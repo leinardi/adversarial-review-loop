@@ -14,6 +14,10 @@ Budget about an hour, plus a handful of real model calls in session A.
   /plugin install opencode-review-loop
   ```
 
+- **A working Bash sandbox, or none at all.** Arming runs through Claude Code's Bash sandbox at prompt-expansion time, so if the sandbox cannot start, `ocrl arm` never runs. On Ubuntu-family kernels `kernel.apparmor_restrict_unprivileged_userns=1` blocks the unprivileged user namespace the sandbox needs, and every command dies with `apply-seccomp: write /proc/self/setgroups`. Check with `unshare --user --map-root-user true`.
+
+  Two independent things must hold: the sandbox must be able to start, **and** it must permit writes to the state root. A `denyWrite` covering `~/` blocks `$XDG_STATE_HOME/opencode-review-loop`, so arming fails on its first write even when the sandbox works.
+
 - A throwaway fixture — never point this at work you care about, since the exercise is about provoking denials and bad commits:
 
   ```console
@@ -41,6 +45,8 @@ cd ~/ocrl-step0/repo && claude
 **Expect** a block beginning `**opencode-review-loop is ARMED for this worktree.**`, naming the repository, a baseline tree, an activation commit, and the reviewer model — *before* Claude says anything.
 
 This is **item 2, and it is load-bearing.** It is the one result that can invalidate the architecture.
+
+**Settled 2026-08-19: it passes.** The expansion ran, `${CLAUDE_PLUGIN_ROOT}` resolved, and `${CLAUDE_SESSION_ID}` interpolated to a real session id. The evidence came from a *failure* of the arm command rather than a success: the error quoted the fully-substituted command back, which is itself proof the expansion happened. The architecture holds; re-check only if the harness changes.
 
 - **Literal `` !`…` `` text appears instead** → expansion does not run in skill bodies. Stop the runbook and see "If A1 fails" below.
 - **Nothing appears and Claude immediately can't do anything** → same conclusion. Arming did not run, but the hooks did register, so the dispatcher denies everything. That is the fail-closed design behaving correctly, not a bug.
@@ -150,7 +156,7 @@ If it has no effect, the residual limit stands as documented in the README: our 
 
 | Item | Check | Result |
 | --- | --- | --- |
-| 2 | `` !`…` `` expansion runs in a skill body |  |
+| 2 | `` !`…` `` expansion runs in a skill body | **pass** (2026-08-19) |
 | 1 | all four hook events register |  |
 | 5 | `${CLAUDE_PLUGIN_ROOT}` resolves in a hook |  |
 | 7 | a hook reads a plan outside the repo |  |
