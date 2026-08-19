@@ -56,7 +56,8 @@ The `PreToolUse` dispatcher runs on **every** tool call, so cost there is multip
 | `prompts/*.md` | the fixed reviewer prompts — Claude composes none of this |
 | `skills/*/SKILL.md` | the five slash commands; `implement` carries the hook registrations |
 | `tests/selftest.sh` | the whole suite; scratch repos, no model calls |
-| `tests/STEP0.md` | assumptions only a live Claude Code session can settle |
+| `tests/STEP0.md` | runbook for the assumptions only a live session can settle |
+| `tests/step0-fixture.sh` | builds the throwaway repo that runbook needs |
 
 ## Working on it
 
