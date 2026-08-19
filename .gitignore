@@ -1,0 +1,27 @@
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IntelliJ IDEA / JetBrains
+.idea/*
+!.idea/codeStyles/
+!.idea/copyright/
+*.iml
+out/
+.gradle/
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# Local tooling / sandbox
+.env
+.env.*
+.venv/
+venv/
+.cache/
+.tmp/
+tmp/

@@ -1,0 +1,13 @@
+name: Pre-commit Cache Warm-up
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .pre-commit-config.yaml
+  workflow_dispatch:
+
+jobs:
+  warm-pre-commit-cache:
+    uses: leinardi/gh-reusable-workflows/.github/workflows/pre-commit-warmup.yaml@v1

@@ -1,0 +1,51 @@
+---
+customRules:
+  - markdownlint-rule-table-format
+
+# Disable some built-in rules
+config:
+  fenced-code-language: false
+  line-length: false
+  no-inline-html: false
+  ul-indent:
+    indent: 4
+  no-duplicate-heading:
+    siblings_only: true
+
+  # Disable built-in MD060 because it reports table style issues,
+  # but does not auto-fix them.
+  table-column-style: false
+
+  # Custom rule that actually rewrites tables.
+  table-format:
+    style: compact
+    aligned_delimiter: false
+    fix: true
+    fixApplicator: true
+
+# Fix any fixable errors
+fix: true
+
+# Ignore files referenced by .gitignore (only valid at root)
+gitignore: true
+
+# Ignore third-party skills tracked in skills-lock.json.
+ignores:
+  - .agents/skills/create-adaptable-composable/**
+  - .agents/skills/fallow/**
+  - .agents/skills/vue-best-practices/**
+  - .agents/skills/vue-debug-guides/**
+  - .agents/skills/vue-router-best-practices/**
+  - .agents/skills/vue-testing-best-practices/**
+
+# Disable banner message on stdout (only valid at root)
+# noBanner: true
+
+# Disable inline config comments
+# noInlineConfig: true
+
+# Disable progress on stdout (only valid at root)
+# noProgress: true
+
+# Show found files on stdout (only valid at root)
+showFound: false
