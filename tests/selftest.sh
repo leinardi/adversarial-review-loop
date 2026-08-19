@@ -455,6 +455,57 @@ if start 'stop: disarming survives the unstarted-arm guard'; then
     assert_eq 'the turn ends cleanly' "$(stop_decision)" 'ok'
 fi
 
+if start 'hook input: the payload arrives on a socket, not a pipe'; then
+    # Claude Code gives hooks their stdin as a socket. `$(</dev/stdin)` reads a
+    # pipe fine and fails with ENXIO on a socket, which emptied every field and
+    # made the gate read its own armed session as unarmed -- while still
+    # denying, so it surfaced as a mystery rather than a breach.
+    new_case
+    arm_ok && phases_ok
+    if command -v python3 >/dev/null 2>&1; then
+        jq -nc --arg s "$SESSION" --arg c "$REPO" \
+            '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:"Edit",tool_input:{file_path:"a.txt"}}' \
+            >"$CASE_DIR/payload.json"
+        sock_out=$(cd "$REPO" && python3 "$TESTS_DIR/fixtures/socket-stdin.py" \
+            "$CASE_DIR/payload.json" "$OCRL" pretool 2>/dev/null)
+        # Phases are frozen, so an Edit is allowed: reaching that verdict at all
+        # proves the payload was read.
+        if [ -z "$sock_out" ]; then
+            ok 'a socket payload is read (Edit passes in ACTIVE state)'
+        else
+            bad 'socket payload not read' "$sock_out" 'empty output (pass-through)'
+        fi
+
+        # And the fields really did parse: an unshaped commit must be refused
+        # by name, which is only possible if tool_name and command arrived.
+        jq -nc --arg s "$SESSION" --arg c "$REPO" \
+            '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"git commit --amend -m x"}}' \
+            >"$CASE_DIR/payload2.json"
+        sock_out=$(cd "$REPO" && python3 "$TESTS_DIR/fixtures/socket-stdin.py" \
+            "$CASE_DIR/payload2.json" "$OCRL" pretool 2>/dev/null)
+        assert_eq 'a socket payload parses tool_name and command' \
+            "$(printf '%s' "$sock_out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
+        assert_contains 'and reaches the real classifier' \
+            "$(printf '%s' "$sock_out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')" 'amend'
+    else
+        ok 'socket-stdin check skipped (python3 unavailable)'
+    fi
+fi
+
+if start 'hook input: a payload with no session id denies rather than guessing' ; then
+    new_case
+    arm_ok && phases_ok
+    out=$(jq -nc --arg c "$REPO" \
+        '{cwd:$c,hook_event_name:"PreToolUse",tool_name:"Edit",tool_input:{}}' |
+        (cd "$REPO" && "$OCRL" pretool))
+    assert_eq 'denied' "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision')" 'deny'
+    assert_contains 'and names it an integration fault' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason')" 'no session id'
+    # It must not leave junk state keyed by an empty session.
+    assert_eq 'no state was written under an empty session key' \
+        "$(find "$OCRL_STATE_DIR/worktrees" -maxdepth 2 -name state.json 2>/dev/null | wc -l)" '0'
+fi
+
 # --------------------------------------------------------------------------
 # Bootstrap
 # --------------------------------------------------------------------------

@@ -56,7 +56,7 @@ OCRL_CMD=''
 ocrl_read_hook_input() {
     local raw
     # A builtin redirect, not $(cat) -- one fewer process on the hot path.
-    raw=$(</dev/stdin)
+    raw=$(cat)
     [ -n "$raw" ] || raw='{}'
     OCRL_HOOK_INPUT=$raw
     ocrl_hook_parse

@@ -529,6 +529,10 @@ ocrl_gate_reset() {
 # not running; passing would be the one outcome the design exists to prevent.
 ocrl_record_unstarted_arm() {
     local session=$1 cwd=$2 repo
+    # An empty session id is not a key. Writing state under one lands it in the
+    # worktree directory itself and makes ocrl_pointer_write target a directory,
+    # which fails silently -- so the next call repeats this branch forever.
+    [ -n "$session" ] || return 1
     repo=$(ocrl_repo_root "$cwd")
     [ -n "$repo" ] || repo=$cwd
     ocrl_config_load "$repo" >/dev/null
@@ -556,6 +560,15 @@ cmd_pretool() {
 
     # No pointer for this session -> arming never executed. Fail closed.
     if ! worktree=$(ocrl_pointer_read "$session") || [ -z "$worktree" ]; then
+        if [ -z "$session" ]; then
+            # No session id means the payload never arrived or could not be
+            # parsed. The gate cannot identify what it is protecting, so it
+            # denies rather than guessing.
+            ocrl_deny "$(
+                ocrl_deny_preamble
+                printf 'The hook payload carried no session id, so the gate cannot tell which activation this call belongs to. Denying rather than guessing.\n\nThis is an integration fault, not a review finding. Tell the user, and leave the mode with /opencode-review-loop:stop if it persists.\n'
+            )"
+        fi
         ocrl_tool_is_readonly "$tool" && ocrl_pass
         ocrl_record_unstarted_arm "$session" "$cwd"
         ocrl_deny "$(
@@ -885,8 +898,12 @@ cmd_gate_stop() {
     if ! worktree=$(ocrl_pointer_read "$session") || [ -z "$worktree" ]; then
         # Same reasoning as the dispatcher: the Stop hook is only registered
         # because implement was invoked, so no pointer means arming never ran.
-        ocrl_record_unstarted_arm "$session" "$cwd"
-        ocrl_emit_stop_block 'opencode-review-loop: arming never ran, so nothing was frozen and nothing has been reviewed. The hooks registered but ocrl.sh arm did not execute at prompt-expansion time. Tell the user what the slash command reported; they can fix the cause and re-run /opencode-review-loop:implement <plan.md>, or leave the mode with /opencode-review-loop:stop. Do not implement the plan.'
+        if ! ocrl_record_unstarted_arm "$session" "$cwd"; then
+            ocrl_emit_stop_ok 'opencode-review-loop: the Stop payload carried no session id, so the gate cannot identify this activation. This is an integration fault, not an approval — nothing was reviewed.'
+        fi
+        # Counted, not unconditional: without this the same message repeats on
+        # every turn end until the host block cap intervenes.
+        ocrl_stop_block_counted 'opencode-review-loop: arming never ran, so nothing was frozen and nothing has been reviewed. The hooks registered but ocrl.sh arm did not execute at prompt-expansion time. Tell the user what the slash command reported; they can fix the cause and re-run /opencode-review-loop:implement <plan.md>, or leave the mode with /opencode-review-loop:stop. Do not implement the plan.'
     fi
     repo=$(ocrl_repo_root "$cwd")
     [ -n "$repo" ] || repo=$worktree
