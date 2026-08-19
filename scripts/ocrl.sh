@@ -473,6 +473,32 @@ ocrl_gate_reset() {
     ocrl_allow "opencode-review-loop: bounded recovery reset to $resolved permitted. Rebuild the intended complete tree, then commit again."
 }
 
+# The dispatcher only ever runs because the implement skill was invoked in this
+# session -- that is what registers the hooks. So reaching a hook with no
+# session pointer means `ocrl arm` never executed at all: a denied sandbox, a
+# missing interpreter, an unreadable script, a ${CLAUDE_PLUGIN_ROOT} that did
+# not resolve. cmd_arm persists ARM_FAILED for every failure it can observe,
+# but it cannot persist a failure to start.
+#
+# Record it here instead, so the very next call takes the ordinary ARM_FAILED
+# path with all of its counting and messaging. Enforcement was requested and is
+# not running; passing would be the one outcome the design exists to prevent.
+ocrl_record_unstarted_arm() {
+    local session=$1 cwd=$2 repo
+    repo=$(ocrl_repo_root "$cwd")
+    [ -n "$repo" ] || repo=$cwd
+    ocrl_config_load "$repo" >/dev/null
+    ocrl_state_bind "$repo" "$session"
+    ocrl_state_load || ocrl_state_new
+    ocrl_set status ARM_FAILED worktree "$repo" session_id "$session" \
+        reason 'arming never executed: the hooks registered, but ocrl.sh arm did not run at prompt-expansion time. Nothing was frozen and nothing has been reviewed.'
+    ocrl_setj armed_at "$(ocrl_now)"
+    ocrl_state_save
+    ocrl_pointer_write "$session" "$repo"
+    mkdir -p "${OCRL_ACT_DIR%/*}"
+    printf '%s\n' "$session" >"$(ocrl_latest_pointer_path "$repo")"
+}
+
 cmd_pretool() {
     ocrl_arm_failclosed pretool
     ocrl_read_hook_input
@@ -484,9 +510,29 @@ cmd_pretool() {
     cmd=$OCRL_CMD
     [ -n "$cwd" ] || cwd=$PWD
 
-    # No pointer for this session -> nothing was ever armed here.
-    worktree=$(ocrl_pointer_read "$session") || ocrl_pass
-    [ -n "$worktree" ] || ocrl_pass
+    # No pointer for this session -> arming never executed. Fail closed.
+    if ! worktree=$(ocrl_pointer_read "$session") || [ -z "$worktree" ]; then
+        ocrl_tool_is_readonly "$tool" && ocrl_pass
+        ocrl_record_unstarted_arm "$session" "$cwd"
+        ocrl_deny "$(
+            ocrl_deny_preamble
+            cat <<'EOF'
+Arming never ran, so nothing was frozen, nothing is being reviewed, and this
+mutation is denied.
+
+The hooks registered, which means /opencode-review-loop:implement was invoked,
+but the arm command itself never executed. The usual causes are a sandbox that
+refused to run it, an unreadable or non-executable scripts/ocrl.sh, or a
+missing interpreter.
+
+Tell the user. They can look at the error the slash command printed, fix the
+cause and run /opencode-review-loop:implement <plan.md> again, or leave the
+mode with /opencode-review-loop:stop.
+
+Do not implement the plan: enforcement was requested and is not running.
+EOF
+        )"
+    fi
 
     # The overwhelmingly common case is cwd already being the armed worktree
     # root, and that needs no git process to establish.
@@ -792,8 +838,12 @@ cmd_gate_stop() {
     cwd=$OCRL_CWD
     [ -n "$cwd" ] || cwd=$PWD
 
-    worktree=$(ocrl_pointer_read "$session") || ocrl_emit_stop_ok
-    [ -n "$worktree" ] || ocrl_emit_stop_ok
+    if ! worktree=$(ocrl_pointer_read "$session") || [ -z "$worktree" ]; then
+        # Same reasoning as the dispatcher: the Stop hook is only registered
+        # because implement was invoked, so no pointer means arming never ran.
+        ocrl_record_unstarted_arm "$session" "$cwd"
+        ocrl_emit_stop_block 'opencode-review-loop: arming never ran, so nothing was frozen and nothing has been reviewed. The hooks registered but ocrl.sh arm did not execute at prompt-expansion time. Tell the user what the slash command reported; they can fix the cause and re-run /opencode-review-loop:implement <plan.md>, or leave the mode with /opencode-review-loop:stop. Do not implement the plan.'
+    fi
     repo=$(ocrl_repo_root "$cwd")
     [ -n "$repo" ] || repo=$worktree
 
@@ -1034,7 +1084,9 @@ cmd_deactivate() {
     fi
     ocrl_set status DISARMED reason 'stopped by the user'
     ocrl_state_save
-    ocrl_pointer_clear "$(ocrl_get session_id)"
+    # The pointer deliberately stays: the hooks are still registered for this
+    # session, and removing it would make every later tool call look like an
+    # arm that never ran. DISARMED is what makes the gates pass through.
     cat <<EOF
 opencode-review-loop: STOPPED for this worktree.
 

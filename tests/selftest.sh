@@ -369,6 +369,49 @@ if start 'fail-closed: missing state denies mutations'; then
     assert_eq 'Read still allowed' "$(pre Read)" 'pass'
 fi
 
+if start 'fail-closed: an arm that never executed still denies'; then
+    # The hooks register when the skill is invoked, so a dispatcher running
+    # with no session pointer means `ocrl arm` never started -- a denied
+    # sandbox, an unreadable script, an unresolved plugin root. cmd_arm cannot
+    # persist a failure to start, so the dispatcher has to.
+    new_case
+    # Deliberately no arm_ok here: this is the "expansion never ran" case.
+    assert_eq 'no state exists yet' "$(find "$OCRL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+
+    assert_eq 'Edit is denied rather than silently passing' "$(pre Edit)" 'deny'
+    assert_contains 'and says arming never ran' "$(pre_reason)" 'Arming never ran'
+    assert_contains 'and tells Claude not to implement' "$(pre_reason)" 'Do not implement the plan'
+
+    assert_eq 'the dispatcher recorded the failure itself' "$(sget status)" 'ARM_FAILED'
+    assert_contains 'with a reason naming the cause' "$(sget reason)" 'arming never executed'
+
+    # Now that it is recorded, the ordinary ARM_FAILED path takes over.
+    assert_eq 'Write stays denied' "$(pre Write)" 'deny'
+    assert_eq 'Bash stays denied' "$(pre Bash 'git add -A && git commit -m x')" 'deny'
+    assert_eq 'an MCP mutation stays denied' "$(pre mcp__serena__replace_content)" 'deny'
+    assert_eq 'Read is still allowed' "$(pre Read)" 'pass'
+    assert_eq 'the turn cannot end quietly' "$(stop_decision)" 'block'
+fi
+
+if start 'fail-closed: a turn ending before any tool call still blocks'; then
+    new_case
+    out=$(stop_gate)
+    assert_contains 'the Stop gate blocks' "$out" 'arming never ran'
+    assert_eq 'and records it' "$(sget status)" 'ARM_FAILED'
+fi
+
+if start 'stop: disarming survives the unstarted-arm guard'; then
+    # Regression: deactivate used to delete the session pointer, which the new
+    # guard would then read as "arming never ran" and deny on every call.
+    new_case
+    arm_ok && phases_ok
+    ocrl deactivate >/dev/null 2>&1
+    assert_eq 'status is DISARMED' "$(sget status)" 'DISARMED'
+    assert_eq 'Edit passes after stopping' "$(pre Edit)" 'pass'
+    assert_eq 'Bash passes after stopping' "$(pre Bash 'git add -A && git commit -m x')" 'pass'
+    assert_eq 'the turn ends cleanly' "$(stop_decision)" 'ok'
+fi
+
 # --------------------------------------------------------------------------
 # Bootstrap
 # --------------------------------------------------------------------------
@@ -645,11 +688,16 @@ if start 'scoping: another repository in the same session is untouched'; then
     assert_eq 'while the armed repo still gates' "$(pre Edit)" 'deny'
 fi
 
-if start 'scoping: an unknown session sees no gate at all'; then
+if start 'scoping: a session with no pointer fails closed, it does not opt out'; then
+    # This asserted "pass" until the guard landed, which encoded the fail-open
+    # hole: the dispatcher only runs in a session where implement was invoked,
+    # so an unrecognised session id means arming never completed, not that the
+    # session is uninvolved. Worktree scoping is the test above; this is not it.
     new_case
     arm_ok
     SESSION='some-other-session'
-    assert_eq 'no pointer means no opinion' "$(pre Edit)" 'pass'
+    assert_eq 'an unrecognised session denies rather than passing' "$(pre Edit)" 'deny'
+    assert_contains 'and explains why' "$(pre_reason)" 'Arming never ran'
 fi
 
 # --------------------------------------------------------------------------

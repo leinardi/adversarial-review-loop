@@ -165,6 +165,7 @@ State lives in `$XDG_STATE_HOME/opencode-review-loop/worktrees/<sha256(worktree)
 | Dirty worktree at arm time | `ARM_FAILED`; `--allow-dirty` folds the dirt into phase 1's review |
 | `opencode` missing or model unreachable | `ARM_FAILED`, naming the failure |
 | Any arm failure | Persisted **before** exit; all mutations and commits denied until re-armed or stopped |
+| Arming never executes (refused sandbox, unreadable script) | The dispatcher records `ARM_FAILED` itself and denies; a missing pointer is never read as "not armed" |
 | Mutation before `set-phases` | Denied, with the exact command to run |
 | Turn ends while `ARM_FAILED` or phases unset | `Stop` blocks with instructions; OpenCode is never called |
 | Timeout, malformed output, missing verdict, non-zero exit | `OP_FAILURE` → deny; never an approval |

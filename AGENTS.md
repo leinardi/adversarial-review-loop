@@ -10,10 +10,11 @@ A Claude Code plugin that turns an external OpenCode review into an **enforcemen
 
 It is a security-shaped component. The failure that matters is not a crash — it is an **unreviewed commit that looks reviewed**.
 
-## The four rules
+## The five rules
 
 Everything else is detail. These are not negotiable, and a change that weakens one is a defect even if every test passes.
 
+0. **A gate that cannot prove it is running denies.** The hooks register when the `implement` skill is invoked, so a dispatcher that runs at all proves the skill was invoked. If it then finds no session pointer, arming never *executed* — a refused sandbox, an unreadable script, an unresolved `${CLAUDE_PLUGIN_ROOT}` — and `cmd_arm` cannot persist a failure to start. The dispatcher records `ARM_FAILED` itself and denies. Absence of state is never an opt-out. This is why `deactivate` leaves the session pointer in place and relies on `DISARMED` instead of deleting it.
 1. **Nothing converts a failure into an approval.** Missing state, malformed JSON, a snapshot failure, a timeout, a non-zero reviewer exit, empty output, absent markers, an unknown verdict, an evidence ceiling — every one of them blocks or escalates. Operational uncertainty is never "no findings".
 2. **Hook stdout is protocol.** Hook entrypoints (`pretool`, `confirm-commit`, `posttool-failure`, `gate-stop`) emit valid Claude hook JSON or nothing. Diagnostics go to stderr or a file. A stray `printf` in a library that runs under a hook corrupts the response — `ocrl_report_store` is deliberately silent for this reason. `EXIT` traps fail closed.
 3. **Nothing is written inside the repository under review.** All state, frozen plans, bundles and reports live under `$XDG_STATE_HOME/opencode-review-loop/`. The snapshot uses a throwaway `GIT_INDEX_FILE` and never touches the real index or worktree.
