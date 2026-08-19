@@ -89,6 +89,18 @@ New keys go in `ocrl_config_defaults`, in the `ocrl_config_from_env` key list wi
 
 Conventional Commits with a mandatory scope (`conventional-pre-commit --force-scope`), e.g. `fix(cmdshape): reject git commit --only`.
 
+### The install cache, and what it means for iterating
+
+A local marketplace install **copies** the plugin to `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, but sets `${CLAUDE_PLUGIN_ROOT}` to the `installLocation` — this repository. The two are served from different places:
+
+| What changed | Takes effect |
+| --- | --- |
+| anything under `scripts/` | **immediately** — hooks run `${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh`, which is the working tree |
+| `skills/*/SKILL.md` body or frontmatter | only after the cache is refreshed |
+| `prompts/*.md` | immediately, for the same reason as `scripts/` |
+
+`/plugin marketplace update` refreshes the marketplace record but **not** the cached copy when the version is unchanged. To pick up a skill-body change, bump `version` in `.claude-plugin/plugin.json`, then reinstall and restart. A stale body is easy to misdiagnose because the script it invokes is current — the giveaway is an error quoting a command line you no longer have in the repo.
+
 ## Host integration
 
 Some behaviour cannot be tested from a shell — skill-hook registration, `` !`…` `` expansion inside a skill body, `${CLAUDE_SESSION_ID}` equality with the hooks' `session_id`, the Stop-hook block cap. These live in `tests/STEP0.md` with an expected result and a fallback each. **Do not claim shell tests cover them**, and do not change the arming path or the skill frontmatter without re-running the relevant STEP0 item.
