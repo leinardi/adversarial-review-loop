@@ -10,8 +10,10 @@
 set -uo pipefail
 
 OCRL_SELF=${BASH_SOURCE[0]}
-OCRL_SCRIPT_DIR=$(cd -- "$(dirname -- "$OCRL_SELF")" && pwd)
-OCRL_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT:-$(dirname -- "$OCRL_SCRIPT_DIR")}
+# Parameter expansion rather than dirname(1): this file is re-executed on every
+# tool call, so two forks here are two forks per hook.
+OCRL_SCRIPT_DIR=$(cd -- "${OCRL_SELF%/*}" && pwd)
+OCRL_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT:-${OCRL_SCRIPT_DIR%/*}}
 
 # shellcheck source=lib/common.sh
 . "$OCRL_SCRIPT_DIR/lib/common.sh"
@@ -476,20 +478,33 @@ cmd_pretool() {
     ocrl_read_hook_input
 
     local session cwd tool cmd repo worktree st
-    session=$(ocrl_hook_field session_id)
-    cwd=$(ocrl_hook_field cwd)
-    tool=$(ocrl_hook_field tool_name)
-    cmd=$(ocrl_hook_field tool_input.command)
+    session=$OCRL_SESSION_ID
+    cwd=$OCRL_CWD
+    tool=$OCRL_TOOL
+    cmd=$OCRL_CMD
     [ -n "$cwd" ] || cwd=$PWD
 
     # No pointer for this session -> nothing was ever armed here.
     worktree=$(ocrl_pointer_read "$session") || ocrl_pass
     [ -n "$worktree" ] || ocrl_pass
 
-    repo=$(ocrl_repo_root "$cwd")
-    [ -n "$repo" ] || repo=$cwd
+    # The overwhelmingly common case is cwd already being the armed worktree
+    # root, and that needs no git process to establish.
+    if [ "$cwd" = "$worktree" ]; then
+        repo=$worktree
+    else
+        repo=$(ocrl_repo_root "$cwd")
+        [ -n "$repo" ] || repo=$cwd
+    fi
     # Work outside the armed worktree in the same session is untouched.
     [ "$repo" = "$worktree" ] || ocrl_pass
+
+    # A read-only tool is permitted in *every* state -- each branch below ends
+    # up calling ocrl_pass for one. Answering here avoids loading the config and
+    # the state to reach a foregone conclusion, and Read/Grep/Glob are the bulk
+    # of all tool traffic. If a future state ever needs to deny a read-only
+    # tool, this hoist has to come out first.
+    ocrl_tool_is_readonly "$tool" && ocrl_pass
 
     ocrl_config_load "$repo" >/dev/null
     ocrl_state_bind "$worktree" "$session"
@@ -623,15 +638,19 @@ cmd_confirm_commit() {
     ocrl_read_hook_input
 
     local session cwd tool cmd repo worktree pending pending_head pending_cmd
-    session=$(ocrl_hook_field session_id)
-    cwd=$(ocrl_hook_field cwd)
-    tool=$(ocrl_hook_field tool_name)
-    cmd=$(ocrl_hook_field tool_input.command)
+    session=$OCRL_SESSION_ID
+    cwd=$OCRL_CWD
+    tool=$OCRL_TOOL
+    cmd=$OCRL_CMD
     [ -n "$cwd" ] || cwd=$PWD
     [ "$tool" = 'Bash' ] || exit 0
 
     worktree=$(ocrl_pointer_read "$session") || exit 0
-    repo=$(ocrl_repo_root "$cwd")
+    if [ "$cwd" = "$worktree" ]; then
+        repo=$worktree
+    else
+        repo=$(ocrl_repo_root "$cwd")
+    fi
     [ "$repo" = "$worktree" ] || exit 0
 
     ocrl_config_load "$repo" >/dev/null
@@ -714,11 +733,15 @@ EOF
 cmd_posttool_failure() {
     ocrl_read_hook_input
     local session cwd repo worktree
-    session=$(ocrl_hook_field session_id)
-    cwd=$(ocrl_hook_field cwd)
+    session=$OCRL_SESSION_ID
+    cwd=$OCRL_CWD
     [ -n "$cwd" ] || cwd=$PWD
     worktree=$(ocrl_pointer_read "$session") || exit 0
-    repo=$(ocrl_repo_root "$cwd")
+    if [ "$cwd" = "$worktree" ]; then
+        repo=$worktree
+    else
+        repo=$(ocrl_repo_root "$cwd")
+    fi
     [ "$repo" = "$worktree" ] || exit 0
 
     ocrl_config_load "$repo" >/dev/null
@@ -765,8 +788,8 @@ cmd_gate_stop() {
     ocrl_read_hook_input
 
     local session cwd repo worktree st
-    session=$(ocrl_hook_field session_id)
-    cwd=$(ocrl_hook_field cwd)
+    session=$OCRL_SESSION_ID
+    cwd=$OCRL_CWD
     [ -n "$cwd" ] || cwd=$PWD
 
     worktree=$(ocrl_pointer_read "$session") || ocrl_emit_stop_ok

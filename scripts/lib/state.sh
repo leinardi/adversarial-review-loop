@@ -28,10 +28,11 @@ ocrl_pointer_write() {
 }
 
 ocrl_pointer_read() {
-    local session=$1 f
+    local session=$1 f line
     f="$(ocrl_sessions_dir)/$session"
     [ -f "$f" ] || return 1
-    head -n 1 "$f"
+    read -r line <"$f" || true # a builtin read, not head(1)
+    printf '%s' "$line"
 }
 
 ocrl_pointer_clear() {
@@ -51,8 +52,10 @@ ocrl_state_bind() {
 ocrl_state_exists() { [ -f "$OCRL_STATE_FILE" ]; }
 
 ocrl_state_load() {
-    if [ -f "$OCRL_STATE_FILE" ] && jq -e 'type=="object"' "$OCRL_STATE_FILE" >/dev/null 2>&1; then
-        OCRL_STATE=$(jq -c . "$OCRL_STATE_FILE")
+    # One jq, not a validate-then-read pair: empty output means "not a usable
+    # state file", which is the same answer the two-call version gave.
+    OCRL_STATE=$(jq -c 'if type == "object" then . else empty end' "$OCRL_STATE_FILE" 2>/dev/null)
+    if [ -n "$OCRL_STATE" ]; then
         return 0
     fi
     OCRL_STATE='{}'
@@ -130,15 +133,22 @@ ocrl_state_new() {
 # an expired activation becomes STALE, and STALE still blocks.
 ocrl_effective_status() {
     local st armed_at ttl now
-    st=$(ocrl_get status)
+    local -a f=()
+    # status, armed_at and the TTL in one jq rather than three separate lookups.
+    mapfile -d '' -t f < <(jq -j --argjson cfg "$OCRL_CONFIG" '
+        ((.status // "") | tostring), "\u0000",
+        ((.armed_at // 0) | tostring), "\u0000",
+        (($cfg.ttl_hours // 24) | tostring), "\u0000"
+    ' <<<"$OCRL_STATE" 2>/dev/null)
+    st=${f[0]-}
     case "$st" in
         COMPLETE | ARM_FAILED | NEEDS_HUMAN)
             printf '%s' "$st"
             return
             ;;
     esac
-    armed_at=$(ocrl_get armed_at)
-    ttl=$(ocrl_cfg ttl_hours)
+    armed_at=${f[1]-0}
+    ttl=${f[2]-24}
     now=$(ocrl_now)
     if [ -n "$armed_at" ] && [ "$armed_at" -gt 0 ] 2>/dev/null &&
         [ "$ttl" -gt 0 ] 2>/dev/null &&

@@ -19,6 +19,28 @@ Everything else is detail. These are not negotiable, and a change that weakens o
 3. **Nothing is written inside the repository under review.** All state, frozen plans, bundles and reports live under `$XDG_STATE_HOME/opencode-review-loop/`. The snapshot uses a throwaway `GIT_INDEX_FILE` and never touches the real index or worktree.
 4. **The user owns the exits.** `implement`, `finish` and `stop` are `disable-model-invocation: true`, and Claude's own route to them — Bash — is denied in `cmd_pretool`. Claude can never arm, finish, or disarm the mode.
 
+## The parser is only safe because the deny-list is aggressive
+
+`scripts/lib/cmdshape.sh` is a hand-rolled tokenizer, and it decides whether a commit command may run. It has a structural weakness worth stating plainly, because it is not visible from the code:
+
+**It is a parser that must agree with a parser it does not control.** The gate reads `tool_input.command` as a string and decides; Claude Code then executes that same string through a real bash. Any place where the tokenizer's reading diverges from bash's actual grammar is a potential bypass. Rewriting the tokenizer in another language would not change this — only using a real shell parser (an AST from something like `mvdan.cc/sh/syntax`) would.
+
+What makes the current implementation defensible is that `ocrl_cmd_tokenize` **rejects almost the entire grammar before tokenizing**: `$`, backticks, `;`, `|`, `<`, `>`, `(`, `)`, `{`, `}`, unquoted globs, a bare `&`, newlines and comments are all refused outright. What survives is a tiny language — words, two quoting forms, backslash escape, and `&&` — and agreeing with bash on *that* is a small claim rather than a large one.
+
+**Therefore: the deny-list and the hand-rolled tokenizer are a single design, and relaxing one without replacing the other is the specific change that breaks this component.** If you want to accept any construct currently rejected up front — command substitution, redirection, process substitution, a pipeline, ANSI-C quoting — swap in a real parser first. Widening `ocrl_cmd_tokenize`'s accepted character set is not a small change, however small the diff looks.
+
+Two things that make this defence in depth rather than a single point of failure, both of which must be preserved:
+
+- `confirm-commit` independently verifies `HEAD^{tree} == pending_approved_tree` and a clean worktree, so a tokenizer bypass yields a *detected, recoverable* bad commit that enters `RECONCILE` — not a silent unreviewed one.
+- The final cumulative review covers the end state regardless of what happened per commit.
+
+## Hot-path rules
+
+The `PreToolUse` dispatcher runs on **every** tool call, so cost there is multiplied by thousands. Two invariants hold it in place:
+
+- **Read-only tools answer before config or state is loaded.** They are permitted in every state, so `cmd_pretool` hoists `ocrl_tool_is_readonly` above `ocrl_config_load`. If a future state ever needs to deny a read-only tool, **remove that hoist first** — otherwise the deny is unreachable.
+- **One process per job on the hot path.** Hook fields come out of a single `jq` (`ocrl_hook_parse`), the config merge is a single `jq`, state load is a single `jq`, and `ocrl_effective_status` gets status, `armed_at` and the TTL together. `ocrl_now` and `ocrl_pointer_read` are builtins. Adding a per-field `jq` or a `date`/`head`/`cut` fork here is a measurable regression — the naive version cost 63 ms and 31 processes per call, against 12 ms and 3 today. Re-measure with `strace -f -e trace=execve` before and after.
+
 ## Layout
 
 | Path | What lives there |

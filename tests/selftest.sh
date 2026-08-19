@@ -768,6 +768,45 @@ if start 'ttl: an expired activation blocks and never silently disarms'; then
 fi
 
 # --------------------------------------------------------------------------
+# Hot path
+# --------------------------------------------------------------------------
+
+if start 'hot path: a read-only tool answers without loading config or state'; then
+    new_case
+    arm_ok && phases_ok
+    if command -v strace >/dev/null 2>&1 &&
+        strace -f -e trace=execve -o /dev/null true >/dev/null 2>&1; then
+        trace_procs() {
+            local tool=$1 out
+            out="$CASE_DIR/trace-$tool.txt"
+            jq -nc --arg s "$SESSION" --arg c "$REPO" --arg t "$tool" \
+                '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:$t,tool_input:{}}' |
+                (cd "$REPO" && strace -f -e trace=execve -o "$out" "$OCRL" pretool >/dev/null 2>&1)
+            # Only successful execs count; the shebang's PATH probe fails cheaply.
+            grep -c 'execve.*= 0' "$out" 2>/dev/null || printf '0'
+        }
+        read_procs=$(trace_procs Read)
+        edit_procs=$(trace_procs Edit)
+
+        # The dispatcher runs on every tool call, so this is a real budget, not
+        # a style preference. See "Hot-path rules" in AGENTS.md.
+        if [ "$read_procs" -le 5 ]; then
+            ok "a read-only tool costs $read_procs processes (budget 5)"
+        else
+            bad 'read-only tool process budget' "$read_procs processes" 'at most 5'
+        fi
+        if [ "$edit_procs" -gt "$read_procs" ]; then
+            ok "a mutating tool legitimately costs more ($edit_procs vs $read_procs)"
+        else
+            bad 'the read-only hoist is doing nothing' \
+                "Read=$read_procs Edit=$edit_procs" 'Read strictly cheaper than Edit'
+        fi
+    else
+        ok 'process-budget guard skipped (strace unavailable or not permitted)'
+    fi
+fi
+
+# --------------------------------------------------------------------------
 # Reporting surfaces
 # --------------------------------------------------------------------------
 

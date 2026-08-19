@@ -194,7 +194,16 @@ Before the first real run, work through [`tests/STEP0.md`](tests/STEP0.md): the 
 
 - **Honest-agent bar.** Claude could commit through a wrapper script or abuse `defer`. The final cumulative review backstops commit-level dodges; nothing here defends against a deliberately hostile agent, and this design does not pretend to.
 - **The Stop-block cap is residual.** Continuation pressure from `PostToolUse`, progress-aware counting and `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` mitigate it, but a run that repeatedly ends its turn without progress can still exhaust the cap — and exhaustion ends the turn.
-- **A `PreToolUse` hook runs on every tool call.** The common path is a pointer read and a `stat`, but it is not free.
+- **A `PreToolUse` hook runs on every tool call**, and it is not free. Measured on Linux with warm caches:
+
+  | Path | Latency | Processes |
+  | --- | --- | --- |
+  | tool call outside the armed worktree | ~12 ms | 3 |
+  | read-only tool (`Read`, `Grep`, `Glob`, …) | ~12 ms | 3 |
+  | mutating tool (`Edit`, `Write`, MCP) | ~28 ms | 8 |
+  | `Bash` (non-commit) | ~33 ms | 8 |
+
+  Read-only tools answer before the config or state is touched, because they are permitted in every state. Mutating tools and `Bash` need the full state, so they pay for it. A commit additionally pays for the review itself, which is measured in minutes, not milliseconds.
 - **Strict commit hygiene is enforced.** Phases must commit all their work and leave a clean worktree. The payoff is that every commit in the history is a tree that was actually reviewed.
 - **Background writers land you in `RECONCILE`.** Anything that touches the worktree between the gate and the commit — an editor writing back a buffer, an MCP server dropping a state directory, a file watcher — changes the tree out from under the approval. That is the gate working, but gitignore such tooling paths before arming rather than fighting it.
 - **Session-scoped.** `/clear` or a crash disarms the mode; state goes stale and blocks rather than vanishing. Recovery is re-arming, which re-baselines from the current `HEAD`.

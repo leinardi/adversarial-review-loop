@@ -17,7 +17,9 @@ ocrl_sessions_dir() {
 }
 
 ocrl_sha256() {
-    printf '%s' "$1" | sha256sum | cut -d' ' -f1
+    local out
+    out=$(printf '%s' "$1" | sha256sum)
+    printf '%s' "${out%% *}"
 }
 
 # Activation directory for a (worktree, session) pair.
@@ -43,20 +45,42 @@ ocrl_repo_root() {
 
 OCRL_HOOK_INPUT='{}'
 
+# The fields every hook entrypoint needs, pulled out in one pass. This runs on
+# every single tool call, so it deliberately spawns one process, not five: the
+# old field-at-a-time helper cost a jq per lookup.
+OCRL_SESSION_ID=''
+OCRL_CWD=''
+OCRL_TOOL=''
+OCRL_CMD=''
+
 ocrl_read_hook_input() {
     local raw
-    raw=$(cat)
-    if [ -n "$raw" ] && printf '%s' "$raw" | jq -e . >/dev/null 2>&1; then
-        OCRL_HOOK_INPUT=$raw
-    else
-        OCRL_HOOK_INPUT='{}'
-    fi
+    # A builtin redirect, not $(cat) -- one fewer process on the hot path.
+    raw=$(</dev/stdin)
+    [ -n "$raw" ] || raw='{}'
+    OCRL_HOOK_INPUT=$raw
+    ocrl_hook_parse
 }
 
-# ocrl_hook_field <dotted.path> -- prints "" when missing.
-ocrl_hook_field() {
-    jq -r --arg k "$1" '[getpath($k | split("."))] | .[0] // "" | if type=="string" then . else tostring end' \
-        <<<"$OCRL_HOOK_INPUT" 2>/dev/null || true
+# Populates OCRL_SESSION_ID / OCRL_CWD / OCRL_TOOL / OCRL_CMD from the payload.
+# NUL-delimited because a Bash command may legitimately contain newlines.
+ocrl_hook_parse() {
+    local -a v=()
+    mapfile -d '' -t v < <(
+        jq -j '
+            def s: if . == null then "" elif type == "string" then . else tostring end;
+            (.session_id | s), "\u0000",
+            (.cwd | s), "\u0000",
+            (.tool_name | s), "\u0000",
+            (.tool_input.command | s), "\u0000"
+        ' <<<"$OCRL_HOOK_INPUT" 2>/dev/null
+    )
+    # A payload that will not parse yields no fields, and every caller then
+    # treats the event as "not ours" or denies -- never as a silent allow.
+    OCRL_SESSION_ID=${v[0]-}
+    OCRL_CWD=${v[1]-}
+    OCRL_TOOL=${v[2]-}
+    OCRL_CMD=${v[3]-}
 }
 
 # --------------------------------------------------------------------------
@@ -149,4 +173,5 @@ ocrl_truncate_bytes() {
     fi
 }
 
-ocrl_now() { date +%s; }
+# A bash builtin (4.2+), not date(1): this runs on the hot path too.
+ocrl_now() { printf '%(%s)T' -1; }
