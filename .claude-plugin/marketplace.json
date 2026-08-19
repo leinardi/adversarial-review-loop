@@ -1,0 +1,13 @@
+{
+  "name": "opencode-review-loop",
+  "owner": {
+    "name": "Roberto Leinardi"
+  },
+  "plugins": [
+    {
+      "name": "opencode-review-loop",
+      "source": "./",
+      "description": "Enforced OpenCode adversarial review loop for phased plan implementation."
+    }
+  ]
+}

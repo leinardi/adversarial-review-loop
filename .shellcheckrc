@@ -1,0 +1,6 @@
+# Follow `source`d library files relative to the sourcing script.
+source-path=SCRIPTDIR
+
+# Library files are sourced into one process, so cross-file globals and
+# functions cannot be resolved per file.
+disable=SC1091

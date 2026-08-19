@@ -1,0 +1,11 @@
+{
+  "name": "opencode-review-loop",
+  "description": "Implement an agreed plan with an enforced OpenCode adversarial review loop: every phase commit is gated on an external review.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Roberto Leinardi"
+  },
+  "homepage": "https://github.com/leinardi/opencode-review-loop",
+  "license": "Apache-2.0",
+  "keywords": ["review", "opencode", "hooks", "quality-gate"]
+}

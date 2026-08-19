@@ -17,10 +17,14 @@ MK_COMMON_BOOTSTRAP := $(shell "$(MK_COMMON_BOOTSTRAP_SCRIPT)" \
   "$(MK_COMMON_FILES)")
 
 
+# Project-specific snippets that live only in this repo
+MK_LOCAL_FILES := test.mk
+
 # -----------------------------------------------------------------------------
 # Include shared make logic (fetched from make-common)
 # -----------------------------------------------------------------------------
 include $(addprefix $(MK_COMMON_DIR)/,$(MK_COMMON_FILES))
+include $(addprefix $(MK_COMMON_DIR)/,$(MK_LOCAL_FILES))
 
 .PHONY: mk-common-update
 mk-common-update: ## Check for remote updates of shared .mk files
