@@ -37,7 +37,7 @@ hooks:
 
 # Implement with an enforced review loop
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh arm --session "${CLAUDE_SESSION_ID}" --plan "$1" "$2"`
+!`${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh arm --session "${CLAUDE_SESSION_ID}" --args "$ARGUMENTS"`
 
 ## What just happened
 

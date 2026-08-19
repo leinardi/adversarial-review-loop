@@ -96,13 +96,57 @@ EOF
     exit 1
 }
 
+# Splits the raw argument string from the slash command into a plan path and an
+# optional flag.
+#
+# The whole string arrives as one argument because Claude Code's positional
+# substitution is 0-based -- `$1` is the *second* argument, and an out-of-range
+# `$N` is left in the body literally, where the expansion shell then turns it
+# into the empty string. `$ARGUMENTS` is substituted unconditionally and keeps
+# paths containing spaces intact, so the split happens here instead.
+ocrl_split_args() {
+    local raw=$1
+    OCRL_ARG_PLAN=''
+    OCRL_ARG_FLAG=''
+    # Trim surrounding whitespace.
+    raw=${raw#"${raw%%[![:space:]]*}"}
+    raw=${raw%"${raw##*[![:space:]]}"}
+    [ -n "$raw" ] || return 0
+    case "$raw" in
+        *[[:space:]]--allow-dirty)
+            OCRL_ARG_FLAG='--allow-dirty'
+            raw=${raw%--allow-dirty}
+            raw=${raw%"${raw##*[![:space:]]}"}
+            ;;
+        --allow-dirty)
+            OCRL_ARG_FLAG='--allow-dirty'
+            raw=''
+            ;;
+        *[[:space:]]-*)
+            # An unknown trailing flag must not be mistaken for part of a path.
+            OCRL_ARG_FLAG=${raw##*[[:space:]]}
+            raw=${raw%"$OCRL_ARG_FLAG"}
+            raw=${raw%"${raw##*[![:space:]]}"}
+            ;;
+    esac
+    OCRL_ARG_PLAN=$raw
+}
+
 cmd_arm() {
     local session='' plan='' dirty_flag='' arg
+    OCRL_ARG_PLAN=''
+    OCRL_ARG_FLAG=''
     while [ "$#" -gt 0 ]; do
         arg=$1
         case "$arg" in
             --session)
                 session=${2:-}
+                shift 2
+                ;;
+            --args)
+                ocrl_split_args "${2:-}"
+                plan=$OCRL_ARG_PLAN
+                [ -n "$OCRL_ARG_FLAG" ] && dirty_flag=$OCRL_ARG_FLAG
                 shift 2
                 ;;
             --plan)

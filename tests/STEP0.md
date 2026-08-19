@@ -133,7 +133,9 @@ Fresh session in the same repo. Run `/opencode-review-loop:stop` between each, s
 | `/opencode-review-loop:implement` (no argument) | `ARMING FAILED`, naming the missing plan |
 | `` /opencode-review-loop:implement ~/ocrl-step0/pl`id`an.md `` | `ARMING FAILED … characters that are not safe` |
 
-The first row is the real test of an omitted `$2`: an unmatched positional must arrive as empty rather than breaking the command.
+**Settled 2026-08-19, and it changed the design.** The skill body originally passed `"$1" "$2"`. Claude Code's positional substitution is **0-based** — `$N` resolves `s[N]` of a zero-indexed array, so `$1` is the *second* argument — and an out-of-range `$N` is left in the body verbatim, where the expansion shell then turns it into the empty string. A single-argument invocation therefore armed with an empty plan path and failed closed with "no plan path was supplied".
+
+The body now passes `--args "$ARGUMENTS"` as one string and splits it in `ocrl_split_args`, which also keeps plan paths containing spaces intact. The same routine (`wPt`) confirms Claude Code does **not** shell-escape substituted arguments, which is why the character-set check in `cmd_arm` and the probe below both matter.
 
 The last row is the **argument-safety probe**. The fixture creates a file whose name literally contains `` `id` ``. The expected result is a clean refusal by the character-set check in `cmd_arm`. If instead you see the output of `id` — a uid/gid line — anywhere in the banner, the harness let a backtick reach a shell. That is a finding worth stopping for, and it is the residual exposure the design documents rather than eliminates.
 

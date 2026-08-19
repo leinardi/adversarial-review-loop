@@ -169,8 +169,13 @@ state_file() {
     find "$OCRL_STATE_DIR/worktrees" -name state.json | head -n 1
 }
 
+# Mirrors ocrl_get, including its avoidance of `//` -- in jq `false // ""` is
+# "", which would blank every boolean field being asserted on.
 sget() {
-    jq -r --arg k "$1" '.[$k] // "" | if type=="string" then . else tostring end' "$(state_file)"
+    jq -r --arg k "$1" '
+        if has($k) and .[$k] != null
+        then (.[$k] | if type == "string" then . else tostring end)
+        else "" end' "$(state_file)"
 }
 
 arm_ok() {
@@ -331,6 +336,44 @@ if start 'arm: rejects a bad second argument and a missing plan'; then
     with_env OCRL_MODEL='provider/does-not-exist' OCRL_REVIEWER_CMD='' \
         ocrl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
     assert_eq 'an unreachable model fails closed' "$(sget status)" 'ARM_FAILED'
+fi
+
+if start 'arm: --args parsing, as the slash command actually delivers it'; then
+    # Claude Code substitutes $ARGUMENTS as one string, so the split happens in
+    # the script. $1 is unusable: its positional substitution is 0-based, so a
+    # single-argument invocation leaves $1 literal and the shell empties it.
+    new_case
+    ocrl arm --session "$SESSION" --args "$PLAN" >/dev/null 2>&1
+    assert_eq 'a bare plan path arms' "$(sget status)" 'ARMED'
+    assert_eq 'and allow_dirty stays off' "$(sget allow_dirty)" 'false'
+
+    new_case
+    ocrl arm --session "$SESSION" --args "$PLAN --allow-dirty" >/dev/null 2>&1
+    assert_eq 'a trailing --allow-dirty arms' "$(sget status)" 'ARMED'
+    assert_eq 'and turns allow_dirty on' "$(sget allow_dirty)" 'true'
+
+    new_case
+    printf 'x\n' >"$CASE_DIR/a plan with spaces.md"
+    ocrl arm --session "$SESSION" --args "$CASE_DIR/a plan with spaces.md" >/dev/null 2>&1
+    assert_eq 'a path containing spaces survives' "$(sget status)" 'ARMED'
+    assert_contains 'and is the plan that was frozen' "$(sget plan_path)" 'a plan with spaces.md'
+
+    new_case
+    printf 'x\n' >"$CASE_DIR/spaced plan.md"
+    ocrl arm --session "$SESSION" --args "$CASE_DIR/spaced plan.md --allow-dirty" >/dev/null 2>&1
+    assert_eq 'spaces plus the flag together' "$(sget status)" 'ARMED'
+    assert_eq 'flag applied' "$(sget allow_dirty)" 'true'
+    assert_contains 'path intact' "$(sget plan_path)" 'spaced plan.md'
+
+    new_case
+    ocrl arm --session "$SESSION" --args "" >/dev/null 2>&1
+    assert_eq 'an empty argument string fails closed' "$(sget status)" 'ARM_FAILED'
+    assert_contains 'naming the missing plan' "$(sget reason)" 'no plan path'
+
+    new_case
+    ocrl arm --session "$SESSION" --args "$PLAN --wat" >/dev/null 2>&1
+    assert_eq 'an unknown trailing flag fails closed' "$(sget status)" 'ARM_FAILED'
+    assert_contains 'naming the offending flag' "$(sget reason)" '--wat'
 fi
 
 # --------------------------------------------------------------------------

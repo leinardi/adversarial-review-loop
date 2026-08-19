@@ -70,8 +70,13 @@ ocrl_state_save() {
     mv -f "$tmp" "$OCRL_STATE_FILE"
 }
 
+# Note the absence of `//`: in jq, `false // ""` yields "", so the alternative
+# operator silently blanks every boolean field. Test for presence instead.
 ocrl_get() {
-    jq -r --arg k "$1" '.[$k] // "" | if type=="string" then . else tostring end' <<<"$OCRL_STATE"
+    jq -r --arg k "$1" '
+        if has($k) and .[$k] != null
+        then (.[$k] | if type == "string" then . else tostring end)
+        else "" end' <<<"$OCRL_STATE"
 }
 
 ocrl_get_array() {
