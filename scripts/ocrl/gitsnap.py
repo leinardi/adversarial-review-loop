@@ -1,0 +1,277 @@
+"""Snapshotting the working state into an immutable tree id.
+
+Ports ``scripts/lib/gitsnap.sh``. A snapshot is committed + staged + unstaged + non-ignored
+untracked content, captured through a **throwaway index**: ``GIT_INDEX_FILE`` points at a
+temporary file, so ``read-tree``/``add -A``/``write-tree`` never touch the repository's real
+index (Rule 3 -- nothing the gate does is visible inside the repository under review).
+
+Only the index is redirected. ``git add -A`` still writes the blobs it hashes into
+``.git/objects``, exactly as the shell did; that is unavoidable for ``write-tree`` and is
+invisible to ``git status``.
+
+The temporary index lands wherever ``tempfile`` puts it (``TMPDIR``), which is the shell's
+behaviour too. It is not placed inside the repository, and it is removed on every path out,
+including the ``index.lock`` git leaves behind when it is interrupted -- the shell leaked
+that one.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import subprocess
+import tempfile
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Final
+
+from ocrl import globmatch
+from ocrl.config import Config
+from ocrl.errors import OcrlError
+from ocrl.util import log
+
+__all__ = [
+    "Snapshot",
+    "SnapshotError",
+    "all_paths_ignored",
+    "changed_paths",
+    "dirty_summary",
+    "format_oversized",
+    "head_commit",
+    "head_tree",
+    "oversized",
+    "snapshot",
+    "stageable",
+    "submodule_warnings",
+    "worktree_clean",
+]
+
+#: Lines of ``git status --porcelain`` kept for a denial message, as ``head -n 40`` did.
+DIRTY_SUMMARY_LINES: Final = 40
+
+
+class SnapshotError(OcrlError):
+    """The working state could not be turned into a tree id.
+
+    Deliberately *not* in ``ocrl.errors``: unlike the errors there, this one is caught, by
+    the gate, to deny with a message naming the reason (the shell carried that reason in
+    ``OCRL_SNAP_ERROR``). Left uncaught it still denies, via the fail-closed guard -- there
+    is no path on which a failed snapshot becomes an approval (Rule 1).
+    """
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """A tree id, plus whatever the caller must be told is *not* represented by it."""
+
+    tree: str
+    warnings: str
+
+
+# --------------------------------------------------------------------------
+# Running git
+# --------------------------------------------------------------------------
+
+
+def _run(repo: str, args: Sequence[str], *, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
+    """Run ``git -C <repo> …``, capturing bytes.
+
+    Bytes rather than text because these commands report *paths*, and a path is not
+    required to be valid UTF-8; decoding is done per call site, with ``surrogateescape``.
+
+    An interpreter-level failure -- git missing entirely -- is reported as a non-zero
+    result rather than raised, because that is what the shell's ``|| true`` produced and
+    every caller here already treats "no output" as failure.
+    """
+    try:
+        return subprocess.run(["git", "-C", repo, *args], capture_output=True, check=False, env=dict(env) if env is not None else None)
+    except OSError as exc:
+        log(f"git {' '.join(args)} could not be run: {exc}")
+        return subprocess.CompletedProcess(args=["git", *args], returncode=127, stdout=b"", stderr=b"")
+
+
+def _decode(raw: bytes) -> str:
+    return raw.decode("utf-8", "surrogateescape")
+
+
+def _first_line_output(proc: subprocess.CompletedProcess[bytes]) -> str:
+    """Captured stdout with trailing newlines stripped, as command substitution did."""
+    return _decode(proc.stdout).rstrip("\n")
+
+
+def head_commit(repo: str) -> str:
+    """HEAD's commit id, or empty in a repository with no commits yet."""
+    proc = _run(repo, ["rev-parse", "--verify", "--quiet", "HEAD"])
+    return _first_line_output(proc) if proc.returncode == 0 else ""
+
+
+def head_tree(repo: str) -> str:
+    """HEAD's tree id, or empty when there is no HEAD."""
+    proc = _run(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])
+    return _first_line_output(proc) if proc.returncode == 0 else ""
+
+
+# --------------------------------------------------------------------------
+# The oversized guard
+# --------------------------------------------------------------------------
+
+
+def stageable(repo: str) -> list[str]:
+    """Paths a snapshot would newly stage: worktree-modified tracked, plus untracked.
+
+    Already-committed content is deliberately not re-checked, so a large blob that is
+    already in history does not wedge the gate forever.
+    """
+    proc = _run(repo, ["ls-files", "-z", "--others", "--exclude-standard", "--modified"])
+    if proc.returncode != 0:
+        return []
+    return [_decode(entry) for entry in proc.stdout.split(b"\0") if entry]
+
+
+def oversized(repo: str, limit: int) -> list[tuple[str, int]]:
+    """Stageable regular files strictly larger than ``limit`` bytes.
+
+    Symlinks are skipped: the snapshot records the link, not the target, so the target's
+    size is not what would be committed.
+    """
+    found: list[tuple[str, int]] = []
+    for rel in stageable(repo):
+        full = os.path.join(repo, rel)
+        if os.path.islink(full) or not os.path.isfile(full):
+            continue
+        try:
+            size = os.stat(full).st_size
+        except OSError:
+            size = 0
+        if size > limit:
+            found.append((rel, size))
+    return found
+
+
+def format_oversized(entries: Sequence[tuple[str, int]]) -> str:
+    """``path<TAB>bytes`` per line, the shape the denial message embeds."""
+    return "".join(f"{path}\t{size}\n" for path, size in entries)
+
+
+# --------------------------------------------------------------------------
+# Submodules
+# --------------------------------------------------------------------------
+
+
+def submodule_warnings(repo: str) -> str:
+    """Declare every submodule for the report header. Content is never diffed.
+
+    The gate reviews one tree; a submodule is a pointer to another repository's history,
+    and the reviewer never sees inside it. Saying so is the whole point of this function --
+    silence would let a submodule bump pass as a reviewed change.
+    """
+    proc = _run(repo, ["submodule", "status", "--recursive"])
+    out = _first_line_output(proc) if proc.returncode == 0 else ""
+    if not out:
+        return ""
+    lines: list[str] = []
+    for line in out.split("\n"):
+        body = line.removeprefix(" ")
+        if line.startswith("+"):
+            lines.append(f"submodule out of sync (content NOT diffed): {body}")
+        elif line.startswith("U"):
+            lines.append(f"submodule has merge conflicts (content NOT diffed): {body}")
+        elif line.startswith("-"):
+            lines.append(f"submodule not initialised (content NOT diffed): {body}")
+        else:
+            lines.append(f"submodule present (content NOT diffed): {line}")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# The snapshot itself
+# --------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _temp_index() -> Iterator[str]:
+    """A throwaway index path, removed however the block is left."""
+    try:
+        fd, path = tempfile.mkstemp(prefix="ocrl-index.")
+    except OSError as exc:
+        raise SnapshotError("could not create a temporary index") from exc
+    os.close(fd)
+    try:
+        yield path
+    finally:
+        for leftover in (path, f"{path}.lock"):
+            with contextlib.suppress(OSError):
+                os.unlink(leftover)
+
+
+def snapshot(repo: str) -> Snapshot:
+    """Turn the current working state into a tree id.
+
+    Raises ``SnapshotError`` with the reason the shell put in ``OCRL_SNAP_ERROR``. There is
+    no "best effort" result: a tree that does not represent the working state would be
+    reviewed instead of the code about to be committed.
+    """
+    with _temp_index() as index:
+        env = {**os.environ, "GIT_INDEX_FILE": index}
+        seed = ["read-tree", "HEAD"] if head_commit(repo) else ["read-tree", "--empty"]
+        if _run(repo, seed, env=env).returncode != 0:
+            raise SnapshotError("could not seed the temporary index from HEAD")
+        if _run(repo, ["add", "-A"], env=env).returncode != 0:
+            raise SnapshotError("git add -A failed against the temporary index")
+        write = _run(repo, ["write-tree"], env=env)
+        tree = _first_line_output(write) if write.returncode == 0 else ""
+
+    if not tree:
+        raise SnapshotError("git write-tree failed against the temporary index")
+    return Snapshot(tree=tree, warnings=submodule_warnings(repo))
+
+
+def worktree_clean(repo: str) -> bool:
+    """True when the worktree holds nothing beyond HEAD.
+
+    A snapshot failure answers False -- "not clean" -- which is what the shell's non-zero
+    return meant. Callers refuse to arm, or refuse to finish, on False; the failure never
+    becomes permission to proceed.
+    """
+    try:
+        snap = snapshot(repo)
+    except SnapshotError as exc:
+        log(f"treating {repo} as dirty: {exc}")
+        return False
+    return bool(snap.tree) and snap.tree == head_tree(repo)
+
+
+def dirty_summary(repo: str) -> str:
+    """Human-readable summary of what makes the worktree dirty, bounded in length."""
+    proc = _run(repo, ["status", "--porcelain=v1"])
+    if proc.returncode != 0:
+        return ""
+    return "\n".join(_decode(proc.stdout).splitlines()[:DIRTY_SUMMARY_LINES])
+
+
+def changed_paths(repo: str, base: str, head: str) -> list[str]:
+    """Paths differing between two tree-ish ids. Empty on any failure."""
+    proc = _run(repo, ["diff", "--name-only", base, head])
+    if proc.returncode != 0:
+        return []
+    return [line for line in _decode(proc.stdout).splitlines() if line]
+
+
+def all_paths_ignored(repo: str, base: str, head: str, config: Config) -> bool:
+    """True when every changed path matches one of the configured ignore globs.
+
+    False whenever the answer is not certain -- no globs configured, no changed paths, or
+    any path that matches none of them -- because True is what skips the review entirely.
+
+    Matching goes through ``ocrl.globmatch``, which reproduces ``[[ $p == $g ]]`` -- the
+    shell's own comparison -- rather than ``fnmatch``. The difference is not cosmetic:
+    ``fnmatch`` reads ``[^a]`` as the set ``{'^', 'a'}`` where bash reads it as *not* ``a``,
+    so ``fnmatch`` would skip the review of a path bash would have sent to the reviewer.
+    """
+    globs = config.as_list("ignore_globs")
+    if not globs:
+        return False
+    paths = changed_paths(repo, base, head)
+    if not paths:
+        return False
+    return all(any(globmatch.matches(path, glob) for glob in globs) for path in paths)

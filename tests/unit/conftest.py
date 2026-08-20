@@ -18,6 +18,8 @@ SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
 BOOTSTRAP = SCRIPTS_DIR / "ocrl-bootstrap.py"
 SOCKET_STDIN = PLUGIN_ROOT / "tests" / "fixtures" / "socket-stdin.py"
 BASH_FIXTURE = PLUGIN_ROOT / "tests" / "fixtures" / "bash-config-state.sh"
+BASH_CMDSHAPE = PLUGIN_ROOT / "tests" / "fixtures" / "bash-cmdshape.sh"
+BASH_GLOB = PLUGIN_ROOT / "tests" / "fixtures" / "bash-glob.sh"
 
 
 def bash_fixture(
@@ -42,6 +44,25 @@ def bash_fixture(
     if check and proc.returncode != 0:
         raise AssertionError(f"bash fixture {args!r} failed ({proc.returncode}): {proc.stderr}")
     return proc
+
+
+def bash_cmdshape(op: str, command: str) -> subprocess.CompletedProcess[bytes]:
+    """Ask the still-live shell tokenizer for its verdict on one command.
+
+    Bytes, not text: the ``tokenize`` op is NUL-separated so a token containing a space
+    stays one token. Nothing here reads configuration or state, so the ambient environment
+    is harmless and is left alone.
+    """
+    return subprocess.run(
+        [str(BASH_CMDSHAPE), op, command],
+        capture_output=True,
+        check=False,
+    )
+
+
+def bash_glob(path: str, glob: str) -> bool:
+    """Ask a real bash whether ``[[ $path == $glob ]]``."""
+    return subprocess.run([str(BASH_GLOB), path, glob], capture_output=True, check=False).returncode == 0
 
 
 #: Modules a hostile repository under review would shadow to hijack the gate. ``ocrl`` and
@@ -99,6 +120,33 @@ def plugin_copy(tmp_path: Path) -> Path:
         ignore=shutil.ignore_patterns("__pycache__"),
     )
     return dest
+
+
+def git(repo: Path, *args: str) -> str:
+    """Run git in ``repo`` and return its stdout, failing the test on a non-zero exit."""
+    proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise AssertionError(f"git {args!r} failed ({proc.returncode}): {proc.stderr}")
+    return proc.stdout.rstrip("\n")
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path) -> Path:
+    """A scratch repository with one committed file, matching ``selftest.sh``'s ``new_case``.
+
+    Signing and the user's identity are pinned locally so the fixture does not depend on --
+    or trip over -- the developer's global git configuration.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "selftest@example.invalid")
+    git(repo, "config", "user.name", "ocrl selftest")
+    git(repo, "config", "commit.gpgsign", "false")
+    (repo / "seed.txt").write_text("seed\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "seed")
+    return repo
 
 
 @pytest.fixture
