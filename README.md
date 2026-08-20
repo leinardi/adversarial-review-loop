@@ -42,7 +42,7 @@ Raise the Stop-hook block cap so a long loop is not cut short. Claude Code caps 
 }
 ```
 
-The variable is read at process start, so restart Claude Code after setting it.
+The variable is read at process start, so restart Claude Code after setting it. The number is how many consecutive blocks are *tolerated* — the override fires on the next one after that. Verified against a cap of `3`, which overrode on the fourth block.
 
 ## Commands
 

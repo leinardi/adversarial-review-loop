@@ -185,7 +185,7 @@ If it has no effect, the residual limit stands as documented in the README: our 
 | — | the loop runs end to end against a real model | **pass** (2026-08-20) |
 | 10 | another repo in another session is untouched | **pass** (2026-08-20) |
 | 3 | arguments, and a hostile path | **pass**, with a confirmed injection surface (2026-08-20) |
-| 6 | the block cap responds to the setting | outstanding |
+| 6 | the block cap responds to the setting | **pass** (2026-08-20) |
 
 ### Isolation, 2026-08-20
 
@@ -204,6 +204,18 @@ A second full run on 2026-08-20 repeated this against genuinely broken code (`gr
 That run also showed a rough edge worth knowing about: re-running `implement` in a session that already holds an older arm failure in its context, Claude reported the **stale** failure rather than the fresh banner. It corrected itself one tool call later — the gate's denial named the real state — but if a banner and Claude's summary disagree, believe the banner and `/opencode-review-loop:status`, not the prose.
 
 Items 1 and 4 fall out of this run: all four hooks fired, and the pre-phase `Read` of the frozen plan was permitted while the gate still denied mutations, which is only possible if the expansion-time session id matches the one the hooks receive.
+
+### The block cap, 2026-08-20
+
+With `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=3`, the host overrode on the **fourth** consecutive block: `A hook blocked the turn from ending 4 consecutive times — overriding and ending turn.` The default would have allowed roughly nine. The setting is honoured, so a configured `40` is real.
+
+Read the number as *blocks tolerated*, not blocks attempted: `N` permits N blocks and overrides on N+1.
+
+Inducing the condition needed more care than expected, and the detours are worth recording:
+
+- **A failed arm never reaches Claude.** When the `` !`…` `` command exits non-zero, Claude Code aborts the skill invocation and Claude gets no turn at all — so no Stop hook fires, and `stop_blocks` stays at 0. That is benign (nothing runs), but it means the `ARM_FAILED` Stop branch is unreachable from a *fresh* failed arm. It is reachable only once Claude already has turns: a re-arm that fails, or the dispatcher recording an arm that never executed.
+- **`ARMED` is not a stable blocking state**, because the block message tells Claude to run `set-phases`, which it then does — that is progress, and the counter resets by design.
+- **`STALE` is the reliable lever.** Nothing Claude can do resolves it, since only the user can re-arm. Arm normally, then from a *second terminal* (the session must stay open) backdate the activation with `jq '.armed_at = 1'`, and every subsequent turn end blocks with no progress in between.
 
 ## If A1 fails
 
