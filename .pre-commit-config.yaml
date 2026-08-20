@@ -19,10 +19,16 @@ repos:
     rev: v1.19.0
     hooks:
       - id: mypy
+        additional_dependencies:
+          # pytest ships py.typed; without it every @fixture and @parametrize is an
+          # untyped decorator and mypy reports the test it decorates as untyped.
+          - pytest==9.0.2
         exclude: ^scripts/ocrl/_vendor/
       - id: mypy
         alias: mypy-json-output
         name: mypy (json output)
+        additional_dependencies:
+          - pytest==9.0.2
         args:
           [
             "--output",

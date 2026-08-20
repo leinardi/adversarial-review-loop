@@ -22,6 +22,10 @@ ignore = [
     # add ignores as needed
 ]
 
+[lint.isort]
+# The package lives under scripts/, which isort cannot infer from the layout.
+known-first-party = ["ocrl"]
+
 [lint.pylint]
 allow-magic-value-types = ["str", "int"]
 
