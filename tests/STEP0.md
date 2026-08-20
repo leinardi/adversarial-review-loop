@@ -159,14 +159,22 @@ If it has no effect, the residual limit stands as documented in the README: our 
 | Item | Check | Result |
 | --- | --- | --- |
 | 2 | `` !`…` `` expansion runs in a skill body | **pass** (2026-08-19) |
-| 1 | all four hook events register |  |
-| 5 | `${CLAUDE_PLUGIN_ROOT}` resolves in a hook |  |
-| 7 | a hook reads a plan outside the repo |  |
-| 4 | session id matches; pre-phase mutation denied |  |
-| — | the loop runs end to end against a real model |  |
-| 10 | another repo in another session is untouched |  |
-| 3 | `$1`, empty `$2`, and a hostile path |  |
-| 6 | the block cap responds to the setting |  |
+| 1 | all four hook events register | **pass** (2026-08-20) |
+| 5 | `${CLAUDE_PLUGIN_ROOT}` resolves in a hook | **pass** (2026-08-19) |
+| 7 | a hook reads a plan outside the repo | **pass** (2026-08-19) |
+| 4 | session id matches; pre-phase mutation denied | **pass** (2026-08-20) |
+| — | the loop runs end to end against a real model | **pass** (2026-08-20) |
+| 10 | another repo in another session is untouched | outstanding |
+| 3 | arguments, and a hostile path | retest — the mechanism changed |
+| 6 | the block cap responds to the setting | outstanding |
+
+### The first clean end-to-end run, 2026-08-20
+
+Two phases against `openai/gpt-5.6-sol`, roughly 80 seconds in total: arm at expansion, `set-phases` via the one permitted Bash call, mutations allowed only after the phases were frozen, both commits intercepted and reviewed, `confirm-commit` verifying each tree and advancing the phase, then the final cumulative review completing the activation and disarming the mode.
+
+Three real reviews landed in `reports/` with their bundles. The reviewer globbed the repository, read `greet.py` and `README.md`, read the diff from the bundle under `$XDG_STATE_HOME`, and emitted the marker block correctly — worth checking `bundles/NNN/reviewer.out` yourself the first time, since an approval is only as good as the evidence the reviewer actually opened.
+
+Items 1 and 4 fall out of this run: all four hooks fired, and the pre-phase `Read` of the frozen plan was permitted while the gate still denied mutations, which is only possible if the expansion-time session id matches the one the hooks receive.
 
 ## If A1 fails
 
