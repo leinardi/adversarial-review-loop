@@ -183,15 +183,25 @@ If it has no effect, the residual limit stands as documented in the README: our 
 | 7 | a hook reads a plan outside the repo | **pass** (2026-08-19) |
 | 4 | session id matches; pre-phase mutation denied | **pass** (2026-08-20) |
 | — | the loop runs end to end against a real model | **pass** (2026-08-20) |
-| 10 | another repo in another session is untouched | outstanding |
+| 10 | another repo in another session is untouched | **pass** (2026-08-20) |
 | 3 | arguments, and a hostile path | **pass**, with a confirmed injection surface (2026-08-20) |
 | 6 | the block cap responds to the setting | outstanding |
+
+### Isolation, 2026-08-20
+
+With the fixture armed, a separate session in an unrelated repository edited a file with no gate activity at all — no denial, no status message, no added latency.
+
+Note precisely what that establishes. A second session has no `ocrl` hooks registered, because skill hooks register on invocation rather than at plugin load, so the dispatcher never runs there. That is the property that matters day to day: **installing the plugin does not tax or gate sessions that never armed it.** The narrower branch — same session, different worktree, where the dispatcher *does* run and compares the pointer against the repo root — is covered by the `scoping` cases in `selftest.sh` rather than here.
 
 ### The first clean end-to-end run, 2026-08-20
 
 Two phases against `openai/gpt-5.6-sol`, roughly 80 seconds in total: arm at expansion, `set-phases` via the one permitted Bash call, mutations allowed only after the phases were frozen, both commits intercepted and reviewed, `confirm-commit` verifying each tree and advancing the phase, then the final cumulative review completing the activation and disarming the mode.
 
 Three real reviews landed in `reports/` with their bundles. The reviewer globbed the repository, read `greet.py` and `README.md`, read the diff from the bundle under `$XDG_STATE_HOME`, and emitted the marker block correctly — worth checking `bundles/NNN/reviewer.out` yourself the first time, since an approval is only as good as the evidence the reviewer actually opened.
+
+A second full run on 2026-08-20 repeated this against genuinely broken code (`greet.py` rewound to the seed), producing commits `9a8cb7e` and `57625c9`, three more real `gpt-5.6-sol` reviews, and a clean `COMPLETE`.
+
+That run also showed a rough edge worth knowing about: re-running `implement` in a session that already holds an older arm failure in its context, Claude reported the **stale** failure rather than the fresh banner. It corrected itself one tool call later — the gate's denial named the real state — but if a banner and Claude's summary disagree, believe the banner and `/opencode-review-loop:status`, not the prose.
 
 Items 1 and 4 fall out of this run: all four hooks fired, and the pre-phase `Read` of the frozen plan was permitted while the gate still denied mutations, which is only possible if the expansion-time session id matches the one the hooks receive.
 
