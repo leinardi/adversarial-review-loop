@@ -1,0 +1,297 @@
+"""Report storage and the text Claude is actually handed.
+
+The thing under test is what survives: **every** ``FINDING`` line comes back inline, and
+prose is the only part allowed to be cut. A finding trimmed for length is a finding that
+never gets fixed, and the loop would then block forever on evidence the model was never
+shown.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import stat
+import subprocess
+from pathlib import Path
+
+import pytest
+from conftest import FAKE_REVIEWER, bash_reviewer, git
+
+from ocrl import config as ocrl_config
+from ocrl import report, reviewer, state
+from ocrl.config import Config
+from ocrl.reviewer import Review, Target
+from ocrl.util import TRUNCATION_MARKER
+
+SESSION = "repsess"
+
+#: Reviewer output that is not valid UTF-8, which the report must keep byte for byte.
+INVALID_UTF8 = b"tool output: \xff\xfe\n"
+
+#: The header line whose value is a clock reading, and so cannot be compared across runs.
+_GENERATED = re.compile(r"^- generated: .*$", re.MULTILINE)
+
+
+@pytest.fixture
+def report_env(clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    for key in list(os.environ):
+        if key.startswith(("OCRL_", "XDG_")):
+            monkeypatch.delenv(key, raising=False)
+    for key, value in clean_env.items():
+        monkeypatch.setenv(key, value)
+    return clean_env
+
+
+@pytest.fixture
+def act_dir(report_env: dict[str, str]) -> Path:
+    st = state.State("/wt", SESSION)
+    st.new()
+    st.save()
+    return st.act_dir
+
+
+def a_target(scope: str = "phase", phase: int = 1, base: str = "b", head: str = "h") -> Target:
+    return Target(repo="/wt", base=base, head=head, scope=scope, phase=phase)
+
+
+def config_with(**overrides: object) -> Config:
+    return Config({**ocrl_config.DEFAULTS, **overrides})
+
+
+def a_review(**overrides: str) -> Review:
+    review = Review(
+        verdict="CHANGES_REQUIRED",
+        findings="FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n",
+        all_findings=(
+            "FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n"
+            "FINDING severity=low actionable=no file=b.txt:2 | Could be named better\n"
+        ),
+        prose="The error path is wrong.",
+    )
+    for key, value in overrides.items():
+        setattr(review, key, value)
+    return review
+
+
+# --------------------------------------------------------------------------
+# Storage
+# --------------------------------------------------------------------------
+
+
+def test_the_filename_carries_the_verdict(act_dir: Path) -> None:
+    review = a_review()
+    path = report.store(review, a_target("phase", 2, "b", "h"), seq="007", act_dir=act_dir, config=config_with())
+
+    assert path.name == "007-phase2-changes_required.md"
+    assert review.report == str(path)
+
+
+def test_a_final_review_is_labelled_final(act_dir: Path) -> None:
+    path = report.store(a_review(verdict="APPROVED"), a_target("final", 3, "b", "h"), seq="001", act_dir=act_dir, config=config_with())
+    assert path.name == "001-final-approved.md"
+
+
+def test_a_verdictless_review_is_still_stored(act_dir: Path) -> None:
+    """A report that cannot be named after a verdict is evidence, not something to drop."""
+    path = report.store(Review(), a_target("phase", 1, "b", "h"), seq="001", act_dir=act_dir, config=config_with())
+    assert path.name == "001-phase1-unknown.md"
+    assert "**UNKNOWN**" in path.read_text()
+
+
+def test_the_report_records_what_decided_it(act_dir: Path) -> None:
+    review = a_review(error="the reviewer timed out after 900s")
+    text = report.store(
+        review, a_target(base="basetree", head="headtree"), seq="001", act_dir=act_dir, config=config_with(variant="thinking")
+    ).read_text()
+
+    assert "- verdict (recomputed by the gate): **CHANGES_REQUIRED**\n" in text
+    assert "- base tree: `basetree`\n" in text
+    assert "- head tree: `headtree`\n" in text
+    assert "- model: `openai/gpt-5.6-sol` (variant `thinking`)\n" in text
+    assert "- block_severity: `low`\n" in text
+    assert "- gate note: the reviewer timed out after 900s\n" in text
+    assert "Returns success on a failed lookup" in text
+
+
+def test_a_clean_review_says_so_rather_than_leaving_the_section_empty(act_dir: Path) -> None:
+    text = report.store(Review(verdict="APPROVED"), a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
+    assert "## Blocking findings\n\n(none)\n" in text
+    assert "- gate note:" not in text
+
+
+def test_the_raw_reviewer_output_is_embedded(act_dir: Path, tmp_path: Path) -> None:
+    raw = tmp_path / "reviewer.out"
+    raw.write_text("everything the reviewer said\n")
+    text = report.store(a_review(raw=str(raw)), a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
+
+    assert "## Raw reviewer output\n\n````\neverything the reviewer said\n\n````\n" in text
+
+
+def test_output_that_is_not_valid_utf8_is_kept_byte_for_byte(act_dir: Path, tmp_path: Path) -> None:
+    """One stray byte must not cost the whole report -- it is what a denial points at."""
+    raw = tmp_path / "reviewer.out"
+    raw.write_bytes(INVALID_UTF8)
+
+    path = report.store(a_review(raw=str(raw)), a_target("phase", 1, "b", "h"), seq="001", act_dir=act_dir, config=config_with())
+    assert INVALID_UTF8 in path.read_bytes()
+
+
+def test_a_missing_raw_file_does_not_stop_the_report(act_dir: Path, tmp_path: Path) -> None:
+    path = report.store(a_review(raw=str(tmp_path / "gone")), a_target(), seq="001", act_dir=act_dir, config=config_with())
+    assert path.is_file()
+
+
+def test_the_report_is_private(act_dir: Path) -> None:
+    """Reports quote the diff and the plan; they are not world-readable."""
+    path = report.store(a_review(), a_target("phase", 1, "b", "h"), seq="001", act_dir=act_dir, config=config_with())
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_the_stored_report_matches_the_shell(report_env: dict[str, str], act_dir: Path, tmp_path: Path) -> None:
+    raw = tmp_path / "reviewer.out"
+    with raw.open("wb") as sink:
+        subprocess.run([str(FAKE_REVIEWER), str(tmp_path), "p"], stdout=sink, env={**os.environ, "OCRL_FAKE_MODE": "changes"}, check=False)
+
+    shell = bash_reviewer(["store", "/wt", SESSION, "", str(raw), "001", "phase", "1", "basetree", "headtree"], env=report_env)
+    assert shell.returncode == 0, shell.stderr
+    theirs = Path(shell.stdout.decode())
+    # Read before storing: both implementations derive the same filename from the same
+    # activation, so the Python write lands on top of the shell's.
+    theirs_text = theirs.read_text()
+
+    mine_review = reviewer.parse(raw, config=ocrl_config.load("", report_env))
+    mine_review.raw = str(raw)
+    mine = report.store(mine_review, a_target("phase", 1, "basetree", "headtree"), seq="001", act_dir=act_dir, config=config_with())
+
+    assert mine.name == theirs.name
+    assert _GENERATED.sub("", mine.read_text()) == _GENERATED.sub("", theirs_text)
+
+
+# --------------------------------------------------------------------------
+# The denial message
+# --------------------------------------------------------------------------
+
+
+def test_the_reason_leads_with_the_headline_and_ends_with_the_instruction() -> None:
+    text = report.reason(a_review(), "opencode-review-loop: changes required.", config=config_with())
+
+    assert text.startswith("opencode-review-loop: changes required.\n")
+    assert text.endswith("Fix the findings above, then commit again. The commit is gated until the review passes.\n")
+
+
+def test_every_blocking_finding_is_quoted_inline() -> None:
+    text = report.reason(a_review(), "h", config=config_with())
+
+    assert "Blocking findings (actionable, severity >= low) -- every one must be resolved:" in text
+    assert "Returns success on a failed lookup" in text
+    assert "All findings reported (non-blocking ones included, for context):" in text
+    assert "Could be named better" in text
+
+
+def test_the_full_set_is_not_repeated_when_it_is_the_blocking_set() -> None:
+    review = a_review()
+    review.all_findings = review.findings
+    assert "All findings reported" not in report.reason(review, "h", config=config_with())
+
+
+def test_the_gate_note_is_carried_back() -> None:
+    text = report.reason(a_review(error="the reviewer produced no output"), "h", config=config_with())
+    assert "\nGate note: the reviewer produced no output\n" in text
+
+
+def test_prose_truncates_but_findings_never_do() -> None:
+    review = a_review(prose="padding. " * 5000)
+    text = report.reason(review, "h", config=config_with(max_reason_bytes=2000))
+
+    assert TRUNCATION_MARKER.format(limit=2000) in text
+    assert "truncated at 2000 bytes" in text
+    assert "Returns success on a failed lookup" in text
+    assert "Could be named better" in text
+
+
+def test_short_prose_is_left_alone() -> None:
+    assert "truncated at" not in report.reason(a_review(), "h", config=config_with())
+
+
+def test_the_report_path_is_offered_when_there_is_one() -> None:
+    assert "\nFull report: /state/001.md\n" in report.reason(a_review(report="/state/001.md"), "h", config=config_with())
+    assert "Full report:" not in report.reason(a_review(), "h", config=config_with())
+
+
+@pytest.mark.parametrize("mode", ["changes", "approve-with-critical", "big-prose", "many"])
+def test_the_reason_matches_the_shell(report_env: dict[str, str], tmp_path: Path, mode: str) -> None:
+    raw = tmp_path / "reviewer.out"
+    with raw.open("wb") as sink:
+        subprocess.run([str(FAKE_REVIEWER), str(tmp_path), "p"], stdout=sink, env={**os.environ, "OCRL_FAKE_MODE": mode}, check=False)
+
+    env = {**report_env, "OCRL_MAX_REASON_BYTES": "2000"}
+    shell = bash_reviewer(["reason", "", str(raw), "the headline"], env=env)
+
+    config = ocrl_config.load("", env)
+    mine = report.reason(reviewer.parse(raw, config=config), "the headline", config=config)
+    assert mine == shell.stdout.decode()
+
+
+# --------------------------------------------------------------------------
+# Listing and printing
+# --------------------------------------------------------------------------
+
+
+def store_seq(act_dir: Path, seq: str, verdict: str) -> Path:
+    return report.store(Review(verdict=verdict), a_target(), seq=seq, act_dir=act_dir, config=config_with())
+
+
+def test_reports_list_oldest_first(act_dir: Path) -> None:
+    store_seq(act_dir, "002", "APPROVED")
+    store_seq(act_dir, "001", "CHANGES_REQUIRED")
+
+    assert report.list_reports(act_dir) == ["001-phase1-changes_required.md", "002-phase1-approved.md"]
+
+
+def test_an_activation_with_no_reports_lists_nothing(act_dir: Path) -> None:
+    assert report.list_reports(act_dir) == []
+    assert report.render(act_dir) == "No reports have been produced for this activation yet.\n"
+
+
+def test_the_newest_report_is_the_default(act_dir: Path) -> None:
+    store_seq(act_dir, "001", "CHANGES_REQUIRED")
+    store_seq(act_dir, "002", "APPROVED")
+
+    assert "# OpenCode review 002 (phase1)" in report.render(act_dir)
+
+
+def test_a_report_can_be_asked_for_by_number(act_dir: Path) -> None:
+    store_seq(act_dir, "001", "CHANGES_REQUIRED")
+    store_seq(act_dir, "002", "APPROVED")
+
+    assert "# OpenCode review 001 (phase1)" in report.render(act_dir, 1)
+
+
+def test_an_unknown_number_lists_what_there_is(act_dir: Path) -> None:
+    store_seq(act_dir, "001", "APPROVED")
+    text = report.render(act_dir, 9)
+
+    assert text.startswith("No such report. Available:\n")
+    assert "001-phase1-approved.md" in text
+
+
+def test_rendering_a_report_never_touches_stdout(act_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Rule 2: this runs under hooks whose stdout is the protocol response."""
+    store_seq(act_dir, "001", "APPROVED")
+    report.render(act_dir)
+    report.reason(a_review(), "h", config=config_with())
+    assert capsys.readouterr().out == ""
+
+
+def test_the_report_listing_matches_the_shell(report_env: dict[str, str], act_dir: Path, git_repo: Path) -> None:
+    """Both implementations must find the same files, since one may have written them."""
+    store_seq(act_dir, "001", "APPROVED")
+    listing = subprocess.run(
+        ["find", str(act_dir / "reports"), "-maxdepth", "1", "-name", "*.md", "-printf", "%f\n"],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    assert sorted(listing.stdout.split()) == report.list_reports(act_dir)
+    assert git(git_repo, "status", "--porcelain") == "", "reports never land in the repository under review"

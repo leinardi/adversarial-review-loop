@@ -139,20 +139,26 @@ def ensure_private_dir(path: Path, *, root: Path) -> None:
         pass
 
 
-def write_private_atomic(path: Path, text: str, *, root: Path) -> None:
+def write_private_atomic(path: Path, text: str, *, root: Path, errors: str = "strict") -> None:
     """Publish ``text`` at ``path`` atomically, mode ``0600``.
 
     The temporary file is created in the destination directory -- ``os.replace`` is only
     atomic within a filesystem -- and with an explicit mode, so the result does not depend
     on the caller's umask. If anything fails before the rename, the previous contents are
     still there, byte for byte.
+
+    ``errors`` is ``"strict"`` for everything the gate composes itself, because an
+    unencodable character there is a bug worth failing on. Reports pass
+    ``"surrogateescape"``: they embed the reviewer's own output, which is not obliged to be
+    valid UTF-8, and losing the whole report to one stray byte would throw away the evidence
+    for a denial.
     """
     tmp_name = f"{path.name}.tmp.{os.getpid()}"
     with private_dir_fd(path.parent, root=root) as dir_fd:
         # O_EXCL so the write can never follow a symlink planted at the temp name.
         fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FILE_MODE, dir_fd=dir_fd)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with os.fdopen(fd, "w", encoding="utf-8", errors=errors) as handle:
                 handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())

@@ -37,6 +37,7 @@ __all__ = [
     "changed_paths",
     "dirty_summary",
     "format_oversized",
+    "git_run",
     "head_commit",
     "head_tree",
     "oversized",
@@ -73,7 +74,7 @@ class Snapshot:
 # --------------------------------------------------------------------------
 
 
-def _run(repo: str, args: Sequence[str], *, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
+def git_run(repo: str, args: Sequence[str], *, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
     """Run ``git -C <repo> …``, capturing bytes.
 
     Bytes rather than text because these commands report *paths*, and a path is not
@@ -101,13 +102,13 @@ def _first_line_output(proc: subprocess.CompletedProcess[bytes]) -> str:
 
 def head_commit(repo: str) -> str:
     """HEAD's commit id, or empty in a repository with no commits yet."""
-    proc = _run(repo, ["rev-parse", "--verify", "--quiet", "HEAD"])
+    proc = git_run(repo, ["rev-parse", "--verify", "--quiet", "HEAD"])
     return _first_line_output(proc) if proc.returncode == 0 else ""
 
 
 def head_tree(repo: str) -> str:
     """HEAD's tree id, or empty when there is no HEAD."""
-    proc = _run(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])
+    proc = git_run(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])
     return _first_line_output(proc) if proc.returncode == 0 else ""
 
 
@@ -122,7 +123,7 @@ def stageable(repo: str) -> list[str]:
     Already-committed content is deliberately not re-checked, so a large blob that is
     already in history does not wedge the gate forever.
     """
-    proc = _run(repo, ["ls-files", "-z", "--others", "--exclude-standard", "--modified"])
+    proc = git_run(repo, ["ls-files", "-z", "--others", "--exclude-standard", "--modified"])
     if proc.returncode != 0:
         return []
     return [_decode(entry) for entry in proc.stdout.split(b"\0") if entry]
@@ -165,7 +166,7 @@ def submodule_warnings(repo: str) -> str:
     and the reviewer never sees inside it. Saying so is the whole point of this function --
     silence would let a submodule bump pass as a reviewed change.
     """
-    proc = _run(repo, ["submodule", "status", "--recursive"])
+    proc = git_run(repo, ["submodule", "status", "--recursive"])
     out = _first_line_output(proc) if proc.returncode == 0 else ""
     if not out:
         return ""
@@ -214,11 +215,11 @@ def snapshot(repo: str) -> Snapshot:
     with _temp_index() as index:
         env = {**os.environ, "GIT_INDEX_FILE": index}
         seed = ["read-tree", "HEAD"] if head_commit(repo) else ["read-tree", "--empty"]
-        if _run(repo, seed, env=env).returncode != 0:
+        if git_run(repo, seed, env=env).returncode != 0:
             raise SnapshotError("could not seed the temporary index from HEAD")
-        if _run(repo, ["add", "-A"], env=env).returncode != 0:
+        if git_run(repo, ["add", "-A"], env=env).returncode != 0:
             raise SnapshotError("git add -A failed against the temporary index")
-        write = _run(repo, ["write-tree"], env=env)
+        write = git_run(repo, ["write-tree"], env=env)
         tree = _first_line_output(write) if write.returncode == 0 else ""
 
     if not tree:
@@ -243,7 +244,7 @@ def worktree_clean(repo: str) -> bool:
 
 def dirty_summary(repo: str) -> str:
     """Human-readable summary of what makes the worktree dirty, bounded in length."""
-    proc = _run(repo, ["status", "--porcelain=v1"])
+    proc = git_run(repo, ["status", "--porcelain=v1"])
     if proc.returncode != 0:
         return ""
     return "\n".join(_decode(proc.stdout).splitlines()[:DIRTY_SUMMARY_LINES])
@@ -251,7 +252,7 @@ def dirty_summary(repo: str) -> str:
 
 def changed_paths(repo: str, base: str, head: str) -> list[str]:
     """Paths differing between two tree-ish ids. Empty on any failure."""
-    proc = _run(repo, ["diff", "--name-only", base, head])
+    proc = git_run(repo, ["diff", "--name-only", base, head])
     if proc.returncode != 0:
         return []
     return [line for line in _decode(proc.stdout).splitlines() if line]

@@ -20,6 +20,8 @@ SOCKET_STDIN = PLUGIN_ROOT / "tests" / "fixtures" / "socket-stdin.py"
 BASH_FIXTURE = PLUGIN_ROOT / "tests" / "fixtures" / "bash-config-state.sh"
 BASH_CMDSHAPE = PLUGIN_ROOT / "tests" / "fixtures" / "bash-cmdshape.sh"
 BASH_GLOB = PLUGIN_ROOT / "tests" / "fixtures" / "bash-glob.sh"
+BASH_REVIEWER = PLUGIN_ROOT / "tests" / "fixtures" / "bash-reviewer.sh"
+FAKE_REVIEWER = PLUGIN_ROOT / "tests" / "fixtures" / "fake-reviewer.sh"
 
 
 def bash_fixture(
@@ -55,6 +57,21 @@ def bash_cmdshape(op: str, command: str) -> subprocess.CompletedProcess[bytes]:
     """
     return subprocess.run(
         [str(BASH_CMDSHAPE), op, command],
+        capture_output=True,
+        check=False,
+    )
+
+
+def bash_reviewer(args: list[str], *, env: Mapping[str, str]) -> subprocess.CompletedProcess[bytes]:
+    """Drive the still-live shell reviewer/report libraries.
+
+    Bytes, not text: the ``parse`` op is NUL-separated so a finding containing a newline
+    stays one record. The environment is passed in full, for the reason ``bash_fixture``
+    documents.
+    """
+    return subprocess.run(
+        [str(BASH_REVIEWER), *args],
+        env=dict(env),
         capture_output=True,
         check=False,
     )
