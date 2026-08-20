@@ -13,16 +13,49 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Final
+
+from ocrl.errors import UnsafePathError
 
 __all__ = [
     "activation_dir",
     "have",
+    "is_safe_component",
     "latest_pointer_path",
     "repo_root",
+    "session_pointer_path",
     "sessions_dir",
     "sha256_hex",
     "state_root",
+    "validate_component",
 ]
+
+#: Names that are never a single, ordinary directory entry.
+_RESERVED_COMPONENTS: Final = frozenset({"", ".", ".."})
+
+
+def is_safe_component(name: str) -> bool:
+    """Is ``name`` exactly one ordinary path component?
+
+    This matters more than it looks. ``Path("/state/sessions") / "/etc/passwd"`` is
+    ``/etc/passwd`` -- an absolute right-hand side silently *discards* the base -- and a
+    ``..`` component walks straight out of the state root. Since the pointer path is both
+    written and unlinked, an unchecked session id is an arbitrary-file-delete primitive.
+    """
+    if name in _RESERVED_COMPONENTS:
+        return False
+    if "\0" in name:
+        return False
+    if os.sep in name or (os.altsep and os.altsep in name):
+        return False
+    # Catches anything the platform still considers more than one component.
+    return os.path.basename(name) == name and not os.path.isabs(name)
+
+
+def validate_component(name: str, *, what: str) -> str:
+    if not is_safe_component(name):
+        raise UnsafePathError(f"{what} is not a single safe path component: {name!r}")
+    return name
 
 
 def state_root() -> Path:
@@ -55,8 +88,17 @@ def _worktree_dir(worktree: str) -> Path:
 
 
 def activation_dir(worktree: str, session: str) -> Path:
-    """Activation directory for a (worktree, session) pair."""
-    return _worktree_dir(worktree) / session
+    """Activation directory for a (worktree, session) pair.
+
+    The worktree is safe by construction -- it is hashed -- but the session id arrives from
+    the hook payload and is used verbatim, so it is validated.
+    """
+    return _worktree_dir(worktree) / validate_component(session, what="session id")
+
+
+def session_pointer_path(session: str) -> Path:
+    """Path of a session pointer. Raises rather than composing an escaping path."""
+    return sessions_dir() / validate_component(session, what="session id")
 
 
 def latest_pointer_path(worktree: str) -> Path:

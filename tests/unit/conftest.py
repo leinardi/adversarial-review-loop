@@ -17,6 +17,32 @@ PLUGIN_ROOT = ocrl.PLUGIN_ROOT
 SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
 BOOTSTRAP = SCRIPTS_DIR / "ocrl-bootstrap.py"
 SOCKET_STDIN = PLUGIN_ROOT / "tests" / "fixtures" / "socket-stdin.py"
+BASH_FIXTURE = PLUGIN_ROOT / "tests" / "fixtures" / "bash-config-state.sh"
+
+
+def bash_fixture(
+    args: list[str],
+    *,
+    env: Mapping[str, str],
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Drive the still-live shell config/state libraries.
+
+    The environment is passed in full rather than inherited, because a developer's shell may
+    carry ``OCRL_*`` overrides -- one of them is a documented leftover from the STEP0 runs --
+    and those would silently skew a differential comparison.
+    """
+    proc = subprocess.run(
+        [str(BASH_FIXTURE), *args],
+        env=dict(env),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if check and proc.returncode != 0:
+        raise AssertionError(f"bash fixture {args!r} failed ({proc.returncode}): {proc.stderr}")
+    return proc
+
 
 #: Modules a hostile repository under review would shadow to hijack the gate. ``ocrl`` and
 #: ``pathlib`` are on the import path of even ``--help``; the rest are reached as later
@@ -47,11 +73,14 @@ def run_bootstrap(
 @pytest.fixture
 def clean_env(tmp_path: Path) -> dict[str, str]:
     """An environment isolated from the developer's real state and cache directories."""
-    env = dict(os.environ)
+    # Every OCRL_* override goes, not just OCRL_STATE_DIR: a developer's shell may carry
+    # one (OCRL_MAX_STOP_BLOCKS is a documented leftover from the STEP0 runs), and it would
+    # silently skew both the Python result and the shell one it is compared against.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("OCRL_")}
     env["HOME"] = str(tmp_path / "home")
     env["XDG_STATE_HOME"] = str(tmp_path / "state")
     env["XDG_CACHE_HOME"] = str(tmp_path / "cache")
-    env.pop("OCRL_STATE_DIR", None)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
     os.makedirs(env["HOME"], exist_ok=True)
     return env
 
