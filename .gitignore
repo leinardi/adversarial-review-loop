@@ -17,6 +17,14 @@ out/
 # Logs
 *.log
 
+# Python
+# Convenience only: Rule 3 (nothing is written inside the repository under review) is
+# enforced by sys.pycache_prefix in scripts/ocrl-bootstrap.py, not by this file.
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # Local tooling / sandbox
 .env
 .env.*

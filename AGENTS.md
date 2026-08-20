@@ -69,11 +69,19 @@ The `PreToolUse` dispatcher runs on **every** tool call, so cost there is multip
 ## Working on it
 
 ```console
+make dev-deps                # install the pinned dev dependencies (once per checkout)
 make test                    # full suite; no model is called
-make test-filter FILTER=stop # one section
-make check                   # pre-commit: shellcheck, markdownlint, yamllint, actionlint
+make test-unit               # the pytest half only
+make test-accept             # tests/selftest.sh only
+make test-filter FILTER=stop # one selftest section
+make check                   # pre-commit: shellcheck, markdownlint, yamllint, actionlint, ruff, mypy
 make dry-run                 # print the exact opencode argv and prompt without invoking it
 ```
+
+`make test` needs pytest, which is pinned in `requirements-dev.txt` and installed by `make dev-deps`;
+CI installs from the same file, so a local run and a CI run see the same version. That is a
+*development* dependency only — the plugin's own runtime needs nothing beyond `python3` and the
+standard library, and must keep working straight from a checkout.
 
 `make test` must pass before any commit. A change to the gate needs a test that **fails on the old code** — a test that only asserts a helper's return value while the end-to-end bypass survives is not a regression test.
 

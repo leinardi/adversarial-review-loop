@@ -2,85 +2,159 @@ name: CI
 
 on:
   pull_request:
+  workflow_dispatch:
 
 concurrency:
-  group: "${{ github.workflow }} @ ${{ github.event.pull_request.head.label }}"
+  group: "${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.ref }}"
   cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
       - name: Run self-tests
         run: make test
 
   actionlint:
+    # Reports inline PR review comments over a diff range; a manual dispatch has
+    # neither a pull request to comment on nor a base ref to diff against.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
       - name: Run actionlint via pre-commit + reviewdog
-        uses: leinardi/gha-pre-commit-actionlint-reviewdog@v1
+        uses: leinardi/gha-pre-commit-reviewdog-actions/actionlint@v1
         with:
           from-ref: ${{ github.event.pull_request.base.sha }}
           to-ref: ${{ github.event.pull_request.head.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   pre-commit-hooks:
+    # Reports inline PR review comments over a diff range; a manual dispatch has
+    # neither a pull request to comment on nor a base ref to diff against.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
       - name: Run pre-commit hooks + reviewdog diff
-        uses: leinardi/gha-pre-commit-hooks-reviewdog@v1
+        uses: leinardi/gha-pre-commit-reviewdog-actions/pre-commit-hooks@v1
         with:
           from-ref: ${{ github.event.pull_request.base.sha }}
           to-ref: ${{ github.event.pull_request.head.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   markdownlint:
+    # Reports inline PR review comments over a diff range; a manual dispatch has
+    # neither a pull request to comment on nor a base ref to diff against.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
       - name: Run markdownlint-cli2 via pre-commit + reviewdog
-        uses: leinardi/gha-pre-commit-markdownlint-cli2-reviewdog@v1
+        uses: leinardi/gha-pre-commit-reviewdog-actions/markdownlint-cli2@v1
+        with:
+          from-ref: ${{ github.event.pull_request.base.sha }}
+          to-ref: ${{ github.event.pull_request.head.sha }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  mypy:
+    # Reports inline PR review comments over a diff range; a manual dispatch has
+    # neither a pull request to comment on nor a base ref to diff against.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Run mypy via pre-commit + reviewdog
+        uses: leinardi/gha-pre-commit-reviewdog-actions/mypy@v1
+        with:
+          from-ref: ${{ github.event.pull_request.base.sha }}
+          to-ref: ${{ github.event.pull_request.head.sha }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  ruff:
+    # Reports inline PR review comments over a diff range; a manual dispatch has
+    # neither a pull request to comment on nor a base ref to diff against.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Run ruff via pre-commit + reviewdog
+        uses: leinardi/gha-pre-commit-reviewdog-actions/ruff@v1
         with:
           from-ref: ${{ github.event.pull_request.base.sha }}
           to-ref: ${{ github.event.pull_request.head.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   shellcheck:
+    # Reports inline PR review comments over a diff range; a manual dispatch has
+    # neither a pull request to comment on nor a base ref to diff against.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
       - name: Run shellcheck via pre-commit + reviewdog
-        uses: leinardi/gha-pre-commit-shellcheck-reviewdog@v1
+        uses: leinardi/gha-pre-commit-reviewdog-actions/shellcheck@v1
         with:
           from-ref: ${{ github.event.pull_request.base.sha }}
           to-ref: ${{ github.event.pull_request.head.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   yamllint:
+    # Reports inline PR review comments over a diff range; a manual dispatch has
+    # neither a pull request to comment on nor a base ref to diff against.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
       - name: Run yamllint via pre-commit + reviewdog
-        uses: leinardi/gha-pre-commit-yamllint-reviewdog@v1
+        uses: leinardi/gha-pre-commit-reviewdog-actions/yamllint@v1
         with:
           from-ref: ${{ github.event.pull_request.base.sha }}
           to-ref: ${{ github.event.pull_request.head.sha }}

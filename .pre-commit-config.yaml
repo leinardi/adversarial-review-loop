@@ -15,6 +15,40 @@ repos:
     rev: v0.3.2
     hooks:
       - id: checkmake
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.19.0
+    hooks:
+      - id: mypy
+        exclude: ^scripts/ocrl/_vendor/
+      - id: mypy
+        alias: mypy-json-output
+        name: mypy (json output)
+        args:
+          [
+            "--output",
+            "json",
+            "--hide-error-context",
+            "--show-column-numbers",
+            "--show-absolute-path",
+            "--no-pretty",
+            "--ignore-missing-imports",
+            "--scripts-are-modules",
+          ]
+        exclude: ^scripts/ocrl/_vendor/
+        stages: [manual]
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.7
+    hooks:
+      - id: ruff-check
+        args: ["--fix"]
+        exclude: ^scripts/ocrl/_vendor/
+      - id: ruff-format
+        exclude: ^scripts/ocrl/_vendor/
+      - id: ruff-check
+        alias: ruff-check-rdjson
+        args: ["--fix", "-q", "--output-format=rdjson"]
+        exclude: ^scripts/ocrl/_vendor/
+        stages: [manual]
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.9
     hooks:

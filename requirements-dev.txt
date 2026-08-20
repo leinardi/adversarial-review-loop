@@ -1,0 +1,8 @@
+# Development dependencies. NOT runtime dependencies: the plugin itself needs only
+# python3 >= 3.12 from the standard library, and must work straight from a checkout.
+#
+# Only tools invoked directly belong here. ruff and mypy are pinned by rev in
+# .pre-commit-config.yaml and run in pre-commit's own environments.
+#
+# Install with: make dev-deps
+pytest==9.0.2
