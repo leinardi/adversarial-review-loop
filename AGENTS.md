@@ -87,6 +87,17 @@ standard library, and must keep working straight from a checkout.
 
 `make check` runs fix-capable hooks (markdownlint, prettier, end-of-file-fixer). Check `git status --short` afterwards so a formatter's edits are not mistaken for reviewed input.
 
+### Why the gate does not run under uv
+
+`make test` uses `uv` when it is installed — it resolves `requirements-dev.txt` into a cached environment with no virtualenv to manage, and it works where pip refuses to touch the system interpreter (PEP 668). That is a **developer convenience only**. The gate itself must keep running as `python3 -I "$PLUGIN_ROOT/scripts/ocrl-bootstrap.py"`, and `uv run` must never appear on the hook path. Two measured reasons, both about the same thing — under a hook, the current directory is the repository under review:
+
+- **`uv run` executes code from the reviewed repository.** In a directory containing a `pyproject.toml` with a `backend-path` build backend, `uv run python -I <trusted bootstrap>` ran that backend *before* the bootstrap started. That is the `python3 -m` exploit reintroduced one level up, and the bootstrap's hardening cannot see it.
+- **`.python-version` in the reviewed repository redirects the interpreter.** Even with `--no-project`, a repo shipping `.python-version` made uv download CPython 3.9 (27 MB, over the network, inside a hook) and run the gate on it — below the 3.12 floor.
+
+Closing both needs `uv run --no-project --no-config --python <absolute interpreter>` with `UV_PYTHON_DOWNLOADS=never` — at which point uv contributes nothing except latency, and the latency is not small: 122 ms per invocation against 20 ms for `python3 -I`, on a path that runs on every tool call.
+
+**`make check` only sees files git already knows about.** pre-commit enumerates `git ls-files`, so a brand-new file that has never been added is skipped in silence — ruff, mypy and shellcheck report clean on code they never read, and the first real run is the commit hook, after the change has already been reviewed. Run `git add -N` on every new file (intent-to-add is enough; it needs no staged content) before `make check`, and treat a green run that skipped a new module as no run at all.
+
 ### Shell conventions
 
 - Bash 4.4+, GNU coreutils. `split -C`, `stat -c`, `sed -i` are relied on and declared in the README.
