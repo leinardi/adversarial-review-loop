@@ -32,7 +32,7 @@ hooks:
           command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
           args: ["gate-stop"]
           timeout: 1800
-          statusMessage: "OpenCode final review"
+          statusMessage: "OpenCode review loop: end-of-turn gate"
 ---
 
 # Implement with an enforced review loop
