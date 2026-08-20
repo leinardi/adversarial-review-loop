@@ -82,6 +82,8 @@ The reviewer's own `VERDICT` line is advisory. The gate recomputes the verdict f
 
 **Nothing converts a failure into an approval.** Missing contract markers, a missing verdict, a non-zero exit, a timeout, an empty response, a diff above the hard ceiling, or more findings than the cap — every one of those blocks or escalates to `needs-human`. Findings are never silently trimmed: above `max_findings` the gate escalates and keeps the full report on disk rather than showing you a shortened list.
 
+The findings block is parsed strictly, and anything else in it is a failed review rather than a line to skip. `severity` must be one of `info`, `low`, `medium`, `high`, `critical` and `actionable` must be `yes` or `no`; there must be exactly one marker pair, in order, holding exactly one `VERDICT`. The gate cannot tell a reviewer's typo from a finding it failed to understand, so `actionable=maybe` on a critical finding blocks instead of quietly not counting.
+
 Every `FINDING` line comes back inline in the denial. Prose is what truncates, never the actionable set.
 
 ### Accepted commit commands

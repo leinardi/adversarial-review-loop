@@ -613,6 +613,20 @@ if start 'commit gate: operational failures never approve'; then
     assert_contains '[timeout] and names the timeout' "$(pre_reason)" 'timed out after 1s'
 fi
 
+if start 'commit gate: a block the contract does not allow never approves'; then
+    # Each of these carries the reviewer's own APPROVED, and each used to get it: the
+    # findings were dropped as unrecognised and the advisory verdict then stood.
+    for mode in bad-actionable bad-severity mangled-finding stray-end two-blocks two-verdicts chatty-block \
+        inline-start-marker suffixed-end-marker nul-byte; do
+        new_case
+        arm_ok && phases_ok
+        printf 'x\n' >"$REPO/a.txt"
+        d=$(with_env OCRL_FAKE_MODE=$mode pre Bash 'git add -A && git commit -m x')
+        assert_eq "[$mode] denied" "$d" 'deny'
+        assert_contains "[$mode] and says a failed review is not an approval" "$(pre_reason)" 'never an approval'
+    done
+fi
+
 if start 'commit gate: repeated failures escalate to needs-human'; then
     new_case
     arm_ok && phases_ok

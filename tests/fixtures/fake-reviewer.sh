@@ -48,6 +48,86 @@ case "$mode" in
     malformed)
         printf 'I reviewed it and it seems fine to me.\n'
         ;;
+    # Every mode below emits a block the contract does not allow, alongside the reviewer's
+    # own APPROVED. Each one used to be read as "no findings" and approved the commit.
+    bad-actionable)
+        printf 'Looks fine to me.\n\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'FINDING severity=critical actionable=maybe file=a.txt:7 | Nil deref when the token is absent\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
+    bad-severity)
+        printf 'Looks fine to me.\n\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'FINDING severity=spicy actionable=yes file=a.txt:7 | Nil deref when the token is absent\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
+    mangled-finding)
+        # One stray colon, and the whole finding stopped counting.
+        printf 'Looks fine to me.\n\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'FINDING: severity=critical actionable=yes file=a.txt:7 | Nil deref when the token is absent\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
+    stray-end)
+        # The real findings sit above a stray end marker, so the sed range never saw them.
+        printf 'Serious problems below.\n\n'
+        printf '<<<OCRL-END>>>\n'
+        printf 'FINDING severity=critical actionable=yes file=a.txt:7 | Nil deref when the token is absent\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
+    two-blocks)
+        printf 'Two blocks, one of them empty.\n\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'FINDING severity=critical actionable=yes file=a.txt:7 | Nil deref when the token is absent\n'
+        printf '<<<OCRL-END>>>\n'
+        printf 'On reflection:\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
+    inline-start-marker)
+        # The marker is real, but it is buried in a sentence rather than on its own line.
+        printf 'Serious problems below.\n\n'
+        printf 'As requested: <<<OCRL-FINDINGS>>> here it comes\n'
+        printf 'FINDING severity=critical actionable=yes file=a.txt:7 | Nil deref when the token is absent\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
+    suffixed-end-marker)
+        printf 'Serious problems below.\n\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>> -- end of block\n'
+        ;;
+    nul-byte)
+        # A NUL inside `actionable=no` is invisible in a terminal, and command substitution
+        # deletes it -- so the shell used to validate a repaired copy of this line.
+        printf 'Looks fine to me.\n\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'FINDING severity=critical actionable=n\000o file=a.txt:7 | Nil deref when the token is absent\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
+    two-verdicts)
+        printf 'Undecided.\n\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'VERDICT CHANGES_REQUIRED\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
+    chatty-block)
+        printf 'Prose, then a block with commentary in it.\n\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'Nothing worth reporting, honestly.\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
     no-verdict)
         printf 'Review body.\n\n'
         printf '<<<OCRL-FINDINGS>>>\n'

@@ -186,59 +186,110 @@ ocrl_review_invoke() {
 # Contract parsing
 # --------------------------------------------------------------------------
 
-_ocrl_finding_field() {
-    printf '%s' "$1" | grep -o "$2=[^[:space:]]*" | head -n 1 | cut -d= -f2-
+# The grammar of a FINDING line, exactly as prompts/reviewer-*.md specifies it:
+#
+#   FINDING severity=<info|low|medium|high|critical> actionable=<yes|no> file=<path|-> | <detail>
+#
+# It is strict on purpose. The gate cannot tell a reviewer's typo from a finding it failed
+# to understand, and reading an unparsable field as "does not block" is exactly the
+# failure-turned-approval Rule 1 forbids: `actionable=maybe` on a critical finding used to
+# leave the reviewer's own APPROVED standing. scripts/ocrl/reviewer.py carries the same
+# grammar, and tests/unit/test_reviewer.py asserts the two agree.
+# shellcheck disable=SC2034  # read by ocrl_review_parse below
+OCRL_FINDING_RE='^FINDING[[:space:]]+severity=(info|low|medium|high|critical)[[:space:]]+actionable=(yes|no)[[:space:]]+file=[^|[:space:]]([^|]*[^|[:space:]])?[[:space:]]*\|[[:space:]]*[^[:space:]]'
+
+_ocrl_parse_fail() {
+    OCRL_REVIEW_VERDICT='OP_FAILURE'
+    OCRL_REVIEW_ERROR=$1
 }
 
 # ocrl_review_parse <out_file>
 # Sets OCRL_REVIEW_VERDICT plus the findings/prose globals.
+#
+# Everything that is not the documented contract is OP_FAILURE, which blocks: a missing,
+# doubled or inverted marker pair, a malformed FINDING line, a severity outside the five
+# labels, an `actionable` that is neither yes nor no, a missing or repeated VERDICT.
 ocrl_review_parse() {
     local out=$1 block prose verdict line sev act rank threshold
-    local count=0 bytes=0 blocking='' all=''
+    local count=0 bytes=0 blocking='' all='' verdicts=0
+    local starts ends start_line end_line
 
     if [ ! -s "$out" ]; then
-        OCRL_REVIEW_VERDICT='OP_FAILURE'
-        OCRL_REVIEW_ERROR='the reviewer produced no output'
-        return 0
-    fi
-    if ! grep -q '<<<OCRL-FINDINGS>>>' "$out" || ! grep -q '<<<OCRL-END>>>' "$out"; then
-        OCRL_REVIEW_VERDICT='OP_FAILURE'
-        OCRL_REVIEW_ERROR='the reviewer output is missing the <<<OCRL-FINDINGS>>> / <<<OCRL-END>>> markers'
+        _ocrl_parse_fail 'the reviewer produced no output'
         return 0
     fi
 
-    prose=$(sed -n '1,/<<<OCRL-FINDINGS>>>/p' "$out" | sed '$d')
-    block=$(sed -n '/<<<OCRL-FINDINGS>>>/,/<<<OCRL-END>>>/p' "$out" | sed '1d;$d')
+    # Refused before anything reads it, because command substitution *deletes* NUL bytes:
+    # `actionable=n<NUL>o` reaches the validation below as a perfectly good `actionable=no`,
+    # so a malformed finding was silently repaired into a non-blocking one and the
+    # reviewer's own APPROVED then stood. The shell cannot validate bytes it is not allowed
+    # to hold, so output carrying a NUL is not validated at all -- it is rejected.
+    if [ "$(wc -c <"$out")" -ne "$(tr -d '\000' <"$out" | wc -c)" ]; then
+        _ocrl_parse_fail 'the reviewer output contains a NUL byte, so the contract cannot be validated'
+        return 0
+    fi
+
+    # A marker is a line, not a substring: `prose <<<OCRL-FINDINGS>>> trailing` used to open
+    # the block, so a contract smuggled inside a sentence parsed as the real one and its
+    # VERDICT APPROVED stood. Surrounding whitespace is tolerated and nothing else is.
+    #
+    # -a throughout: a reviewer transcript may carry a NUL, and grep would otherwise answer
+    # "binary file matches" instead of the line number the block is located by.
+    local start_re='^[[:space:]]*<<<OCRL-FINDINGS>>>[[:space:]]*$'
+    local end_re='^[[:space:]]*<<<OCRL-END>>>[[:space:]]*$'
+    starts=$(grep -acE -- "$start_re" "$out")
+    ends=$(grep -acE -- "$end_re" "$out")
+    if [ "$starts" -eq 0 ] || [ "$ends" -eq 0 ]; then
+        _ocrl_parse_fail 'the reviewer output is missing the <<<OCRL-FINDINGS>>> / <<<OCRL-END>>> markers'
+        return 0
+    fi
+    start_line=$(grep -anE -m1 -- "$start_re" "$out" | cut -d: -f1)
+    end_line=$(grep -anE -m1 -- "$end_re" "$out" | cut -d: -f1)
+    # Exactly one pair, in order. A sed range would take the first opening marker and the
+    # next closing one, so a stray <<<OCRL-END>>> above the real block hid every finding
+    # written before it and still yielded the reviewer's APPROVED.
+    if [ "$starts" -ne 1 ] || [ "$ends" -ne 1 ] || [ "$end_line" -le "$start_line" ]; then
+        _ocrl_parse_fail 'the reviewer output must hold exactly one <<<OCRL-FINDINGS>>> ... <<<OCRL-END>>> block, in that order'
+        return 0
+    fi
+
+    prose=''
+    [ "$start_line" -gt 1 ] && prose=$(sed -n "1,$((start_line - 1))p" "$out")
+    block=''
+    [ "$end_line" -gt $((start_line + 1)) ] && block=$(sed -n "$((start_line + 1)),$((end_line - 1))p" "$out")
     bytes=${#block}
-
-    verdict=$(printf '%s\n' "$block" | grep -E '^[[:space:]]*VERDICT[: ]' | tail -n 1 |
-        sed -E 's/^[[:space:]]*VERDICT[: ]+//; s/[[:space:]]+$//')
-    if [ -z "$verdict" ]; then
-        OCRL_REVIEW_VERDICT='OP_FAILURE'
-        OCRL_REVIEW_ERROR='the reviewer emitted no VERDICT line'
-        return 0
-    fi
 
     threshold=$(ocrl_severity_rank "$(ocrl_cfg block_severity)")
     while IFS= read -r line; do
-        case "$line" in
-            FINDING\ * | FINDING$'\t'*) ;;
-            *) continue ;;
-        esac
-        count=$((count + 1))
-        all+="$line"$'\n'
-        sev=$(_ocrl_finding_field "$line" severity)
-        act=$(_ocrl_finding_field "$line" actionable)
-        [ -z "$sev" ] && sev='critical' # unlabelled severity is treated as severe
-        rank=$(ocrl_severity_rank "$sev")
-        case "${act,,}" in
-            yes | true | 1)
-                if [ "$rank" -ge "$threshold" ]; then
-                    blocking+="$line"$'\n'
-                fi
-                ;;
-        esac
+        [ -z "${line//[[:space:]]/}" ] && continue
+        if [[ $line =~ $OCRL_FINDING_RE ]]; then
+            count=$((count + 1))
+            all+="$line"$'\n'
+            sev=${BASH_REMATCH[1]}
+            act=${BASH_REMATCH[2]}
+            rank=$(ocrl_severity_rank "$sev")
+            if [ "$act" = 'yes' ] && [ "$rank" -ge "$threshold" ]; then
+                blocking+="$line"$'\n'
+            fi
+            continue
+        fi
+        if [[ $line =~ ^[[:space:]]*VERDICT[:\ ] ]]; then
+            verdicts=$((verdicts + 1))
+            verdict=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*VERDICT[: ]+//; s/[[:space:]]+$//')
+            continue
+        fi
+        _ocrl_parse_fail "the reviewer emitted a line the contract does not allow: ${line:0:120}"
+        return 0
     done < <(printf '%s\n' "$block")
+
+    if [ "$verdicts" -eq 0 ]; then
+        _ocrl_parse_fail 'the reviewer emitted no VERDICT line'
+        return 0
+    fi
+    if [ "$verdicts" -gt 1 ]; then
+        _ocrl_parse_fail 'the reviewer emitted more than one VERDICT line'
+        return 0
+    fi
 
     OCRL_REVIEW_ALL=$all
     OCRL_REVIEW_FINDINGS=$blocking
