@@ -1,8 +1,12 @@
 """Subcommand dispatch, reached only through ``scripts/ocrl-bootstrap.py``.
 
-The subcommand table is filled in during phase 5 of the port; until the entrypoint is
-flipped, ``scripts/ocrl.sh`` remains the live gate and this dispatcher only answers for
-``help``.
+Every subcommand module is imported **inside** its own branch. ``pretool`` runs on every
+tool call, so importing ``arm``, ``dryrun`` and the reviewer stack to answer a ``Read`` would
+be import cost multiplied by thousands of calls for code that never runs.
+
+The hook entrypoints (``pretool``, ``confirm-commit``, ``posttool-failure``, ``gate-stop``)
+are not wired here yet; ``scripts/ocrl.sh`` is still the live gate until the entrypoint is
+flipped, and they land with their own review.
 """
 
 from __future__ import annotations
@@ -21,10 +25,49 @@ USAGE = """usage: ocrl.sh <subcommand> [args]
 """
 
 
-def main(argv: list[str]) -> int:
+def _selftest(argv: list[str]) -> int:
+    """Hand over to the acceptance suite, which stays Bash and language-agnostic."""
+    import os  # noqa: PLC0415 - only this branch needs it
+
+    import ocrl  # noqa: PLC0415
+
+    script = str(ocrl.PLUGIN_ROOT / "tests" / "selftest.sh")
+    os.execv(script, [script, *argv])
+
+
+def main(argv: list[str]) -> int:  # noqa: PLR0911 - one return per subcommand, which is the table
     sub = argv[0] if argv else ""
+    rest = argv[1:]
+
     if sub in ("-h", "--help", "help", ""):
         sys.stdout.write(USAGE)
         return 0
+
+    if sub == "arm":
+        from ocrl.commands import arm  # noqa: PLC0415
+
+        return arm.run(rest)
+    if sub == "set-phases":
+        from ocrl.commands import phases  # noqa: PLC0415
+
+        return phases.run(rest)
+    if sub in ("defer", "status", "report", "finish", "deactivate"):
+        from ocrl.commands import session  # noqa: PLC0415
+
+        handler = {
+            "defer": session.defer,
+            "status": session.status,
+            "report": session.report_cmd,
+            "finish": session.finish,
+            "deactivate": session.deactivate,
+        }[sub]
+        return handler(rest)
+    if sub == "dry-run":
+        from ocrl.commands import dryrun  # noqa: PLC0415
+
+        return dryrun.run(rest)
+    if sub == "selftest":
+        return _selftest(rest)
+
     sys.stderr.write(USAGE)
     return 2

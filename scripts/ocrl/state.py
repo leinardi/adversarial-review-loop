@@ -178,6 +178,12 @@ class State:
         ``create=True`` is the deliberate exception, and it is only for transitions that
         can never grant anything: arming, and the two escalations. Both write a document
         whose effect is to deny.
+
+        **The save happens only if the block completes**, so raising out of it abandons the
+        mutation with the previous document intact. That is the supported way to decline:
+        any decision a caller makes about *whether* to write must be taken inside the block,
+        against the document reloaded here, because anything it read before queueing for the
+        lock may have been overwritten while it waited.
         """
         with locked(self.lock_file, root=paths.state_root()):
             if not self.load():

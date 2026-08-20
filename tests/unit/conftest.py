@@ -17,6 +17,7 @@ PLUGIN_ROOT = ocrl.PLUGIN_ROOT
 SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
 BOOTSTRAP = SCRIPTS_DIR / "ocrl-bootstrap.py"
 SOCKET_STDIN = PLUGIN_ROOT / "tests" / "fixtures" / "socket-stdin.py"
+BASH_ARGS = PLUGIN_ROOT / "tests" / "fixtures" / "bash-args.sh"
 BASH_FIXTURE = PLUGIN_ROOT / "tests" / "fixtures" / "bash-config-state.sh"
 BASH_CMDSHAPE = PLUGIN_ROOT / "tests" / "fixtures" / "bash-cmdshape.sh"
 BASH_GLOB = PLUGIN_ROOT / "tests" / "fixtures" / "bash-glob.sh"
@@ -60,6 +61,19 @@ def bash_cmdshape(op: str, command: str) -> subprocess.CompletedProcess[bytes]:
         capture_output=True,
         check=False,
     )
+
+
+def bash_split_args(raw: str) -> tuple[str, str]:
+    """Ask the still-live shell splitter how it reads one ``--args`` string.
+
+    Bytes and NUL-separated, because a plan path may contain spaces and the whole point of
+    the comparison is that the split lands in the same place.
+    """
+    proc = subprocess.run([str(BASH_ARGS), raw], capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise AssertionError(f"bash-args.sh failed ({proc.returncode}): {proc.stderr.decode(errors='replace')}")
+    plan, flag, _ = proc.stdout.split(b"\0")
+    return plan.decode(), flag.decode()
 
 
 def bash_reviewer(args: list[str], *, env: Mapping[str, str]) -> subprocess.CompletedProcess[bytes]:
