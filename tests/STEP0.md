@@ -124,7 +124,9 @@ While session A is still armed, open a second terminal in **any other repository
 
 ## Session B — argument handling (item 3)
 
-Fresh session in the same repo. Run `/opencode-review-loop:stop` between each, since a failed arm persists `ARM_FAILED` deliberately.
+One session, four invocations back to back. No `/stop` needed between them: re-arming overwrites the state for that session, and `implement` runs at expansion time so it is never gated. Press Esc to interrupt Claude between attempts — only the banner matters.
+
+If the fixture has already been through an end-to-end run, rewind it first (`git -C ~/ocrl-step0/repo reset --hard <seed>`), or Claude will correctly report that the plan is already implemented and defer instead of working.
 
 | Invocation | Expected |
 | --- | --- |
@@ -137,7 +139,24 @@ Fresh session in the same repo. Run `/opencode-review-loop:stop` between each, s
 
 The body now passes `--args "$ARGUMENTS"` as one string and splits it in `ocrl_split_args`, which also keeps plan paths containing spaces intact. The same routine (`wPt`) confirms Claude Code does **not** shell-escape substituted arguments, which is why the character-set check in `cmd_arm` and the probe below both matter.
 
-The last row is the **argument-safety probe**. The fixture creates a file whose name literally contains `` `id` ``. The expected result is a clean refusal by the character-set check in `cmd_arm`. If instead you see the output of `id` — a uid/gid line — anywhere in the banner, the harness let a backtick reach a shell. That is a finding worth stopping for, and it is the residual exposure the design documents rather than eliminates.
+### The argument-safety probe, and what it established
+
+`$ARGUMENTS` is substituted into the skill body **textually and without shell escaping**, and the body then runs through `eval`. Claude Code acknowledges this internally: an import-fallback message in the binary notes that Gemini shell-escapes `{{args}}` inside `!{…}` while Claude Code's `$ARGUMENTS` substitution does not.
+
+Confirmed empirically on 2026-08-20, by reproducing the substitute-then-`eval` sequence:
+
+| `$ARGUMENTS` | Result |
+| --- | --- |
+| `~/ocrl-step0/pl`​`id`​`an.md` | the backtick also closes the outer `` !`…` `` delimiter, truncating the command into a bash syntax error — the arm never runs |
+| `x"; id; echo "` | **`id` executes.** The quote closes `--args "…"`, the semicolon starts a new command |
+
+So the live backtick probe fails safe by accident, not by design: it breaks the syntax before it can run. The quote-and-semicolon form is the real test, and it injects.
+
+**This is not fixable inside the plugin.** No quoting of `$ARGUMENTS` in the body helps — double quotes are escaped by `"`, single quotes by `'` — because the substitution happens before any shell sees it. It is a property of `` !`…` `` expansion that every plugin interpolating `$ARGUMENTS` into a command shares.
+
+What bounds it here: `implement` is `disable-model-invocation: true`, so Claude cannot invoke the skill. The only party who can supply a hostile path is the person typing the slash command. The realistic risk is a pasted path from an untrusted source, not a compromised agent. The character-set check in `cmd_arm` still refuses such a path, but it runs *after* the injected command has already executed, so it limits the review loop's state rather than preventing execution.
+
+Worth reporting upstream if you want it changed.
 
 ---
 
@@ -165,7 +184,7 @@ If it has no effect, the residual limit stands as documented in the README: our 
 | 4 | session id matches; pre-phase mutation denied | **pass** (2026-08-20) |
 | — | the loop runs end to end against a real model | **pass** (2026-08-20) |
 | 10 | another repo in another session is untouched | outstanding |
-| 3 | arguments, and a hostile path | retest — the mechanism changed |
+| 3 | arguments, and a hostile path | **pass**, with a confirmed injection surface (2026-08-20) |
 | 6 | the block cap responds to the setting | outstanding |
 
 ### The first clean end-to-end run, 2026-08-20

@@ -35,6 +35,12 @@ Two things that make this defence in depth rather than a single point of failure
 - `confirm-commit` independently verifies `HEAD^{tree} == pending_approved_tree` and a clean worktree, so a tokenizer bypass yields a *detected, recoverable* bad commit that enters `RECONCILE` — not a silent unreviewed one.
 - The final cumulative review covers the end state regardless of what happened per commit.
 
+### The argument channel is not escaped
+
+`skills/implement/SKILL.md` passes `--args "$ARGUMENTS"`. Claude Code substitutes `$ARGUMENTS` textually, without shell escaping, and the body runs through `eval`. A plan path of `x"; id; echo "` therefore executes `id`. This is confirmed, not theoretical.
+
+No change to the body fixes it — double quotes are broken by `"`, single quotes by `'`, and the substitution precedes any shell. The containment is `disable-model-invocation: true` on the skill, which means only the user can supply the path. **Do not remove that flag**, and do not add a second interpolated argument without re-reading this. `cmd_arm`'s character-set check is still worth keeping, but understand what it does and does not do: it runs after any injected command has already executed, so it protects the loop's state, not the machine.
+
 ## Hot-path rules
 
 The `PreToolUse` dispatcher runs on **every** tool call, so cost there is multiplied by thousands. Two invariants hold it in place:

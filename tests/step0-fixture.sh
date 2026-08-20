@@ -34,6 +34,7 @@ cat >.gitignore <<'EOF'
 .serena/
 .idea/
 .vscode/
+__pycache__/
 EOF
 
 cat >greet.py <<'EOF'
@@ -90,4 +91,7 @@ printf '  plan:          %s/plan.md\n' "$TARGET"
 printf '  backtick probe: %s/pl`id`an.md\n' "$TARGET"
 printf '  state root:    %s\n\n' "$STATE_ROOT"
 printf 'Start the session with:\n\n    cd %s && claude\n\n' "$REPO"
-printf 'Reset between runs:\n\n    rm -rf %s %s\n' "$TARGET" "$STATE_ROOT"
+printf 'Reset between runs:\n\n    rm -rf %s %s\n\n' "$TARGET" "$STATE_ROOT"
+printf 'After an end-to-end run the plan is already implemented, so re-running\n'
+printf 'needs the repository rewound or Claude will correctly find nothing to do:\n\n'
+printf '    git -C %s reset --hard %s\n' "$REPO" "$(git -C "$REPO" rev-parse --short HEAD)"
