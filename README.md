@@ -183,7 +183,7 @@ State lives in `$XDG_STATE_HOME/opencode-review-loop/worktrees/<sha256(worktree)
 ## Development
 
 ```console
-make test                    # 196 assertions against scratch repos; no model is called
+make test                    # 293 assertions against scratch repos; no model is called
 make test-filter FILTER=stop # one section
 make dry-run                 # print the exact opencode argv and prompt, without invoking it
 make check                   # pre-commit (shellcheck, yamllint, markdownlint, …)
@@ -197,16 +197,18 @@ Before the first real run, work through [`tests/STEP0.md`](tests/STEP0.md): the 
 
 - **Honest-agent bar.** Claude could commit through a wrapper script or abuse `defer`. The final cumulative review backstops commit-level dodges; nothing here defends against a deliberately hostile agent, and this design does not pretend to.
 - **The Stop-block cap is residual.** Continuation pressure from `PostToolUse`, progress-aware counting and `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` mitigate it, but a run that repeatedly ends its turn without progress can still exhaust the cap — and exhaustion ends the turn.
-- **A `PreToolUse` hook runs on every tool call**, and it is not free. Measured on Linux with warm caches:
+- **A `PreToolUse` hook runs on every tool call**, and it is not free. Measured on Linux with warm caches, through `scripts/ocrl.sh` end to end (the Python port; these numbers supersede the Bash-era ones this table used to carry):
 
   | Path | Latency | Processes |
   | --- | --- | --- |
-  | tool call outside the armed worktree | ~12 ms | 3 |
-  | read-only tool (`Read`, `Grep`, `Glob`, …) | ~12 ms | 3 |
-  | mutating tool (`Edit`, `Write`, MCP) | ~28 ms | 8 |
-  | `Bash` (non-commit) | ~33 ms | 8 |
+  | tool call outside the armed worktree | ~111 ms | 5 |
+  | read-only tool (`Read`, `Grep`, `Glob`, …) | ~111 ms | 4 |
+  | mutating tool (`Edit`, `Write`, MCP) | ~111 ms | 4 |
+  | `Bash` (non-commit) | ~111 ms | 4 |
 
-  Read-only tools answer before the config or state is touched, because they are permitted in every state. Mutating tools and `Bash` need the full state, so they pay for it. A commit additionally pays for the review itself, which is measured in minutes, not milliseconds.
+  Processes counted the same way `tests/selftest.sh`'s own hot-path check counts them: every successful `execve` under `strace -f`, end to end through `scripts/ocrl.sh`. Four is the shim's fixed floor regardless of branch — the shebang's `env`, the `bash` shim itself, the `timeout` wrapper, and `python3` — plus one more `git rev-parse` when `cwd` is outside the armed worktree and has to be placed. Under Python, config and state are in-process file I/O rather than `jq` subprocesses, so *that* part of the process count no longer varies by branch the way it did under Bash. The read-only hoist still exists and still matters (it is what makes a future read-only deny unreachable without deliberately undoing it) — it just shows up as less work inside the one Python process, not as fewer processes around it.
+
+  Latency did not drop with the process count, and the reason is `scripts/ocrl.sh` itself: every hook call is wrapped in `timeout <N>` (below the timeout Claude Code enforces — see "Interpreter invocation" in `AGENTS.md`), so a hung parser still denies before the host tears the hook down with nothing. On this machine that wrapper alone measured **~90 ms**, flat, on every call — `timeout` here is `uutils-coreutils`' Rust reimplementation, and it appears to poll on a fixed interval rather than waking when the child exits (confirmed with `strace`: the child exits immediately, `timeout` still sleeps out the rest of its interval). The raw interpreter cost underneath it, `python3 -I` running the port directly with no wrapper, measured **~45 ms**. Neither the wrapper's cost nor its presence is optional — Rule 1's "a hung parser must deny" needs it — but which number you see depends on which `timeout` your system runs: GNU coreutils' does not have this behaviour. A commit additionally pays for the review itself, which is measured in minutes, not milliseconds.
 - **Strict commit hygiene is enforced.** Phases must commit all their work and leave a clean worktree. The payoff is that every commit in the history is a tree that was actually reviewed.
 - **Background writers land you in `RECONCILE`.** Anything that touches the worktree between the gate and the commit — an editor writing back a buffer, an MCP server dropping a state directory, a file watcher — changes the tree out from under the approval. That is the gate working, but gitignore such tooling paths before arming rather than fighting it.
 - **A hostile plan path can inject a shell command.** `$ARGUMENTS` is substituted into the skill body textually, without shell escaping, and the body is then `eval`ed — so a path like `x"; id; echo "` runs `id`. Confirmed empirically, and not fixable inside the plugin: the substitution happens before any shell sees it, so no quoting of `$ARGUMENTS` helps. What bounds it is that `implement` is `disable-model-invocation: true`, so only the person typing the slash command can supply the path — Claude cannot invoke it. Do not paste plan paths from untrusted sources.

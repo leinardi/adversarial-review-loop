@@ -191,59 +191,47 @@ commit_now() {
 }
 
 # --------------------------------------------------------------------------
-# Snapshot layer
-# --------------------------------------------------------------------------
-
-if start 'snapshot: clean, dirty, untracked, ignored, no-op'; then
-    new_case
-    # shellcheck source=../scripts/lib/common.sh
-    . "$PLUGIN_ROOT/scripts/lib/common.sh"
-    # shellcheck source=../scripts/lib/config.sh
-    . "$PLUGIN_ROOT/scripts/lib/config.sh"
-    # shellcheck source=../scripts/lib/gitsnap.sh
-    . "$PLUGIN_ROOT/scripts/lib/gitsnap.sh"
-    ocrl_config_load "$REPO" >/dev/null
-
-    t_clean=$(ocrl_snap_tree "$REPO")
-    assert_eq 'clean worktree snapshots to the HEAD tree' "$t_clean" "$(ocrl_head_tree "$REPO")"
-
-    printf 'x\n' >"$REPO/untracked.txt"
-    t_untracked=$(ocrl_snap_tree "$REPO")
-    if [ "$t_untracked" != "$t_clean" ]; then ok 'untracked content changes the snapshot'; else bad 'untracked content changes the snapshot'; fi
-
-    printf 'untracked.txt\n' >"$REPO/.gitignore"
-    git -C "$REPO" add .gitignore && git -C "$REPO" commit -qm ignore
-    t_ignored=$(ocrl_snap_tree "$REPO")
-    assert_eq 'ignored content is excluded from the snapshot' "$t_ignored" "$(ocrl_head_tree "$REPO")"
-
-    if ocrl_worktree_clean "$REPO"; then ok 'a worktree holding only ignored files counts as clean'; else bad 'a worktree holding only ignored files counts as clean'; fi
-
-    printf 'modified\n' >>"$REPO/seed.txt"
-    if ocrl_worktree_clean "$REPO"; then bad 'a modified tracked file counts as dirty'; else ok 'a modified tracked file counts as dirty'; fi
-
-    git -C "$REPO" checkout -q -- seed.txt
-    over=$(ocrl_snap_oversized "$REPO" 1000000)
-    assert_eq 'nothing oversized in a small repo' "$over" ''
-    head -c 2000 /dev/zero | tr '\0' 'a' >"$REPO/big.bin"
-    over=$(ocrl_snap_oversized "$REPO" 1000)
-    assert_contains 'an oversized stageable file is reported' "$over" 'big.bin'
-    rm -f "$REPO/big.bin"
-fi
-
-# --------------------------------------------------------------------------
 # Command shape
 # --------------------------------------------------------------------------
+#
+# The snapshot layer is retired from this file: pytest has owned it,
+# assertion-for-assertion, since Phase 3, and the black-box arm/commit
+# sections above already exercise snapshotting through the CLI on every run.
+#
+# The allowlist table below used to call scripts/lib/cmdshape.sh directly.
+# It is now driven through an armed `scripts/ocrl.sh pretool`, because
+# unit-level correctness (already proven in pytest) says nothing about
+# whether `pretool` actually calls the shape validator, on the right
+# argument, and turns its verdict into the right hook decision. This is the
+# one phase where that wiring could be wrong, so it is proven here instead
+# of only at Phase 7 -- and Phase 7 reuses this exact suite unchanged, which
+# is what proves bashlex was actually wired into the gate too.
+#
+# Only commands containing "commit" reach the shape validator at all --
+# `pretool` decides that with a cheap substring pre-filter before ever
+# tokenizing. A command like `git status` never reaches it and is not part
+# of this corpus; that routing is exercised directly below instead.
 
-if start 'command shape: allowlist table'; then
+if start 'command shape: allowlist table, through an armed pretool'; then
     new_case
-    # shellcheck source=../scripts/lib/cmdshape.sh
-    . "$PLUGIN_ROOT/scripts/lib/cmdshape.sh"
+    arm_ok && phases_ok
 
+    # Every accepted shape here changes nothing in the worktree, so each one
+    # hits the "byte-identical to the last approved tree" cache hit and is
+    # allowed without the reviewer ever running -- proving the shape passed,
+    # not that there was something to approve.
     shape_ok() {
-        if ocrl_cmd_validate_commit "$1"; then ok "accepted: $1"; else bad "accepted: $1" "$OCRL_CMD_ERROR"; fi
+        local d
+        d=$(pre Bash "$1")
+        if [ "$d" = 'allow' ]; then ok "accepted: $1"; else bad "accepted: $1" "$d ($(pre_reason))"; fi
     }
+    # Every rejected shape must be denied for having been read as an unsafe
+    # commit command -- never merely "pass" (which would mean it was never
+    # classified as a commit at all) and never "allow".
     shape_no() {
-        if ocrl_cmd_validate_commit "$1"; then bad "denied: $1" 'accepted'; else ok "denied: $1 ($OCRL_CMD_ERROR)"; fi
+        local d
+        d=$(pre Bash "$1")
+        if [ "$d" = 'deny' ]; then ok "denied: $1"; else bad "denied: $1" "$d"; fi
     }
 
     shape_ok 'git commit -m x'
@@ -269,26 +257,33 @@ if start 'command shape: allowlist table'; then
     shape_no 'git commit --only src -m x'
     shape_no 'git commit --include src -m x'
     shape_no 'git commit src/main.go -m x'
-    shape_no 'git -C /other commit -m x'
     shape_no 'git commit -F msg.txt'
     shape_no 'git add -p && git commit -m x'
     shape_no 'sed -i s/a/b/ f && git commit -m x'
     shape_no 'git add -A & git commit -m x'
-    shape_no 'git status'
     shape_no 'git commit -m'
 
-    if ocrl_cmd_is_escape 'ocrl.sh finish'; then ok 'finish is recognised as an escape'; else bad 'finish is recognised as an escape'; fi
-    if ocrl_cmd_is_escape '/x/y/ocrl.sh deactivate'; then ok 'deactivate is recognised as an escape'; else bad 'deactivate is recognised as an escape'; fi
-    if ocrl_cmd_is_escape 'ocrl.sh status'; then bad 'status is not an escape'; else ok 'status is not an escape'; fi
+    # "git status" mentions neither expansion nor commit, so it never reaches
+    # the shape validator at all -- it is ordinary Bash, passed through.
+    assert_eq 'git status never reaches the shape validator' "$(pre Bash 'git status')" 'pass'
 
-    if reset_target=$(ocrl_cmd_reset_target 'git reset --soft HEAD^'); then
-        assert_eq 'reset target parsed' "$reset_target" 'HEAD^'
-    else
-        bad 'reset target parsed' "$OCRL_CMD_ERROR"
-    fi
-    if ocrl_cmd_reset_target 'git reset --hard HEAD^' >/dev/null 2>&1; then
-        bad 'hard reset rejected'
-    else ok 'hard reset rejected'; fi
+    # KNOWN GAP, carried over unchanged from the shell: the cheap "does this
+    # command mention commit" pre-filter only understands a flag as a single
+    # space-free token, so a flag taking a separate value -- `-C /other` --
+    # breaks the pattern before it reaches "commit", and the command is never
+    # routed to the validator at all. `validate_commit` itself still rejects
+    # `-C` when called directly (see tests/unit/test_cmdshape.py), but that
+    # code path is unreachable in production for exactly this shape. This is
+    # true of the live Bash gate today, not a regression from the port --
+    # confirmed by running the shell's own grep pattern above -- and fixing
+    # the detector is out of scope for a same-behaviour flip. Recorded here so
+    # the gap is asserted, not silently lost when this section changed shape.
+    assert_eq 'git -C /other commit -m x is a live detection gap, not denied' \
+        "$(pre Bash 'git -C /other commit -m x')" 'pass'
+
+    # is_escape and reset_target are exercised as armed-CLI tests too, just
+    # not here: see "escapes: Claude may not finish or deactivate" and
+    # "reconcile: a bad phase-1 commit is recoverable ..." below.
 fi
 
 # --------------------------------------------------------------------------
@@ -520,7 +515,7 @@ if start 'bootstrap: arm -> set-phases -> first edit, with no deadlock'; then
     assert_eq 'Grep allowed' "$(pre Grep)" 'pass'
     assert_eq 'an arbitrary Bash call is denied' "$(pre Bash 'ls')" 'deny'
     assert_eq 'the set-phases command itself is allowed' \
-        "$(pre Bash "$OCRL scripts/ocrl.sh set-phases --phase 'a'")" 'allow'
+        "$(pre Bash "$OCRL set-phases --phase 'a'")" 'allow'
     assert_eq 'ending the turn here blocks' "$(stop_decision)" 'block'
 
     phases_ok
@@ -946,19 +941,382 @@ if start 'hot path: a read-only tool answers without loading config or state'; t
 
         # The dispatcher runs on every tool call, so this is a real budget, not
         # a style preference. See "Hot-path rules" in AGENTS.md.
+        #
+        # Under the shell implementation, a mutating tool legitimately forked
+        # more processes than a read-only one: config and state were loaded
+        # through jq. Under Python, loading them is in-process file I/O with
+        # no forking either way, so the hoist's saving is no longer visible as
+        # a process-count difference -- both tools share the same two-process
+        # floor (`timeout` + `python3`). What the budget still proves is that
+        # neither path shells out per field the way jq did.
         if [ "$read_procs" -le 5 ]; then
             ok "a read-only tool costs $read_procs processes (budget 5)"
         else
             bad 'read-only tool process budget' "$read_procs processes" 'at most 5'
         fi
-        if [ "$edit_procs" -gt "$read_procs" ]; then
-            ok "a mutating tool legitimately costs more ($edit_procs vs $read_procs)"
+        if [ "$edit_procs" -le 5 ]; then
+            ok "a mutating tool also stays within budget ($edit_procs processes)"
         else
-            bad 'the read-only hoist is doing nothing' \
-                "Read=$read_procs Edit=$edit_procs" 'Read strictly cheaper than Edit'
+            bad 'mutating tool process budget' "$edit_procs processes" 'at most 5'
         fi
     else
         ok 'process-budget guard skipped (strace unavailable or not permitted)'
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# Interpreter probe
+# --------------------------------------------------------------------------
+
+# hook_payload <event> [cmd] -- the raw JSON stdin for one hook invocation,
+# shared by every case in this section so each one only has to say which
+# event and, for Bash-shaped ones, which command.
+hook_payload() {
+    case "$1" in
+        PreToolUse)
+            jq -nc --arg s "$SESSION" --arg c "$REPO" \
+                '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:"Edit",tool_input:{file_path:"a.txt"}}'
+            ;;
+        PostToolUse)
+            jq -nc --arg s "$SESSION" --arg c "$REPO" --arg cmd "${2:-git add -A && git commit -m x}" \
+                '{session_id:$s,cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{exit_code:0}}'
+            ;;
+        PostToolUseFailure)
+            jq -nc --arg s "$SESSION" --arg c "$REPO" --arg cmd "${2:-git add -A && git commit -m x}" \
+                '{session_id:$s,cwd:$c,hook_event_name:"PostToolUseFailure",tool_name:"Bash",tool_input:{command:$cmd}}'
+            ;;
+        Stop)
+            jq -nc --arg s "$SESSION" --arg c "$REPO" \
+                '{session_id:$s,cwd:$c,hook_event_name:"Stop",stop_hook_active:false}'
+            ;;
+    esac
+}
+
+if start 'interpreter probe: a missing python3 fails closed, not open, on every hook'; then
+    new_case
+    arm_ok && phases_ok
+
+    # A curated PATH holding every binary the shim and git need, but no
+    # python3. Stripping PATH down to nothing would also hide bash itself,
+    # since the shim's own `#!/usr/bin/env bash` shebang resolves through
+    # this same PATH.
+    nopy="$CASE_DIR/no-python-path"
+    mkdir -p "$nopy"
+    for b in bash sh cat printf timeout env grep sed cut git mktemp true false ls find head tr; do
+        p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$nopy/$b"
+    done
+
+    out=$(hook_payload PreToolUse | (cd "$REPO" && PATH="$nopy" "$OCRL" pretool))
+    rc=$?
+    assert_eq 'pretool: the shim itself exits 0, not 127' "$rc" '0'
+    assert_eq 'pretool denies rather than failing open' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
+    assert_contains 'and names the missing interpreter' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')" 'python3'
+
+    out=$(hook_payload PostToolUse | (cd "$REPO" && PATH="$nopy" "$OCRL" confirm-commit))
+    rc=$?
+    assert_eq 'confirm-commit: the shim itself exits 0' "$rc" '0'
+    assert_contains 'and reports the failure rather than staying silent' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""')" 'python3'
+
+    out=$(hook_payload PostToolUseFailure | (cd "$REPO" && PATH="$nopy" "$OCRL" posttool-failure))
+    rc=$?
+    assert_eq 'posttool-failure: the shim itself exits 0' "$rc" '0'
+    assert_eq 'and stays silent, matching its ordinary behaviour' "$out" ''
+
+    out=$(hook_payload Stop | (cd "$REPO" && PATH="$nopy" "$OCRL" gate-stop))
+    rc=$?
+    assert_eq 'gate-stop: the shim itself exits 0' "$rc" '0'
+    assert_eq 'and blocks the turn rather than letting it end' \
+        "$(printf '%s' "$out" | jq -r '.decision // "ok"')" 'block'
+fi
+
+if start 'shim contract: partial output + non-zero exit is discarded on every hook'; then
+    new_case
+    arm_ok && phases_ok
+
+    # Simulates the interpreter dying mid-write: a fragment of a plausible
+    # PreToolUse response reaches stdout, then a non-zero exit. The shim must
+    # discard this outright -- forwarding it would concatenate a fail-closed
+    # fallback onto real bytes and produce unparseable JSON, which for
+    # PreToolUse is not a denial.
+    fakepy="$CASE_DIR/fake-python"
+    mkdir -p "$fakepy"
+    cat >"$fakepy/python3" <<'PYEOF'
+#!/usr/bin/env bash
+printf '{"hookSpecificOutput":{"hookEventName":"PreTo'
+exit 1
+PYEOF
+    chmod +x "$fakepy/python3"
+
+    out=$(hook_payload PreToolUse | (cd "$REPO" && PATH="$fakepy:$PATH" "$OCRL" pretool))
+    assert_eq 'pretool: exactly one valid JSON object, not the fragment' \
+        "$(printf '%s' "$out" | jq -c . 2>/dev/null | wc -l)" '1'
+    assert_eq 'and it denies' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
+
+    out=$(hook_payload PostToolUse | (cd "$REPO" && PATH="$fakepy:$PATH" "$OCRL" confirm-commit))
+    assert_eq 'confirm-commit: exactly one valid JSON object, not the fragment' \
+        "$(printf '%s' "$out" | jq -c . 2>/dev/null | wc -l)" '1'
+    assert_contains 'and it reports the failure' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""')" 'could not run'
+
+    out=$(hook_payload PostToolUseFailure | (cd "$REPO" && PATH="$fakepy:$PATH" "$OCRL" posttool-failure))
+    assert_eq 'posttool-failure: exactly zero bytes, not the fragment' "$out" ''
+
+    out=$(hook_payload Stop | (cd "$REPO" && PATH="$fakepy:$PATH" "$OCRL" gate-stop))
+    assert_eq 'gate-stop: exactly one valid JSON object, not the fragment' \
+        "$(printf '%s' "$out" | jq -c . 2>/dev/null | wc -l)" '1'
+    assert_eq 'and it blocks' \
+        "$(printf '%s' "$out" | jq -r '.decision // "ok"')" 'block'
+fi
+
+if start 'shim contract: a hung interpreter still denies, before the host timeout'; then
+    new_case
+    arm_ok && phases_ok
+
+    hangpy="$CASE_DIR/hang-python"
+    mkdir -p "$hangpy"
+    cat >"$hangpy/python3" <<'PYEOF'
+#!/usr/bin/env bash
+sleep 300
+PYEOF
+    chmod +x "$hangpy/python3"
+
+    # Each event's timeout is overridden to 1s so this proves the mechanism
+    # -- `timeout` returning 124 and the shim treating that as any other
+    # failure -- without waiting out the real, minutes-long default.
+    t0=$(date +%s)
+    out=$(hook_payload PreToolUse | (cd "$REPO" && PATH="$hangpy:$PATH" OCRL_SHIM_TIMEOUT_PRETOOL=1 "$OCRL" pretool))
+    elapsed=$(($(date +%s) - t0))
+    assert_eq 'pretool: a hung parser still denies' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
+    assert_contains 'and names the timeout' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')" 'timed out'
+    if [ "$elapsed" -le 15 ]; then ok "pretool returned in ${elapsed}s, not after a real hook timeout"; else
+        bad 'pretool returned before a real hook timeout' "${elapsed}s" '<=15s'
+    fi
+
+    t0=$(date +%s)
+    out=$(hook_payload PostToolUse | (cd "$REPO" && PATH="$hangpy:$PATH" OCRL_SHIM_TIMEOUT_CONFIRM_COMMIT=1 "$OCRL" confirm-commit))
+    elapsed=$(($(date +%s) - t0))
+    assert_contains 'confirm-commit: reports the timeout rather than hanging' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""')" 'timed out'
+    if [ "$elapsed" -le 15 ]; then ok "confirm-commit returned in ${elapsed}s"; else
+        bad 'confirm-commit returned before a real hook timeout' "${elapsed}s" '<=15s'
+    fi
+
+    t0=$(date +%s)
+    out=$(hook_payload PostToolUseFailure | (cd "$REPO" && PATH="$hangpy:$PATH" OCRL_SHIM_TIMEOUT_POSTTOOL_FAILURE=1 "$OCRL" posttool-failure))
+    elapsed=$(($(date +%s) - t0))
+    assert_eq 'posttool-failure: stays silent rather than hanging' "$out" ''
+    if [ "$elapsed" -le 15 ]; then ok "posttool-failure returned in ${elapsed}s"; else
+        bad 'posttool-failure returned before a real hook timeout' "${elapsed}s" '<=15s'
+    fi
+
+    t0=$(date +%s)
+    out=$(hook_payload Stop | (cd "$REPO" && PATH="$hangpy:$PATH" OCRL_SHIM_TIMEOUT_GATE_STOP=1 "$OCRL" gate-stop))
+    elapsed=$(($(date +%s) - t0))
+    assert_eq 'gate-stop: a hung parser still blocks' \
+        "$(printf '%s' "$out" | jq -r '.decision // "ok"')" 'block'
+    if [ "$elapsed" -le 15 ]; then ok "gate-stop returned in ${elapsed}s"; else
+        bad 'gate-stop returned before a real hook timeout' "${elapsed}s" '<=15s'
+    fi
+fi
+
+if start 'shim contract: OCRL_SHIM_TIMEOUT_* cannot loosen or disable the timeout'; then
+    new_case
+    arm_ok && phases_ok
+
+    # A spy, not a stub: it records the duration the shim actually asked
+    # `timeout` for, then runs the real command so the hook still completes.
+    # `timeout 0` means "no limit" to both GNU and uutils coreutils, so an
+    # override of 0 would be exactly as dangerous as removing the wrapper
+    # entirely -- this is the regression the clamp in ocrl_bounded_timeout
+    # exists to prevent.
+    faketimeout="$CASE_DIR/fake-timeout-bin"
+    mkdir -p "$faketimeout"
+    cat >"$faketimeout/timeout" <<'PYEOF'
+#!/usr/bin/env bash
+printf '%s' "$1" >"$OCRL_TEST_TIMEOUT_LOG"
+shift
+exec "$@"
+PYEOF
+    chmod +x "$faketimeout/timeout"
+
+    logged() {
+        local value=$1
+        rm -f "$CASE_DIR/log.txt"
+        hook_payload PreToolUse |
+            (cd "$REPO" && PATH="$faketimeout:$PATH" OCRL_TEST_TIMEOUT_LOG="$CASE_DIR/log.txt" OCRL_SHIM_TIMEOUT_PRETOOL="$value" "$OCRL" pretool) >/dev/null
+        cat "$CASE_DIR/log.txt" 2>/dev/null
+    }
+
+    assert_eq '0 does not disable the timeout' "$(logged 0)" '1150'
+    assert_eq 'a negative value is rejected' "$(logged -5)" '1150'
+    assert_eq 'garbage is rejected' "$(logged nope)" '1150'
+    assert_eq 'a value above the ceiling is clamped down, never up' "$(logged 999999)" '1150'
+    assert_eq 'a value at the ceiling passes through' "$(logged 1150)" '1150'
+    assert_eq 'a value below the ceiling passes through -- what the hang tests above rely on' "$(logged 5)" '5'
+
+    # A digit string too large for bash's integer type makes `[ -gt ]` error
+    # out rather than compare, and that error must not be read as "not
+    # bigger than the ceiling" -- length is checked first, precisely to
+    # avoid ever handing a value like this to `-gt` at all.
+    assert_eq 'an oversized digit string is clamped, not forwarded unclamped' \
+        "$(logged 999999999999999999999999999999999999)" '1150'
+
+    # `timeout 00 …` and `timeout 0000 …` mean "no limit" exactly like
+    # `timeout 0 …` does, to both GNU and uutils coreutils -- a bare
+    # string-equality check against "0" would miss both.
+    assert_eq '00 does not disable the timeout' "$(logged 00)" '1150'
+    assert_eq '0000 does not disable the timeout' "$(logged 0000)" '1150'
+    assert_eq 'a legitimate value with a leading zero still passes through' "$(logged 0005)" '5'
+fi
+
+# --------------------------------------------------------------------------
+# Rollback compatibility
+# --------------------------------------------------------------------------
+#
+# Reverting the Phase 6 commit restores the Bash entrypoint, and that has to
+# be safe for an activation that is already live: state.json written by the
+# Python port must still be exactly what the old ocrl_state_load/ocrl_get
+# expect, in both directions. `HEAD` cannot be used to find "the old Bash
+# implementation" -- once Phase 6 lands, scripts/ocrl.sh at HEAD *is* the
+# shim. So this pins the exact commit where scripts/ocrl.sh was last the full
+# Bash dispatcher, and reconstitutes it from git history for the duration of
+# this section only. scripts/lib/*.sh, which that file sources, stay on disk
+# unreferenced and need no such trick.
+OCRL_LAST_BASH_SHA='eea08d35d42a0351a468fcc64e349185fdfaf090'
+
+if start 'rollback: Python and Bash agree on disk state, in both directions'; then
+    new_case
+    old_dir="$CASE_DIR/bash-shim"
+    old_ocrl="$old_dir/ocrl.sh"
+    if git -C "$PLUGIN_ROOT" cat-file -e "$OCRL_LAST_BASH_SHA:scripts/ocrl.sh" 2>/dev/null; then
+        mkdir -p "$old_dir"
+        # The old dispatcher sources ./lib/*.sh relative to its own location;
+        # those files are untouched on disk (unreferenced, per the plan) and
+        # are reused here rather than copied.
+        ln -sf "$PLUGIN_ROOT/scripts/lib" "$old_dir/lib"
+        git -C "$PLUGIN_ROOT" show "$OCRL_LAST_BASH_SHA:scripts/ocrl.sh" >"$old_ocrl"
+        chmod +x "$old_ocrl"
+
+        old_pre() {
+            local tool=$1 cmd=${2:-} out
+            out=$(jq -nc --arg s "$SESSION" --arg c "$REPO" --arg t "$tool" --arg cmd "$cmd" \
+                '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:$t,tool_input:{command:$cmd}}' |
+                (cd "$REPO" && "$old_ocrl" pretool))
+            printf '%s' "$out" >"$ROOT/last.json"
+            if [ -z "$out" ]; then printf 'pass'; else printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"'; fi
+        }
+        old_confirm() {
+            local cmd=$1 out
+            out=$(jq -nc --arg s "$SESSION" --arg c "$REPO" --arg cmd "$cmd" \
+                '{session_id:$s,cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{exit_code:0}}' |
+                (cd "$REPO" && "$old_ocrl" confirm-commit))
+            printf '%s' "$out" >"$ROOT/last.json"
+            printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""'
+        }
+
+        # -- Python starts and advances phase 1 -----------------------------
+        arm_ok && phases_ok
+        assert_eq 'allow_dirty (a boolean) round-trips as written by Python' "$(sget allow_dirty)" 'false'
+        printf 'phase one\n' >"$REPO/a.txt"
+        with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
+        commit_now 'phase 1'
+        confirm 'git add -A && git commit -m "phase 1"' >/dev/null
+        assert_eq 'python advanced to phase 2' "$(sget phase)" '2'
+
+        # -- Bash reads what Python wrote ------------------------------------
+        out=$(cd "$REPO" && "$old_ocrl" status)
+        assert_contains 'bash reads the python-written phase' "$out" 'phase:               2 of 2'
+        assert_contains 'and the phases array round-tripped' "$out" '2. Phase two'
+
+        py_edit=$(pre Edit)
+        bash_edit=$(old_pre Edit)
+        assert_eq 'python allows an edit on phase 2' "$py_edit" 'pass'
+        assert_eq 'bash agrees, reading the identical state' "$bash_edit" 'pass'
+
+        # -- Bash drives phase 2 to completion, mutating the same file ------
+        printf 'phase two\n' >"$REPO/b.txt"
+        bd=$(with_env OCRL_FAKE_MODE=approve old_pre Bash 'git add -A && git commit -m "phase 2"')
+        assert_eq 'bash approves phase 2 against python-written state' "$bd" 'allow'
+        commit_now 'phase 2'
+        ctx=$(old_confirm 'git add -A && git commit -m "phase 2"')
+        assert_contains 'bash confirms the commit and reports all phases done' "$ctx" 'All 2 phases are now committed'
+        assert_eq 'the pending approval bash wrote was consumed' "$(sget pending_approved_tree)" ''
+
+        # -- Python finishes what Bash advanced ------------------------------
+        d=$(with_env OCRL_FAKE_MODE=approve stop_decision)
+        assert_eq 'python completes the activation bash advanced' "$d" 'ok'
+        assert_eq 'status is COMPLETE' "$(sget status)" 'COMPLETE'
+    else
+        # A silent skip here would hide the one proof that matters most: that
+        # reverting Phase 6 can safely resume a live session. A shallow clone
+        # is the known cause (`git fetch --unshallow` fixes it locally; CI's
+        # checkout uses fetch-depth: 0 for exactly this reason) -- but the
+        # gap must fail loudly, not report green with nothing tested.
+        bad "rollback compatibility could not run: $OCRL_LAST_BASH_SHA is not reachable in this checkout (shallow clone? try: git fetch --unshallow)"
+    fi
+fi
+
+if start 'rollback: bash reads a python-written RECONCILE and NEEDS_HUMAN'; then
+    new_case
+    old_dir="$CASE_DIR/bash-shim"
+    old_ocrl="$old_dir/ocrl.sh"
+    if git -C "$PLUGIN_ROOT" cat-file -e "$OCRL_LAST_BASH_SHA:scripts/ocrl.sh" 2>/dev/null; then
+        mkdir -p "$old_dir"
+        # The old dispatcher sources ./lib/*.sh relative to its own location;
+        # those files are untouched on disk (unreferenced, per the plan) and
+        # are reused here rather than copied.
+        ln -sf "$PLUGIN_ROOT/scripts/lib" "$old_dir/lib"
+        git -C "$PLUGIN_ROOT" show "$OCRL_LAST_BASH_SHA:scripts/ocrl.sh" >"$old_ocrl"
+        chmod +x "$old_ocrl"
+        old_pre() {
+            local tool=$1 cmd=${2:-} out
+            out=$(jq -nc --arg s "$SESSION" --arg c "$REPO" --arg t "$tool" --arg cmd "$cmd" \
+                '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:$t,tool_input:{command:$cmd}}' |
+                (cd "$REPO" && "$old_ocrl" pretool))
+            printf '%s' "$out" >"$ROOT/last.json"
+            if [ -z "$out" ]; then printf 'pass'; else printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"'; fi
+        }
+
+        # Python enters RECONCILE (a partial commit), Bash reads the reason
+        # and the bounded recovery target, and permits exactly that reset.
+        arm_ok && phases_ok
+        printf 'one\n' >"$REPO/a.txt"
+        printf 'two\n' >"$REPO/b.txt"
+        with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+        git -C "$REPO" add a.txt
+        git -C "$REPO" commit -qm 'only half'
+        confirm 'git add -A && git commit -m x' >/dev/null
+        assert_eq 'python entered RECONCILE' "$(sget status)" 'RECONCILE'
+
+        d=$(old_pre Bash "git reset --soft $(sget bad_commit_parent)")
+        assert_eq 'bash permits the exact bounded reset python recorded' "$d" 'allow'
+
+        # Python escalates to NEEDS_HUMAN (repeated failures), Bash denies
+        # every mutation and names the reason.
+        new_case
+        arm_ok && phases_ok
+        printf 'x\n' >"$REPO/a.txt"
+        export OCRL_MAX_FAILURES=1
+        with_env OCRL_FAKE_MODE=malformed pre Bash 'git add -A && git commit -m x' >/dev/null
+        with_env OCRL_FAKE_MODE=malformed pre Bash 'git add -A && git commit -m x' >/dev/null
+        unset OCRL_MAX_FAILURES
+        assert_eq 'python escalated to NEEDS_HUMAN' "$(sget status)" 'NEEDS_HUMAN'
+
+        d=$(old_pre Edit)
+        assert_eq 'bash denies, reading the same escalation' "$d" 'deny'
+    else
+        # A silent skip here would hide the one proof that matters most: that
+        # reverting Phase 6 can safely resume a live session. A shallow clone
+        # is the known cause (`git fetch --unshallow` fixes it locally; CI's
+        # checkout uses fetch-depth: 0 for exactly this reason) -- but the
+        # gap must fail loudly, not report green with nothing tested.
+        bad "rollback compatibility could not run: $OCRL_LAST_BASH_SHA is not reachable in this checkout (shallow clone? try: git fetch --unshallow)"
     fi
 fi
 

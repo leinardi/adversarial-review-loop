@@ -189,6 +189,20 @@ Note what a positive result would *not* fix. A model that can run arbitrary Bash
 
 ---
 
+## Session E — does `{"decision":"block"}` work on a post-hook (items 13, 14)
+
+The Python port's fail-closed fallback table (see "The shim is not three lines" in `AGENTS.md`) gives `confirm-commit` (`PostToolUse`) and `posttool-failure` (`PostToolUseFailure`) weaker fallbacks than `pretool` and `gate-stop`, because neither can deny — the tool call has already run by the time either fires. `confirm-commit` falls back to `additionalContext`, which is known to work because the entrypoint already emits it on its ordinary path. `posttool-failure` stays silent, matching its current behaviour. A stronger `{"decision":"block"}` would be preferable for both, but it is documented as **unverified for these events** rather than assumed, and this is the item that settles it.
+
+1. With the fixture armed and phases frozen, have Claude run a plain, successful `Bash` call that is not a commit (`echo hi`). Point `OCRL_REVIEWER_CMD` or a scratch build of `confirm-commit` at a stub that returns `{"decision":"block","reason":"step0 probe"}` instead of its normal `additionalContext` response, and watch whether the turn is actually blocked, or whether `decision` is simply ignored on `PostToolUse` the way an unrecognised key would be.
+2. **Expect**, if it works: the turn does not end (or Claude is redirected) with `"step0 probe"` visible, the same way a `Stop`-hook block behaves.
+3. **Fallback**, if it does not: `PostToolUse` only honours `hookSpecificOutput.additionalContext` (or nothing), and the table's existing choice stands, documented as a deliberate limit.
+4. Repeat for `PostToolUseFailure`: force a failing `Bash` call (a command that exits non-zero) while a `pending_approved_tree` is set, and have `posttool-failure` return `{"decision":"block","reason":"step0 probe"}` instead of its normal silent exit.
+5. **Expect**, if it works: same as above, the reason surfaces and the turn is blocked.
+6. **Fallback**, if it does not: `posttool-failure` stays silent, exactly as it is today — inventing a protocol shape here trades an inert inconsistency for a possibly-ignored message, which is worse.
+7. Whatever the result, it tightens (or confirms) the fallback table in `hookio.py`'s `failclosed_exit` and the corresponding row in `AGENTS.md`; it does not change `pretool` or `gate-stop`, which already have the strongest fallback either event supports.
+
+---
+
 ## Record the outcome
 
 | Item | Check | Result |
@@ -204,6 +218,8 @@ Note what a positive result would *not* fix. A model that can run arbitrary Bash
 | 6 | the block cap responds to the setting | **pass** (2026-08-20) |
 | 11 | a host-only signal distinguishes the user's exits | **open** |
 | 12 | `systemMessage` from a Stop hook reaches the user | **open** |
+| 13 | `{"decision":"block"}` takes effect on `PostToolUse` | **open** |
+| 14 | `{"decision":"block"}` takes effect on `PostToolUseFailure` | **open** |
 
 ### Isolation, 2026-08-20
 
