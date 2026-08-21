@@ -356,8 +356,8 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
         hook.pass_()
 
     # Words this gate cannot read are refused before anything is classified. `$(printf git)`
-    # runs `git commit`, and no textual pass -- nor bashlex, in Phase 7 -- can resolve it to a
-    # command name. See `cmdshape.unresolved_expansion`.
+    # runs `git commit`, and no textual pass -- nor bashlex, which now reads the shape -- can
+    # resolve it to a command name. See `cmdshape.unresolved_expansion`.
     expansion = cmdshape.unresolved_expansion(command)
     if expansion:
         hooks.deny(hook, EXPANSION_DENIED.format(expansion=expansion))

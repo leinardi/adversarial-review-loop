@@ -219,8 +219,8 @@ def _guard_unreviewed_head(check: _Check) -> None:
 
     ``pretool`` decides from a *string*, and there is no textual rule that catches every way
     of running git: ``$(printf git) commit``, ``eval``, ``xargs``, a shell function, a
-    Makefile target. Phase 7's real parser does not close that either -- it can only report
-    that a command name is a substitution node.
+    Makefile target. The real parser does not close that either -- it can only report that a
+    command name is a substitution node.
 
     This asks git instead, after the fact, and it is the check that makes the string-matching
     half defence in depth rather than the whole defence. HEAD's tree is compared against the

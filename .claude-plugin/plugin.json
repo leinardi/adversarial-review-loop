@@ -6,7 +6,7 @@
     "name": "Roberto Leinardi"
   },
   "homepage": "https://github.com/leinardi/opencode-review-loop",
-  "license": "Apache-2.0",
+  "license": "GPL-3.0-or-later",
   "keywords": [
     "review",
     "opencode",

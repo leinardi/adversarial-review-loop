@@ -14,12 +14,16 @@ live entrypoint and those assertions still cover production code.
 
 from __future__ import annotations
 
+import signal
 import subprocess
+import time
 
 import pytest
 from conftest import bash_cmdshape
 
 from ocrl import cmdshape
+from ocrl._vendor import bashlex
+from ocrl._vendor.bashlex import errors as bashlex_errors
 from ocrl.cmdshape import CommandShapeError
 
 # -- the corpus ------------------------------------------------------------
@@ -110,6 +114,12 @@ def test_denied(command: str) -> None:
 #: verdict is identical; only the explanation differs, and here it differs deliberately.
 PRINTF_BUG_OPTIONS = ("--file", "--template", "--pathspec-from-file", "--chmod")
 
+#: Commands the shell refused by walking off the end of its own token stream, and bashlex
+#: refuses as the syntax errors they are. Same verdict, different wording -- and the wording
+#: is better: `git commit -m x && ` is not "an empty segment", it is an unfinished command.
+#: Each one is asserted individually below, so this exemption cannot quietly grow.
+PARSER_WORDED_REFUSALS = ("git commit -m x && ",)
+
 
 @pytest.mark.parametrize("command", ACCEPTED + DENIED)
 def test_the_shell_reaches_the_same_verdict_and_says_the_same_thing(command: str) -> None:
@@ -118,11 +128,23 @@ def test_the_shell_reaches_the_same_verdict_and_says_the_same_thing(command: str
         cmdshape.validate_commit(command)
     except CommandShapeError as exc:
         assert shell.returncode == 1, f"python denied {command!r} ({exc}) but the shell accepted it"
-        if any(option in command for option in PRINTF_BUG_OPTIONS):
+        if any(option in command for option in PRINTF_BUG_OPTIONS) or command in PARSER_WORDED_REFUSALS:
             return  # covered by its own test below, which asserts the difference
         assert str(exc) == shell.stdout.decode(), f"the explanation drifted for {command!r}"
     else:
         assert shell.returncode == 0, f"python accepted {command!r} but the shell denied it: {shell.stdout.decode()}"
+
+
+@pytest.mark.parametrize("command", PARSER_WORDED_REFUSALS)
+def test_a_syntax_error_is_refused_as_one(command: str) -> None:
+    """The shell called an unfinished command an "empty segment"; bashlex names the syntax.
+
+    Asserted in both directions, because the point is that the *verdict* did not move when
+    the wording did.
+    """
+    assert bash_cmdshape("validate", command).returncode == 1, "the shell must still have denied it"
+    with pytest.raises(CommandShapeError, match="not valid shell syntax"):
+        cmdshape.validate_commit(command)
 
 
 @pytest.mark.parametrize(
@@ -157,7 +179,6 @@ TOKENIZED = [
     "git add -A && git commit -m ''",
     'git commit -m "a\'b"',
     "git commit -m 'a\"b'",
-    "git commit -m x\\",
     "git commit -m 'trailing space '",
 ]
 
@@ -168,6 +189,21 @@ def test_the_split_into_tokens_matches_the_shell(command: str) -> None:
     assert shell.returncode == 0, shell.stdout.decode()
     expected = [part.decode() for part in shell.stdout.split(b"\0")[:-1]]
     assert cmdshape.tokenize(command) == expected
+
+
+def test_a_trailing_backslash_is_refused_rather_than_guessed_at() -> None:
+    """Three implementations, three readings of ``git commit -m x\\`` -- so it is denied.
+
+    The shell tokenizer dropped the backslash and produced ``x``. A real bash keeps it and
+    runs the commit with the message ``x\\``. bashlex calls it an unexpected EOF. Only the
+    last one is honest about not knowing, and a command whose words are in dispute is
+    exactly what this gate must not wave through: the reviewed message and the committed
+    message would differ.
+    """
+    assert bash_cmdshape("tokenize", "git commit -m x\\").stdout.split(b"\0")[:-1] == [b"git", b"commit", b"-m", b"x"]
+    assert _bash_words("x\\") == ["x\\"]
+    with pytest.raises(CommandShapeError, match="not valid shell syntax"):
+        cmdshape.tokenize("git commit -m x\\")
 
 
 # -- the tokenizer's own refusals ------------------------------------------
@@ -486,3 +522,240 @@ def test_a_command_whose_words_are_unknowable_is_named(command: str) -> None:
 def test_a_command_with_no_expansion_is_left_alone(command: str) -> None:
     """A ``$`` bash treats as literal is literal here too, so ordinary regexes still work."""
     assert cmdshape.unresolved_expansion(command) == ""
+
+
+# --------------------------------------------------------------------------
+# The parser: every way it can fail is a denial
+# --------------------------------------------------------------------------
+#
+# Unit-level correctness of the tokenizer says nothing about what happens when the parser
+# *misbehaves*, and that is the half a vendored dependency adds. A parser that raises, that
+# returns something unexpected, or that never returns must each end in a refusal -- never in
+# an approval, and never in an unhandled exception that some outer `except` might read as
+# "not a commit".
+#
+# `validate_commit` is driven rather than `_parse`, because the property is that the gate's
+# own entry point denies, not that a private helper raises.
+
+#: The one command the whole corpus agrees is a valid commit. If the parser breaks, *this*
+#: is what must stop being accepted.
+GOOD = "git add -A && git commit -m x"
+
+
+class _FakeNode:
+    """Whatever bashlex might hand back that this gate is not prepared for."""
+
+    def __init__(self, kind: str, **attrs: object) -> None:
+        self.kind = kind
+        for name, value in attrs.items():
+            setattr(self, name, value)
+
+
+def _patch_parse(monkeypatch: pytest.MonkeyPatch, replacement: object) -> None:
+    monkeypatch.setattr(bashlex, "parse", replacement)
+
+
+def test_the_vendored_parser_is_what_reads_the_words(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Break bashlex and the accepted command must stop being accepted.
+
+    Without this, every other test here could pass against a gate that still ran the old
+    hand-rolled tokenizer and never imported the parser at all.
+    """
+    cmdshape.validate_commit(GOOD)  # the premise: it is accepted while the parser works
+
+    def explode(_command: str) -> list[object]:
+        raise RuntimeError("bashlex is broken")
+
+    _patch_parse(monkeypatch, explode)
+    with pytest.raises(CommandShapeError, match="could not be parsed"):
+        cmdshape.validate_commit(GOOD)
+
+
+@pytest.mark.parametrize(
+    "exception",
+    [
+        pytest.param(RuntimeError("boom"), id="runtime-error"),
+        pytest.param(RecursionError("too deep"), id="recursion-error"),
+        pytest.param(AttributeError("NoneType has no attribute kind"), id="attribute-error"),
+        pytest.param(IndexError("list index out of range"), id="index-error"),
+        pytest.param(TypeError("unorderable"), id="type-error"),
+    ],
+)
+def test_a_parser_exception_is_a_denial(monkeypatch: pytest.MonkeyPatch, exception: Exception) -> None:
+    def raiser(_command: str) -> list[object]:
+        raise exception
+
+    _patch_parse(monkeypatch, raiser)
+    with pytest.raises(CommandShapeError):
+        cmdshape.validate_commit(GOOD)
+
+
+def test_the_parsers_own_syntax_error_is_a_denial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ParsingError`` is the expected failure, and it is reported as a syntax error."""
+
+    def raiser(_command: str) -> list[object]:
+        raise bashlex_errors.ParsingError("unexpected token", GOOD, 4)
+
+    _patch_parse(monkeypatch, raiser)
+    with pytest.raises(CommandShapeError, match="not valid shell syntax"):
+        cmdshape.validate_commit(GOOD)
+
+
+@pytest.mark.parametrize(
+    ("trees", "fragment"),
+    [
+        pytest.param([], "more than one statement", id="no-tree"),
+        pytest.param([_FakeNode("command"), _FakeNode("command")], "more than one statement", id="two-trees"),
+        pytest.param([_FakeNode("pipeline", parts=[])], "not a plain command", id="a-pipeline-at-the-top"),
+        pytest.param([_FakeNode("compound", parts=[])], "not a plain command", id="a-compound-at-the-top"),
+        pytest.param([_FakeNode("nonesuch")], "not a plain command", id="a-node-kind-that-does-not-exist"),
+        pytest.param(
+            [_FakeNode("list", parts=[_FakeNode("command", parts=[]), _FakeNode("operator", op="||"), _FakeNode("command", parts=[])])],
+            'only "&&" may join',
+            id="the-wrong-operator",
+        ),
+        pytest.param(
+            [_FakeNode("list", parts=[_FakeNode("command", parts=[]), _FakeNode("command", parts=[])])],
+            'only "&&" may join',
+            id="two-commands-with-no-operator",
+        ),
+        pytest.param(
+            [_FakeNode("list", parts=[_FakeNode("command", parts=[]), _FakeNode("operator", op="&&")])],
+            "ends in an operator",
+            id="a-chain-that-ends-in-an-operator",
+        ),
+        pytest.param(
+            [_FakeNode("command", parts=[_FakeNode("redirect", output="f")])],
+            "does not accept in a commit sequence",
+            id="a-redirect-inside-the-command",
+        ),
+        pytest.param(
+            [_FakeNode("command", parts=[_FakeNode("word", word=None)])],
+            "with no word",
+            id="a-word-that-is-not-a-string",
+        ),
+        pytest.param(
+            [_FakeNode("command", parts=[_FakeNode("word", word="git", parts=[_FakeNode("commandsubstitution")])])],
+            "whose value the gate cannot know",
+            id="a-word-built-from-a-substitution",
+        ),
+    ],
+)
+def test_a_malformed_ast_is_a_denial(monkeypatch: pytest.MonkeyPatch, trees: list[object], fragment: str) -> None:
+    """None of these is reachable while the deny-list runs first. All of them still deny.
+
+    This is the layer that has to hold if the deny-list is ever widened -- the change the
+    module docstring warns about -- so it is asserted now, while the reasoning is written
+    down next to it.
+    """
+    _patch_parse(monkeypatch, lambda _command: list(trees))
+    with pytest.raises(CommandShapeError, match=fragment):
+        cmdshape.validate_commit(GOOD)
+
+
+@pytest.mark.parametrize(
+    ("returned", "fragment"),
+    [
+        pytest.param(None, "not a list of nodes", id="parse-returned-nothing"),
+        pytest.param(5, "not a list of nodes", id="parse-returned-a-scalar"),
+        pytest.param(_FakeNode("command", parts=[]), "not a list of nodes", id="parse-returned-a-bare-node"),
+        pytest.param([_FakeNode("list", parts=None)], "not a list of nodes", id="a-chain-whose-parts-are-none"),
+        pytest.param([_FakeNode("list")], "not a list of nodes", id="a-chain-with-no-parts-at-all"),
+        pytest.param([_FakeNode("command", parts=None)], "not a list of nodes", id="a-command-whose-parts-are-none"),
+        pytest.param(
+            [_FakeNode("command", parts=[_FakeNode("word", word="git", parts=None)])],
+            "not a list of nodes",
+            id="a-word-whose-parts-are-none",
+        ),
+    ],
+)
+def test_a_parser_that_returns_something_unwalkable_is_a_denial(
+    monkeypatch: pytest.MonkeyPatch,
+    returned: object,
+    fragment: str,
+) -> None:
+    """A broken parser must produce a refusal with a reason, not a ``TypeError``.
+
+    The hook guard denies on an unhandled exception too, so the *verdict* was never at risk.
+    What was at risk is the contract this module documents -- and the difference the model
+    sees: "the parser misbehaved" against "the gate crashed", the second of which reads like
+    a bug to route around rather than a command to re-issue.
+    """
+    _patch_parse(monkeypatch, lambda _command: returned)
+    with pytest.raises(CommandShapeError, match=fragment):
+        cmdshape.validate_commit(GOOD)
+
+
+def test_a_tilde_is_the_one_word_part_that_is_read_as_written() -> None:
+    """``~/x`` reaches git as written; the shell tokenizer passed it through and so does this."""
+    assert cmdshape.tokenize("git add ~/x") == ["git", "add", "~/x"]
+
+
+# -- the deadline ----------------------------------------------------------
+
+
+def test_a_hanging_parse_denies_instead_of_stalling_the_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A parser that never returns must still produce a verdict, and produce it early.
+
+    The shim runs each hook under ``timeout`` as well, but that layer kills this process
+    along with the shim's command substitution -- so the shim's generic fallback is what
+    Claude would see. This deadline is the one that can still deny in the event's own words.
+    """
+    monkeypatch.setattr(cmdshape, "PARSE_TIMEOUT_SECONDS", 0.25)
+
+    def never_returns(_command: str) -> list[object]:
+        time.sleep(30)
+        raise AssertionError("the deadline did not fire")
+
+    _patch_parse(monkeypatch, never_returns)
+
+    started = time.monotonic()
+    with pytest.raises(cmdshape.CommandShapeTimeout, match="longer than"):
+        cmdshape.validate_commit(GOOD)
+    assert time.monotonic() - started < 5, "the deadline fired, but far too late to be the reason"
+
+
+def test_a_wedged_pure_python_loop_is_interrupted_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``time.sleep`` is a syscall; a spin loop is what a runaway parser actually looks like.
+
+    bashlex being pure Python is the reason this works: SIGALRM is delivered between
+    bytecodes, so the interpreter can raise inside the loop.
+    """
+    monkeypatch.setattr(cmdshape, "PARSE_TIMEOUT_SECONDS", 0.25)
+
+    def spins(_command: str) -> list[object]:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            pass
+        raise AssertionError("the deadline did not fire")
+
+    _patch_parse(monkeypatch, spins)
+
+    with pytest.raises(cmdshape.CommandShapeTimeout):
+        cmdshape.validate_commit(GOOD)
+
+
+def test_the_timeout_is_a_command_shape_error_so_every_caller_already_denies() -> None:
+    """The gate catches ``CommandShapeError``; a deadline that was not one would escape it."""
+    assert issubclass(cmdshape.CommandShapeTimeout, CommandShapeError)
+
+
+def test_the_timer_is_disarmed_and_the_previous_handler_restored() -> None:
+    """A gate that left SIGALRM armed would fire it into whatever ran next."""
+    sentinel = signal.getsignal(signal.SIGALRM)
+    cmdshape.validate_commit(GOOD)
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    assert signal.getsignal(signal.SIGALRM) is sentinel
+
+
+def test_a_failed_parse_also_disarms_the_timer(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = signal.getsignal(signal.SIGALRM)
+
+    def raiser(_command: str) -> list[object]:
+        raise RuntimeError("boom")
+
+    _patch_parse(monkeypatch, raiser)
+    with pytest.raises(CommandShapeError):
+        cmdshape.validate_commit(GOOD)
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    assert signal.getsignal(signal.SIGALRM) is sentinel

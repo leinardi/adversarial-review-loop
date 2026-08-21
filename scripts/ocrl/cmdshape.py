@@ -1,22 +1,26 @@
 r"""Command-shape classification: may this command be allowed to create a commit?
 
-A translation of ``scripts/lib/cmdshape.sh``, tokenizer included -- bashlex replaces the
-tokenizer in a later phase, kept separate on purpose so a parser swap is never entangled with
-a language port. **The tokenizer and the deny-list are unchanged**, and no command the shell
-accepted is refused here.
+Two layers decide, and only the first one is policy:
 
-What did change is *detection*: which commands are sent to the gate at all. The shell matched
-the raw string, so ``g\it commit`` and a ``set-phases`` buried in an ``&&`` chain both evaded
-it -- see :func:`detection_form` and :func:`is_set_phases`, which document the two bypasses
-and are the only deliberate divergences in this module.
+* **The deny-list** refuses nearly the whole shell grammar -- ``$``, backticks, ``;``,
+  ``|``, redirection, subshells, braces, unquoted globs, a bare ``&``, newlines, comments.
+  It is unchanged from ``scripts/lib/cmdshape.sh``, character for character and message for
+  message, and it still runs first. What survives it is a flat sequence of words joined by
+  ``&&``.
+* **bashlex** -- a real bash parser, vendored under :mod:`ocrl._vendor` -- turns that into
+  words. It replaced a hand-rolled quote-and-escape loop, which is the one thing in this
+  module a reader could not check against bash without re-deriving bash's own rules.
 
-The invariant that makes a hand-rolled tokenizer defensible is unchanged: it is safe only
-*because* the deny-list rejects nearly the whole shell grammar before tokenizing. Anything
-that could run a second program or touch a file after the snapshot was taken -- ``$``,
-backticks, ``;``, ``|``, redirection, subshells, braces, unquoted globs, a bare ``&``,
-newlines, comments -- is refused outright, so what reaches the token loop is a flat sequence
-of words joined by ``&&``. Widening the deny-list without replacing the tokenizer breaks
-that, and the tokenizer will not tell you.
+The deny-list did not move when the parser arrived, and that is deliberate. A parser makes
+it *possible* to reason about a pipeline or a subshell; it does not make it wise. Relaxing
+what is accepted is a separate change, with its own evidence, and the invariant to carry
+into it is that the accepted grammar and the thing that reads it are one design. Widening
+the deny-list without re-reading :func:`_words` breaks that, and neither will tell you.
+
+Detection -- which commands are sent to the gate at all -- is still textual, and cannot be
+otherwise: it runs on commands the deny-list *would* refuse, so there may be nothing
+parseable to work with. See :func:`detection_form` and :func:`is_set_phases`, which document
+the two bypasses that the shell's raw-string matching left open.
 
 Every rejection raises ``CommandShapeError``; its message is the explanation the shell kept
 in ``OCRL_CMD_ERROR`` and the gate shows to the model.
@@ -24,14 +28,20 @@ in ``OCRL_CMD_ERROR`` and the gate shows to the model.
 
 from __future__ import annotations
 
+import contextlib
 import re
-from collections.abc import Sequence
-from typing import Final
+import signal
+from collections.abc import Iterator, Sequence
+from types import FrameType
+from typing import Any, Final, NoReturn
 
 from ocrl.errors import OcrlError
+from ocrl.util import log, log_exception
 
 __all__ = [
+    "PARSE_TIMEOUT_SECONDS",
     "CommandShapeError",
+    "CommandShapeTimeout",
     "detection_form",
     "is_escape",
     "is_set_phases",
@@ -67,14 +77,61 @@ _METACHARACTERS: Final = ";|<>(){}"
 _GLOB_CHARACTERS: Final = "*?[]"
 
 
-def tokenize(command: str) -> list[str]:  # noqa: PLR0912, PLR0915 - one branch per shell `case` arm; splitting it would hide the deny-list
+def tokenize(command: str) -> list[str]:
     """Split a command into words, with ``&&`` surviving as its own token.
 
-    Quote-aware and hostile: the checks below are the security boundary, not tidiness.
+    Two layers, in this order, and the order **is** the design:
 
-    Deliberately one flat loop, mirroring the shell's ``case`` arm for arm. A reviewer has
-    to be able to read this against ``cmdshape.sh`` and see that nothing was dropped; that
-    matters more here than a branch count.
+    1. :func:`_deny_shell_grammar` refuses nearly the whole shell grammar. It is the
+       hand-rolled scanner that used to do the splitting too, with the token accumulation
+       taken out: the same characters are refused, in the same order, with the same
+       messages.
+    2. Whatever survives that is a flat sequence of words joined by ``&&``, and *bashlex*
+       -- a real bash parser, vendored -- is what turns it into words.
+
+    Keeping the deny-list in front of the parser is not belt-and-braces. bashlex parses the
+    whole language, so on its own it would happily hand back a clean AST for a pipeline, a
+    subshell or a redirection; the gate would then have to decide, node by node, which
+    constructs cannot reach the filesystem after the snapshot -- the same policy as today,
+    re-expressed against a grammar large enough to hide a mistake in. The deny-list keeps
+    that decision a short list of characters a reader can check.
+
+    What the parser buys is the *other* half: word splitting, quote removal and escape
+    handling are now bash's rules as implemented by a parser, not as re-derived by a loop
+    of this repository's own. Two things follow, both intended:
+
+    - a command bashlex cannot parse is refused rather than tokenized on a guess. The
+      hand-rolled loop read ``git commit -m x\\`` -- a trailing backslash -- as ``x``, where
+      bash keeps the backslash and bashlex calls it an unexpected EOF. The gate now denies
+      it. Denying a command whose words three implementations disagree about is the safe
+      direction, and the model can re-issue it quoted.
+    - the wording of a refusal for a *syntactically* broken command comes from the parser
+      now (``git commit -m x && `` was "the command contains an empty segment", and is now
+      a parse failure). The verdict is the same in every such case; only the explanation
+      moved, and ``tests/unit/test_cmdshape.py`` asserts each one that did.
+    """
+    _deny_shell_grammar(command)
+    # bashlex has no concept of an empty program: `parse("")` walks off the end of its own
+    # AST. The shell tokenizer returned no tokens, and every caller already has a message
+    # for that, so it stays their decision rather than becoming a parse error here.
+    if not command.strip(" \t"):
+        return []
+    return _words(_parse(command))
+
+
+def _deny_shell_grammar(command: str) -> None:  # noqa: PLR0912 - one branch per shell `case` arm; splitting it would hide the deny-list
+    """Refuse everything that could run a second program or touch a file after the snapshot.
+
+    **This is the security boundary.** Deliberately one flat loop, mirroring the shell's
+    ``case`` arm for arm, because a reviewer has to be able to read it against
+    ``cmdshape.sh`` and see that nothing was dropped; that matters more here than a branch
+    count.
+
+    Quote-aware, which is the whole subtlety: ``git commit -m "a;b"`` is a legitimate commit
+    message and ``git commit -m x; rm -rf /`` is two commands. The scan therefore tracks
+    quotes and escapes exactly as the splitting loop used to -- it *is* that loop, with the
+    token accumulation removed and ``started`` kept, since a ``#`` is a comment only where a
+    word is not already open.
     """
     if "$" in command:
         raise CommandShapeError('the command contains "$" (variable or command substitution)')
@@ -83,8 +140,6 @@ def tokenize(command: str) -> list[str]:  # noqa: PLR0912, PLR0915 - one branch 
     if "\n" in command or "\r" in command:
         raise CommandShapeError("the command spans multiple lines")
 
-    tokens: list[str] = []
-    token: list[str] = []
     started = False
     quote = ""
     index = 0
@@ -95,31 +150,21 @@ def tokenize(command: str) -> list[str]:  # noqa: PLR0912, PLR0915 - one branch 
         if quote:
             if char == quote:
                 quote = ""
-            else:
-                token.append(char)
             started = True
         elif char in ("'", '"'):
             quote = char
             started = True
         elif char in (" ", "\t"):
-            if started:
-                tokens.append("".join(token))
-                token = []
-                started = False
+            started = False
         elif char == "\\":
+            # A trailing backslash escapes nothing; the shell's ${s:i:1} yielded "" here and
+            # so does running off the end of the string.
             index += 1
-            # A trailing backslash escapes nothing; slicing yields "" where the shell's
-            # ${s:i:1} did the same.
-            token.append(command[index : index + 1])
             started = True
         elif char == "&":
             if command[index + 1 : index + 2] != "&":
                 raise CommandShapeError('the command backgrounds a process ("&")')
-            if started:
-                tokens.append("".join(token))
-                token = []
-                started = False
-            tokens.append("&&")
+            started = False
             index += 1
         elif char in _METACHARACTERS:
             raise CommandShapeError(f'the command contains the shell metacharacter "{char}" (pipeline, redirection, subshell or sequencing)')
@@ -128,17 +173,191 @@ def tokenize(command: str) -> list[str]:  # noqa: PLR0912, PLR0915 - one branch 
         elif char == "#":
             if not started:
                 raise CommandShapeError("the command contains a comment")
-            token.append(char)
         else:
-            token.append(char)
             started = True
         index += 1
 
     if quote:
         raise CommandShapeError("the command has an unterminated quote")
-    if started:
-        tokens.append("".join(token))
+
+
+# --------------------------------------------------------------------------
+# The parser
+# --------------------------------------------------------------------------
+
+
+class CommandShapeTimeout(CommandShapeError):
+    """The parse did not finish inside its deadline.
+
+    A ``CommandShapeError``, so every caller already denies on it; named separately so a
+    test can tell a deadline apart from a refusal, and a reader can tell that a hang is a
+    handled outcome rather than a hope.
+    """
+
+
+#: Wall-clock ceiling on one parse, enforced in-process.
+#:
+#: The shim in ``scripts/ocrl.sh`` already runs each hook under ``timeout``, but that layer
+#: cannot answer: when it fires it kills this process *and* the shim's own command
+#: substitution, so the shim's fallback is what reaches Claude. This deadline is the layer
+#: that can still emit the event's real denial, so it sits far below the shim's ceiling
+#: (50 s on the tightest hook). bashlex is pure Python, so SIGALRM is delivered between
+#: bytecodes and a parse is genuinely interruptible.
+#:
+#: Nothing in the corpus takes longer than a millisecond; five seconds is "the parser is
+#: wedged", not "the parser is busy".
+PARSE_TIMEOUT_SECONDS: Final = 5.0
+
+
+def _on_parse_alarm(signum: int, frame: FrameType | None) -> NoReturn:
+    raise CommandShapeTimeout(f"the command took longer than {PARSE_TIMEOUT_SECONDS:g}s to parse, so it cannot be shown to be a safe commit")
+
+
+@contextlib.contextmanager
+def _parse_deadline() -> Iterator[None]:
+    """Run the body under a SIGALRM deadline, if this process can have one.
+
+    Only the main thread of the main interpreter may install a signal handler. Under a hook
+    that is always where we are; a caller that imports this module into a thread gets no
+    deadline rather than an exception, and the shim's ``timeout`` remains its backstop.
+
+    **This assumes the gate is the only user of ``ITIMER_REAL`` in the process.** A process
+    has exactly one of them, so arming this one cancels any timer already running, and the
+    ``finally`` clears rather than restores it -- restoring a partly-elapsed timer would be
+    a guess at how much of it was left. The assumption holds by construction: the gate is
+    started by ``scripts/ocrl-bootstrap.py``, runs one subcommand and exits, and nothing
+    else in ``ocrl`` touches ``signal``. It is written down because it is the kind of thing
+    an added timer elsewhere would break silently -- the parse would still be bounded, the
+    other timer would simply never fire.
+    """
+    try:
+        previous = signal.signal(signal.SIGALRM, _on_parse_alarm)
+    except ValueError:
+        log("no parse deadline: not the main thread")
+        yield
+        return
+    try:
+        signal.setitimer(signal.ITIMER_REAL, PARSE_TIMEOUT_SECONDS)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _parse(command: str) -> Any:
+    """Parse one command with bashlex, or raise ``CommandShapeError`` saying why not.
+
+    bashlex is imported here rather than at module scope: it builds its LALR tables at
+    import time, which costs ~55 ms, and only a command that already looks like a commit
+    ever reaches this function. A ``Read`` must not pay for a parser it never runs.
+
+    Every failure is a refusal. ``ParsingError`` is the ordinary one -- the command is not
+    valid bash -- and anything else coming out of the parser is a defect in it, which is
+    exactly the case where guessing at the words would be worst.
+    """
+    from ocrl._vendor import bashlex  # noqa: PLC0415 - see the docstring: ~55 ms of table construction
+    from ocrl._vendor.bashlex import errors as bashlex_errors  # noqa: PLC0415
+
+    try:
+        with _parse_deadline():
+            trees = bashlex.parse(command)
+    except CommandShapeError:
+        raise  # the deadline; it already says what happened
+    except bashlex_errors.ParsingError as exc:
+        raise CommandShapeError(f"the command is not valid shell syntax ({exc})") from exc
+    except Exception as exc:
+        # bashlex is a parser generator's output over hostile input: an unexpected
+        # exception is a bug in it, not a verdict. Say so on stderr and deny.
+        log_exception()
+        raise CommandShapeError(f"the command could not be parsed ({type(exc).__name__})") from exc
+
+    if len(_nodes(trees, "a parse that is not a list of nodes")) != 1:
+        raise CommandShapeError("the command is more than one statement")
+    return trees[0]
+
+
+def _nodes(value: Any, what: str) -> Sequence[Any]:
+    """Insist that the parser handed back something walkable, or refuse.
+
+    ``bashlex.parse`` returns a list of trees and every node carries a list of parts -- but
+    "returns" is a property of a working parser, and this module's contract is that a broken
+    one produces a *denial with a reason*, not a ``TypeError`` for someone else to catch.
+    The fail-closed guard in :class:`ocrl.hookio.Hook` would still deny either way; the
+    difference is whether the model is told the parser misbehaved or told the gate crashed.
+    """
+    if isinstance(value, (list, tuple)):
+        return value
+    raise CommandShapeError(f"the parser returned {what} ({type(value).__name__})")
+
+
+#: AST nodes that carry a literal word. ``assignment`` is included so ``VAR=x git commit``
+#: keeps the token stream the shell produced -- and is refused a line later, by
+#: ``_validate_segment``, for not starting with ``git``. Turning it into a parser-level
+#: refusal here would change what the model is told for no gain.
+_WORD_KINDS: Final = frozenset({"word", "assignment"})
+
+
+def _words(tree: Any) -> list[str]:
+    """Flatten the AST the deny-list allows to exist into the shell's token stream.
+
+    That is exactly two shapes: one command, or commands joined by ``&&``. Anything else --
+    a pipeline, a subshell, a compound, a redirect -- is refused. Those are unreachable
+    while the deny-list runs first, and they are checked anyway: this is the layer that
+    would have to hold if the deny-list were ever relaxed, and a reader of that future
+    change should find it already written down rather than assume it.
+    """
+    kind = getattr(tree, "kind", "")
+    if kind == "command":
+        return _command_words(tree)
+    if kind != "list":
+        raise CommandShapeError(f'the command is a "{kind}", not a plain command or an "&&" chain')
+
+    tokens: list[str] = []
+    expect_command = True
+    for part in _nodes(getattr(tree, "parts", None), "a chain whose parts are not a list of nodes"):
+        part_kind = getattr(part, "kind", "")
+        if expect_command:
+            if part_kind != "command":
+                raise CommandShapeError(f'the chain contains a "{part_kind}", not a plain command')
+            tokens.extend(_command_words(part))
+        else:
+            if part_kind != "operator" or getattr(part, "op", "") != "&&":
+                raise CommandShapeError('only "&&" may join the commands in a commit sequence')
+            tokens.append("&&")
+        expect_command = not expect_command
+
+    if expect_command:
+        raise CommandShapeError("the command ends in an operator with nothing after it")
     return tokens
+
+
+def _command_words(node: Any) -> list[str]:
+    words: list[str] = []
+    for part in _nodes(getattr(node, "parts", ()), "a command whose parts are not a list of nodes"):
+        kind = getattr(part, "kind", "")
+        if kind not in _WORD_KINDS:
+            raise CommandShapeError(f'the command contains a "{kind}", which this gate does not accept in a commit sequence')
+        word = getattr(part, "word", None)
+        if not isinstance(word, str):
+            raise CommandShapeError(f'the parser returned a "{kind}" with no word')
+        _reject_unreadable_word(part, word)
+        words.append(word)
+    return words
+
+
+def _reject_unreadable_word(node: Any, word: str) -> None:
+    """Refuse a word whose value is decided at exec time rather than by its text.
+
+    ``tilde`` is the one exception: ``~/x`` reaches ``git`` as written and expands there,
+    and the shell tokenizer passed it through unchanged. A substitution cannot be passed
+    through -- its value is unknowable here -- but it also cannot be reached: ``$`` and
+    backticks are refused by the deny-list before the parser runs. This is what makes that
+    unreachability a checked property instead of a comment.
+    """
+    for part in _nodes(getattr(node, "parts", ()), "a word whose parts are not a list of nodes"):
+        kind = getattr(part, "kind", "")
+        if kind != "tilde":
+            raise CommandShapeError(f'the word "{word}" contains a "{kind}" whose value the gate cannot know')
 
 
 # --------------------------------------------------------------------------
@@ -188,7 +407,12 @@ def detection_form(command: str) -> str:
     ``$`` would deny the builds and tests the loop exists to run. Such a commit is not
     approved -- it simply never reaches the gate -- and it is caught at turn end, where the
     phase has not advanced and the Stop gate blocks on the outstanding phase before the
-    cumulative review runs. Closing it needs the real parser Phase 7 vendors.
+    cumulative review runs.
+
+    **The vendored parser does not close this, and no parser can.** bashlex reports a
+    command whose *name is a substitution node*; what the node evaluates to is decided when
+    it runs. What closes it is the deny-list refusing ``$`` and backticks outright while the
+    gate is enforcing -- see :func:`unresolved_expansion`.
     """
     out: list[str] = []
     quote = ""
@@ -480,6 +704,10 @@ def _consume_short_cluster(sub: str, tokens: Sequence[str], index: int) -> int:
 def _validate_segment(tokens: Sequence[str]) -> None:  # noqa: PLR0912 - one branch per token shape the shell distinguishes
     """Prove one ``&&``-separated segment cannot change working-tree content."""
     if not tokens:
+        # Unreachable through bashlex, which refuses a chain with a missing command before
+        # this is ever called -- the shell tokenizer was the one that could produce it. Kept
+        # because the alternative to an explicit refusal here is falling through to the
+        # checks below on an empty list.
         raise CommandShapeError("the command contains an empty segment")
     if tokens[0] != "git":
         raise CommandShapeError(f'segment starts with "{tokens[0]}"; only git add, git status and git commit may appear alongside a commit')

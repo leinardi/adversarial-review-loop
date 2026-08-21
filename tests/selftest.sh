@@ -203,9 +203,11 @@ commit_now() {
 # unit-level correctness (already proven in pytest) says nothing about
 # whether `pretool` actually calls the shape validator, on the right
 # argument, and turns its verdict into the right hook decision. This is the
-# one phase where that wiring could be wrong, so it is proven here instead
-# of only at Phase 7 -- and Phase 7 reuses this exact suite unchanged, which
-# is what proves bashlex was actually wired into the gate too.
+# one phase where that wiring could be wrong, so it is proven here rather
+# than only once the parser changed. Swapping the hand-rolled tokenizer for
+# bashlex reused this suite with every assertion unchanged, which is what
+# proves the vendored parser was actually wired into the gate and not merely
+# correct in isolation.
 #
 # Only commands containing "commit" reach the shape validator at all --
 # `pretool` decides that with a cheap substring pre-filter before ever

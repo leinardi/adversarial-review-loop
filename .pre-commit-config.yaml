@@ -5,8 +5,13 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-merge-conflict
+      # The vendored parser is excluded from the whitespace fixers as well as from the
+      # Python hooks: it is kept diffable against the upstream sdist, and upstream ships
+      # trailing whitespace this repository would otherwise rewrite.
       - id: end-of-file-fixer
+        exclude: ^scripts/ocrl/_vendor/
       - id: trailing-whitespace
+        exclude: ^scripts/ocrl/_vendor/
       - id: check-yaml
       - id: check-json
       - id: check-toml

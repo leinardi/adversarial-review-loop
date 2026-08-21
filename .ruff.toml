@@ -1,7 +1,8 @@
 line-length = 150
 target-version = "py312"
 
-# Vendored third-party code is kept byte-identical to upstream.
+# Vendored third-party code is kept diffable against upstream: the only change to it is the
+# import rewrite recorded in scripts/ocrl/_vendor/README.md.
 extend-exclude = ["scripts/ocrl/_vendor"]
 
 [lint]
