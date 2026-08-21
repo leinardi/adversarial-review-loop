@@ -31,6 +31,7 @@ from ocrl.errors import OcrlError
 from ocrl.util import log
 
 __all__ = [
+    "GitUnavailable",
     "Snapshot",
     "SnapshotError",
     "all_paths_ignored",
@@ -40,7 +41,9 @@ __all__ = [
     "git_run",
     "head_commit",
     "head_tree",
+    "head_tree_checked",
     "oversized",
+    "rev_parse",
     "snapshot",
     "stageable",
     "submodule_warnings",
@@ -49,6 +52,19 @@ __all__ = [
 
 #: Lines of ``git status --porcelain`` kept for a denial message, as ``head -n 40`` did.
 DIRTY_SUMMARY_LINES: Final = 40
+
+
+class GitUnavailable(OcrlError):
+    """git could not answer at all -- an unreadable ``.git``, or no git on PATH.
+
+    Deliberately distinct from a repository that simply has no commits yet. Both make
+    ``head_tree`` return ``""``, and a caller that reads the empty string as "nothing to check
+    here" turns "the gate cannot see the history" into "the history is fine" -- which is the
+    failure-into-approval Rule 1 forbids. Measured: ``rev-parse --verify --quiet`` exits 1
+    with **no stderr** for an unborn HEAD and 128 *with* stderr for a repository it cannot
+    read, so the two are told apart by the exit status and the presence of a complaint, never
+    by its text (git localises it).
+    """
 
 
 class SnapshotError(OcrlError):
@@ -100,16 +116,45 @@ def _first_line_output(proc: subprocess.CompletedProcess[bytes]) -> str:
     return _decode(proc.stdout).rstrip("\n")
 
 
+def rev_parse(repo: str, spec: str) -> str:
+    """Resolve ``spec`` to an object id, or empty when it does not resolve.
+
+    ``--verify --quiet`` because the callers all want "did this name something?" as a plain
+    yes/no: git says nothing on stderr and exits non-zero, which becomes an empty string
+    here. Every caller treats empty as "no", and no caller treats it as permission.
+    """
+    proc = git_run(repo, ["rev-parse", "--verify", "--quiet", spec])
+    return _first_line_output(proc) if proc.returncode == 0 else ""
+
+
 def head_commit(repo: str) -> str:
     """HEAD's commit id, or empty in a repository with no commits yet."""
-    proc = git_run(repo, ["rev-parse", "--verify", "--quiet", "HEAD"])
-    return _first_line_output(proc) if proc.returncode == 0 else ""
+    return rev_parse(repo, "HEAD")
 
 
 def head_tree(repo: str) -> str:
-    """HEAD's tree id, or empty when there is no HEAD."""
+    """HEAD's tree id, or empty when there is no HEAD.
+
+    Lenient: a repository git cannot read is indistinguishable from one with no commits. Use
+    :func:`head_tree_checked` wherever that difference decides whether anything is reported.
+    """
+    return rev_parse(repo, "HEAD^{tree}")
+
+
+def head_tree_checked(repo: str) -> str:
+    """HEAD's tree id, ``""`` for a repository with no commits, or raise.
+
+    Raises :class:`GitUnavailable` when git could not answer, so "the history cannot be read"
+    cannot be mistaken for "there is nothing here to look at".
+    """
     proc = git_run(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])
-    return _first_line_output(proc) if proc.returncode == 0 else ""
+    if proc.returncode == 0:
+        return _first_line_output(proc)
+    complaint = _decode(proc.stderr).strip()
+    if proc.returncode == 1 and not complaint:
+        # `--quiet` turns "that ref does not resolve" into a silent exit 1. Nothing else is.
+        return ""
+    raise GitUnavailable(complaint or f"git rev-parse exited with status {proc.returncode} in {repo}")
 
 
 # --------------------------------------------------------------------------

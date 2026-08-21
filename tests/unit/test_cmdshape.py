@@ -14,6 +14,8 @@ live entrypoint and those assertions still cover production code.
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 from conftest import bash_cmdshape
 
@@ -351,3 +353,136 @@ def test_a_value_consuming_flag_does_not_swallow_the_next_flag_check() -> None:
     cmdshape.validate_commit("git commit --trailer 'Co-authored-by: someone' -m x")
     with pytest.raises(CommandShapeError, match="not on the allowlist"):
         cmdshape.validate_commit("git commit --trailer 'Co-authored-by: someone' --wat -m x")
+
+
+# --------------------------------------------------------------------------
+# Detection: the raw string is not what bash runs
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param(r"g\it commit", "git commit", id="backslash"),
+        pytest.param(r"g\\it commit", r"g\it commit", id="escaped-backslash"),
+        pytest.param("'g'it commit", "git commit", id="single-quotes"),
+        pytest.param('g"i"t commit', "git commit", id="double-quotes"),
+        pytest.param(r"'g\it' commit", r"g\it commit", id="backslash-is-literal-in-single-quotes"),
+        pytest.param(r'"g\it" commit', "git commit", id="backslash-escapes-in-double-quotes"),
+        pytest.param("git commit -m 'a b'", "git commit -m a b", id="ordinary-text-survives"),
+    ],
+)
+def test_the_detection_form_is_what_bash_will_run(raw: str, expected: str) -> None:
+    assert cmdshape.detection_form(raw) == expected
+
+
+def _bash_words(text: str) -> list[str]:
+    """The words a real bash makes of ``text``. Expansion only -- nothing is executed."""
+    proc = subprocess.run(["bash", "-c", f"printf '%s\\0' {text}"], capture_output=True, check=True)
+    return [word.decode() for word in proc.stdout.split(b"\0") if word]
+
+
+@pytest.mark.parametrize(
+    ("disguised", "real"),
+    [
+        pytest.param(r"g\it", "git", id="backslash"),
+        pytest.param("'g'it", "git", id="single-quotes"),
+        pytest.param('g"i"t', "git", id="double-quotes"),
+        pytest.param(r"oc\rl.sh", "ocrl.sh", id="escaped-entrypoint"),
+        pytest.param("'o'crl.sh", "ocrl.sh", id="quoted-entrypoint"),
+    ],
+)
+def test_a_real_bash_reads_the_disguised_word_as_the_real_name(disguised: str, real: str) -> None:
+    """The premise these bypasses rest on, asserted against bash rather than assumed."""
+    assert _bash_words(disguised) == [real]
+    assert cmdshape.detection_form(disguised) == real
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"g\it commit -m x",
+        r"g\it add -A && g\it commit -m x",
+        "'g'it commit -m x",
+        'g"i"t commit -m x',
+    ],
+)
+def test_a_disguised_commit_is_detected(command: str) -> None:
+    """Each of these ran ungated: the detector matched the raw string, which has no ``git``."""
+    assert cmdshape.mentions_commit(command)
+
+
+@pytest.mark.parametrize("command", [r"g\it reset --soft HEAD~1", "'g'it reset --hard HEAD"])
+def test_a_disguised_reset_is_detected(command: str) -> None:
+    assert cmdshape.mentions_reset(command)
+
+
+@pytest.mark.parametrize("command", [r"oc\rl.sh finish", "/p/'o'crl.sh deactivate", r"ocrl\.sh finish"])
+def test_a_disguised_escape_is_detected(command: str) -> None:
+    assert cmdshape.is_escape(command)
+
+
+#: The exact path ``arm`` prints for the model to copy. Nothing else is the exception.
+ENTRYPOINT = "/plugin/scripts/ocrl.sh"
+
+
+@pytest.mark.parametrize(
+    ("command", "accepted"),
+    [
+        pytest.param(f"{ENTRYPOINT} set-phases --phase one", True, id="the-trusted-path"),
+        pytest.param(f'{ENTRYPOINT} set-phases --phase "one" --phase "two"', True, id="several-phases"),
+        pytest.param("./ocrl set-phases --phase one", False, id="a-program-the-repo-ships"),
+        pytest.param("ocrl.sh set-phases --phase one", False, id="bare-name-off-PATH"),
+        pytest.param("/elsewhere/ocrl.sh set-phases", False, id="another-copy"),
+        pytest.param(f"git add -A && git commit -m x && {ENTRYPOINT} set-phases --phase x", False, id="commit-chained-ahead"),
+        pytest.param(f"{ENTRYPOINT} set-phases --phase x && git commit -m x", False, id="commit-chained-behind"),
+        pytest.param(f"echo {ENTRYPOINT} set-phases", False, id="mentioned-not-invoked"),
+        pytest.param(f"{ENTRYPOINT} status", False, id="another-subcommand"),
+        pytest.param(f"bash {ENTRYPOINT} set-phases", False, id="through-an-interpreter"),
+        pytest.param(f"{ENTRYPOINT} set-phases; git commit -m x", False, id="sequenced"),
+        pytest.param(f"{ENTRYPOINT} set-phases --phase $(id)", False, id="substitution"),
+    ],
+)
+def test_only_the_trusted_set_phases_command_is_the_armed_exception(command: str, accepted: bool) -> None:
+    """Two bypasses at once: a substring match, and trusting anything named ``ocrl``.
+
+    The shell matched ``ocrl\\(\\.sh\\)\\?[[:space:]]\\+set-phases`` anywhere in the raw
+    command, so a commit could ride along in front of it -- and any executable with that name,
+    including one the repository under review ships, satisfied it.
+    """
+    assert cmdshape.is_set_phases(command, ENTRYPOINT) is accepted
+
+
+# --------------------------------------------------------------------------
+# Expansion: words the gate cannot read
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("$(printf git) commit -m x", id="command-substitution"),
+        pytest.param("`printf git` commit -m x", id="backtick"),
+        pytest.param("$'\\x67it' commit -m x", id="ansi-c-quoting"),
+        pytest.param("${GIT} commit -m x", id="braced-variable"),
+        pytest.param('echo "$HOME"', id="expansion-in-double-quotes"),
+        pytest.param("make test && echo $?", id="anywhere-in-the-command"),
+    ],
+)
+def test_a_command_whose_words_are_unknowable_is_named(command: str) -> None:
+    """``$(printf git) commit`` runs ``git commit`` and contains no ``git`` to match on."""
+    assert cmdshape.unresolved_expansion(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("make test", id="plain"),
+        pytest.param("grep '$foo' file.txt", id="dollar-in-single-quotes"),
+        pytest.param(r"echo \$notreally", id="escaped-dollar"),
+        pytest.param('git commit -m "a message"', id="ordinary-quoting"),
+    ],
+)
+def test_a_command_with_no_expansion_is_left_alone(command: str) -> None:
+    """A ``$`` bash treats as literal is literal here too, so ordinary regexes still work."""
+    assert cmdshape.unresolved_expansion(command) == ""

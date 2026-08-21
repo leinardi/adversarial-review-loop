@@ -173,6 +173,22 @@ If it has no effect, the residual limit stands as documented in the README: our 
 
 ---
 
+## Session D — a host-only signal for the user's exits (item 11)
+
+Open, and the reason Rule 4 is documented as a limit rather than a guarantee. `finish` and `stop` are shell subcommands, so anything that can run a shell can run them; the gate cannot tell a user's `/opencode-review-loop:stop` from the same command issued inside `bash escape.sh`. Confirmed by experiment: the script commits and disarms, and nothing prevents either.
+
+What the gate now does about it is *report* — `confirm-commit` emits `additionalContext`, and the Stop gate emits a `systemMessage`. Both are covered by `tests/unit/test_commands_posttool.py` and `test_commands_stop.py`, so what remains here is the half a shell test cannot reach.
+
+1. Run the escape for real: have Claude write and run a script that commits and then invokes `ocrl.sh deactivate`. **Expect** the `additionalContext` report on the tool result, and the `systemMessage` at turn end.
+2. **Check where the `systemMessage` is rendered.** AGENTS.md rests on it reaching the *user*, so that relaying it is not the model's decision. Confirm it appears in the user's transcript, and note whether it is also fed back to the model. If it turns out to be model-visible only, the visibility argument in AGENTS.md is wrong and must be rewritten — this is the item that decides it.
+3. Then the open question: is there anything the host offers that the model cannot produce? Register a `UserPromptSubmit` hook and check whether it fires for a slash command, and what the payload carries. Compare the environment a skill body sees at prompt-expansion time against the one a `Bash` tool call sees; anything in the first and absent from the second is a candidate.
+4. **Expect**, if either works: `deactivate` and `finish` refuse unless the signal is present, and the wrapper escape stops ending the mode.
+5. **Fallback**, if neither does: the limit stands as AGENTS.md documents it, and the reporting path is the whole of the defence.
+
+Note what a positive result would *not* fix. A model that can run arbitrary Bash can still edit `state.json` directly, so the signal would have to gate the transition rather than the command, and the state file would still be forgeable. Treat this as raising the bar, not closing the hole.
+
+---
+
 ## Record the outcome
 
 | Item | Check | Result |
@@ -186,6 +202,8 @@ If it has no effect, the residual limit stands as documented in the README: our 
 | 10 | another repo in another session is untouched | **pass** (2026-08-20) |
 | 3 | arguments, and a hostile path | **pass**, with a confirmed injection surface (2026-08-20) |
 | 6 | the block cap responds to the setting | **pass** (2026-08-20) |
+| 11 | a host-only signal distinguishes the user's exits | **open** |
+| 12 | `systemMessage` from a Stop hook reaches the user | **open** |
 
 ### Isolation, 2026-08-20
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable
-from typing import Any, Final, Literal, NamedTuple, TextIO
+from typing import Any, Final, Literal, NamedTuple, NoReturn, TextIO
 
 from ocrl.util import log, log_exception
 
@@ -94,6 +94,9 @@ class HookInput(NamedTuple):
     cwd: str = ""
     tool_name: str = ""
     command: str = ""
+    #: The file an editing tool is about to write. ``Write`` and ``Edit`` call it
+    #: ``file_path``, ``NotebookEdit`` calls it ``notebook_path``; both land here.
+    path: str = ""
     raw: str = "{}"
 
 
@@ -139,14 +142,15 @@ def parse_hook_input(raw: str) -> HookInput:
     tool_input = payload.get("tool_input")
     if isinstance(tool_input, dict):
         command = _as_str(tool_input.get("command"))
+        path = _as_str(tool_input.get("file_path")) or _as_str(tool_input.get("notebook_path"))
     elif tool_input is None:
-        command = ""
+        command = path = ""
     else:
         # jq: "Cannot index string with string \"command\"" -- the field is lost, the
         # three already-emitted ones are not.
-        command = ""
+        command = path = ""
 
-    return HookInput(session_id=session_id, cwd=cwd, tool_name=tool_name, command=command, raw=raw)
+    return HookInput(session_id=session_id, cwd=cwd, tool_name=tool_name, command=command, path=path, raw=raw)
 
 
 def read_hook_input(stream: TextIO | None = None) -> HookInput:
@@ -192,7 +196,7 @@ class Hook:
         """Declare which fallback this entrypoint owes if it dies before deciding."""
         self.failclosed = mode
 
-    def _write(self, payload: dict[str, Any] | None) -> None:
+    def _write(self, payload: dict[str, Any] | None) -> NoReturn:
         """Emit at most one response, in a single write, then unwind.
 
         A second emitter call is dropped rather than appended: two JSON objects
@@ -241,8 +245,15 @@ class Hook:
         raise Decided
 
     # -- PreToolUse ------------------------------------------------------
+    #
+    # Every emitter below is ``NoReturn``: ``_write`` always raises, either ``Decided`` once
+    # the response is out or ``OutputFailure`` when it could not be. Saying so in the
+    # signature is not decoration -- it is what lets an entrypoint read as a flat sequence of
+    # terminal decisions, the way the shell's ``ocrl_deny`` / ``exit 0`` did, instead of
+    # every branch needing a ``return`` that only exists to convince a reader (and a type
+    # checker) that execution stopped.
 
-    def emit_pretool(self, decision: str, reason: str) -> None:
+    def emit_pretool(self, decision: str, reason: str) -> NoReturn:
         self._write(
             {
                 "hookSpecificOutput": {
@@ -253,13 +264,13 @@ class Hook:
             }
         )
 
-    def allow(self, reason: str = "opencode-review-loop: allowed") -> None:
+    def allow(self, reason: str = "opencode-review-loop: allowed") -> NoReturn:
         self.emit_pretool("allow", reason)
 
-    def deny(self, reason: str) -> None:
+    def deny(self, reason: str) -> NoReturn:
         self.emit_pretool("deny", reason)
 
-    def pass_(self) -> None:
+    def pass_(self) -> NoReturn:
         """Silent pass-through: no opinion, leave the normal permission flow alone.
 
         Zero bytes and exit 0 -- and this is the commonest hot-path outcome, which is why
@@ -269,7 +280,7 @@ class Hook:
 
     # -- PostToolUse -----------------------------------------------------
 
-    def posttool_context(self, context: str) -> None:
+    def posttool_context(self, context: str) -> NoReturn:
         self._write(
             {
                 "hookSpecificOutput": {
@@ -281,10 +292,10 @@ class Hook:
 
     # -- Stop ------------------------------------------------------------
 
-    def stop_block(self, reason: str) -> None:
+    def stop_block(self, reason: str) -> NoReturn:
         self._write({"decision": "block", "reason": reason})
 
-    def stop_ok(self, message: str = "") -> None:
+    def stop_ok(self, message: str = "") -> NoReturn:
         self._write({"systemMessage": message} if message else None)
 
     # -- fail closed -----------------------------------------------------

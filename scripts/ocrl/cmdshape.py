@@ -1,8 +1,14 @@
-"""Command-shape classification: may this command be allowed to create a commit?
+r"""Command-shape classification: may this command be allowed to create a commit?
 
-A **faithful translation** of ``scripts/lib/cmdshape.sh``, tokenizer included. No verdict,
-and no message, changes here -- bashlex replaces the tokenizer in a later phase, kept
-separate on purpose so a parser swap is never entangled with a language port.
+A translation of ``scripts/lib/cmdshape.sh``, tokenizer included -- bashlex replaces the
+tokenizer in a later phase, kept separate on purpose so a parser swap is never entangled with
+a language port. **The tokenizer and the deny-list are unchanged**, and no command the shell
+accepted is refused here.
+
+What did change is *detection*: which commands are sent to the gate at all. The shell matched
+the raw string, so ``g\it commit`` and a ``set-phases`` buried in an ``&&`` chain both evaded
+it -- see :func:`detection_form` and :func:`is_set_phases`, which document the two bypasses
+and are the only deliberate divergences in this module.
 
 The invariant that makes a hand-rolled tokenizer defensible is unchanged: it is safe only
 *because* the deny-list rejects nearly the whole shell grammar before tokenizing. Anything
@@ -26,7 +32,9 @@ from ocrl.errors import OcrlError
 
 __all__ = [
     "CommandShapeError",
+    "detection_form",
     "is_escape",
+    "is_set_phases",
     "mentions_commit",
     "mentions_reset",
     "reset_target",
@@ -145,22 +153,173 @@ _SPACE: Final = r"[ \t\v\f\r]"
 _NON_SPACE: Final = r"[^ \t\v\f\r\n]"
 _BEFORE: Final = r"(^|[ \t\v\f\r;&|(])"
 
-_COMMIT_RE: Final = re.compile(rf"{_BEFORE}git({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+commit({_SPACE}|$)", re.MULTILINE)
-_RESET_RE: Final = re.compile(rf"{_BEFORE}git({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+reset({_SPACE}|$)", re.MULTILINE)
+#: ``git``, however it is spelled as a path. The shell matched the bare word, so
+#: ``/usr/bin/git commit -m x`` -- the same program, and what a ``PATH``-wary caller writes --
+#: matched nothing and was passed through ungated. Any word ending in ``/git`` counts; the
+#: strict validator then refuses the non-canonical spelling, which is the safe direction.
+_GIT: Final = r"(?:[^ \t\v\f\r\n;&|()]*/)?git"
+
+_COMMIT_RE: Final = re.compile(rf"{_BEFORE}{_GIT}({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+commit({_SPACE}|$)", re.MULTILINE)
+_RESET_RE: Final = re.compile(rf"{_BEFORE}{_GIT}({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+reset({_SPACE}|$)", re.MULTILINE)
 _ESCAPE_RE: Final = re.compile(rf"ocrl(\.sh)?{_SPACE}+(finish|deactivate)({_SPACE}|$)", re.MULTILINE)
 
 
+def detection_form(command: str) -> str:
+    r"""Undo backslash escapes and quoting, so detection reads a command as bash will.
+
+    **This is the fix for a real bypass, not a tidy-up.** The three detectors below matched
+    the raw string, so ``g\it commit -m x`` -- which bash runs as ``git commit`` -- contained
+    no literal ``git`` and was not detected as a commit at all. ``pretool`` then passed it
+    straight through to be executed, ungated. The same trick hid ``g\it reset --hard`` from
+    the reset guard and ``oc\rl.sh finish`` from the Rule 4 denial. Quoting does it too:
+    ``'g'it commit`` and ``g"i"t commit`` are both ``git commit`` to bash.
+
+    So the word-removal half of bash's expansion is applied first: a backslash outside single
+    quotes escapes the next character, quote delimiters vanish, and everything else survives
+    in place.
+
+    **Used for detection only, never for validation.** ``tokenize`` still reads the raw
+    string, because that is where the deny-list lives. Over-detecting is the safe direction:
+    a false positive routes the command into the commit gate, which either proves it is one
+    of the three accepted shapes or denies it.
+
+    **What this still does not see: substitution.** ``$(echo git) commit`` and ``$'g\x69t'``
+    produce a command name no textual pass can predict, and denying every command containing
+    ``$`` would deny the builds and tests the loop exists to run. Such a commit is not
+    approved -- it simply never reaches the gate -- and it is caught at turn end, where the
+    phase has not advanced and the Stop gate blocks on the outstanding phase before the
+    cumulative review runs. Closing it needs the real parser Phase 7 vendors.
+    """
+    out: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote:
+            if char == quote:
+                quote = ""
+            elif char == "\\" and quote == '"':
+                index += 1
+                out.append(command[index : index + 1])
+            else:
+                out.append(char)
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "\\":
+            index += 1
+            out.append(command[index : index + 1])
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def mentions_commit(command: str) -> bool:
-    return _COMMIT_RE.search(command) is not None
+    return _COMMIT_RE.search(detection_form(command)) is not None
 
 
 def mentions_reset(command: str) -> bool:
-    return _RESET_RE.search(command) is not None
+    return _RESET_RE.search(detection_form(command)) is not None
 
 
 def is_escape(command: str) -> bool:
     """The user-only escapes. Claude's own route -- Bash -- is denied elsewhere (Rule 4)."""
-    return _ESCAPE_RE.search(command) is not None
+    return _ESCAPE_RE.search(detection_form(command)) is not None
+
+
+def is_set_phases(command: str, entrypoint: str) -> bool:
+    """Is this command **exactly** ``<entrypoint> set-phases …`` and nothing else?
+
+    ``set-phases`` is the single command permitted while the phase list is still unfrozen --
+    a state in which nothing may change the repository -- so an ``allow`` here runs a program
+    at a moment when everything else is denied. Two things therefore have to hold, and the
+    shell checked neither.
+
+    **It must be the whole command.** The shell used
+    ``grep 'ocrl\\(\\.sh\\)\\?[[:space:]]\\+set-phases'``, a substring match, so
+    ``git add -A && git commit -m x && .../ocrl.sh set-phases --phase x`` was *allowed*: the
+    commit ran before phases were ever frozen, with no snapshot and no review. The command is
+    tokenized instead -- with the real tokenizer, which refuses ``$``, backticks, ``;``,
+    ``|``, redirection, subshells, globs and a bare ``&`` outright -- and must be a single
+    segment.
+
+    **It must be this gate's own script**, matched as the exact path the caller passes in,
+    not by basename. A basename test trusts any executable called ``ocrl``, and the
+    repository under review can ship one: ``./ocrl set-phases --phase x`` would then be
+    allowed to run arbitrary code at the one moment nothing else may run at all. ``arm``
+    prints this exact path for the model to copy, so nothing legitimate is lost.
+
+    The arguments after ``set-phases`` are deliberately not constrained. They are read by
+    :mod:`ocrl.commands.phases`, which can freeze a phase list and nothing else -- there is
+    no argument to that command that touches the repository under review.
+    """
+    try:
+        tokens = tokenize(command)
+    except CommandShapeError:
+        return False
+    if len(tokens) < 2 or "&&" in tokens:
+        return False
+    return tokens[0] == entrypoint and tokens[1] == "set-phases"
+
+
+# --------------------------------------------------------------------------
+# Expansion: words this gate cannot read
+# --------------------------------------------------------------------------
+
+_EXPANSIONS: Final = {
+    "$(": "a command substitution ($( … ))",
+    "${": "a variable expansion (${ … })",
+    "$'": "an ANSI-C quoted string ($' … ')",
+}
+
+
+def unresolved_expansion(command: str) -> str:
+    """Name the expansion that makes this command's words unknowable, or return "".
+
+    Detection reads text, and ``$(printf git) commit -m x`` contains no word this or any
+    other textual pass can resolve to ``git``. It runs ``git commit`` all the same. A real
+    parser does not fix this either: bashlex would report a command whose *name is a
+    substitution node*, and the only sound answer to that is still refusal.
+
+    So the deny-list absorbs it, which is the same trade the tokenizer already makes -- the
+    parser is defensible only because almost the whole grammar is refused before it runs.
+    A ``$`` or a backtick outside single quotes is refused while the gate is enforcing;
+    inside single quotes both are literal to bash and are left alone, so ordinary
+    ``grep '$foo'`` still works.
+
+    This does not make the gate a complete barrier, and nothing textual can: ``eval``,
+    ``xargs``, ``env`` and a shell function all reach ``git`` with a literal command name.
+    What catches those is ``confirm-commit`` noticing afterwards that HEAD moved to a tree no
+    review ever approved.
+    """
+    quote = ""
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+        elif quote == '"':
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                quote = ""
+            elif char in "$`":
+                return _expansion_at(command, index)
+        elif char == "\\":
+            index += 1
+        elif char in ("'", '"'):
+            quote = char
+        elif char in "$`":
+            return _expansion_at(command, index)
+        index += 1
+    return ""
+
+
+def _expansion_at(command: str, index: int) -> str:
+    if command[index] == "`":
+        return "a backtick (command substitution)"
+    return _EXPANSIONS.get(command[index : index + 2], "a variable expansion ($ … )")
 
 
 # --------------------------------------------------------------------------

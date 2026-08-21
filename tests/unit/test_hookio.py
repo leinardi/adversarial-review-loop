@@ -70,7 +70,7 @@ def test_parses_a_well_formed_payload() -> None:
             "tool_input": {"command": "git commit -m x"},
         }
     )
-    assert parse_hook_input(raw) == HookInput("s1", "/w", "Bash", "git commit -m x", raw)
+    assert parse_hook_input(raw) == HookInput(session_id="s1", cwd="/w", tool_name="Bash", command="git commit -m x", raw=raw)
 
 
 @pytest.mark.parametrize("raw", ["not json", "[1,2]", '"a string"', "5", ""])

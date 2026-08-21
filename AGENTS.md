@@ -18,7 +18,18 @@ Everything else is detail. These are not negotiable, and a change that weakens o
 1. **Nothing converts a failure into an approval.** Missing state, malformed JSON, a snapshot failure, a timeout, a non-zero reviewer exit, empty output, absent markers, an unknown verdict, an evidence ceiling — every one of them blocks or escalates. Operational uncertainty is never "no findings".
 2. **Hook stdout is protocol.** Hook entrypoints (`pretool`, `confirm-commit`, `posttool-failure`, `gate-stop`) emit valid Claude hook JSON or nothing. Diagnostics go to stderr or a file. A stray `printf` in a library that runs under a hook corrupts the response — `ocrl_report_store` is deliberately silent for this reason. `EXIT` traps fail closed.
 3. **Nothing is written inside the repository under review.** All state, frozen plans, bundles and reports live under `$XDG_STATE_HOME/opencode-review-loop/`. The snapshot uses a throwaway `GIT_INDEX_FILE` and never touches the real index or worktree.
-4. **The user owns the exits.** `implement`, `finish` and `stop` are `disable-model-invocation: true`, and Claude's own route to them — Bash — is denied in `cmd_pretool`. Claude can never arm, finish, or disarm the mode.
+4. **The user owns the exits.** `implement`, `finish` and `stop` are `disable-model-invocation: true`, and Claude's own route to them — Bash — is denied in `cmd_pretool`. See below for what that does and does not guarantee.
+
+### What Rule 4 does and does not guarantee
+
+The denial reads `tool_input.command` as a string, so it stops the direct route and nothing more. Two things defeat it, both confirmed by experiment:
+
+- **A wrapper.** `bash escape.sh`, where the script commits and then runs `ocrl.sh deactivate`, is recognised as neither a commit nor an escape. The commit lands unreviewed and the mode ends.
+- **Editing the state.** `status: DISARMED` written straight into `state.json` ends the mode with no command to inspect at all. The `PreToolUse` gate now refuses an *editing tool* aimed at the state root, but a shell command can still write the same file — the gate runs as the same user, and by the time it is asked about a command, that command is about to run.
+
+**So Rule 4 is not enforceable against a deliberately adversarial model.** It holds against mistakes, drift, and a model following the loop's instructions, which is what the component is for. No file-based mechanism can do better: any token this plugin writes to disk, the model's shell can write too.
+
+What *is* enforceable is reporting. `confirm-commit` reports a HEAD whose tree no review approved, and the Stop gate repeats it through `systemMessage`. The value of that second channel rests on `systemMessage` reaching the *user*, so that relaying it is not the model's decision — **that is assumed, not verified**, and it is `tests/STEP0.md` item 12. If it turns out to be model-visible only, this paragraph is wrong and the escape has no reliable reader at all. Closing the rule properly needs a host-only signal that a real user typed the slash command: item 11. Until both are settled, the limit stands as documented rather than fixed.
 
 ## The parser is only safe because the deny-list is aggressive
 

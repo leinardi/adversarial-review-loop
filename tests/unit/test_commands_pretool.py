@@ -1,0 +1,919 @@
+"""``pretool`` -- the hook that decides whether a mutation happens.
+
+Everything here drives the real entrypoint through ``scripts/ocrl-bootstrap.py`` with a
+payload on stdin, because the property under test is the whole contract: what lands on
+stdout, what the exit status is, and what the activation says afterwards. A helper returning
+the right verdict while the entrypoint emits the wrong JSON is not a gate.
+
+The invariant every test in this file is ultimately about: **no failure becomes an allow.**
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from conftest import FAKE_REVIEWER, decision, git, run_bootstrap, run_hook
+from test_commands_arm import armed_env, plan_file, read_state, state_dir
+
+from ocrl import paths
+
+SESSION = "s1"
+
+#: The gate's own script, as ``arm`` prints it for the model to copy. ``set-phases`` accepts
+#: this exact path and nothing else, so the tests pin it rather than inherit it.
+PLUGIN_ROOT = "/plugin"
+ENTRYPOINT = f"{PLUGIN_ROOT}/scripts/ocrl.sh"
+
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+
+def armed(clean_env: dict[str, str], **extra: str) -> dict[str, str]:
+    """``armed_env`` with the plugin root pinned, so the trusted entrypoint path is known."""
+    return armed_env(clean_env, CLAUDE_PLUGIN_ROOT=PLUGIN_ROOT, **extra)
+
+
+def payload(repo: Path, tool: str = "Bash", command: str = "", session: str = SESSION) -> dict[str, object]:
+    return {"session_id": session, "cwd": str(repo), "tool_name": tool, "tool_input": {"command": command}}
+
+
+def pretool(repo: Path, env: dict[str, str], **kwargs: object) -> tuple[str, str]:
+    proc = run_hook("pretool", payload(repo, **kwargs), cwd=repo, env=env)  # type: ignore[arg-type]
+    assert proc.returncode == 0, proc.stderr
+    return decision(proc)
+
+
+def arm(repo: Path, tmp_path: Path, env: dict[str, str]) -> None:
+    proc = run_bootstrap(["arm", "--session", SESSION, "--plan", str(plan_file(tmp_path))], cwd=repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+
+
+def set_phases(repo: Path, env: dict[str, str], *phases: str) -> None:
+    argv = ["set-phases"]
+    for phase in phases:
+        argv += ["--phase", phase]
+    proc = run_bootstrap(argv, cwd=repo, env=env)
+    assert proc.returncode == 0, proc.stderr
+
+
+def active(repo: Path, tmp_path: Path, env: dict[str, str], *phases: str) -> None:
+    """An armed activation with its phase list frozen -- the ordinary working state."""
+    arm(repo, tmp_path, env)
+    set_phases(repo, env, *(phases or ("phase one",)))
+
+
+def patch_state(env: dict[str, str], repo: Path, **values: object) -> None:
+    path = state_dir(env, repo, SESSION) / "state.json"
+    document = json.loads(path.read_text())
+    document.update(values)
+    path.write_text(json.dumps(document))
+
+
+# --------------------------------------------------------------------------
+# Rule 0: no pointer means arming never executed
+# --------------------------------------------------------------------------
+
+
+def test_a_payload_with_no_session_id_denies(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """The gate cannot tell which activation this is, so it denies rather than guessing."""
+    verdict, reason = pretool(git_repo, clean_env, session="")
+
+    assert verdict == "deny"
+    assert "carried no session id" in reason
+
+
+def test_no_pointer_records_arm_failed_and_denies(git_repo: Path, clean_env: dict[str, str]) -> None:
+    verdict, reason = pretool(git_repo, clean_env, tool="Write")
+
+    assert verdict == "deny"
+    assert "Arming never ran" in reason
+    document = read_state(clean_env, git_repo, SESSION)
+    assert document["status"] == "ARM_FAILED"
+    assert "arming never executed" in str(document["reason"])
+
+
+def test_no_pointer_still_lets_a_read_through(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """Read-only tools are permitted in every state, including this one."""
+    proc = run_hook("pretool", payload(git_repo, tool="Read"), cwd=git_repo, env=clean_env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert not (state_dir(clean_env, git_repo, SESSION) / "state.json").exists()
+
+
+def test_an_unusable_session_id_is_not_turned_into_a_state_path(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """A traversing id names no activation; it must deny without composing a path from it."""
+    verdict, reason = pretool(git_repo, clean_env, tool="Write", session="../escape")
+
+    assert verdict == "deny"
+    assert "Arming never ran" in reason
+    assert not (Path(clean_env["XDG_STATE_HOME"]) / "opencode-review-loop" / "worktrees" / "escape").exists()
+
+
+def test_missing_state_denies_rather_than_passing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The pointer says this session armed, so absent state is the fail-open case."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (state_dir(env, git_repo, SESSION) / "state.json").unlink()
+
+    verdict, reason = pretool(git_repo, env, tool="Write")
+
+    assert verdict == "deny"
+    assert "activation state for this session is missing" in reason
+
+
+# --------------------------------------------------------------------------
+# Scope and the hot-path hoist
+# --------------------------------------------------------------------------
+
+
+def test_work_outside_the_armed_worktree_is_untouched(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    proc = run_hook("pretool", payload(elsewhere, tool="Write"), cwd=elsewhere, env=env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+
+
+@pytest.mark.parametrize("status", ["ARM_FAILED", "NEEDS_HUMAN", "RECONCILE", "ARMED"])
+def test_a_read_only_tool_is_permitted_in_every_denying_state(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    status: str,
+) -> None:
+    """The hoist is what makes this true, and it is why a read-only deny would be unreachable."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status=status, reason="whatever")
+
+    proc = run_hook("pretool", payload(git_repo, tool="Read"), cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+
+
+@pytest.mark.parametrize("status", ["COMPLETE", "DISARMED"])
+def test_a_finished_activation_stops_gating(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status=status)
+
+    proc = run_hook("pretool", payload(git_repo, tool="Write"), cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+
+
+# --------------------------------------------------------------------------
+# Status branches
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        pytest.param("ARM_FAILED", "Arming failed, so the review loop is NOT active", id="arm-failed"),
+        pytest.param("NEEDS_HUMAN", "escalated to NEEDS_HUMAN", id="needs-human"),
+    ],
+)
+def test_a_denying_status_denies_a_mutation(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    status: str,
+    expected: str,
+) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status=status, reason="because")
+
+    verdict, reason = pretool(git_repo, env, tool="Write")
+
+    assert verdict == "deny"
+    assert expected in reason
+    assert "because" in reason
+
+
+def test_an_expired_activation_blocks_rather_than_disarming(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """STALE is a denial, not a timer that quietly turns enforcement off (Rule 1)."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, armed_at=1)
+
+    verdict, reason = pretool(git_repo, env, tool="Write")
+
+    assert verdict == "deny"
+    assert "older than ttl_hours" in reason
+
+
+def test_nothing_may_change_before_the_phase_list_is_frozen(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, tool="Write")
+
+    assert verdict == "deny"
+    assert "phase list has not been frozen yet" in reason
+
+
+def test_set_phases_is_the_one_command_allowed_while_armed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=f"{ENTRYPOINT} set-phases --phase 'one'")
+
+    assert verdict == "allow"
+    assert "set-phases is the one command allowed" in reason
+
+
+# --------------------------------------------------------------------------
+# Rule 4: the user owns the exits
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", ["ocrl.sh finish", "/some/where/ocrl deactivate", "cd /x && ocrl.sh finish"])
+def test_claude_may_not_end_the_loop_itself(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "user-only escapes" in reason
+
+
+def test_the_escape_denial_outranks_a_commit_in_the_same_command(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command="git commit -m x && ocrl.sh finish")
+
+    assert verdict == "deny"
+    assert "user-only escapes" in reason
+
+
+# --------------------------------------------------------------------------
+# The commit gate
+# --------------------------------------------------------------------------
+
+
+def test_a_non_bash_tool_is_left_to_the_normal_flow(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    proc = run_hook("pretool", payload(git_repo, tool="Write"), cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param("git commit --amend -m x", "amending rewrites the commit", id="amend"),
+        pytest.param("git commit -m x a.txt", "partial commit", id="pathspec"),
+        pytest.param("make build && git commit -m x", 'segment starts with "make"', id="build-first"),
+        pytest.param("git commit -m 'a message' extra.txt", "partial commit", id="second-pathspec"),
+        pytest.param("git commit -m x; rm -rf /", "shell metacharacter", id="sequencing"),
+    ],
+)
+def test_a_commit_command_that_cannot_be_shown_safe_is_denied(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    command: str,
+    expected: str,
+) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "This commit command was not accepted" in reason
+    assert expected in reason
+
+
+def test_an_unchanged_tree_needs_no_review(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command='git commit -m "x"')
+
+    assert verdict == "allow"
+    assert "byte-identical to the last approved tree" in reason
+
+
+def test_an_approving_review_allows_the_commit_and_records_the_pending_tree(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "allow"
+    assert "OpenCode approved phase 1" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["pending_approved_tree"]
+    assert document["pending_command"] == 'git add -A && git commit -m "x"'
+    assert document["pending_approved_tree"] in document["approved_trees"]  # type: ignore[operator]
+
+
+def test_a_blocking_review_denies_and_returns_every_finding(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "requires changes before phase 1" in reason
+    assert "Returns success on a failed lookup" in reason
+    assert not read_state(env, git_repo, SESSION)["pending_approved_tree"]
+
+
+def test_a_reviewer_the_gate_contradicts_still_blocks(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The reviewer's own verdict is advisory; an actionable critical finding blocks anyway."""
+    env = armed_env(clean_env, OCRL_FAKE_MODE="approve-with-critical")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "Nil deref" in reason
+
+
+def test_a_failing_reviewer_counts_and_then_escalates(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A failed review is never an approval, and a run of them is not an infinite retry."""
+    env = armed_env(clean_env, OCRL_FAKE_MODE="nonzero", OCRL_MAX_FAILURES="1")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    command = 'git add -A && git commit -m "x"'
+
+    first = pretool(git_repo, env, command=command)
+    assert first[0] == "deny"
+    assert "1 of 1 consecutive failures" in first[1]
+    assert read_state(env, git_repo, SESSION)["failures"] == 1
+
+    second = pretool(git_repo, env, command=command)
+    assert second[0] == "deny"
+    assert "escalated to NEEDS_HUMAN" in second[1]
+    assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
+
+
+def test_an_oversized_file_is_never_silently_left_out_of_the_snapshot(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env, OCRL_MAX_FILE_BYTES="16")
+    active(git_repo, tmp_path, env)
+    (git_repo / "big.bin").write_bytes(b"x" * 64)
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "above max_file_bytes (16)" in reason
+    assert "big.bin" in reason
+
+
+def test_a_stale_pending_approval_is_cleared_before_a_new_attempt(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """An approval from an earlier attempt is stale by definition once a new commit is gated."""
+    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    patch_state(env, git_repo, pending_approved_tree="deadbeef", pending_command="git commit -m old")
+
+    verdict, _ = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert read_state(env, git_repo, SESSION)["pending_approved_tree"] == ""
+
+
+def test_a_rejected_shape_never_grants_a_pending_approval(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The shape check runs first, exactly as the shell ordered it.
+
+    A command the gate cannot read as a safe commit sequence therefore leaves an earlier
+    pending approval where it was. That is inert rather than a hole: ``confirm-commit`` still
+    requires an exact ``HEAD^{tree}`` match *and* the very command that was approved, so a
+    leftover approval cannot be consumed by this one.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, pending_approved_tree="deadbeef", pending_command="git commit -m old")
+
+    verdict, _ = pretool(git_repo, env, command="git commit --amend -m x")
+
+    assert verdict == "deny"
+    assert read_state(env, git_repo, SESSION)["pending_approved_tree"] == "deadbeef"
+
+
+# --------------------------------------------------------------------------
+# Reset
+# --------------------------------------------------------------------------
+
+
+def test_a_bounded_reset_is_permitted_during_a_reconcile(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    parent = git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "bad.txt").write_text("bad\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "bad")
+    patch_state(env, git_repo, status="RECONCILE", bad_commit_parent=parent)
+
+    verdict, reason = pretool(git_repo, env, command=f"git reset --soft {parent}")
+
+    assert verdict == "allow"
+    assert "bounded recovery reset" in reason
+
+
+def test_a_reset_to_anything_but_the_diverging_parent_is_denied(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    head = git(git_repo, "rev-parse", "HEAD")
+    patch_state(env, git_repo, status="RECONCILE", bad_commit_parent="0" * 40)
+
+    verdict, reason = pretool(git_repo, env, command=f"git reset --soft {head}")
+
+    assert verdict == "deny"
+    assert "the only permitted target during this reconcile" in reason
+
+
+def test_a_hard_reset_is_denied_during_a_reconcile(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """--hard discards the very working-tree content the gate exists to review."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    head = git(git_repo, "rev-parse", "HEAD")
+    patch_state(env, git_repo, status="RECONCILE", bad_commit_parent=head)
+
+    verdict, reason = pretool(git_repo, env, command=f"git reset --hard {head}")
+
+    assert verdict == "deny"
+    assert "would discard working-tree content" in reason
+
+
+def test_a_reset_may_not_rewind_a_reviewed_commit_outside_a_reconcile(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    first = git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "more.txt").write_text("more\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "more")
+
+    verdict, reason = pretool(git_repo, env, command=f"git reset --soft {first}")
+
+    assert verdict == "deny"
+    assert "only permitted during a reconcile" in reason
+
+
+# --------------------------------------------------------------------------
+# The fail-closed guard
+# --------------------------------------------------------------------------
+
+
+def test_an_unreadable_payload_denies(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Malformed JSON yields no session id, and no session id is a denial, not a pass."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    proc = run_bootstrap(["pretool"], cwd=git_repo, env=env, stdin=b"{not json")
+
+    assert proc.returncode == 0
+    verdict, reason = decision(proc)
+    assert verdict == "deny"
+    assert "carried no session id" in reason
+
+
+def test_the_reviewer_seam_is_the_only_thing_that_makes_these_tests_cheap() -> None:
+    """A guard on the fixture itself: without it every commit test would call a model."""
+    assert FAKE_REVIEWER.is_file()
+
+
+# --------------------------------------------------------------------------
+# Detection bypasses
+#
+# Every case here executed ungated before the fix, so each one fails on the old code.
+# --------------------------------------------------------------------------
+
+
+def test_a_commit_chained_ahead_of_set_phases_is_denied(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The one exception permitted while ARMED was matched as a *substring* of the command.
+
+    So a commit could be chained in front of it and ran with no snapshot and no review, at the
+    one moment nothing has been frozen yet -- and ``confirm-commit`` then saw no pending
+    approval and said nothing about it.
+    """
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+
+    verdict, reason = pretool(
+        git_repo,
+        env,
+        command=f'git add -A && git commit -m "x" && {ENTRYPOINT} set-phases --phase one',
+    )
+
+    assert verdict == "deny"
+    assert "phase list has not been frozen yet" in reason
+    assert read_state(env, git_repo, SESSION)["status"] == "ARMED"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(f"{ENTRYPOINT} set-phases --phase one", id="one-phase"),
+        pytest.param(f'{ENTRYPOINT} set-phases --phase "one" --phase "two"', id="several-phases"),
+    ],
+)
+def test_a_plain_set_phases_is_still_allowed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
+    """The fix must not close the exception it is narrowing."""
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    verdict, _ = pretool(git_repo, env, command=command)
+
+    assert verdict == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("./ocrl set-phases --phase one", id="a-program-the-repo-ships"),
+        pytest.param("ocrl.sh set-phases --phase one", id="bare-name-off-PATH"),
+        pytest.param("/elsewhere/ocrl.sh set-phases --phase one", id="another-copy"),
+    ],
+)
+def test_only_this_gates_own_script_is_the_armed_exception(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    command: str,
+) -> None:
+    """Matching by basename trusts any executable named ``ocrl`` -- including one the repo ships.
+
+    That is an arbitrary program allowed to run at the one moment everything else is denied.
+    """
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "phase list has not been frozen yet" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(r'g\it add -A && g\it commit -m "x"', id="backslash"),
+        pytest.param("'g'it add -A && 'g'it commit -m \"x\"", id="single-quotes"),
+        pytest.param('g"i"t add -A && g"i"t commit -m "x"', id="double-quotes"),
+    ],
+)
+def test_a_disguised_commit_command_still_reaches_the_gate(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    command: str,
+) -> None:
+    r"""``g\it commit`` is ``git commit`` to bash, and the detector matched the raw string.
+
+    So none of these were recognised as commits at all: ``pretool`` fell through to its silent
+    pass and the commit ran with no snapshot and no review. A blocking reviewer is used here
+    so the assertion proves the command was actually *reviewed*, not merely denied.
+    """
+    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "requires changes before phase 1" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(r"/plugin/scripts/oc\rl.sh finish", id="backslash"),
+        pytest.param("/plugin/scripts/'o'crl.sh deactivate", id="quotes"),
+    ],
+)
+def test_a_disguised_escape_is_still_denied(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
+    """Rule 4 is not escapable by quoting the name of the script that ends the loop."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "user-only escapes" in reason
+
+
+def test_a_disguised_reset_is_classified_as_a_reset(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    r"""``g\it reset`` reaches the reconcile gate, where the raw tokenizer reads it correctly."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    head = git(git_repo, "rev-parse", "HEAD")
+    patch_state(env, git_repo, status="RECONCILE", bad_commit_parent=head)
+
+    verdict, reason = pretool(git_repo, env, command=r"g\it reset --hard " + head)
+
+    assert verdict == "deny"
+    assert "would discard working-tree content" in reason
+
+
+# --------------------------------------------------------------------------
+# An approval may not land on an activation that moved
+# --------------------------------------------------------------------------
+
+
+def test_an_approval_does_not_land_on_an_activation_that_moved(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A review takes minutes, and the loop can transition during them.
+
+    The reviewer stand-in escalates the activation from inside the review, which is exactly
+    that window. Reloading under the lock is not enough on its own -- the approval would still
+    be written over the escalation and the commit allowed.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    env["OCRL_REVIEWER_CMD"] = str(escalating_reviewer(tmp_path, state_dir(env, git_repo, SESSION) / "state.json"))
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "while this commit was being gated" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["status"] == "NEEDS_HUMAN"
+    assert document["pending_approved_tree"] == ""
+    # Only the baseline arming banked; the reviewed tree was never marked approved.
+    assert document["approved_trees"] == [document["baseline_tree"]]
+
+
+def escalating_reviewer(tmp_path: Path, state_path: Path) -> Path:
+    """A reviewer that escalates the activation and *then* approves.
+
+    Stands in for the ordinary case of something else transitioning the loop while a slow
+    review runs; doing it from inside the reviewer is what makes the race deterministic.
+    """
+    script = tmp_path / "escalating-reviewer.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "python3 - <<'PY'\n"
+        "import json, pathlib\n"
+        f"p = pathlib.Path({str(state_path)!r})\n"
+        "d = json.loads(p.read_text())\n"
+        'd["status"] = "NEEDS_HUMAN"\n'
+        'd["reason"] = "escalated while the review ran"\n'
+        "p.write_text(json.dumps(d))\n"
+        "PY\n"
+        "printf 'Fine.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<OCRL-END>>>\\n'\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+# --------------------------------------------------------------------------
+# Words the gate cannot read
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("$(printf git) commit -m x", id="command-substitution"),
+        pytest.param("`printf git` commit -m x", id="backtick"),
+        pytest.param("${GIT} commit -m x", id="braced-variable"),
+        pytest.param("$'\\x67it' commit -m x", id="ansi-c-quoting"),
+    ],
+)
+def test_a_command_whose_name_is_an_expansion_is_denied(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    command: str,
+) -> None:
+    """Each of these runs ``git commit`` and contains no ``git`` for any detector to match.
+
+    No textual pass resolves them, and neither does a real parser -- bashlex would report a
+    command whose *name is a substitution node*, and the only sound answer to that is still
+    refusal. So the deny-list absorbs it, which is the trade the tokenizer already makes.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "the gate cannot tell what it will run" in reason
+
+
+def test_an_ordinary_command_with_no_expansion_is_untouched(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The denial must not swallow the builds and tests the loop exists to run."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    for command in ("make test", "grep -r '$foo' .", "pytest -q tests"):
+        proc = run_hook("pretool", payload(git_repo, command=command), cwd=git_repo, env=env)
+        assert proc.returncode == 0
+        assert proc.stdout == "", command
+
+
+# --------------------------------------------------------------------------
+# git by any other path
+# --------------------------------------------------------------------------
+
+
+def test_an_absolute_git_commit_still_reaches_the_gate(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``/usr/bin/git commit`` is the same program, and the detector matched the bare word.
+
+    The strict validator then refuses the non-canonical spelling, which is the safe direction:
+    it is denied rather than silently passed through to run.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+
+    verdict, reason = pretool(git_repo, env, command="/usr/bin/git add -A && /usr/bin/git commit -m x")
+
+    assert verdict == "deny"
+    assert "This commit command was not accepted" in reason
+    assert "/usr/bin/git" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git reset --hard HEAD~1", id="hard"),
+        pytest.param("git reset HEAD~1", id="mixed-is-the-default"),
+        pytest.param("/usr/bin/git reset --soft HEAD~1", id="absolute-path"),
+        pytest.param("git reset", id="unstage-everything"),
+    ],
+)
+def test_a_reset_the_gate_cannot_read_is_denied_rather_than_passed(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    command: str,
+) -> None:
+    """The shell only denied when it could *parse* the target, so every other shape passed.
+
+    ``git reset --hard HEAD~1`` and a bare ``git reset HEAD~1`` both move HEAD off a reviewed
+    commit, and both were allowed. "The gate could not parse it" is not a reason to allow it.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "more.txt").write_text("more\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "more")
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "This reset was not accepted" in reason
+
+
+# --------------------------------------------------------------------------
+# An escalation may not undo a user's exit
+# --------------------------------------------------------------------------
+
+
+def test_an_escalation_does_not_reopen_a_mode_the_user_stopped(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Rule 4: the user owns the exits, and a review that fails afterwards may not undo one.
+
+    The reviewer stand-in disarms the activation from inside the review -- the window in which
+    a user actually runs ``/opencode-review-loop:stop`` -- and then fails. Escalating over that
+    would turn their ``DISARMED`` back into a state that denies every mutation.
+    """
+    env = armed(clean_env, OCRL_MAX_FAILURES="0")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    env["OCRL_REVIEWER_CMD"] = str(stopping_reviewer(tmp_path, state_dir(env, git_repo, SESSION) / "state.json"))
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "while this commit was being gated" in reason
+    assert read_state(env, git_repo, SESSION)["status"] == "DISARMED"
+
+
+def stopping_reviewer(tmp_path: Path, state_path: Path) -> Path:
+    """A reviewer that disarms the activation and then fails, in that order."""
+    script = tmp_path / "stopping-reviewer.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "python3 - <<'PY'\n"
+        "import json, pathlib\n"
+        f"p = pathlib.Path({str(state_path)!r})\n"
+        "d = json.loads(p.read_text())\n"
+        'd["status"] = "DISARMED"\n'
+        'd["reason"] = "stopped by the user"\n'
+        "p.write_text(json.dumps(d))\n"
+        "PY\n"
+        "exit 3\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+# --------------------------------------------------------------------------
+# The gate's own state is not an ordinary file
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool", ["Write", "Edit", "NotebookEdit"])
+def test_an_editing_tool_may_not_rewrite_the_gates_own_state(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    tool: str,
+) -> None:
+    """``pretool`` passes every non-Bash tool, so this route needed no shell at all.
+
+    A ``Write`` of ``{"status": "DISARMED"}`` over ``state.json`` ends the mode without any of
+    the checks that exist to stop exactly that (Rule 4).
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    target = state_dir(env, git_repo, SESSION) / "state.json"
+    key = "notebook_path" if tool == "NotebookEdit" else "file_path"
+
+    proc = run_hook(
+        "pretool",
+        {"session_id": SESSION, "cwd": str(git_repo), "tool_name": tool, "tool_input": {key: str(target)}},
+        cwd=git_repo,
+        env=env,
+    )
+
+    verdict, reason = decision(proc)
+    assert verdict == "deny"
+    assert "review loop's own state directory" in reason
+    assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
+
+
+def test_an_ordinary_file_in_the_repository_is_still_writable(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The check must not cost the model its ability to implement the plan."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    proc = run_hook(
+        "pretool",
+        {"session_id": SESSION, "cwd": str(git_repo), "tool_name": "Write", "tool_input": {"file_path": "src/thing.py"}},
+        cwd=git_repo,
+        env=env,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+
+
+def test_a_symlink_into_the_state_root_does_not_bypass_the_guard(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Containment was decided lexically, so an alias inside the repository shared no prefix."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "alias").symlink_to(Path(env["XDG_STATE_HOME"]) / "opencode-review-loop")
+    target = f"alias/worktrees/{paths.sha256_hex(str(git_repo))}/{SESSION}/state.json"
+
+    proc = run_hook(
+        "pretool",
+        {"session_id": SESSION, "cwd": str(git_repo), "tool_name": "Write", "tool_input": {"file_path": target}},
+        cwd=git_repo,
+        env=env,
+    )
+
+    verdict, reason = decision(proc)
+    assert verdict == "deny"
+    assert "review loop's own state directory" in reason
+
+
+def test_a_relative_state_dir_does_not_bypass_the_guard(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``OCRL_STATE_DIR`` is used verbatim, so a relative one never matched an absolute target."""
+    env = armed(clean_env, OCRL_STATE_DIR="relative-state")
+    proc = run_bootstrap(["arm", "--session", SESSION, "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    proc = run_bootstrap(["set-phases", "--phase", "one"], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stderr
+    target = f"relative-state/worktrees/{paths.sha256_hex(str(git_repo))}/{SESSION}/state.json"
+
+    proc = run_hook(
+        "pretool",
+        {"session_id": SESSION, "cwd": str(git_repo), "tool_name": "Write", "tool_input": {"file_path": target}},
+        cwd=git_repo,
+        env=env,
+    )
+
+    verdict, reason = decision(proc)
+    assert verdict == "deny"
+    assert "review loop's own state directory" in reason

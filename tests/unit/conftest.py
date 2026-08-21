@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -120,6 +122,35 @@ def run_bootstrap(
         text=True,
         check=False,
     )
+
+
+def run_hook(
+    sub: str,
+    payload: Mapping[str, object],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+) -> subprocess.CompletedProcess[str]:
+    """Drive one hook entrypoint with a payload on stdin, exactly as Claude Code does.
+
+    Through the real bootstrap rather than by calling the function: the thing under test is
+    the whole contract -- what reaches stdout, and what the process exit status is -- and the
+    exit status is the only discriminator the shim is allowed to use.
+    """
+    return run_bootstrap([sub], cwd=cwd, env=env, stdin=json.dumps(payload).encode())
+
+
+def hook_json(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    """The single JSON object a hook emitted. Fails the test if stdout is not exactly one."""
+    document: dict[str, Any] = json.loads(proc.stdout)
+    return document
+
+
+def decision(proc: subprocess.CompletedProcess[str]) -> tuple[str, str]:
+    """``(permissionDecision, permissionDecisionReason)`` from a ``PreToolUse`` response."""
+    output = hook_json(proc)["hookSpecificOutput"]
+    assert output["hookEventName"] == "PreToolUse"
+    return output["permissionDecision"], output["permissionDecisionReason"]
 
 
 @pytest.fixture

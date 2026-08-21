@@ -13,6 +13,8 @@ from __future__ import annotations
 import sys
 
 from ocrl import commands, gitsnap, report, reviewer
+from ocrl.commands import completion
+from ocrl.commands.completion import Completion
 from ocrl.config import Config
 from ocrl.gitsnap import SnapshotError
 from ocrl.state import State
@@ -199,99 +201,11 @@ def _refuse_unless_finishable(state: State, config: Config) -> None:
     )
 
 
-def _fingerprint(state: State, config: Config) -> tuple[str, str, str, str, str]:
-    """Everything that must be **unchanged** for a finished review to still mean anything.
-
-    Deliberately an equality check rather than a list of statuses that may not be overwritten.
-    A deny-list has to enumerate every denying state, and it silently fails open the day one
-    is added or renamed: ``RECONCILE`` was missing from exactly such a list, so an approving
-    review overwrote "a commit diverged from the reviewed tree" with ``COMPLETE``.
-
-    So instead: whatever the activation was when the review started, it must still be that
-    when the review lands. Both statuses are captured because they answer different questions
-    -- the stored one changes when something transitions the loop, the effective one also
-    changes when the TTL expires underneath a long review, and a stale baseline is exactly
-    what must not be signed off.
-
-    ``armed_at``, ``baseline_tree`` and ``session_id`` identify *which* activation this is:
-    ``arm`` writes a fresh document, so a re-arm mid-review changes them.
-    """
-    return (
-        state.get("armed_at"),
-        state.get("baseline_tree"),
-        state.get("session_id"),
-        state.get("status"),
-        state.effective_status(config),
-    )
-
-
-def _describe_change(before: tuple[str, str, str, str, str], now: tuple[str, str, str, str, str], reason: str) -> str:
-    if before[:3] != now[:3]:
-        return (
-            "opencode-review-loop: this activation was re-armed while the final review was running, "
-            "so the approval belongs to an activation that is no longer current. The new activation stays armed.\n"
-        )
-    return (
-        f"opencode-review-loop: the activation moved from {before[4]} to {now[4]} ({reason}) while the final review was running. "
-        "That is not overwritten by an approval — the review is recorded, but the mode does not complete.\n"
-    )
-
-
-def _complete(state: State, *, repo: str, config: Config, reviewed: str, before: tuple[str, str, str, str, str]) -> None:
-    """Record ``COMPLETE``, but only if nothing invalidated the review while it ran.
-
-    A final review takes minutes, and three things can happen in that window, each of which
-    turns "approved" into a lie:
-
-    - the worktree changes, so the tree that was reviewed is no longer the tree on disk;
-    - the loop transitions -- escalates, enters reconcile, is stopped, goes stale -- and
-      completing would overwrite somebody else's decision with an approval;
-    - the activation is re-armed, so the approval belongs to a plan that is no longer active.
-
-    **Every check runs with the activation lock held**, and the lock is not released until
-    ``COMPLETE`` is on disk. Verifying the worktree before taking the lock leaves a window in
-    which the tree is checked, the process then waits for the lock, and the content changes
-    while it waits -- the verification would be of a tree that no longer exists by the time
-    the approval is written. What this can promise is precisely that at the instant
-    ``COMPLETE`` was persisted, the worktree was the reviewed tree and nothing had moved the
-    activation; a change *after* that is the next gate's problem, not a hole in this one.
-
-    Raises ``commands.Refused``, which abandons the transaction with the previous document
-    intact -- the mode stays armed, which is the safe direction.
-    """
-    with state.transaction():
-        now = _fingerprint(state, config)
-        if now != before:
-            raise commands.Refused(_describe_change(before, now, state.get("reason")))
-
-        try:
-            after = gitsnap.snapshot(repo)
-        except SnapshotError as exc:
-            raise commands.Refused(
-                f"opencode-review-loop: the final review passed, but the working state could not be re-checked afterwards ({exc}), "
-                "so completion is refused. The mode stays armed.\n"
-            ) from exc
-
-        if after.tree != reviewed:
-            raise commands.Refused(
-                f"opencode-review-loop: the final review approved tree {reviewed}, but the worktree is now {after.tree} — "
-                "content changed while the review was running, so what was approved is not what is on disk. "
-                "The mode stays armed; commit the change and finish again.\n"
-            )
-        if after.tree != gitsnap.head_tree(repo):
-            raise commands.Refused(
-                "opencode-review-loop: the final review passed, but the worktree is no longer clean — "
-                f"a commit or a reset moved HEAD while the review was running.\n\n{gitsnap.dirty_summary(repo)}\n"
-            )
-
-        state.update(final_done_tree=reviewed, status="COMPLETE", reason="final cumulative review approved (user-invoked finish)")
-
-
-def _prepare(state: State, *, config: Config, repo: str) -> tuple[gitsnap.Snapshot, tuple[str, str, str, str, str]]:
+def _prepare(state: State, *, config: Config, repo: str) -> tuple[gitsnap.Snapshot, Completion]:
     """Everything that must hold before a model is called. Raises ``commands.Refused``.
 
-    Returns the snapshot the review will be run against and the fingerprint the approval will
-    be checked against.
+    Returns the snapshot the review will be run against and the pending completion the
+    approval will be checked against.
     """
     with state.transaction():
         # Both under the same lock, and in this order: an activation that may not finish must
@@ -299,7 +213,7 @@ def _prepare(state: State, *, config: Config, repo: str) -> tuple[gitsnap.Snapsh
         # insisting on the outstanding phases.
         _refuse_unless_finishable(state, config)
         state.update(finish_requested=True)
-        before = _fingerprint(state, config)
+        pending = completion.start(state, config=config, repo=repo)
 
     if not gitsnap.worktree_clean(repo):
         raise commands.Refused(
@@ -316,7 +230,7 @@ def _prepare(state: State, *, config: Config, repo: str) -> tuple[gitsnap.Snapsh
         raise commands.Refused(
             f"opencode-review-loop: the working state could not be snapshotted ({exc}), so the final review did not run.\n"
         ) from exc
-    return snap, before
+    return snap, pending
 
 
 def finish(argv: list[str]) -> int:
@@ -334,7 +248,7 @@ def finish(argv: list[str]) -> int:
 
     state, config, repo = activation.state, activation.config, activation.repo
     try:
-        snap, before = _prepare(state, config=config, repo=repo)
+        snap, pending = _prepare(state, config=config, repo=repo)
     except commands.Refused as exc:
         sys.stdout.write(str(exc))
         return 1
@@ -352,7 +266,7 @@ def finish(argv: list[str]) -> int:
         return 1
 
     try:
-        _complete(state, repo=repo, config=config, reviewed=snap.tree, before=before)
+        pending.commit(reviewed=snap.tree, reason="final cumulative review approved (user-invoked finish)")
     except commands.Refused as exc:
         sys.stdout.write(str(exc))
         return 1

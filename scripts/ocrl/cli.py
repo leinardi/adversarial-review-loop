@@ -4,9 +4,12 @@ Every subcommand module is imported **inside** its own branch. ``pretool`` runs 
 tool call, so importing ``arm``, ``dryrun`` and the reviewer stack to answer a ``Read`` would
 be import cost multiplied by thousands of calls for code that never runs.
 
-The hook entrypoints (``pretool``, ``confirm-commit``, ``posttool-failure``, ``gate-stop``)
-are not wired here yet; ``scripts/ocrl.sh`` is still the live gate until the entrypoint is
-flipped, and they land with their own review.
+The four hook entrypoints return the process exit status their :class:`ocrl.hookio.Hook`
+reports, and that status is the shim's only discriminator: ``0`` means a response was
+written in full -- including a legitimately empty one -- and anything else means the shim
+must discard what it captured and emit that event's own fail-closed response. Nothing here
+may turn a non-zero into a zero. ``scripts/ocrl.sh`` is still the live gate until Phase 6
+flips the entrypoint.
 """
 
 from __future__ import annotations
@@ -42,6 +45,25 @@ def main(argv: list[str]) -> int:  # noqa: PLR0911 - one return per subcommand, 
     if sub in ("-h", "--help", "help", ""):
         sys.stdout.write(USAGE)
         return 0
+
+    # The hot path first: `pretool` runs on every single tool call, so it is matched before
+    # the table a user's typing reaches.
+    if sub == "pretool":
+        from ocrl.commands import pretool  # noqa: PLC0415
+
+        return pretool.run(rest)
+    if sub == "confirm-commit":
+        from ocrl.commands import posttool  # noqa: PLC0415
+
+        return posttool.confirm_commit(rest)
+    if sub == "posttool-failure":
+        from ocrl.commands import posttool  # noqa: PLC0415
+
+        return posttool.posttool_failure(rest)
+    if sub == "gate-stop":
+        from ocrl.commands import stop  # noqa: PLC0415
+
+        return stop.run(rest)
 
     if sub == "arm":
         from ocrl.commands import arm  # noqa: PLC0415
