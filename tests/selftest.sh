@@ -275,11 +275,12 @@ if start 'command shape: allowlist table, through an armed pretool'; then
     # breaks the pattern before it reaches "commit", and the command is never
     # routed to the validator at all. `validate_commit` itself still rejects
     # `-C` when called directly (see tests/unit/test_cmdshape.py), but that
-    # code path is unreachable in production for exactly this shape. This is
-    # true of the live Bash gate today, not a regression from the port --
-    # confirmed by running the shell's own grep pattern above -- and fixing
-    # the detector is out of scope for a same-behaviour flip. Recorded here so
-    # the gap is asserted, not silently lost when this section changed shape.
+    # code path is unreachable in production for exactly this shape. This gap
+    # predates the Python port -- it was already true of the plugin's retired
+    # Bash gate, carried over unchanged rather than fixed, because fixing the
+    # detector was out of scope for a same-behaviour translation. Recorded
+    # here so the gap is asserted, not silently lost when this section
+    # changed shape.
     assert_eq 'git -C /other commit -m x is a live detection gap, not denied' \
         "$(pre Bash 'git -C /other commit -m x')" 'pass'
 
@@ -1175,151 +1176,6 @@ PYEOF
     assert_eq '00 does not disable the timeout' "$(logged 00)" '1150'
     assert_eq '0000 does not disable the timeout' "$(logged 0000)" '1150'
     assert_eq 'a legitimate value with a leading zero still passes through' "$(logged 0005)" '5'
-fi
-
-# --------------------------------------------------------------------------
-# Rollback compatibility
-# --------------------------------------------------------------------------
-#
-# Reverting the Phase 6 commit restores the Bash entrypoint, and that has to
-# be safe for an activation that is already live: state.json written by the
-# Python port must still be exactly what the old ocrl_state_load/ocrl_get
-# expect, in both directions. `HEAD` cannot be used to find "the old Bash
-# implementation" -- once Phase 6 lands, scripts/ocrl.sh at HEAD *is* the
-# shim. So this pins the exact commit where scripts/ocrl.sh was last the full
-# Bash dispatcher, and reconstitutes it from git history for the duration of
-# this section only. scripts/lib/*.sh, which that file sources, stay on disk
-# unreferenced and need no such trick.
-OCRL_LAST_BASH_SHA='eea08d35d42a0351a468fcc64e349185fdfaf090'
-
-if start 'rollback: Python and Bash agree on disk state, in both directions'; then
-    new_case
-    old_dir="$CASE_DIR/bash-shim"
-    old_ocrl="$old_dir/ocrl.sh"
-    if git -C "$PLUGIN_ROOT" cat-file -e "$OCRL_LAST_BASH_SHA:scripts/ocrl.sh" 2>/dev/null; then
-        mkdir -p "$old_dir"
-        # The old dispatcher sources ./lib/*.sh relative to its own location;
-        # those files are untouched on disk (unreferenced, per the plan) and
-        # are reused here rather than copied.
-        ln -sf "$PLUGIN_ROOT/scripts/lib" "$old_dir/lib"
-        git -C "$PLUGIN_ROOT" show "$OCRL_LAST_BASH_SHA:scripts/ocrl.sh" >"$old_ocrl"
-        chmod +x "$old_ocrl"
-
-        old_pre() {
-            local tool=$1 cmd=${2:-} out
-            out=$(jq -nc --arg s "$SESSION" --arg c "$REPO" --arg t "$tool" --arg cmd "$cmd" \
-                '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:$t,tool_input:{command:$cmd}}' |
-                (cd "$REPO" && "$old_ocrl" pretool))
-            printf '%s' "$out" >"$ROOT/last.json"
-            if [ -z "$out" ]; then printf 'pass'; else printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"'; fi
-        }
-        old_confirm() {
-            local cmd=$1 out
-            out=$(jq -nc --arg s "$SESSION" --arg c "$REPO" --arg cmd "$cmd" \
-                '{session_id:$s,cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{exit_code:0}}' |
-                (cd "$REPO" && "$old_ocrl" confirm-commit))
-            printf '%s' "$out" >"$ROOT/last.json"
-            printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""'
-        }
-
-        # -- Python starts and advances phase 1 -----------------------------
-        arm_ok && phases_ok
-        assert_eq 'allow_dirty (a boolean) round-trips as written by Python' "$(sget allow_dirty)" 'false'
-        printf 'phase one\n' >"$REPO/a.txt"
-        with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
-        commit_now 'phase 1'
-        confirm 'git add -A && git commit -m "phase 1"' >/dev/null
-        assert_eq 'python advanced to phase 2' "$(sget phase)" '2'
-
-        # -- Bash reads what Python wrote ------------------------------------
-        out=$(cd "$REPO" && "$old_ocrl" status)
-        assert_contains 'bash reads the python-written phase' "$out" 'phase:               2 of 2'
-        assert_contains 'and the phases array round-tripped' "$out" '2. Phase two'
-
-        py_edit=$(pre Edit)
-        bash_edit=$(old_pre Edit)
-        assert_eq 'python allows an edit on phase 2' "$py_edit" 'pass'
-        assert_eq 'bash agrees, reading the identical state' "$bash_edit" 'pass'
-
-        # -- Bash drives phase 2 to completion, mutating the same file ------
-        printf 'phase two\n' >"$REPO/b.txt"
-        bd=$(with_env OCRL_FAKE_MODE=approve old_pre Bash 'git add -A && git commit -m "phase 2"')
-        assert_eq 'bash approves phase 2 against python-written state' "$bd" 'allow'
-        commit_now 'phase 2'
-        ctx=$(old_confirm 'git add -A && git commit -m "phase 2"')
-        assert_contains 'bash confirms the commit and reports all phases done' "$ctx" 'All 2 phases are now committed'
-        assert_eq 'the pending approval bash wrote was consumed' "$(sget pending_approved_tree)" ''
-
-        # -- Python finishes what Bash advanced ------------------------------
-        d=$(with_env OCRL_FAKE_MODE=approve stop_decision)
-        assert_eq 'python completes the activation bash advanced' "$d" 'ok'
-        assert_eq 'status is COMPLETE' "$(sget status)" 'COMPLETE'
-    else
-        # A silent skip here would hide the one proof that matters most: that
-        # reverting Phase 6 can safely resume a live session. A shallow clone
-        # is the known cause (`git fetch --unshallow` fixes it locally; CI's
-        # checkout uses fetch-depth: 0 for exactly this reason) -- but the
-        # gap must fail loudly, not report green with nothing tested.
-        bad "rollback compatibility could not run: $OCRL_LAST_BASH_SHA is not reachable in this checkout (shallow clone? try: git fetch --unshallow)"
-    fi
-fi
-
-if start 'rollback: bash reads a python-written RECONCILE and NEEDS_HUMAN'; then
-    new_case
-    old_dir="$CASE_DIR/bash-shim"
-    old_ocrl="$old_dir/ocrl.sh"
-    if git -C "$PLUGIN_ROOT" cat-file -e "$OCRL_LAST_BASH_SHA:scripts/ocrl.sh" 2>/dev/null; then
-        mkdir -p "$old_dir"
-        # The old dispatcher sources ./lib/*.sh relative to its own location;
-        # those files are untouched on disk (unreferenced, per the plan) and
-        # are reused here rather than copied.
-        ln -sf "$PLUGIN_ROOT/scripts/lib" "$old_dir/lib"
-        git -C "$PLUGIN_ROOT" show "$OCRL_LAST_BASH_SHA:scripts/ocrl.sh" >"$old_ocrl"
-        chmod +x "$old_ocrl"
-        old_pre() {
-            local tool=$1 cmd=${2:-} out
-            out=$(jq -nc --arg s "$SESSION" --arg c "$REPO" --arg t "$tool" --arg cmd "$cmd" \
-                '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:$t,tool_input:{command:$cmd}}' |
-                (cd "$REPO" && "$old_ocrl" pretool))
-            printf '%s' "$out" >"$ROOT/last.json"
-            if [ -z "$out" ]; then printf 'pass'; else printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"'; fi
-        }
-
-        # Python enters RECONCILE (a partial commit), Bash reads the reason
-        # and the bounded recovery target, and permits exactly that reset.
-        arm_ok && phases_ok
-        printf 'one\n' >"$REPO/a.txt"
-        printf 'two\n' >"$REPO/b.txt"
-        with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
-        git -C "$REPO" add a.txt
-        git -C "$REPO" commit -qm 'only half'
-        confirm 'git add -A && git commit -m x' >/dev/null
-        assert_eq 'python entered RECONCILE' "$(sget status)" 'RECONCILE'
-
-        d=$(old_pre Bash "git reset --soft $(sget bad_commit_parent)")
-        assert_eq 'bash permits the exact bounded reset python recorded' "$d" 'allow'
-
-        # Python escalates to NEEDS_HUMAN (repeated failures), Bash denies
-        # every mutation and names the reason.
-        new_case
-        arm_ok && phases_ok
-        printf 'x\n' >"$REPO/a.txt"
-        export OCRL_MAX_FAILURES=1
-        with_env OCRL_FAKE_MODE=malformed pre Bash 'git add -A && git commit -m x' >/dev/null
-        with_env OCRL_FAKE_MODE=malformed pre Bash 'git add -A && git commit -m x' >/dev/null
-        unset OCRL_MAX_FAILURES
-        assert_eq 'python escalated to NEEDS_HUMAN' "$(sget status)" 'NEEDS_HUMAN'
-
-        d=$(old_pre Edit)
-        assert_eq 'bash denies, reading the same escalation' "$d" 'deny'
-    else
-        # A silent skip here would hide the one proof that matters most: that
-        # reverting Phase 6 can safely resume a live session. A shallow clone
-        # is the known cause (`git fetch --unshallow` fixes it locally; CI's
-        # checkout uses fetch-depth: 0 for exactly this reason) -- but the
-        # gap must fail loudly, not report green with nothing tested.
-        bad "rollback compatibility could not run: $OCRL_LAST_BASH_SHA is not reachable in this checkout (shallow clone? try: git fetch --unshallow)"
-    fi
 fi
 
 # --------------------------------------------------------------------------

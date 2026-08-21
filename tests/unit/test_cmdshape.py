@@ -1,15 +1,12 @@
 """Command-shape classification, mirrored from ``selftest.sh``'s allowlist table.
 
-Two things are asserted, per command:
-
-* the verdict this implementation reaches, spelled out here so the table is readable on its
-  own and a change of behaviour cannot hide behind a shared helper;
-* that the still-live shell implementation reaches the *same* verdict with the *same*
-  explanation. Phase 3 is a translation, and the message is part of what was translated --
-  it is what the model is shown when a commit is refused.
-
-The shell section stays in ``selftest.sh`` for now, because ``scripts/ocrl.sh`` is still the
-live entrypoint and those assertions still cover production code.
+The verdict this implementation reaches for each command is spelled out here so the table is
+readable on its own and a change of behaviour cannot hide behind a shared helper. This used to
+also assert that the plugin's own (now-deleted) shell implementation reached the same verdict
+with the same explanation; that comparison is gone along with ``scripts/lib/cmdshape.sh``, but
+a handful of tests below still drive a real, unmodified system ``bash`` directly -- those are
+about bash's own word-splitting and quoting rules, not about this plugin's retired Bash port,
+and stay for exactly that reason.
 """
 
 from __future__ import annotations
@@ -19,7 +16,6 @@ import subprocess
 import time
 
 import pytest
-from conftest import bash_cmdshape
 
 from ocrl import cmdshape
 from ocrl._vendor import bashlex
@@ -107,42 +103,13 @@ def test_denied(command: str) -> None:
         cmdshape.validate_commit(command)
 
 
-# -- agreement with the shell implementation -------------------------------
-
-
-#: Options whose specific reason the shell lost to `printf` -- see `_long_reason`. The
-#: verdict is identical; only the explanation differs, and here it differs deliberately.
-PRINTF_BUG_OPTIONS = ("--file", "--template", "--pathspec-from-file", "--chmod")
-
-#: Commands the shell refused by walking off the end of its own token stream, and bashlex
-#: refuses as the syntax errors they are. Same verdict, different wording -- and the wording
-#: is better: `git commit -m x && ` is not "an empty segment", it is an unfinished command.
-#: Each one is asserted individually below, so this exemption cannot quietly grow.
+#: Commands whose failure mode is bashlex naming a real syntax error -- `git commit -m x && `
+#: is not "an empty segment", it is an unfinished command.
 PARSER_WORDED_REFUSALS = ("git commit -m x && ",)
-
-
-@pytest.mark.parametrize("command", ACCEPTED + DENIED)
-def test_the_shell_reaches_the_same_verdict_and_says_the_same_thing(command: str) -> None:
-    shell = bash_cmdshape("validate", command)
-    try:
-        cmdshape.validate_commit(command)
-    except CommandShapeError as exc:
-        assert shell.returncode == 1, f"python denied {command!r} ({exc}) but the shell accepted it"
-        if any(option in command for option in PRINTF_BUG_OPTIONS) or command in PARSER_WORDED_REFUSALS:
-            return  # covered by its own test below, which asserts the difference
-        assert str(exc) == shell.stdout.decode(), f"the explanation drifted for {command!r}"
-    else:
-        assert shell.returncode == 0, f"python accepted {command!r} but the shell denied it: {shell.stdout.decode()}"
 
 
 @pytest.mark.parametrize("command", PARSER_WORDED_REFUSALS)
 def test_a_syntax_error_is_refused_as_one(command: str) -> None:
-    """The shell called an unfinished command an "empty segment"; bashlex names the syntax.
-
-    Asserted in both directions, because the point is that the *verdict* did not move when
-    the wording did.
-    """
-    assert bash_cmdshape("validate", command).returncode == 1, "the shell must still have denied it"
     with pytest.raises(CommandShapeError, match="not valid shell syntax"):
         cmdshape.validate_commit(command)
 
@@ -157,50 +124,38 @@ def test_a_syntax_error_is_refused_as_one(command: str) -> None:
     ],
 )
 def test_the_reasons_the_shell_lost_to_printf_are_restored(command: str, fragment: str) -> None:
-    """These four denials say *why* now; in the shell `printf` ate the message.
-
-    The shell still denied them -- via the generic allowlist message -- so this changes what
-    the model is told, not what it is allowed to do.
-    """
-    shell = bash_cmdshape("validate", command)
-    assert shell.returncode == 1, "the shell must still have denied it"
-    assert "is not on the allowlist" in shell.stdout.decode(), "the shell's message must be the generic one"
-
+    """These four denials say *why*; the plugin's retired Bash port lost the reason to `printf`."""
     with pytest.raises(CommandShapeError, match=fragment):
         cmdshape.validate_commit(command)
 
 
-TOKENIZED = [
-    "git commit -m x",
-    'git commit -m "one two"',
-    "git commit -m a\\ b",
-    "git   commit   -m   x",
-    "git add -A&&git commit -m x",
-    "git add -A && git commit -m ''",
-    'git commit -m "a\'b"',
-    "git commit -m 'a\"b'",
-    "git commit -m 'trailing space '",
-]
-
-
-@pytest.mark.parametrize("command", TOKENIZED)
-def test_the_split_into_tokens_matches_the_shell(command: str) -> None:
-    shell = bash_cmdshape("tokenize", command)
-    assert shell.returncode == 0, shell.stdout.decode()
-    expected = [part.decode() for part in shell.stdout.split(b"\0")[:-1]]
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param("git commit -m x", ["git", "commit", "-m", "x"], id="plain"),
+        pytest.param('git commit -m "one two"', ["git", "commit", "-m", "one two"], id="double-quoted-spaces"),
+        pytest.param("git commit -m a\\ b", ["git", "commit", "-m", "a b"], id="escaped-space"),
+        pytest.param("git   commit   -m   x", ["git", "commit", "-m", "x"], id="repeated-whitespace-collapses"),
+        pytest.param("git add -A&&git commit -m x", ["git", "add", "-A", "&&", "git", "commit", "-m", "x"], id="adjacent-ampersands"),
+        pytest.param("git add -A && git commit -m ''", ["git", "add", "-A", "&&", "git", "commit", "-m", ""], id="empty-single-quoted-argument"),
+        pytest.param('git commit -m "a\'b"', ["git", "commit", "-m", "a'b"], id="single-quote-inside-double-quotes"),
+        pytest.param("git commit -m 'a\"b'", ["git", "commit", "-m", 'a"b'], id="double-quote-inside-single-quotes"),
+        pytest.param("git commit -m 'trailing space '", ["git", "commit", "-m", "trailing space "], id="trailing-space-preserved-inside-quotes"),
+    ],
+)
+def test_the_split_into_tokens(command: str, expected: list[str]) -> None:
+    """Fixed expectations, not a comparison: a parser regression here must fail this test on
+    its own, without needing an accepted/denied verdict to also flip."""
     assert cmdshape.tokenize(command) == expected
 
 
 def test_a_trailing_backslash_is_refused_rather_than_guessed_at() -> None:
-    """Three implementations, three readings of ``git commit -m x\\`` -- so it is denied.
+    """Two implementations, two readings of ``git commit -m x\\`` -- so it is denied.
 
-    The shell tokenizer dropped the backslash and produced ``x``. A real bash keeps it and
-    runs the commit with the message ``x\\``. bashlex calls it an unexpected EOF. Only the
-    last one is honest about not knowing, and a command whose words are in dispute is
-    exactly what this gate must not wave through: the reviewed message and the committed
-    message would differ.
+    A real bash keeps the backslash and runs the commit with the message ``x\\``. bashlex
+    calls it an unexpected EOF. A command whose words are in dispute is exactly what this
+    gate must not wave through: the reviewed message and the committed message would differ.
     """
-    assert bash_cmdshape("tokenize", "git commit -m x\\").stdout.split(b"\0")[:-1] == [b"git", b"commit", b"-m", b"x"]
     assert _bash_words("x\\") == ["x\\"]
     with pytest.raises(CommandShapeError, match="not valid shell syntax"):
         cmdshape.tokenize("git commit -m x\\")
@@ -248,48 +203,45 @@ def test_a_quoted_ampersand_is_not_a_segment_separator() -> None:
 
 # -- the loose detectors ---------------------------------------------------
 
-MENTIONS = [
-    "git commit -m x",
-    "git commit",
-    "cd /tmp && git commit -m x",
-    "git -c user.name=x commit -m y",
-    "make && git commit",
-    "gitcommit",
-    "git committer",
-    "echo git commit",
-    "git reset --soft HEAD^",
-    "git reset",
-    "resetting git",
-    "",
-]
+
+@pytest.mark.parametrize(
+    ("command", "commit", "reset"),
+    [
+        ("git commit -m x", True, False),
+        ("git commit", True, False),
+        ("cd /tmp && git commit -m x", True, False),
+        pytest.param("git -c user.name=x commit -m y", False, False, id="global-option-disguise-not-detected"),
+        ("make && git commit", True, False),
+        pytest.param("gitcommit", False, False, id="no-word-boundary-no-match"),
+        pytest.param("git committer", False, False, id="longer-word-does-not-match"),
+        ("echo git commit", True, False),
+        ("git reset --soft HEAD^", False, True),
+        ("git reset", False, True),
+        pytest.param("resetting git", False, False, id="reset-as-a-substring-does-not-match"),
+        ("", False, False),
+    ],
+)
+def test_the_loose_detectors(command: str, commit: bool, reset: bool) -> None:
+    """Pins false positives and false negatives alike -- a detector too loose escalates every
+    ordinary command, and one too strict lets a real commit or reset through ungated."""
+    assert cmdshape.mentions_commit(command) is commit
+    assert cmdshape.mentions_reset(command) is reset
 
 
-@pytest.mark.parametrize("command", MENTIONS)
-def test_the_loose_detectors_match_the_shell(command: str) -> None:
-    assert cmdshape.mentions_commit(command) == (bash_cmdshape("mentions-commit", command).returncode == 0)
-    assert cmdshape.mentions_reset(command) == (bash_cmdshape("mentions-reset", command).returncode == 0)
-
-
-ESCAPES = [
-    "ocrl.sh finish",
-    "/x/y/ocrl.sh deactivate",
-    "ocrl finish",
-    "ocrl.sh status",
-    "ocrl.sh finishing",
-    "finish",
-    "",
-]
-
-
-@pytest.mark.parametrize("command", ESCAPES)
-def test_escape_recognition_matches_the_shell(command: str) -> None:
-    assert cmdshape.is_escape(command) == (bash_cmdshape("is-escape", command).returncode == 0)
-
-
-def test_the_documented_escapes_are_recognised() -> None:
-    assert cmdshape.is_escape("ocrl.sh finish")
-    assert cmdshape.is_escape("/x/y/ocrl.sh deactivate")
-    assert not cmdshape.is_escape("ocrl.sh status")
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("ocrl.sh finish", True),
+        ("/x/y/ocrl.sh deactivate", True),
+        ("ocrl finish", True),
+        ("ocrl.sh status", False),
+        pytest.param("ocrl.sh finishing", False, id="lookalike-suffix-not-an-escape"),
+        pytest.param("finish", False, id="bare-word-without-the-entrypoint-is-not-an-escape"),
+        ("", False),
+    ],
+)
+def test_the_documented_escapes_are_recognised(command: str, expected: bool) -> None:
+    assert cmdshape.is_escape(command) is expected
 
 
 # -- the bounded reconcile reset -------------------------------------------
@@ -299,38 +251,6 @@ def test_a_soft_reset_target_is_parsed() -> None:
     assert cmdshape.reset_target("git reset --soft HEAD^") == "HEAD^"
     assert cmdshape.reset_target("git reset --soft --quiet HEAD~2") == "HEAD~2"
     assert cmdshape.reset_target("git reset -q --soft HEAD^") == "HEAD^"
-
-
-RESETS = [
-    "git reset --soft HEAD^",
-    "git reset --soft --quiet HEAD~2",
-    "git reset -q --soft HEAD^",
-    "git reset --hard HEAD^",
-    "git reset --mixed HEAD^",
-    "git reset --merge HEAD^",
-    "git reset --keep HEAD^",
-    "git reset --soft",
-    "git reset HEAD^",
-    "git reset --soft HEAD^ HEAD~2",
-    "git reset --soft --patch HEAD^",
-    "git reset --soft - ",
-    "git commit -m x",
-    "git reset --soft HEAD^ && git commit -m x",
-    "",
-]
-
-
-@pytest.mark.parametrize("command", RESETS)
-def test_reset_parsing_matches_the_shell(command: str) -> None:
-    shell = bash_cmdshape("reset-target", command)
-    try:
-        target = cmdshape.reset_target(command)
-    except CommandShapeError as exc:
-        assert shell.returncode == 1, f"python refused {command!r} ({exc}) but the shell parsed it"
-        assert str(exc) == shell.stdout.decode(), f"the explanation drifted for {command!r}"
-    else:
-        assert shell.returncode == 0, f"python parsed {command!r} but the shell refused it"
-        assert target == shell.stdout.decode()
 
 
 @pytest.mark.parametrize("mode", ["--hard", "--mixed", "--merge", "--keep"])
@@ -343,6 +263,23 @@ def test_only_a_soft_reset_is_permitted(mode: str) -> None:
 def test_a_chained_reset_is_refused() -> None:
     with pytest.raises(CommandShapeError, match="single command on its own"):
         cmdshape.reset_target("git reset --soft HEAD^ && git commit -m x")
+
+
+@pytest.mark.parametrize(
+    ("command", "fragment"),
+    [
+        pytest.param("git reset --soft", "needs an explicit target", id="missing-target"),
+        pytest.param("git reset HEAD^", "only .git reset --soft", id="missing---soft"),
+        pytest.param("git reset --soft HEAD^ HEAD~2", "exactly one target", id="multiple-targets"),
+        pytest.param("git reset --soft --patch HEAD^", "--patch is not permitted", id="patch-flag"),
+        pytest.param("git reset --soft - ", "git reset - is not permitted", id="bare-dash-target"),
+        pytest.param("git commit -m x", 'not a plain "git reset"', id="not-a-reset-at-all"),
+        pytest.param("", 'not a plain "git reset"', id="empty-string"),
+    ],
+)
+def test_a_malformed_reset_is_refused(command: str, fragment: str) -> None:
+    with pytest.raises(CommandShapeError, match=fragment):
+        cmdshape.reset_target(command)
 
 
 # -- the properties behind the table ---------------------------------------

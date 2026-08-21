@@ -1,9 +1,4 @@
-"""Activation state: durability, privacy, locking, and agreement with the shell.
-
-Phase 6 flips the entrypoint and must stay revertible mid-session, so a session written by
-one implementation has to be loadable *and advanceable* by the other. That is asserted here
-against the shell libraries that are still live, not against a reading of them.
-"""
+"""Activation state: durability, privacy, and locking."""
 
 from __future__ import annotations
 
@@ -16,7 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import SCRIPTS_DIR, bash_fixture
+from conftest import SCRIPTS_DIR
 
 from ocrl import config as ocrl_config
 from ocrl import paths, state
@@ -41,117 +36,6 @@ def state_env(clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> dic
 
 def default_config() -> Config:
     return ocrl_config.load("", {})
-
-
-# -- the shell wrote it, Python must read it -------------------------------
-
-
-def test_python_reads_what_bash_wrote(state_env: dict[str, str]) -> None:
-    bash_fixture(["state-new", WORKTREE, SESSION], env=state_env)
-
-    st = state.State(WORKTREE, SESSION)
-    assert st.load()
-
-    assert st.get("status") == "ACTIVE"
-    assert st.get("reason") == "bash wrote this"
-    assert st.get("plan_path") == "/tmp/plan.md"
-    assert st.get("pending_command") == 'git commit -m "héllo"'
-    assert st.get_int("armed_at") == 1700000000
-    assert st.get_int("phase") == 2
-    assert st.get_int("report_seq") == 3
-    assert st.get("allow_dirty") == "true"
-    assert st.get("defer_pending") == "false"
-    assert st.get_array("phases") == ["first phase", "second phase"]
-    assert st.get_array("approved_trees") == ["tree0", "tree1"]
-    assert st.phase_count() == 2
-    assert st.phase_desc(1) == "first phase"
-    assert st.tree_approved("tree1")
-    assert not st.tree_approved("nope")
-
-
-def test_the_activation_directory_is_the_same_one(state_env: dict[str, str]) -> None:
-    """Both implementations must hash the worktree path to the same location."""
-    bash_fixture(["state-new", WORKTREE, SESSION], env=state_env)
-    assert state.State(WORKTREE, SESSION).state_file.is_file()
-
-
-# -- Python wrote it, the shell must read it -------------------------------
-
-
-def test_bash_reads_what_python_wrote(state_env: dict[str, str]) -> None:
-    st = state.State(WORKTREE, SESSION)
-    st.new()
-    st.update(
-        status="ACTIVE",
-        reason="python wrote this",
-        session_id=SESSION,
-        worktree=WORKTREE,
-        armed_at=1700000000,
-        allow_dirty=True,
-        defer_pending=False,
-        phases=["alpha", "beta", "gamma"],
-        phase=2,
-        pending_command='git commit -m "héllo"',
-    )
-    st.mark_tree_approved("treeB")
-    st.mark_tree_approved("treeA")
-    st.save()
-
-    def bash_get(key: str) -> str:
-        # `ocrl_get` renders through `jq -r`, which appends a newline.
-        return bash_fixture(["state-get", WORKTREE, SESSION, key], env=state_env).stdout.rstrip("\n")
-
-    assert bash_get("status") == "ACTIVE"
-    assert bash_get("reason") == "python wrote this"
-    assert bash_get("pending_command") == 'git commit -m "héllo"'
-    assert bash_get("armed_at") == "1700000000"
-    # Booleans must survive as booleans; the shell has a jq trap here and handles it.
-    assert bash_get("allow_dirty") == "true"
-    assert bash_get("defer_pending") == "false"
-    assert bash_fixture(["phase-count", WORKTREE, SESSION], env=state_env).stdout.rstrip("\n") == "3"
-    assert bash_fixture(["state-array", WORKTREE, SESSION, "approved_trees"], env=state_env).stdout.split() == [
-        "treeA",
-        "treeB",
-    ]
-
-
-def test_a_session_survives_a_round_trip_through_both(state_env: dict[str, str]) -> None:
-    """Reverting phase 6 must safely resume a live session, so this goes both ways."""
-    bash_fixture(["state-new", WORKTREE, SESSION], env=state_env)
-
-    st = state.State(WORKTREE, SESSION)
-    assert st.load()
-    st.update(status="NEEDS_HUMAN", reason="python escalated it", failures=4)
-    st.mark_tree_approved("treeP")
-    st.save()
-
-    bash_fixture(["state-advance", WORKTREE, SESSION], env=state_env)
-
-    st = state.State(WORKTREE, SESSION)
-    assert st.load()
-    assert st.get("status") == "RECONCILE"
-    assert st.get("reason") == "bash advanced it"
-    assert st.get_int("phase") == 3
-    assert st.get_int("stop_blocks") == 2
-    assert st.get_int("failures") == 4, "the Python mutation must survive the shell's save"
-    # Both implementations deduplicate and sort (jq `unique`), so the order is exact.
-    assert st.get_array("approved_trees") == ["tree0", "tree1", "tree2", "treeP"]
-
-
-def test_the_serialised_document_is_byte_identical_to_the_shells(state_env: dict[str, str]) -> None:
-    """Not required for interoperability, but it keeps state diffs readable across a revert."""
-    bash_fixture(["state-new", WORKTREE, SESSION], env=state_env)
-    from_bash = state.State(WORKTREE, SESSION).state_file.read_text(encoding="utf-8")
-
-    st = state.State(WORKTREE, SESSION)
-    st.load()
-    assert st.serialise() == from_bash
-
-
-def test_a_fresh_document_has_the_same_schema_as_the_shells(state_env: dict[str, str]) -> None:
-    bash_fixture(["state-new", WORKTREE, SESSION], env=state_env)
-    from_bash = json.loads(state.State(WORKTREE, SESSION).state_file.read_text(encoding="utf-8"))
-    assert list(state.new_state_document()) == list(from_bash)
 
 
 # -- durability ------------------------------------------------------------
@@ -669,13 +553,13 @@ def test_a_zero_armed_at_never_goes_stale(state_env: dict[str, str], monkeypatch
     assert st.effective_status(default_config()) == "ARMED"
 
 
-def test_effective_status_matches_the_shell(state_env: dict[str, str]) -> None:
-    bash_fixture(["state-new", WORKTREE, SESSION], env=state_env)
+def test_an_old_activation_is_stale(state_env: dict[str, str]) -> None:
     st = state.State(WORKTREE, SESSION)
-    st.load()
-    # armed_at is 1700000000, long past a 24 hour TTL by now.
-    from_bash = bash_fixture(["effective-status", WORKTREE, SESSION, ""], env=state_env).stdout
-    assert st.effective_status(default_config()) == from_bash == "STALE"
+    st.new()
+    # Long past a 24 hour TTL by now.
+    st.update(status="ACTIVE", armed_at=1700000000)
+    st.save()
+    assert st.effective_status(default_config()) == "STALE"
 
 
 # -- unusable state --------------------------------------------------------

@@ -15,7 +15,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_REVIEWER, bash_split_args, git, run_bootstrap
+from conftest import FAKE_REVIEWER, git, run_bootstrap
 
 from ocrl import paths
 from ocrl.commands import arm
@@ -51,35 +51,45 @@ def plan_file(tmp_path: Path, text: str = "# plan\n\nphase one\n") -> Path:
 # --------------------------------------------------------------------------
 # Argument splitting
 # --------------------------------------------------------------------------
-
-#: Both the shapes the slash command actually produces and the ones that make the shell's
-#: rules visible -- including ``"a -x b"``, where the flag taken is the last word rather than
-#: the one that starts with a dash.
-SPLIT_CORPUS = [
-    "",
-    "   ",
-    "plan.md",
-    "  plan.md  ",
-    "plan.md --allow-dirty",
-    "plan.md   --allow-dirty",
-    "--allow-dirty",
-    " --allow-dirty ",
-    "my plans/phase one.md",
-    "my plans/phase one.md --allow-dirty",
-    "plan.md --nonsense",
-    "a -x b",
-    "-x",
-    "plan.md -",
-    "plan.md --allow-dirty extra",
-    "~/plan.md --allow-dirty",
-    "plan.md\t--allow-dirty",
-]
+#
+# `split_args` is the only thing standing between `$ARGUMENTS` -- substituted into the skill
+# body unescaped, see "The argument channel is not escaped" in AGENTS.md -- and the plan path
+# `arm` actually opens, so its split points are a direct spec, not an implementation detail.
+# This corpus and its expected splits used to be asserted differentially, against the shell
+# port `ocrl_split_args` was translated from; that reference was retired in Phase 8, so the
+# split points below are now the specification.
 
 
-@pytest.mark.parametrize("raw", SPLIT_CORPUS)
-def test_split_args_agrees_with_the_shell(raw: str) -> None:
-    """Differential, not a reading: the port must split where ``ocrl_split_args`` splits."""
-    assert arm.split_args(raw) == bash_split_args(raw)
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("", ("", "")),
+        ("   ", ("", "")),
+        ("plan.md", ("plan.md", "")),
+        ("  plan.md  ", ("plan.md", "")),
+        ("plan.md --allow-dirty", ("plan.md", "--allow-dirty")),
+        ("plan.md   --allow-dirty", ("plan.md", "--allow-dirty")),
+        ("--allow-dirty", ("", "--allow-dirty")),
+        (" --allow-dirty ", ("", "--allow-dirty")),
+        ("my plans/phase one.md", ("my plans/phase one.md", "")),
+        ("my plans/phase one.md --allow-dirty", ("my plans/phase one.md", "--allow-dirty")),
+        ("plan.md --nonsense", ("plan.md", "--nonsense")),
+        pytest.param("a -x b", ("a -x", "b"), id="last-word-taken-as-the-flag"),
+        ("-x", ("-x", "")),
+        ("plan.md -", ("plan.md", "-")),
+        ("plan.md --allow-dirty extra", ("plan.md --allow-dirty", "extra")),
+        ("~/plan.md --allow-dirty", ("~/plan.md", "--allow-dirty")),
+        ("plan.md\t--allow-dirty", ("plan.md", "--allow-dirty")),
+    ],
+)
+def test_split_args(raw: str, expected: tuple[str, str]) -> None:
+    """Pins the exact split, including the ``"a -x b"`` oddity documented on ``split_args``.
+
+    Harmless in practice only because the caller rejects every flag that is not
+    ``--allow-dirty`` -- if that check is ever loosened, this corpus is what tells you the
+    split point moved.
+    """
+    assert arm.split_args(raw) == expected
 
 
 # --------------------------------------------------------------------------

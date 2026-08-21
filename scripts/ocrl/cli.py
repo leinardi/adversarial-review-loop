@@ -8,8 +8,8 @@ The four hook entrypoints return the process exit status their :class:`ocrl.hook
 reports, and that status is the shim's only discriminator: ``0`` means a response was
 written in full -- including a legitimately empty one -- and anything else means the shim
 must discard what it captured and emit that event's own fail-closed response. Nothing here
-may turn a non-zero into a zero. ``scripts/ocrl.sh`` is still the live gate until Phase 6
-flips the entrypoint.
+may turn a non-zero into a zero. ``scripts/ocrl.sh`` is the live gate, a guarded shim over
+this package -- see "Interpreter invocation" in ``AGENTS.md``.
 """
 
 from __future__ import annotations

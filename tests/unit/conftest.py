@@ -19,82 +19,18 @@ PLUGIN_ROOT = ocrl.PLUGIN_ROOT
 SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
 BOOTSTRAP = SCRIPTS_DIR / "ocrl-bootstrap.py"
 SOCKET_STDIN = PLUGIN_ROOT / "tests" / "fixtures" / "socket-stdin.py"
-BASH_ARGS = PLUGIN_ROOT / "tests" / "fixtures" / "bash-args.sh"
-BASH_FIXTURE = PLUGIN_ROOT / "tests" / "fixtures" / "bash-config-state.sh"
-BASH_CMDSHAPE = PLUGIN_ROOT / "tests" / "fixtures" / "bash-cmdshape.sh"
 BASH_GLOB = PLUGIN_ROOT / "tests" / "fixtures" / "bash-glob.sh"
-BASH_REVIEWER = PLUGIN_ROOT / "tests" / "fixtures" / "bash-reviewer.sh"
 FAKE_REVIEWER = PLUGIN_ROOT / "tests" / "fixtures" / "fake-reviewer.sh"
 
 
-def bash_fixture(
-    args: list[str],
-    *,
-    env: Mapping[str, str],
-    check: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    """Drive the still-live shell config/state libraries.
-
-    The environment is passed in full rather than inherited, because a developer's shell may
-    carry ``OCRL_*`` overrides -- one of them is a documented leftover from the STEP0 runs --
-    and those would silently skew a differential comparison.
-    """
-    proc = subprocess.run(
-        [str(BASH_FIXTURE), *args],
-        env=dict(env),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if check and proc.returncode != 0:
-        raise AssertionError(f"bash fixture {args!r} failed ({proc.returncode}): {proc.stderr}")
-    return proc
-
-
-def bash_cmdshape(op: str, command: str) -> subprocess.CompletedProcess[bytes]:
-    """Ask the still-live shell tokenizer for its verdict on one command.
-
-    Bytes, not text: the ``tokenize`` op is NUL-separated so a token containing a space
-    stays one token. Nothing here reads configuration or state, so the ambient environment
-    is harmless and is left alone.
-    """
-    return subprocess.run(
-        [str(BASH_CMDSHAPE), op, command],
-        capture_output=True,
-        check=False,
-    )
-
-
-def bash_split_args(raw: str) -> tuple[str, str]:
-    """Ask the still-live shell splitter how it reads one ``--args`` string.
-
-    Bytes and NUL-separated, because a plan path may contain spaces and the whole point of
-    the comparison is that the split lands in the same place.
-    """
-    proc = subprocess.run([str(BASH_ARGS), raw], capture_output=True, check=False)
-    if proc.returncode != 0:
-        raise AssertionError(f"bash-args.sh failed ({proc.returncode}): {proc.stderr.decode(errors='replace')}")
-    plan, flag, _ = proc.stdout.split(b"\0")
-    return plan.decode(), flag.decode()
-
-
-def bash_reviewer(args: list[str], *, env: Mapping[str, str]) -> subprocess.CompletedProcess[bytes]:
-    """Drive the still-live shell reviewer/report libraries.
-
-    Bytes, not text: the ``parse`` op is NUL-separated so a finding containing a newline
-    stays one record. The environment is passed in full, for the reason ``bash_fixture``
-    documents.
-    """
-    return subprocess.run(
-        [str(BASH_REVIEWER), *args],
-        env=dict(env),
-        capture_output=True,
-        check=False,
-    )
-
-
 def bash_glob(path: str, glob: str) -> bool:
-    """Ask a real bash whether ``[[ $path == $glob ]]``."""
+    """Ask a real bash whether ``[[ $path == $glob ]]``.
+
+    Unlike the other bash_* fixtures this plugin used to carry, this one does not depend on
+    the plugin's own (now-deleted) Bash implementation -- it drives the system's bash
+    directly, so it stays as the reference for globmatch's from-scratch reimplementation of
+    ``[[ $p == $g ]]`` semantics.
+    """
     return subprocess.run([str(BASH_GLOB), path, glob], capture_output=True, check=False).returncode == 0
 
 

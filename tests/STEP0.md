@@ -137,7 +137,7 @@ If the fixture has already been through an end-to-end run, rewind it first (`git
 
 **Settled 2026-08-19, and it changed the design.** The skill body originally passed `"$1" "$2"`. Claude Code's positional substitution is **0-based** — `$N` resolves `s[N]` of a zero-indexed array, so `$1` is the *second* argument — and an out-of-range `$N` is left in the body verbatim, where the expansion shell then turns it into the empty string. A single-argument invocation therefore armed with an empty plan path and failed closed with "no plan path was supplied".
 
-The body now passes `--args "$ARGUMENTS"` as one string and splits it in `ocrl_split_args`, which also keeps plan paths containing spaces intact. The same routine (`wPt`) confirms Claude Code does **not** shell-escape substituted arguments, which is why the character-set check in `cmd_arm` and the probe below both matter.
+The body now passes `--args "$ARGUMENTS"` as one string and splits it in `ocrl_split_args` (ported as `commands.arm.split_args`, in `scripts/ocrl/commands/arm.py`, since the Phase 8 Bash removal), which also keeps plan paths containing spaces intact. The same routine (`wPt`) confirms Claude Code does **not** shell-escape substituted arguments, which is why the character-set check in `cmd_arm` (now the same `scripts/ocrl/commands/arm.py`) and the probe below both matter.
 
 ### The argument-safety probe, and what it established
 
@@ -154,7 +154,7 @@ So the live backtick probe fails safe by accident, not by design: it breaks the 
 
 **This is not fixable inside the plugin.** No quoting of `$ARGUMENTS` in the body helps — double quotes are escaped by `"`, single quotes by `'` — because the substitution happens before any shell sees it. It is a property of `` !`…` `` expansion that every plugin interpolating `$ARGUMENTS` into a command shares.
 
-What bounds it here: `implement` is `disable-model-invocation: true`, so Claude cannot invoke the skill. The only party who can supply a hostile path is the person typing the slash command. The realistic risk is a pasted path from an untrusted source, not a compromised agent. The character-set check in `cmd_arm` still refuses such a path, but it runs *after* the injected command has already executed, so it limits the review loop's state rather than preventing execution.
+What bounds it here: `implement` is `disable-model-invocation: true`, so Claude cannot invoke the skill. The only party who can supply a hostile path is the person typing the slash command. The realistic risk is a pasted path from an untrusted source, not a compromised agent. The character-set check in `cmd_arm` (now `scripts/ocrl/commands/arm.py`) still refuses such a path, but it runs *after* the injected command has already executed, so it limits the review loop's state rather than preventing execution.
 
 Worth reporting upstream if you want it changed.
 
@@ -257,7 +257,7 @@ Expansion not running in skill bodies is the only outcome that forces a redesign
 
 1. Remove the `` !`…` `` line from `skills/implement/SKILL.md`.
 2. Have the body instruct Claude to run `ocrl.sh arm …` as its first action.
-3. Add a narrow `pretool` exception for exactly that command, mirroring the existing `set-phases` exception in `cmd_pretool`.
+3. Add a narrow `pretool` exception for exactly that command, mirroring the existing `set-phases` exception in `scripts/ocrl/commands/pretool.py`.
 
 That reintroduces a one-command hole in the pre-activation guard — smaller than the original design's, but not zero, and it must be written to match only the exact arm command shape.
 

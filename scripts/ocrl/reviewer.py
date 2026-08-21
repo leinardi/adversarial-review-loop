@@ -753,10 +753,10 @@ def parse(out_path: Path, *, config: Config) -> Review:
         return _fail(review, "the reviewer produced no output")
     if NUL in raw:
         # Python would carry the NUL through and reject the line it corrupts, so this check
-        # is not what protects *this* parser. It is here for parity: the shell gate cannot
-        # hold a NUL at all -- command substitution deletes it, repairing `actionable=n\0o`
-        # into a valid `actionable=no` -- and two gates that disagree about what a byte
-        # sequence means is the state Phase 6 must never be reverted into.
+        # is not what protects *this* parser on its own. It is here because the plugin's
+        # retired Bash gate could not hold a NUL at all -- command substitution deleted it,
+        # repairing `actionable=n\0o` into a valid `actionable=no` -- and an explicit refusal
+        # here keeps that historical leniency from ever being reintroduced by accident.
         return _fail(review, "the reviewer output contains a NUL byte, so the contract cannot be validated")
 
     lines = _records(_decode(raw))

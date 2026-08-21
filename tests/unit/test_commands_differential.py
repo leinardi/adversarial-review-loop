@@ -1,12 +1,14 @@
-"""The user-facing commands, Python against the shell they are ported from.
+"""The user-facing commands, driven through the guarded shim against the bootstrap directly.
 
-``scripts/ocrl.sh`` is still the live entrypoint, so it can be driven with the same arguments
-and the same environment and the two answers compared byte for byte. That is a stronger claim
-than "the output looks right": these strings are what the user reads when the mode refuses to
-arm, and the state document is what a hook decides on afterwards.
+``scripts/ocrl.sh`` is a thin guarded shim over ``python3 -I scripts/ocrl-bootstrap.py`` (see
+"Interpreter invocation" in ``AGENTS.md``); for non-hook subcommands it simply ``exec``s the
+bootstrap. This proves that pass-through is real: the same argv and the same environment
+produce byte-identical output whether invoked through the shim or the bootstrap directly. That
+is a stronger claim than "the output looks right" -- these strings are what the user reads
+when the mode refuses to arm, and the state document is what a hook decides on afterwards.
 
-Each test runs the shell first, snapshots what it produced, wipes the state root, and runs the
-Python implementation over the *same* repository -- so the paths embedded in both answers are
+Each test runs the shim first, snapshots what it produced, wipes the state root, and runs the
+bootstrap directly over the *same* repository -- so the paths embedded in both answers are
 identical and any difference is a real one.
 """
 

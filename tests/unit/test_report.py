@@ -9,16 +9,15 @@ shown.
 from __future__ import annotations
 
 import os
-import re
 import stat
 import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_REVIEWER, bash_reviewer, git
+from conftest import git
 
 from ocrl import config as ocrl_config
-from ocrl import report, reviewer, state
+from ocrl import report, state
 from ocrl.config import Config
 from ocrl.reviewer import Review, Target
 from ocrl.util import TRUNCATION_MARKER
@@ -27,9 +26,6 @@ SESSION = "repsess"
 
 #: Reviewer output that is not valid UTF-8, which the report must keep byte for byte.
 INVALID_UTF8 = b"tool output: \xff\xfe\n"
-
-#: The header line whose value is a clock reading, and so cannot be compared across runs.
-_GENERATED = re.compile(r"^- generated: .*$", re.MULTILINE)
 
 
 @pytest.fixture
@@ -148,26 +144,6 @@ def test_the_report_is_private(act_dir: Path) -> None:
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
-def test_the_stored_report_matches_the_shell(report_env: dict[str, str], act_dir: Path, tmp_path: Path) -> None:
-    raw = tmp_path / "reviewer.out"
-    with raw.open("wb") as sink:
-        subprocess.run([str(FAKE_REVIEWER), str(tmp_path), "p"], stdout=sink, env={**os.environ, "OCRL_FAKE_MODE": "changes"}, check=False)
-
-    shell = bash_reviewer(["store", "/wt", SESSION, "", str(raw), "001", "phase", "1", "basetree", "headtree"], env=report_env)
-    assert shell.returncode == 0, shell.stderr
-    theirs = Path(shell.stdout.decode())
-    # Read before storing: both implementations derive the same filename from the same
-    # activation, so the Python write lands on top of the shell's.
-    theirs_text = theirs.read_text()
-
-    mine_review = reviewer.parse(raw, config=ocrl_config.load("", report_env))
-    mine_review.raw = str(raw)
-    mine = report.store(mine_review, a_target("phase", 1, "basetree", "headtree"), seq="001", act_dir=act_dir, config=config_with())
-
-    assert mine.name == theirs.name
-    assert _GENERATED.sub("", mine.read_text()) == _GENERATED.sub("", theirs_text)
-
-
 # --------------------------------------------------------------------------
 # The denial message
 # --------------------------------------------------------------------------
@@ -217,20 +193,6 @@ def test_short_prose_is_left_alone() -> None:
 def test_the_report_path_is_offered_when_there_is_one() -> None:
     assert "\nFull report: /state/001.md\n" in report.reason(a_review(report="/state/001.md"), "h", config=config_with())
     assert "Full report:" not in report.reason(a_review(), "h", config=config_with())
-
-
-@pytest.mark.parametrize("mode", ["changes", "approve-with-critical", "big-prose", "many"])
-def test_the_reason_matches_the_shell(report_env: dict[str, str], tmp_path: Path, mode: str) -> None:
-    raw = tmp_path / "reviewer.out"
-    with raw.open("wb") as sink:
-        subprocess.run([str(FAKE_REVIEWER), str(tmp_path), "p"], stdout=sink, env={**os.environ, "OCRL_FAKE_MODE": mode}, check=False)
-
-    env = {**report_env, "OCRL_MAX_REASON_BYTES": "2000"}
-    shell = bash_reviewer(["reason", "", str(raw), "the headline"], env=env)
-
-    config = ocrl_config.load("", env)
-    mine = report.reason(reviewer.parse(raw, config=config), "the headline", config=config)
-    assert mine == shell.stdout.decode()
 
 
 # --------------------------------------------------------------------------

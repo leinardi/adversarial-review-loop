@@ -4,9 +4,9 @@ Two layers decide, and only the first one is policy:
 
 * **The deny-list** refuses nearly the whole shell grammar -- ``$``, backticks, ``;``,
   ``|``, redirection, subshells, braces, unquoted globs, a bare ``&``, newlines, comments.
-  It is unchanged from ``scripts/lib/cmdshape.sh``, character for character and message for
-  message, and it still runs first. What survives it is a flat sequence of words joined by
-  ``&&``.
+  Ported arm-for-arm from the plugin's now-retired shell implementation, character for
+  character and message for message, and it still runs first. What survives it is a flat
+  sequence of words joined by ``&&``.
 * **bashlex** -- a real bash parser, vendored under :mod:`ocrl._vendor` -- turns that into
   words. It replaced a hand-rolled quote-and-escape loop, which is the one thing in this
   module a reader could not check against bash without re-deriving bash's own rules.
@@ -122,10 +122,11 @@ def tokenize(command: str) -> list[str]:
 def _deny_shell_grammar(command: str) -> None:  # noqa: PLR0912 - one branch per shell `case` arm; splitting it would hide the deny-list
     """Refuse everything that could run a second program or touch a file after the snapshot.
 
-    **This is the security boundary.** Deliberately one flat loop, mirroring the shell's
-    ``case`` arm for arm, because a reviewer has to be able to read it against
-    ``cmdshape.sh`` and see that nothing was dropped; that matters more here than a branch
-    count.
+    **This is the security boundary.** Ported arm-for-arm from the plugin's retired shell
+    implementation's ``case`` statement (now gone; see ``git log`` before the Phase 8 removal
+    for the original), deliberately kept as one flat loop rather than split up, so a reviewer
+    can read it top to bottom and see that nothing was dropped. ``tests/unit/test_cmdshape.py``
+    is what now proves that claim, not a diff against the shell.
 
     Quote-aware, which is the whole subtlety: ``git commit -m "a;b"`` is a legitimate commit
     message and ``git commit -m x; rm -rf /`` is two commands. The scan therefore tracks

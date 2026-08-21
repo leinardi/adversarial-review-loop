@@ -105,11 +105,11 @@ def split_args(raw: str) -> tuple[str, str]:
     is substituted unconditionally and keeps paths containing spaces intact, so the split
     happens here.
 
-    Faithful to ``ocrl_split_args`` including its oddity: the third case matches on *any*
-    whitespace followed by a dash, but then takes the last whitespace-separated word as the
-    flag, whatever it starts with. ``"a -x b"`` therefore yields ``("a -x", "b")``, and a
-    differential test pins that against the shell rather than against a reading of it. It
-    is harmless because the caller rejects every flag that is not ``--allow-dirty``.
+    Faithful to the retired shell's ``ocrl_split_args`` including its oddity: the third case
+    matches on *any* whitespace followed by a dash, but then takes the last whitespace-separated
+    word as the flag, whatever it starts with. ``"a -x b"`` therefore yields ``("a -x", "b")``,
+    pinned in ``tests/unit/test_commands_arm.py``. It is harmless because the caller rejects
+    every flag that is not ``--allow-dirty``.
     """
     raw = raw.strip(_SPACE)
     if not raw:

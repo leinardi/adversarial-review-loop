@@ -15,12 +15,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          # tests/selftest.sh's rollback-compatibility cases and
-          # tests/fixtures/bash-args.sh pin a historical commit and
-          # reconstitute scripts/ocrl.sh from it with `git show`; a shallow
-          # clone would not have that commit as a reachable object.
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6

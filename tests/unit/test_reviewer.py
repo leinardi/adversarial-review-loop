@@ -1,13 +1,9 @@
 """The reviewer half of the gate: bundle, invocation, and contract parsing.
 
-Two properties are asserted throughout, and they are the reason this file is long:
-
-- **Rule 1.** No reviewer output and no operational failure produces ``APPROVED``. Every
-  broken shape in ``tests/fixtures/fake-reviewer.sh`` is driven through the parser and the
-  full ``execute`` path, and the verdict is asserted, never merely "not a crash".
-- **Translation, not reinterpretation.** The shell libraries are still the live gate, so
-  the bundle text, the argv, the permission document and the recomputed verdict are
-  compared against them directly through ``tests/fixtures/bash-reviewer.sh``.
+The property asserted throughout, and the reason this file is long: **Rule 1**. No reviewer
+output and no operational failure produces ``APPROVED``. Every broken shape in
+``tests/fixtures/fake-reviewer.sh`` is driven through the parser and the full ``execute``
+path, and the verdict is asserted, never merely "not a crash".
 """
 
 from __future__ import annotations
@@ -21,7 +17,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_REVIEWER, bash_reviewer, git, git_status_ignored
+from conftest import FAKE_REVIEWER, git, git_status_ignored
 
 from ocrl import config as ocrl_config
 from ocrl import gitsnap, report, reviewer, state
@@ -136,11 +132,6 @@ def test_the_broad_external_deny_is_written_before_the_bundle_allow(tmp_path: Pa
     assert external.index('"*":"deny"') < external.index(f'"{tmp_path}/**":"allow"')
 
 
-def test_permission_matches_the_shell(review_env: dict[str, str], tmp_path: Path) -> None:
-    shell = bash_reviewer(["permission", str(tmp_path)], env=review_env)
-    assert json.loads(shell.stdout) == json.loads(reviewer.permission(tmp_path))
-
-
 # --------------------------------------------------------------------------
 # argv
 # --------------------------------------------------------------------------
@@ -186,15 +177,6 @@ def test_verify_output_is_attached_last(tmp_path: Path) -> None:
 
     argv = reviewer.review_argv("/repo", tmp_path, "t", config=config_with())
     assert argv[-1] == str(tmp_path / "verify.txt")
-
-
-def test_argv_matches_the_shell(review_env: dict[str, str], tmp_path: Path) -> None:
-    for name in ("range.txt", "changes.00.diff", "changes.01.diff", "verify.txt"):
-        (tmp_path / name).write_text("x")
-
-    shell = bash_reviewer(["argv", "/repo", str(tmp_path), "review-loop phase 1"], env=review_env)
-    expected = shell.stdout.decode().splitlines()
-    assert reviewer.review_argv("/repo", tmp_path, "review-loop phase 1", config=ocrl_config.load("", review_env)) == expected
 
 
 # --------------------------------------------------------------------------
@@ -399,26 +381,6 @@ def test_the_bundle_is_private_and_outside_the_repository(activation: state.Stat
     assert git_status_ignored(git_repo) == "?? a.txt\n"
 
 
-def test_the_bundle_text_matches_the_shell(activation: state.State, git_repo: Path, review_env: dict[str, str]) -> None:
-    target = target_for(git_repo)
-    base, head = target.base, target.head
-    (git_repo / "extra.txt").write_text("extra\n")
-
-    mine = activation.act_dir / "bundles" / "py"
-    theirs = activation.act_dir / "bundles" / "sh"
-    reviewer.build_bundle(target, mine, state=activation, config=config_with(), warnings="w1")
-    shell = bash_reviewer(
-        ["bundle", str(git_repo), SESSION, str(git_repo), base, head, "phase", "1", str(theirs)],
-        env={**review_env, "OCRL_FAKE_WARNINGS": "w1"},
-    )
-    assert shell.returncode == 0, shell.stderr
-
-    assert (mine / "range.txt").read_bytes() == (theirs / "range.txt").read_bytes()
-    assert (mine / "chunks").read_bytes() == (theirs / "chunks").read_bytes()
-    assert sorted(p.name for p in mine.glob("changes.*")) == sorted(p.name for p in theirs.glob("changes.*"))
-    assert (mine / "changes.00.diff").read_bytes() == (theirs / "changes.00.diff").read_bytes()
-
-
 # --------------------------------------------------------------------------
 # Invocation
 # --------------------------------------------------------------------------
@@ -597,19 +559,6 @@ def test_no_reviewer_shape_produces_an_approval_it_did_not_earn(tmp_path: Path, 
         assert parsed.error or parsed.findings
 
 
-@pytest.mark.parametrize(("mode", "_verdict"), MODE_VERDICTS)
-def test_parsing_matches_the_shell(review_env: dict[str, str], tmp_path: Path, mode: str, _verdict: str) -> None:
-    out = fake_reviewer_output(tmp_path, mode)
-    shell = bash_reviewer(["parse", "", str(out)], env=review_env)
-    verdict, error, findings, everything, prose = shell.stdout.decode().split("\0")[:5]
-
-    mine = reviewer.parse(out, config=ocrl_config.load("", review_env))
-    assert (mine.verdict, mine.error) == (verdict, error)
-    assert mine.findings == findings
-    assert mine.all_findings == everything
-    assert mine.prose == prose
-
-
 def test_missing_markers_are_a_failure(tmp_path: Path) -> None:
     out = tmp_path / "o"
     out.write_text("VERDICT APPROVED\n")
@@ -642,15 +591,12 @@ def test_output_carrying_a_nul_byte_is_refused(tmp_path: Path, payload: bytes) -
     assert parsed.error == "the reviewer output contains a NUL byte, so the contract cannot be validated"
 
 
-def test_a_nul_refusal_matches_the_shell(review_env: dict[str, str], tmp_path: Path) -> None:
+def test_a_nul_byte_inside_a_finding_line_is_refused(tmp_path: Path) -> None:
     out = tmp_path / "o"
     out.write_bytes(b"prose\n<<<OCRL-FINDINGS>>>\nFINDING severity=critical actionable=n\0o file=a | x\nVERDICT APPROVED\n<<<OCRL-END>>>\n")
 
-    shell = bash_reviewer(["parse", "", str(out)], env=review_env)
-    verdict, error = shell.stdout.decode().split("\0")[:2]
-    mine = reviewer.parse(out, config=ocrl_config.load("", review_env))
+    mine = reviewer.parse(out, config=config_with())
 
-    assert (mine.verdict, mine.error) == (verdict, error)
     assert mine.verdict == "OP_FAILURE"
 
 

@@ -1,4 +1,4 @@
-"""Config precedence, typed access, and agreement with the shell implementation."""
+"""Config precedence and typed access."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import bash_fixture
 
 from ocrl import config
 
@@ -162,33 +161,3 @@ def test_severity_rank(label: str, rank: int) -> None:
 def test_an_unrecognised_severity_ranks_most_severe(label: str) -> None:
     """An unparsable label must never be a way to slip past the gate (Rule 1)."""
     assert config.severity_rank(label) == 5
-
-
-# -- agreement with the shell ----------------------------------------------
-
-
-def test_merged_config_matches_the_shell(layers: dict[str, str], tmp_path: Path) -> None:
-    """Differential test against the implementation that is still live."""
-    repo = tmp_path / "repo"
-    write_user_config(layers, {"model": "user-model", "ttl_hours": 5, "pure": False})
-    write_repo_config(repo, {"block_severity": "medium", "ignore_globs": ["docs/**"]})
-    layers["OCRL_MAX_FAILURES"] = "7"
-    layers["OCRL_VERIFY_CMD"] = "make test"
-    layers["OCRL_ALLOW_DIRTY"] = "yes"
-
-    from_bash = json.loads(bash_fixture(["config-load", str(repo)], env=layers).stdout)
-    from_python = config.load(str(repo), layers).values
-
-    assert from_python == from_bash
-
-
-def test_merged_config_matches_the_shell_when_a_file_is_broken(layers: dict[str, str], tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    write_user_config(layers, {"model": "user-model"})
-    write_repo_config(repo, "{{{")
-    layers["OCRL_TTL_HOURS"] = "3"
-
-    from_bash = json.loads(bash_fixture(["config-load", str(repo)], env=layers).stdout)
-    from_python = config.load(str(repo), layers).values
-
-    assert from_python == from_bash

@@ -20,7 +20,10 @@ The review is not advice Claude may weigh up. It is a `PreToolUse` gate on the c
 
 - Claude Code 2.1.x or newer (the plugin uses `PreToolUse`, `PostToolUse`, `PostToolUseFailure` and `Stop` skill hooks)
 - [`opencode`](https://opencode.ai) on `PATH`, authenticated, with the configured model available
-- `git`, `jq`, `sha256sum`, GNU `coreutils` (`split -C`), `bash` 4.4+
+- `python3` 3.12 or newer — the gate itself. No install step: the standard library plus a vendored, lint-excluded copy of [bashlex](https://github.com/idank/bashlex) is everything it needs.
+- `git`, `bash` 4.4+ and `timeout` (GNU or uutils coreutils) — `scripts/ocrl.sh` is a thin guarded shim over the interpreter above; see "Interpreter invocation" in `AGENTS.md` for why it exists and what it guarantees.
+
+`jq` and GNU-specific coreutils (`split -C`, `stat -c`, `sed -i`) are no longer runtime dependencies — the port replaced every one of them with the standard library.
 
 ## Install
 
@@ -183,7 +186,7 @@ State lives in `$XDG_STATE_HOME/opencode-review-loop/worktrees/<sha256(worktree)
 ## Development
 
 ```console
-make test                    # 293 assertions against scratch repos; no model is called
+make test                    # 278 acceptance assertions against scratch repos, plus the Python unit tests; no model is called
 make test-filter FILTER=stop # one section
 make dry-run                 # print the exact opencode argv and prompt, without invoking it
 make check                   # pre-commit (shellcheck, yamllint, markdownlint, …)

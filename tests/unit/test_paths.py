@@ -1,7 +1,11 @@
-"""Path layout must stay byte-compatible with the shell implementation.
+"""Path layout must stay byte-compatible with ``sha256sum``.
 
-Phase 6 has to be revertible mid-session, so a session created by one implementation must
-be found by the other. That starts with hashing the worktree path identically.
+The worktree digest names the on-disk activation directory, so a digest that drifts from
+``printf '%s' … | sha256sum`` orphans every activation an existing install already has on
+disk under the old digest -- state silently becomes unfindable rather than failing loudly.
+``sha256_hex`` is checked against the real ``sha256sum`` binary, not a re-derived expectation,
+so this is the same guarantee for exotic input (spaces, Unicode, the empty string) as for the
+ordinary case.
 """
 
 from __future__ import annotations
