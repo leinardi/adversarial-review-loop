@@ -86,7 +86,7 @@ def test_the_unstarted_arm_block_is_counted_rather_than_endless(git_repo: Path, 
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("status", ["COMPLETE", "DISARMED"])
+@pytest.mark.parametrize("status", ["COMPLETE", "DISARMED", "RESUMED"])
 def test_a_finished_activation_says_nothing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str) -> None:
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
@@ -373,6 +373,50 @@ def test_corrupt_state_blocks_the_turn_too(git_repo: Path, tmp_path: Path, clean
     assert "could not be read" in reason
 
 
+def test_a_version_conflict_blocks_without_overwriting_the_document(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A document from a build newer than this one is not "nothing to preserve".
+
+    Unlike the two tests above, ``state.needs_human`` here refuses to write at all: escalating
+    over a document this build cannot trust would silently replace whatever the newer build
+    recorded with a fresh, blank ``NEEDS_HUMAN``. The turn must still block -- through the
+    generic fail-closed path, since the ordinary escalation refused -- but the file on disk
+    must be untouched.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    state_path = state_dir(env, git_repo, SESSION) / "state.json"
+    document = json.loads(state_path.read_text())
+    document["version"] = 99
+    state_path.write_text(json.dumps(document))
+    before = state_path.read_bytes()
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "internal error in the Stop gate" in reason
+    assert state_path.read_bytes() == before, "a version conflict must never be overwritten, not even by an escalation"
+
+
+def test_a_malformed_version_still_escalates_normally(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The contrast case: a malformed (not merely newer) ``version`` is ordinary corrupt state.
+
+    No build of this gate has ever written ``"version": null`` -- unlike the integer-99 case
+    above, there is nothing here worth preserving untouched. The ordinary escalation must
+    still work, exactly as it does for a missing or corrupt state.json, so the user is never
+    left with manual deletion as the only way out.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    state_path = state_dir(env, git_repo, SESSION) / "state.json"
+    document = json.loads(state_path.read_text())
+    document["version"] = None
+    state_path.write_text(json.dumps(document))
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "could not be read" in reason
+    assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
+
+
 def test_a_late_escalation_does_not_reopen_a_mode_the_user_stopped(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Rule 4: a review failing may not undo a stop the user ran while it was running.
 
@@ -408,7 +452,7 @@ def test_a_late_escalation_does_not_reopen_a_mode_the_user_stopped(git_repo: Pat
     assert read_state(env, git_repo, SESSION)["status"] == "DISARMED"
 
 
-@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE"])
+@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "RESUMED"])
 def test_a_turn_ending_on_unreviewed_work_tells_the_user(
     git_repo: Path,
     tmp_path: Path,
@@ -434,7 +478,7 @@ def test_a_turn_ending_on_unreviewed_work_tells_the_user(
     assert "without passing the review gate" in message
 
 
-@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE"])
+@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "RESUMED"])
 def test_a_turn_ending_cleanly_still_says_nothing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str) -> None:
     """The warning must not fire for the ordinary way a session ends."""
     env = armed_env(clean_env)

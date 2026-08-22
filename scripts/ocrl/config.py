@@ -162,8 +162,19 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load(repo: str, environ: Mapping[str, str] | None = None) -> Config:
+def load(
+    repo: str,
+    environ: Mapping[str, str] | None = None,
+    overrides: Mapping[str, Any] | None = None,
+) -> Config:
     """Merge every layer into one configuration.
+
+    Precedence, lowest to highest: defaults < user config < repo config < ``overrides`` <
+    environment. ``overrides`` is a per-activation overlay (``state.json``'s ``overrides``
+    field, e.g. a ``--model`` given to ``implement`` or ``resume``) -- it beats the config
+    files but not ``OCRL_*``, so the environment still has the final word. Only keys already
+    in :data:`DEFAULTS` are accepted from it; anything else is dropped, because the overlay
+    is written into state and state is not a trust boundary the config layer should widen.
 
     A config file that cannot be read or parsed discards the *whole* file layer rather than
     applying half of it: the shell slurped all files through a single ``jq``, so one bad
@@ -191,6 +202,9 @@ def load(repo: str, environ: Mapping[str, str] | None = None) -> Config:
         for document in documents:
             if isinstance(document, dict):
                 merged.update(document)
+
+    if overrides:
+        merged.update({key: value for key, value in overrides.items() if key in DEFAULTS})
 
     merged.update(env_overrides)
     return Config(merged)

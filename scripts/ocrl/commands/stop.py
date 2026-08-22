@@ -195,15 +195,15 @@ def _gate_stop(hook: Hook) -> None:
     if not worktree:
         _no_pointer(hook, session=payload.session_id, cwd=cwd)
 
+    state = State(worktree, payload.session_id)
+    if not state.load():
+        _no_state(hook, state)
     # The configuration is loaded against the *armed worktree*, not against cwd: the Stop
     # hook fires wherever the turn happened to end, and the activation's own repo config is
     # what the gate is enforcing. The shell also resolved cwd to a repository here and then
     # never read the result; that dead resolution is a git process per turn end, and it is
     # not reproduced.
-    config = config_module.load(worktree)
-    state = State(worktree, payload.session_id)
-    if not state.load():
-        _no_state(hook, state)
+    config = config_module.load(worktree, overrides=state.data.get("overrides"))
 
     gate = _Gate(hook=hook, state=state, config=config, worktree=worktree, expected=hooks.activation(state, config))
     _by_status(gate)
@@ -313,7 +313,9 @@ def _by_status(gate: _Gate) -> None:
     state, config, hook = gate.state, gate.config, gate.hook
     status = state.effective_status(config)
 
-    if status in ("COMPLETE", "DISARMED"):
+    if status in ("COMPLETE", "DISARMED", "RESUMED"):
+        # A retirement is as terminal to this session as DISARMED: the turn may end, and an
+        # unapproved HEAD is still worth telling the user about through systemMessage.
         _ended(gate, status)
     if status == "NEEDS_HUMAN":
         hook.stop_ok(STILL_NEEDS_HUMAN.format(reason=state.get("reason")))

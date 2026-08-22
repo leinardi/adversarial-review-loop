@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import stat
@@ -11,13 +12,15 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import SCRIPTS_DIR
+from conftest import PLUGIN_ROOT, SCRIPTS_DIR
 
 from ocrl import config as ocrl_config
 from ocrl import paths, state
 from ocrl.atomic import write_private_atomic
 from ocrl.config import Config
 from ocrl.errors import StateLoadError, UnsafePathError
+
+LEGACY_FIXTURE = PLUGIN_ROOT / "tests" / "fixtures" / "state-v1-legacy.json"
 
 WORKTREE = "/wt"
 SESSION = "sess1"
@@ -323,6 +326,46 @@ def test_an_explicit_create_transaction_may_start_fresh(state_env: dict[str, str
     assert reread.get("status") == "ARM_FAILED"
 
 
+def test_create_true_does_not_overwrite_a_version_conflict(state_env: dict[str, str]) -> None:
+    """``create=True`` exists for "nothing to preserve"; a newer-build document is the opposite.
+
+    ``needs_human``/``arm_failed`` both go through ``create=True`` -- without this, an
+    activation whose ``version`` this build cannot trust would be silently replaced with a
+    fresh, blank document the moment anything tried to escalate over it (Stop's ``_no_state``
+    among them), destroying whatever the newer build had recorded.
+    """
+    st = state.State(WORKTREE, SESSION)
+    doc = {"version": 99, "status": "ACTIVE", "reason": "", "phases": ["from the future"]}
+    write_private_atomic(st.state_file, json.dumps(doc), root=paths.state_root())
+    before = st.state_file.read_bytes()
+
+    assert st.load() is False
+    assert st.version_conflict is True
+
+    with pytest.raises(StateLoadError, match="version"), st.transaction(create=True):
+        st.update(status="ARM_FAILED")  # pragma: no cover - transaction aborts first
+
+    assert st.state_file.read_bytes() == before, "create=True must not clobber a document this build merely disagrees with"
+
+
+def test_create_true_still_starts_fresh_over_genuinely_unusable_state(state_env: dict[str, str]) -> None:
+    """The contrast case: truly missing or corrupt state has nothing to preserve, so
+    ``create=True`` still builds a fresh document for it -- only a version conflict is
+    special-cased."""
+    st = state.State(WORKTREE, SESSION)
+    write_private_atomic(st.state_file, "{ not json", root=paths.state_root())
+
+    assert st.load() is False
+    assert st.version_conflict is False
+
+    with st.transaction(create=True):
+        st.update(status="ARM_FAILED", reason="corrupt state")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.get("status") == "ARM_FAILED"
+
+
 # -- escalation must win ---------------------------------------------------
 
 
@@ -536,7 +579,7 @@ def test_an_unexpired_activation_keeps_its_status(state_env: dict[str, str], mon
     assert st.effective_status(default_config()) == "ACTIVE"
 
 
-@pytest.mark.parametrize("status", ["COMPLETE", "ARM_FAILED", "NEEDS_HUMAN"])
+@pytest.mark.parametrize("status", ["COMPLETE", "ARM_FAILED", "NEEDS_HUMAN", "RESUMED"])
 def test_terminal_statuses_ignore_the_ttl(status: str, state_env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
     st = state.State(WORKTREE, SESSION)
     st.new()
@@ -617,3 +660,203 @@ def test_escalation_persists_immediately(state_env: dict[str, str]) -> None:
     assert reread.load()
     assert reread.get("status") == "NEEDS_HUMAN"
     assert reread.get("reason") == "because"
+
+
+# -- resume / pause / plan-revision / config-overlay fields -----------------
+
+
+def test_new_state_document_carries_the_resume_fields(state_env: dict[str, str]) -> None:
+    doc = state.new_state_document()
+    assert doc["version"] == state.STATE_VERSION == 2
+    assert doc["stop_after_phase"] == 0
+    assert doc["resumed_from"] == ""
+    assert doc["resumed_into"] == ""
+    assert doc["resume_count"] == 0
+    assert doc["plan_revisions"] == []
+    assert doc["replan_pending"] is False
+    assert doc["overrides"] == {}
+    assert doc["abandoned_pending_tree"] == ""
+    assert doc["abandoned_pending_head"] == ""
+    assert doc["activation_generation"] == 0
+    assert doc["finish_requested"] is False
+
+
+def test_a_fresh_document_needs_no_migration(state_env: dict[str, str]) -> None:
+    st = state.State(WORKTREE, SESSION)
+    with st.transaction(create=True):
+        st.update(status="ARMED")
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["version"] == 2
+    assert reread.data["plan_revisions"] == []
+
+
+# -- legacy migration --------------------------------------------------------
+
+
+def _install_legacy_state(worktree: str, session: str) -> state.State:
+    """A version-1 document plus its frozen plan, laid out exactly as ``arm`` used to."""
+    st = state.State(worktree, session)
+    write_private_atomic(st.state_file, LEGACY_FIXTURE.read_text(encoding="utf-8"), root=paths.state_root())
+    return st
+
+
+def test_a_legacy_document_migrates_on_the_first_transaction(state_env: dict[str, str]) -> None:
+    st = _install_legacy_state(WORKTREE, SESSION)
+    plan_bytes = b"# The Plan\n\nDo the three things.\n"
+    write_private_atomic(st.act_dir / "plan.frozen.md", plan_bytes.decode(), root=paths.state_root())
+
+    before = json.loads(LEGACY_FIXTURE.read_text(encoding="utf-8"))
+
+    with st.transaction():
+        st.update(reason="touched during migration")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["version"] == 2
+    assert reread.data["plan_revisions"] == [
+        {
+            "at": before["armed_at"],
+            "phase": 1,
+            "sha256": hashlib.sha256(plan_bytes).hexdigest(),
+            "file": "plan.frozen.md",
+        }
+    ]
+    # New fields defaulted...
+    assert reread.data["stop_after_phase"] == 0
+    assert reread.data["resumed_from"] == ""
+    assert reread.data["resume_count"] == 0
+    assert reread.data["replan_pending"] is False
+    assert reread.data["overrides"] == {}
+    assert reread.data["activation_generation"] == 0
+    assert reread.data["finish_requested"] is False
+    # ... and everything the legacy document already had is untouched.
+    assert reread.data["status"] == before["status"]
+    assert reread.data["phase"] == before["phase"]
+    assert reread.data["phases"] == before["phases"]
+    assert reread.data["approved_trees"] == before["approved_trees"]
+    assert reread.data["report_seq"] == before["report_seq"]
+    assert reread.data["reason"] == "touched during migration"
+
+    # The phase gate works normally on the migrated document.
+    assert reread.phase_count() == len(before["phases"])
+    assert reread.tree_approved(before["approved_trees"][0])
+
+
+def test_a_legacy_document_without_its_frozen_plan_fails_closed(state_env: dict[str, str]) -> None:
+    """A migration that invents a plan is worse than a refusal."""
+    st = _install_legacy_state(WORKTREE, SESSION)
+    # No plan.frozen.md written into st.act_dir.
+
+    with pytest.raises(StateLoadError, match=r"plan\.frozen\.md"), st.transaction():
+        st.update(reason="should never run")  # pragma: no cover - transaction aborts first
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["status"] == "ARM_FAILED"
+    assert "plan.frozen.md" in reread.data["reason"]
+    assert reread.data["version"] == 1, "a failed migration must not claim to have upgraded anything"
+
+
+def test_a_document_from_a_newer_build_is_refused_untouched(state_env: dict[str, str]) -> None:
+    """Refused on ``load`` itself, before ``status`` is ever dispatched on -- see below."""
+    st = state.State(WORKTREE, SESSION)
+    doc = json.loads(LEGACY_FIXTURE.read_text(encoding="utf-8"))
+    doc["version"] = 99
+    write_private_atomic(st.state_file, json.dumps(doc), root=paths.state_root())
+    before = st.state_file.read_bytes()
+
+    assert st.load() is False, "load() must not hand a hook a document it cannot trust"
+    assert st.data == {}
+
+    with pytest.raises(StateLoadError, match="version"), st.transaction():
+        st.update(reason="should never run")  # pragma: no cover - transaction aborts first
+
+    assert st.state_file.read_bytes() == before, "a document this build cannot interpret must not be rewritten"
+
+
+@pytest.mark.parametrize(
+    ("value", "label", "is_conflict"),
+    [
+        (99, "an-integer-newer-than-this-build", True),
+        ("invalid", "a-non-numeric-string", False),
+        (None, "an-explicit-null", False),
+        (False, "a-boolean", False),
+        (True, "a-boolean-true", False),
+        (1.5, "a-float", False),
+        (0, "an-integer-below-any-real-version", False),
+        (-1, "a-negative-integer", False),
+        ([], "a-list", False),
+    ],
+)
+def test_load_fails_closed_on_an_untrustworthy_version(value: object, label: str, is_conflict: bool, state_env: dict[str, str]) -> None:
+    """A malformed ``version`` must be refused, never silently folded into "legacy" version 1.
+
+    Read-only hook paths (``pretool``, ``stop``, ``posttool``, ``resolve_local_activation``)
+    call ``load()`` and dispatch on ``status`` without any version check of their own -- so
+    if ``load()`` let a document like this through, they would gate on a ``status`` value
+    from a schema they do not understand, at face value.
+
+    ``version_conflict`` must be set for **only** the one case that is plausibly a real
+    future build's document (a positive integer above ``STATE_VERSION``): every other
+    malformed value here is something no build of this gate has ever written, so it is
+    ordinary corrupt state, not evidence worth preserving untouched. Getting this wrong in
+    the other direction is its own failure mode -- a stray ``null`` would then permanently
+    refuse every escalation and every re-arm over what is, in truth, no different from
+    unparseable JSON, with manual deletion of the activation directory as the only way out.
+    """
+    st = state.State(WORKTREE, SESSION)
+    doc = json.loads(LEGACY_FIXTURE.read_text(encoding="utf-8"))
+    doc["version"] = value
+    write_private_atomic(st.state_file, json.dumps(doc), root=paths.state_root())
+
+    assert st.load() is False, label
+    assert st.data == {}
+    assert st.version_conflict is is_conflict, label
+
+
+def test_an_absent_version_key_is_the_only_legacy_case(state_env: dict[str, str]) -> None:
+    """The one value ``load`` must accept without a ``version`` key at all: genuinely missing."""
+    st = state.State(WORKTREE, SESSION)
+    doc = json.loads(LEGACY_FIXTURE.read_text(encoding="utf-8"))
+    del doc["version"]
+    write_private_atomic(st.state_file, json.dumps(doc), root=paths.state_root())
+
+    assert st.load() is True
+    assert "version" not in st.data
+
+
+# -- migration refuses a symlinked plan -------------------------------------
+
+
+def test_migration_refuses_a_symlinked_plan_frozen(state_env: dict[str, str], tmp_path: Path) -> None:
+    """A symlink planted at ``plan.frozen.md`` must not be read, hashed and trusted as revision 0."""
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Not the real plan\n\nrm -rf /\n")
+
+    st = _install_legacy_state(WORKTREE, SESSION)
+    (st.act_dir / "plan.frozen.md").symlink_to(outside)
+
+    with pytest.raises(StateLoadError, match=r"plan\.frozen\.md"), st.transaction():
+        st.update(reason="should never run")  # pragma: no cover - transaction aborts first
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["status"] == "ARM_FAILED"
+    assert not reread.data.get("plan_revisions"), "the symlinked content must never be recorded as revision 0"
+
+
+def test_migration_runs_only_once(state_env: dict[str, str]) -> None:
+    """A second transaction against an already-migrated document must not re-synthesize revision 0."""
+    st = _install_legacy_state(WORKTREE, SESSION)
+    write_private_atomic(st.act_dir / "plan.frozen.md", "plan\n", root=paths.state_root())
+
+    with st.transaction():
+        st.update(reason="first")
+    with st.transaction():
+        st.update(reason="second")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert len(reread.data["plan_revisions"]) == 1
+    assert reread.data["reason"] == "second"

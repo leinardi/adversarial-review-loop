@@ -82,6 +82,12 @@ This activation is older than ttl_hours ({ttl_hours}) and its baseline can no lo
 Re-arm with /opencode-review-loop:implement <plan.md>, or leave the mode with /opencode-review-loop:stop.
 """
 
+RESUMED: Final = """\
+This activation was retired by a resume; {successor} took over. It no longer accepts any mutation, and nothing here can undo that.
+
+Continue in {successor}, or re-arm this worktree from scratch with /opencode-review-loop:implement <plan.md>.
+"""
+
 ESCAPE_DENIED: Final = """\
 ocrl finish and ocrl deactivate are user-only escapes. You may not end the review loop yourself.
 
@@ -300,12 +306,12 @@ def _pretool(hook: Hook) -> None:
     if hooks.tool_is_readonly(tool):
         hook.pass_()
 
-    config = config_module.load(repo)
     state = State(worktree, payload.session_id)
     if not state.load():
         # The entrypoint ran, so the skill was invoked, but no state exists. That is the
         # fail-open case, and it fails closed instead.
         hooks.deny(hook, MISSING_STATE)
+    config = config_module.load(repo, overrides=state.data.get("overrides"))
 
     _gate(hook, payload, state=state, config=config, repo=repo)
 
@@ -323,13 +329,13 @@ def _no_pointer(hook: Hook, *, session: str, cwd: str, tool: str) -> NoReturn:
     hooks.deny(hook, UNSTARTED_ARM)
 
 
-def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo: str) -> None:
-    """Everything from the effective status down. Ends in an emitter on every path."""
-    from ocrl import cmdshape  # noqa: PLC0415 - not on the read-only hot path
+def _gate_terminal_status(hook: Hook, *, state: State, config: Config, status: str) -> None:
+    """The statuses that end the decision unconditionally, before anything is classified.
 
-    tool, command = payload.tool_name, payload.command
-    status = state.effective_status(config)
-
+    Split out of :func:`_gate` to keep it under the branch-count linter's ceiling -- these
+    four are independent of ``tool``/``command`` and of each other, so factoring them out
+    changes nothing about the decision itself.
+    """
     if status in ("COMPLETE", "DISARMED"):
         hook.pass_()
     if status == "ARM_FAILED":
@@ -338,6 +344,21 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
         hooks.deny(hook, NEEDS_HUMAN.format(reason=state.get("reason")))
     if status == "STALE":
         hooks.deny(hook, STALE.format(ttl_hours=config.as_int("ttl_hours")))
+    if status == "RESUMED":
+        # Terminal, like the three above: retirement must never be something a mutation in
+        # the old session can talk its way past.
+        successor = state.get("resumed_into") or "the successor session"
+        hooks.deny(hook, RESUMED.format(successor=successor))
+
+
+def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo: str) -> None:
+    """Everything from the effective status down. Ends in an emitter on every path."""
+    from ocrl import cmdshape  # noqa: PLC0415 - not on the read-only hot path
+
+    tool, command = payload.tool_name, payload.command
+    status = state.effective_status(config)
+
+    _gate_terminal_status(hook, state=state, config=config, status=status)
 
     # The escapes are user-only; Claude's route is Bash, and it is denied (Rule 4).
     if tool == "Bash" and cmdshape.is_escape(command):

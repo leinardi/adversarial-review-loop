@@ -295,6 +295,22 @@ def test_finish_never_completes_on_a_review_that_did_not_approve(
     assert document["final_done_tree"] == ""
 
 
+def test_finish_refuses_a_resumed_activation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``_FINISHABLE`` is an allow-list that already excludes ``RESUMED`` -- pin it in a test."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    state_path = state_dir(env, git_repo, "s1") / "state.json"
+    document = json.loads(state_path.read_text())
+    document.update(status="RESUMED", resumed_into="s2", reason="resumed into s2")
+    state_path.write_text(json.dumps(document))
+
+    proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 1
+    assert "cannot finish while the activation is RESUMED" in proc.stdout
+    assert read_state(env, git_repo, "s1")["status"] == "RESUMED"
+
+
 def test_finish_without_an_activation(git_repo: Path, clean_env: dict[str, str]) -> None:
     proc = run_bootstrap(["finish"], cwd=git_repo, env=armed_env(clean_env))
     assert proc.returncode == 0

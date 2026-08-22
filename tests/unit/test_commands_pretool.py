@@ -143,7 +143,7 @@ def test_work_outside_the_armed_worktree_is_untouched(git_repo: Path, tmp_path: 
     assert proc.stdout == ""
 
 
-@pytest.mark.parametrize("status", ["ARM_FAILED", "NEEDS_HUMAN", "RECONCILE", "ARMED"])
+@pytest.mark.parametrize("status", ["ARM_FAILED", "NEEDS_HUMAN", "RECONCILE", "ARMED", "RESUMED"])
 def test_a_read_only_tool_is_permitted_in_every_denying_state(
     git_repo: Path,
     tmp_path: Path,
@@ -201,6 +201,38 @@ def test_a_denying_status_denies_a_mutation(
     assert verdict == "deny"
     assert expected in reason
     assert "because" in reason
+
+
+def test_a_resumed_activation_denies_every_mutation_naming_the_successor(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A retired activation must deny in the old session, not gate as if it were still live.
+
+    Otherwise the old session can still approve a commit through the ordinary commit gate,
+    and ``confirm-commit`` would then advance a document that ``resume`` already retired --
+    resurrecting it into a second live activation over the same worktree.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status="RESUMED", resumed_into="s2")
+
+    verdict, reason = pretool(git_repo, env, tool="Write")
+
+    assert verdict == "deny"
+    assert "retired" in reason
+    assert "s2" in reason
+
+
+def test_a_resumed_activation_ignores_the_ttl(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """RESUMED already denies everything; the TTL turning it into a generic STALE would lose
+    the message naming the successor session."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status="RESUMED", resumed_into="s2", armed_at=1)
+
+    verdict, reason = pretool(git_repo, env, tool="Write")
+
+    assert verdict == "deny"
+    assert "retired" in reason
+    assert "older than ttl_hours" not in reason
 
 
 def test_an_expired_activation_blocks_rather_than_disarming(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

@@ -105,6 +105,7 @@ class Activation:
     pending_approved_tree: str
     pending_head: str
     pending_command: str
+    activation_generation: int
 
     @property
     def identity(self) -> tuple[str, str, str]:
@@ -129,6 +130,7 @@ def activation(state: State, config: Config) -> Activation:
         pending_approved_tree=state.get("pending_approved_tree"),
         pending_head=state.get("pending_head"),
         pending_command=state.get("pending_command"),
+        activation_generation=state.get_int("activation_generation"),
     )
 
 
@@ -165,6 +167,8 @@ def describe_move(before: Activation, now: Activation) -> str:
         return f"the phase moved from {before.phase} to {now.phase}"
     if before.last_approved_tree != now.last_approved_tree:
         return "another call approved a different tree"
+    if before.activation_generation != now.activation_generation:
+        return "a resume changed the activation while this was in progress"
     return "the pending approval changed"
 
 

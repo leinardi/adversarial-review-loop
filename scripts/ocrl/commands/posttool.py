@@ -156,13 +156,13 @@ def _bind(hook: Hook, payload: HookInput) -> tuple[State, Config, str]:
     if hooks.resolve_repo(cwd, worktree) != worktree:
         hook.pass_()
 
-    # The shell loaded the configuration here and then read nothing out of it. It is read
-    # now, for `ttl_hours`: an activation that expired between the gate and the commit must
-    # not have a phase advanced on it.
-    config = config_module.load(worktree)
     state = State(worktree, payload.session_id)
     if not state.load():
         hook.pass_()
+    # The shell loaded the configuration here and then read nothing out of it. It is read
+    # now, for `ttl_hours`: an activation that expired between the gate and the commit must
+    # not have a phase advanced on it.
+    config = config_module.load(worktree, overrides=state.data.get("overrides"))
     return state, config, worktree
 
 
@@ -191,8 +191,10 @@ _RECONCILABLE: Final = frozenset({"ACTIVE", "ARMED"})
 #: work still uncommitted, and reverting that would take an exit away from them (Rule 4). The
 #: two escalations are here because writing ``RECONCILE`` over either downgrades a stronger
 #: denial. ``RECONCILE`` itself is absent -- it already records a divergence -- and so is
-#: ``ARM_FAILED``, which froze no baseline, so *every* tree is unapproved under it.
-_REPORT_ONLY: Final = frozenset({"DISARMED", "COMPLETE", "NEEDS_HUMAN", "STALE"})
+#: ``ARM_FAILED``, which froze no baseline, so *every* tree is unapproved under it. ``RESUMED``
+#: must never become ``RECONCILE``: that would resurrect a retired activation into one that
+#: still has something to recover, so an unapproved HEAD under it is reported, not acted on.
+_REPORT_ONLY: Final = frozenset({"DISARMED", "COMPLETE", "NEEDS_HUMAN", "STALE", "RESUMED"})
 
 
 def _confirm_commit(hook: Hook) -> None:

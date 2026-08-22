@@ -111,7 +111,6 @@ def resolve_local_activation(session: str = "") -> Activation | None:
         session = latest_session(repo)
     if not session:
         return None
-    config = config_module.load(repo)
     try:
         state = State(repo, session)
     except UnsafePathError:
@@ -119,4 +118,5 @@ def resolve_local_activation(session: str = "") -> Activation | None:
         return None
     if not state.load():
         return None
+    config = config_module.load(repo, overrides=state.data.get("overrides"))
     return Activation(repo=repo, session=session, config=config, state=state)

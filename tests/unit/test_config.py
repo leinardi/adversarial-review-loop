@@ -59,6 +59,36 @@ def test_a_missing_repo_argument_skips_the_repo_layer(layers: dict[str, str], tm
     assert config.load("", layers).as_str("model") == "openai/gpt-5.6-sol"
 
 
+# -- the activation overlay --------------------------------------------------
+
+
+def test_overrides_beat_repo_but_lose_to_environment(layers: dict[str, str], tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    write_user_config(layers, {"model": "user-model"})
+    write_repo_config(repo, {"model": "repo-model"})
+    layers["OCRL_MODEL"] = "env-model"
+
+    cfg = config.load(str(repo), layers, overrides={"model": "override-model"})
+    assert cfg.as_str("model") == "env-model", "the environment must still win over an activation override"
+
+    del layers["OCRL_MODEL"]
+    cfg = config.load(str(repo), layers, overrides={"model": "override-model"})
+    assert cfg.as_str("model") == "override-model", "an override must beat the repo config"
+
+
+def test_an_unknown_override_key_is_dropped(layers: dict[str, str], tmp_path: Path) -> None:
+    """The overlay is written into ``state.json``, which is not a trust boundary (Rule 3)."""
+    cfg = config.load(str(tmp_path / "repo"), layers, overrides={"model": "override-model", "totally_not_a_real_key": "x"})
+    assert cfg.as_str("model") == "override-model", "a known key from the overlay is still accepted"
+    assert "totally_not_a_real_key" not in cfg.values
+
+
+def test_an_empty_overrides_mapping_changes_nothing(layers: dict[str, str], tmp_path: Path) -> None:
+    write_user_config(layers, {"model": "user-model"})
+    assert config.load(str(tmp_path / "repo"), layers, overrides={}).as_str("model") == "user-model"
+    assert config.load(str(tmp_path / "repo"), layers, overrides=None).as_str("model") == "user-model"
+
+
 # -- malformed input -------------------------------------------------------
 
 

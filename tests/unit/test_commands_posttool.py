@@ -467,20 +467,26 @@ def test_a_wrapper_that_commits_and_disarms_does_not_go_unreported(
     assert read_state(env, git_repo, SESSION)["status"] == "DISARMED"
 
 
-@pytest.mark.parametrize("status", ["NEEDS_HUMAN", "STALE", "COMPLETE"])
+@pytest.mark.parametrize("status", ["NEEDS_HUMAN", "STALE", "COMPLETE", "RESUMED"])
 def test_an_unapproved_head_is_reported_in_every_state_that_cannot_act_on_it(
     git_repo: Path,
     tmp_path: Path,
     clean_env: dict[str, str],
     status: str,
 ) -> None:
-    """Entering RECONCILE would downgrade an escalation, so these report instead."""
+    """Entering RECONCILE would downgrade an escalation, so these report instead.
+
+    ``RESUMED`` belongs in this group for the same reason: writing ``RECONCILE`` over a
+    retirement would give a dead session something that looks recoverable, when what
+    actually happened is that ``resume`` replaced it.
+    """
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     (git_repo / "sneaked.txt").write_text("never gated\n")
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "ungated")
-    patch_state(env, git_repo, status=status, reason="whatever", armed_at=1 if status == "STALE" else 2**31)
+    extra = {"resumed_into": "s2"} if status == "RESUMED" else {}
+    patch_state(env, git_repo, status=status, reason="whatever", armed_at=1 if status == "STALE" else 2**31, **extra)
 
     _, stdout = confirm(git_repo, env, command="make test")
 

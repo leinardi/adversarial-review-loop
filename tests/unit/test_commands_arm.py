@@ -18,6 +18,7 @@ import pytest
 from conftest import FAKE_REVIEWER, git, run_bootstrap
 
 from ocrl import paths
+from ocrl.atomic import locked as _real_locked
 from ocrl.commands import arm
 
 
@@ -178,6 +179,94 @@ def test_re_arming_starts_a_fresh_activation(git_repo: Path, tmp_path: Path, cle
     assert "deadbeef" not in fresh["approved_trees"]  # type: ignore[operator]
     assert fresh["phases"] == []
     assert fresh["phase"] == 1
+
+
+def test_re_arming_refuses_a_version_conflict_without_touching_the_directory(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """A newer build's activation must not be destroyed by an older build's re-arm.
+
+    ``_freeze_plan`` writes ``plan.frozen.md`` before ``state.transaction`` ever takes the
+    lock, so a check that only lived inside the transaction would let this exact overwrite
+    happen and only refuse to save the (unrelated) state document afterwards -- the frozen
+    plan, which is the evidence every past review was run against, would already be gone.
+    This asserts the whole activation directory, byte for byte, to catch that.
+    """
+    env = armed_env(clean_env)
+    plan = plan_file(tmp_path)
+    run_bootstrap(["arm", "--session", "s1", "--plan", str(plan)], cwd=git_repo, env=env)
+
+    act = state_dir(env, git_repo, "s1")
+    document = json.loads((act / "state.json").read_text())
+    document["version"] = 99
+    (act / "state.json").write_text(json.dumps(document))
+
+    before = {p.relative_to(act): p.read_bytes() for p in act.rglob("*") if p.is_file()}
+
+    new_plan = plan_file(tmp_path, text="# a completely different plan\n\nnot the same at all\n")
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(new_plan)], cwd=git_repo, env=env)
+
+    assert proc.returncode == 1
+    assert "ARMING REFUSED" in proc.stdout
+    assert "version 99" in proc.stdout
+    assert str(act) in proc.stdout
+
+    after = {p.relative_to(act): p.read_bytes() for p in act.rglob("*") if p.is_file()}
+    assert after == before, "the version-99 activation directory must be byte-for-byte unchanged"
+
+
+def test_a_concurrent_newer_arm_landing_between_the_check_and_the_freeze_is_still_caught(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run``'s pre-check is unlocked and is a fast exit, not the guarantee.
+
+    Simulates the race directly, in-process: a "concurrent newer build" plants a version-99
+    activation, complete with its own frozen plan, at the exact moment this arm is about to
+    take the activation lock -- i.e. *after* ``run``'s own unlocked check already read "no
+    conflict". Only the recheck ``_arm`` repeats *inside* the lock, immediately before
+    freezing, can catch a race landing in that window; a version-conflict check that lived
+    only in ``run`` would freeze right over the newer build's plan before ever finding out.
+    """
+    env = armed_env(clean_env)
+    # Unlike run_bootstrap, this drives arm.run() in-process so the monkeypatch below can
+    # take effect -- and in-process means os.environ is overlaid, not replaced, so any
+    # OCRL_*/XDG_* the host happens to carry has to be cleared first (test_state.py's
+    # state_env fixture does the same, for the same reason).
+    for key in list(os.environ):
+        if key.startswith(("OCRL_", "XDG_")):
+            monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.chdir(git_repo)
+
+    plan = plan_file(tmp_path)
+    assert arm.run(["--session", "s1", "--plan", str(plan)]) == 0
+
+    act = state_dir(env, git_repo, "s1")
+    concurrent_plan = b"# planted by a concurrent newer build, mid-race\n"
+
+    def racing_locked(lock_path: Path, *, root: Path):  # type: ignore[no-untyped-def]
+        # The instant this arm is about to take the lock -- after its own unlocked check
+        # already passed -- a "different, newer process" wins the race and lands first.
+        document = json.loads((act / "state.json").read_text())
+        document["version"] = 99
+        (act / "state.json").write_text(json.dumps(document))
+        (act / "plan.frozen.md").write_bytes(concurrent_plan)
+        return _real_locked(lock_path, root=root)
+
+    monkeypatch.setattr(arm, "locked", racing_locked)
+
+    new_plan = plan_file(tmp_path, text="# a different plan, from the old build that lost the race\n")
+    rc = arm.run(["--session", "s1", "--plan", str(new_plan)])
+
+    assert rc == 1
+    assert (act / "plan.frozen.md").read_bytes() == concurrent_plan, "the concurrently-armed newer build's plan must survive"
+    assert json.loads((act / "state.json").read_text())["version"] == 99
 
 
 # --------------------------------------------------------------------------

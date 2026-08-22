@@ -30,8 +30,9 @@ from ocrl.state import State
 
 __all__ = ["Completion", "Fingerprint", "describe_change", "fingerprint", "start"]
 
-#: ``armed_at``, ``baseline_tree``, ``session_id``, stored status, effective status.
-type Fingerprint = tuple[str, str, str, str, str]
+#: ``armed_at``, ``baseline_tree``, ``session_id``, stored status, effective status,
+#: ``activation_generation``.
+type Fingerprint = tuple[str, str, str, str, str, int]
 
 
 def fingerprint(state: State, config: Config) -> Fingerprint:
@@ -49,7 +50,10 @@ def fingerprint(state: State, config: Config) -> Fingerprint:
     what must not be signed off.
 
     ``armed_at``, ``baseline_tree`` and ``session_id`` identify *which* activation this is:
-    ``arm`` writes a fresh document, so a re-arm mid-review changes them.
+    ``arm`` writes a fresh document, so a re-arm mid-review changes them. ``activation_generation``
+    catches what identity does not: a same-session ``resume`` leaves all three unchanged but
+    swaps the active plan revision or the model override underneath a review already in
+    flight, and every resume -- same-session included -- increments it for exactly this.
     """
     return (
         state.get("armed_at"),
@@ -57,6 +61,7 @@ def fingerprint(state: State, config: Config) -> Fingerprint:
         state.get("session_id"),
         state.get("status"),
         state.effective_status(config),
+        state.get_int("activation_generation"),
     )
 
 
@@ -65,6 +70,12 @@ def describe_change(before: Fingerprint, now: Fingerprint, reason: str) -> str:
         return (
             "opencode-review-loop: this activation was re-armed while the final review was running, "
             "so the approval belongs to an activation that is no longer current. The new activation stays armed.\n"
+        )
+    if before[5] != now[5]:
+        return (
+            "opencode-review-loop: a resume changed the activation while the final review was running "
+            "(the plan or the model may have changed underneath it), so the approval no longer applies. "
+            "The activation stays armed; finish again.\n"
         )
     return (
         f"opencode-review-loop: the activation moved from {before[4]} to {now[4]} ({reason}) while the final review was running. "

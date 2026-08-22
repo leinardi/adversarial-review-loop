@@ -15,7 +15,9 @@ Nothing is ever written inside the repository under review (Rule 3).
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,12 +29,20 @@ from ocrl.config import Config
 from ocrl.errors import StateLoadError
 from ocrl.util import log, now
 
-__all__ = ["State", "new_state_document", "pointer_clear", "pointer_read", "pointer_write"]
+__all__ = ["STATE_VERSION", "State", "new_state_document", "pointer_clear", "pointer_read", "pointer_write"]
 
-#: Statuses that are terminal enough that the TTL no longer applies to them.
-_TTL_EXEMPT: Final = frozenset({"COMPLETE", "ARM_FAILED", "NEEDS_HUMAN"})
+#: Statuses that are terminal enough that the TTL no longer applies to them. ``RESUMED``
+#: marks a retired activation -- it already denies everything on its own, and letting the
+#: TTL turn it into ``STALE`` instead would replace a message naming the successor session
+#: with a generic re-arm prompt.
+_TTL_EXEMPT: Final = frozenset({"COMPLETE", "ARM_FAILED", "NEEDS_HUMAN", "RESUMED"})
 
-STATE_VERSION: Final = 1
+#: Version 2 adds resume, pause, plan revision and the config overlay's fields. See
+#: ``State._migrate`` for the upgrade from a version-1 (or unversioned) document.
+STATE_VERSION: Final = 2
+
+#: The name ``arm`` freezes the plan under, and the name revision 0 always carries.
+_PLAN_FROZEN_NAME: Final = "plan.frozen.md"
 
 
 def new_state_document() -> dict[str, Any]:
@@ -64,6 +74,17 @@ def new_state_document() -> dict[str, Any]:
         "defer_pending": False,
         "final_done_tree": "",
         "report_seq": 0,
+        "stop_after_phase": 0,
+        "resumed_from": "",
+        "resumed_into": "",
+        "resume_count": 0,
+        "plan_revisions": [],
+        "replan_pending": False,
+        "overrides": {},
+        "abandoned_pending_tree": "",
+        "abandoned_pending_head": "",
+        "activation_generation": 0,
+        "finish_requested": False,
     }
 
 
@@ -119,6 +140,55 @@ def pointer_clear(session: str) -> None:
 # --------------------------------------------------------------------------
 
 
+def _document_version(document: Mapping[str, Any]) -> int | None:
+    """The document's version as a small int, or ``None`` if it cannot be trusted.
+
+    A genuinely **absent** key is the one legacy case: documents ``arm`` wrote before this
+    field existed. Answers ``1`` for it, matching the version those documents would have
+    declared had the field existed. Every other malformed value -- an explicit ``null``, a
+    boolean (``bool`` is a subclass of ``int`` in Python, so it must be excluded explicitly),
+    a non-numeric string, a float -- answers ``None`` rather than being folded into "legacy":
+    collapsing anything the document might contain into a trusted version 1 is how malformed
+    state would get migrated and trusted instead of refused.
+    """
+    if "version" not in document:
+        return 1
+    value = document["version"]
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return int(value)
+
+
+def _usable_version(document: Mapping[str, Any]) -> bool:
+    """Whether ``document["version"]`` is safe for this build to interpret at all.
+
+    Used by :meth:`State.load` itself, so that a document from a build newer than this one
+    -- or one carrying a malformed version -- is treated exactly like unparseable JSON:
+    unusable, on every path, not merely on the write path ``_migrate`` guards. A hook that
+    only checked ``status`` would otherwise read a future schema's status value at face
+    value and gate on it as if it understood what that value meant.
+    """
+    version = _document_version(document)
+    return version is not None and 1 <= version <= STATE_VERSION
+
+
+def _is_future_version(document: Mapping[str, Any]) -> bool:
+    """Whether ``version`` is a real, positive integer this build merely does not go up to.
+
+    Deliberately **not** the negation of :func:`_usable_version`: that also covers ``0``,
+    negative integers, and every malformed non-integer value (``null``, a boolean, a float,
+    a string) -- none of which any build of this gate has ever written or ever will, so
+    there is nothing plausibly "newer" about them. Only an integer greater than
+    :data:`STATE_VERSION` is the shape an actual future build's document would have.
+    :meth:`State.load` uses exactly this to decide whether a document is worth preserving
+    untouched (see :attr:`State.version_conflict`) or is ordinary corrupt state -- conflating
+    the two would let a single stray ``null`` permanently refuse every escalation and every
+    re-arm over what is, in truth, no different from unparseable JSON.
+    """
+    version = _document_version(document)
+    return version is not None and version > STATE_VERSION
+
+
 class State:
     """One activation's state document, bound to a (worktree, session) pair."""
 
@@ -129,6 +199,21 @@ class State:
         self.state_file: Path = self.act_dir / "state.json"
         self.lock_file: Path = self.act_dir / "lock"
         self.data: dict[str, Any] = {}
+        #: Set by :meth:`load` when the document is well-formed JSON -- a real, readable
+        #: object -- and declares a ``version`` that is a real, positive integer greater
+        #: than :data:`STATE_VERSION`: the shape an actual newer build's document would
+        #: have. Distinct from every other way ``load`` can fail (missing, unparseable, not
+        #: an object, or a malformed non-integer ``version`` like ``null``) -- those mean
+        #: there is nothing to preserve, which is what makes ``transaction(create=True)``
+        #: safe to overwrite with a fresh document. A version conflict means the opposite --
+        #: the document is real, and overwriting it is exactly the "cannot know what its
+        #: fields mean" case the version check exists to refuse, not a fresh start to build
+        #: on. See :func:`_is_future_version` for why the boundary is drawn there and not at
+        #: "any unusable version".
+        self.version_conflict: bool = False
+        #: The offending integer when :attr:`version_conflict` is set, for messages that
+        #: want to name it. ``None`` otherwise.
+        self.version_conflict_value: int | None = None
 
     # -- persistence -----------------------------------------------------
 
@@ -139,8 +224,14 @@ class State:
         """Read the document. False -- and an empty document -- if it is not usable.
 
         Callers treat False as "the gate cannot tell what has been reviewed" and deny; it is
-        never an opt-out.
+        never an opt-out. A document whose ``version`` this build cannot trust -- newer than
+        :data:`STATE_VERSION`, or malformed -- is unusable for exactly the same reason
+        unparseable JSON is: every other field, ``status`` included, might mean something
+        this build does not know about. Only the genuinely-newer case also sets
+        :attr:`version_conflict`; see there for why.
         """
+        self.version_conflict = False
+        self.version_conflict_value = None
         try:
             document = json.loads(self.state_file.read_text(encoding="utf-8"))
         except (OSError, ValueError, RecursionError):
@@ -148,6 +239,12 @@ class State:
             return False
         if not isinstance(document, dict):
             self.data = {}
+            return False
+        if not _usable_version(document):
+            self.data = {}
+            if _is_future_version(document):
+                self.version_conflict = True
+                self.version_conflict_value = _document_version(document)
             return False
         self.data = document
         return True
@@ -160,6 +257,95 @@ class State:
 
     def new(self) -> None:
         self.data = new_state_document()
+
+    def _migrate(self) -> None:
+        """Upgrade a document written before ``STATE_VERSION`` existed, lock already held.
+
+        Most fields this version added degrade correctly on their own through the typed
+        accessors below -- ``get_int`` answers ``0`` for a missing key, ``get_array``
+        answers ``[]``, ``get`` answers ``""``. ``plan_revisions`` is the one exception:
+        later code indexes its *last* entry, and an empty list turns that into an
+        ``IndexError`` raised from inside a hook -- which the fail-closed guard in
+        ``hookio.Hook.run`` turns into a denial that says nothing useful. So a legacy
+        document is upgraded explicitly, once, here, under the lock ``transaction`` already
+        holds.
+
+        Must not call back into :meth:`transaction` or :meth:`_escalate` on any path: both
+        take the activation lock, and ``flock`` does not nest across two descriptors opened
+        by the same process on the same file -- a second acquisition here would block
+        forever on the first. Failure is instead written straight into ``self.data`` and
+        saved directly, and a :class:`StateLoadError` raised so the caller's own mutation is
+        abandoned exactly as it would be for any other unusable document.
+
+        ``version`` is re-validated here even though :meth:`load` already refused anything
+        it could not trust -- belt and braces, in case a future caller ever reaches this
+        method with data that did not come through ``load``.
+        """
+        version = _document_version(self.data)
+        if version is None or not (1 <= version <= STATE_VERSION):
+            # Either newer than this build understands, or a value that is not a version this
+            # build has ever written. Neither is safe to interpret, so nothing is written --
+            # the previous, unparsed document is left exactly as it was found.
+            raise StateLoadError(f"{self.state_file} declares version {self.data.get('version')!r}, which this build does not know how to read")
+        if version == STATE_VERSION:
+            return
+
+        # `os.path.realpath` on both the activation directory and the plan file, then a
+        # containment check by exact parent-directory equality -- the same shape
+        # ``pretool._guard_state_root`` uses -- so a symlink planted at either level is
+        # refused rather than followed: reading and hashing whatever it points at would
+        # publish that content as revision 0 of a plan nobody ever froze.
+        plan_path = self.act_dir / _PLAN_FROZEN_NAME
+        act_dir_real = os.path.realpath(self.act_dir)
+        plan_real = os.path.realpath(plan_path)
+        usable = os.path.dirname(plan_real) == act_dir_real and os.path.isfile(plan_real)
+        plan_bytes = b""
+        if usable:
+            try:
+                plan_bytes = Path(plan_real).read_bytes()
+            except OSError:
+                usable = False
+        if not usable:
+            # A migration that invents a plan is worse than a refusal. This is honest about
+            # what is and is not known: the document is real, but the evidence every review
+            # was run against is gone, so nothing more can be verified against it.
+            self.data["status"] = "ARM_FAILED"
+            self.data["reason"] = (
+                f"legacy activation predates resume and {_PLAN_FROZEN_NAME} is missing, unreadable, or not a "
+                "plain file inside the activation directory; the frozen plan can no longer be verified"
+            )
+            self.save()
+            raise StateLoadError(self.data["reason"]) from None
+
+        defaults = new_state_document()
+        for key in (
+            "stop_after_phase",
+            "resumed_from",
+            "resumed_into",
+            "resume_count",
+            "replan_pending",
+            "overrides",
+            "abandoned_pending_tree",
+            "abandoned_pending_head",
+            "activation_generation",
+            "finish_requested",
+        ):
+            self.data.setdefault(key, defaults[key])
+
+        # Revision 0 is synthesized from the plan as found *at migration time*: no earlier
+        # hash was ever recorded to check it against, so this attests only that the file
+        # existed with this content when the document was upgraded, not that it is unchanged
+        # since arming. Every later revision is verified normally, against a hash recorded
+        # when it was written.
+        self.data["plan_revisions"] = [
+            {
+                "at": self.data.get("armed_at") or 0,
+                "phase": 1,
+                "sha256": hashlib.sha256(plan_bytes).hexdigest(),
+                "file": _PLAN_FROZEN_NAME,
+            }
+        ]
+        self.data["version"] = STATE_VERSION
 
     @contextmanager
     def transaction(self, *, create: bool = False) -> Iterator[State]:
@@ -179,6 +365,16 @@ class State:
         can never grant anything: arming, and the two escalations. Both write a document
         whose effect is to deny.
 
+        **``create=True`` does not cover a version conflict.** ``self.new()`` is a *fresh*
+        document -- the right answer when there was truly nothing to preserve, but wrong
+        for a document this build can read fine yet refuses to interpret: it is real, and
+        overwriting it with a blank one destroys whatever a newer build recorded, in the
+        one case the version check exists to say "refuse" about, not "start over". So this
+        still raises even when ``create`` is set; the two escalations that rely on
+        ``create=True`` (``needs_human``, ``arm_failed``) then raise too, and that
+        propagates to the fail-closed guard in ``hookio.Hook.run`` -- which denies or blocks
+        without ever calling :meth:`save`, exactly what "refuse" means here.
+
         **The save happens only if the block completes**, so raising out of it abandons the
         mutation with the previous document intact. That is the supported way to decline:
         any decision a caller makes about *whether* to write must be taken inside the block,
@@ -187,9 +383,13 @@ class State:
         """
         with locked(self.lock_file, root=paths.state_root()):
             if not self.load():
+                if self.version_conflict:
+                    raise StateLoadError(f"{self.state_file} declares a version this build does not trust; refusing to touch it")
                 if not create:
                     raise StateLoadError(f"no usable activation state at {self.state_file}")
                 self.new()
+            else:
+                self._migrate()
             yield self
             self.save()
 

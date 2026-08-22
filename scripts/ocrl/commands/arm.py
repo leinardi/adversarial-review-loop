@@ -30,7 +30,7 @@ from typing import Final
 
 from ocrl import commands, gitsnap, paths
 from ocrl import config as config_module
-from ocrl.atomic import ensure_private_dir, write_private_atomic
+from ocrl.atomic import ensure_private_dir, locked, write_private_atomic
 from ocrl.config import Config
 from ocrl.state import State, pointer_write
 from ocrl.util import now
@@ -65,9 +65,36 @@ NO_SESSION_MESSAGE: Final = (
     "The review loop is NOT active; do not implement anything."
 )
 
+VERSION_CONFLICT_MESSAGE: Final = """\
+**opencode-review-loop: ARMING REFUSED — an activation already at {act_dir} was written by a version {version} this build does not understand.**
+
+Nothing here was touched: not the frozen plan, not state.json, not anything else in that \
+directory. Overwriting it would destroy whatever that build recorded, which is worse than \
+refusing outright.
+
+The review loop is NOT active. Either run the build that wrote it, or -- only if you are sure \
+discarding that record is safe -- remove {act_dir} yourself and re-run \
+`/opencode-review-loop:implement <plan.md>`.
+"""
+
 
 class _ArmFailure(Exception):
     """An arming failure that must be persisted before the command returns."""
+
+
+class _VersionConflict(Exception):
+    """The activation directory already holds a document a newer build wrote.
+
+    Deliberately not an ``_ArmFailure``: that class is always reported through
+    ``_record_failure``, which persists ``ARM_FAILED`` -- and that write is itself refused
+    for exactly the same document (``state.transaction`` raises regardless of ``create``),
+    so routing this through the ordinary failure path would just move the crash rather than
+    avoid it. This is reported directly, and nothing is written at all.
+    """
+
+    def __init__(self, version: int | None) -> None:
+        self.version = version
+        super().__init__(f"activation directory holds a version-{version} document")
 
 
 @dataclass(frozen=True)
@@ -307,8 +334,23 @@ def run(argv: list[str]) -> int:
         return 1
 
     state = State(repo, session)
+    if not state.load() and state.version_conflict:
+        # A fast, unlocked exit for the common case: no point running the dirty-worktree
+        # check or probing the reviewer for an arm that is already going to be refused.
+        # **Not the guarantee** -- a concurrent newer-build arm can land between this read
+        # and the freeze below, so the authoritative check is the one _arm repeats under the
+        # activation lock, immediately before it writes anything.
+        sys.stdout.write(VERSION_CONFLICT_MESSAGE.format(act_dir=state.act_dir, version=state.version_conflict_value))
+        return 1
+
     try:
         frozen = _arm(state, request)
+    except _VersionConflict as exc:
+        # _record_failure is deliberately not used here: it writes ARM_FAILED through the
+        # same create=True path that state.transaction now refuses for a version conflict,
+        # so calling it would just move the crash rather than avoid it.
+        sys.stdout.write(VERSION_CONFLICT_MESSAGE.format(act_dir=state.act_dir, version=exc.version))
+        return 1
     except _ArmFailure as exc:
         _record_failure(state, session=session, repo=repo, reason=str(exc))
         sys.stdout.write(ARM_FAILED_MESSAGE.format(reason=str(exc)))
@@ -350,9 +392,21 @@ def _arm(state: State, request: _Request) -> _Frozen:
     )
 
     ensure_private_dir(state.act_dir, root=paths.state_root())
-    _freeze_plan(plan, state.act_dir)
 
-    with state.transaction(create=True):
+    # The freeze and the save happen inside the *same* hold of the activation lock as the
+    # version recheck, not `state.transaction(create=True)` -- which would need to be
+    # entered twice (once to check, once to write) and reopen exactly the window this
+    # closes. `run`'s check above is only a fast, unlocked exit; a concurrent newer-build
+    # arm can land between it and here, and this is what actually serialises against that:
+    # whichever process takes the lock first finishes checking, freezing and saving before
+    # the other can observe anything, so there is no gap in which an old build can read
+    # "no conflict" and then overwrite a plan a newer build wrote a moment later.
+    with locked(state.lock_file, root=paths.state_root()):
+        if not state.load() and state.version_conflict:
+            raise _VersionConflict(state.version_conflict_value)
+
+        _freeze_plan(plan, state.act_dir)
+
         # A fresh document: re-arming the same session starts a new activation, and carrying
         # the old one's approved trees forward would approve a tree nobody reviewed for it.
         state.new()
@@ -369,6 +423,7 @@ def _arm(state: State, request: _Request) -> _Frozen:
             allow_dirty=allow_dirty,
         )
         state.mark_tree_approved(frozen.baseline)
+        state.save()
 
     pointer_write(request.session, repo)
     commands.write_latest(repo, request.session)
