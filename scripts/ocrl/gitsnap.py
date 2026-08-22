@@ -42,8 +42,10 @@ __all__ = [
     "head_commit",
     "head_tree",
     "head_tree_checked",
+    "is_ancestor",
     "oversized",
     "rev_parse",
+    "rev_parse_checked",
     "snapshot",
     "stageable",
     "submodule_warnings",
@@ -141,20 +143,42 @@ def head_tree(repo: str) -> str:
     return rev_parse(repo, "HEAD^{tree}")
 
 
+def is_ancestor(repo: str, ancestor: str, descendant: str) -> bool:
+    """Is ``ancestor`` reachable by walking ``descendant``'s first-parent-and-beyond history?
+
+    False on anything git cannot resolve, which is the safe direction for every caller here:
+    ``resume`` uses it to refuse rather than trust a baseline it cannot place, and ``pretool``
+    uses it to refuse a recovery reset that predates the activation.
+    """
+    return git_run(repo, ["merge-base", "--is-ancestor", ancestor, descendant]).returncode == 0
+
+
+def rev_parse_checked(repo: str, spec: str) -> str:
+    """Like :func:`rev_parse`, but raises rather than folding a genuine git failure into
+    "this spec does not resolve".
+
+    ``--verify --quiet`` exits 1 with **no stderr** when the spec legitimately names nothing
+    (a root commit's ``^``, for one) and 128 *with* stderr when git could not answer at all --
+    the same distinction :func:`head_tree_checked` already relies on, and any caller for whom
+    that difference decides whether something is reported should use this instead of
+    :func:`rev_parse`.
+    """
+    proc = git_run(repo, ["rev-parse", "--verify", "--quiet", spec])
+    if proc.returncode == 0:
+        return _first_line_output(proc)
+    complaint = _decode(proc.stderr).strip()
+    if proc.returncode == 1 and not complaint:
+        return ""
+    raise GitUnavailable(complaint or f"git rev-parse exited with status {proc.returncode} in {repo}")
+
+
 def head_tree_checked(repo: str) -> str:
     """HEAD's tree id, ``""`` for a repository with no commits, or raise.
 
     Raises :class:`GitUnavailable` when git could not answer, so "the history cannot be read"
     cannot be mistaken for "there is nothing here to look at".
     """
-    proc = git_run(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])
-    if proc.returncode == 0:
-        return _first_line_output(proc)
-    complaint = _decode(proc.stderr).strip()
-    if proc.returncode == 1 and not complaint:
-        # `--quiet` turns "that ref does not resolve" into a silent exit 1. Nothing else is.
-        return ""
-    raise GitUnavailable(complaint or f"git rev-parse exited with status {proc.returncode} in {repo}")
+    return rev_parse_checked(repo, "HEAD^{tree}")
 
 
 # --------------------------------------------------------------------------

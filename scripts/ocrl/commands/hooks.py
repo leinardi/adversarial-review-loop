@@ -31,7 +31,9 @@ __all__ = [
     "deny",
     "describe_move",
     "escalate",
+    "find_abandoned_marker_commit",
     "record_unstarted_arm",
+    "resolve_abandoned_marker",
     "resolve_repo",
     "tool_is_readonly",
 ]
@@ -170,6 +172,91 @@ def describe_move(before: Activation, now: Activation) -> str:
     if before.activation_generation != now.activation_generation:
         return "a resume changed the activation while this was in progress"
     return "the pending approval changed"
+
+
+def find_abandoned_marker_commit(repo: str, *, activation_commit: str, marker_head: str, marker_tree: str) -> str:
+    """The abandoned commit's id, if it landed in ``activation_commit..HEAD``; else ``""``.
+
+    ``resume --abandon-pending`` clears a stale pending approval whose approving session is
+    gone, but records the one commit it would have produced -- parent ``marker_head``, tree
+    ``marker_tree`` -- because the killed session's Bash call may still complete *after* the
+    marker is recorded. The pair is unambiguous: matching on the tree alone would also match
+    an ordinary, already-reviewed commit whose diff happened to be empty (its tree equals
+    ``last_approved_tree``, which the abandoned tree can legitimately equal too).
+
+    One ``git rev-list`` plus a ``rev-parse`` pair per commit in range -- paid only when a
+    marker is actually set, which is a rare, user-chosen state.
+
+    Raises ``gitsnap.GitUnavailable`` when ``git rev-list`` itself fails (a broken ``.git``),
+    or when either per-commit ``rev-parse`` fails to answer for a commit ``rev-list`` just
+    proved exists. Whether the abandoned commit landed is exactly what this function cannot
+    answer if git cannot be read at all, and Rule 1 says that uncertainty must not silently
+    read as "it didn't land" -- which plain ``rev_parse`` would do, since it folds a genuine
+    failure into the same empty string it returns for "does not resolve".
+
+    One range is legitimately empty rather than unreadable: an activation armed against an
+    empty repository has ``activation_commit == ""``, and if nothing has landed since, ``HEAD``
+    is still unborn -- ``git rev-list HEAD`` fails for that reason alone, with the same exit
+    status a genuine failure would have. That is checked for explicitly, with the *checked*
+    read (``rev_parse_checked``, not the lenient ``head_commit``) so a genuine git failure while
+    asking the question still raises rather than being folded into the same "" an unborn HEAD
+    answers with -- the same distinction the rest of this function already draws for its own
+    git calls. Only a *confirmed* unborn HEAD short-circuits to "no match"; wedging every
+    commit in the successor before the very first one has ever landed is exactly the failure
+    this short-circuit exists to prevent, and it must not itself become a way past a genuine
+    git failure.
+    """
+    from ocrl import gitsnap  # noqa: PLC0415 - not on the read-only hot path
+
+    if not activation_commit and not gitsnap.rev_parse_checked(repo, "HEAD"):
+        return ""
+
+    range_spec = f"{activation_commit}..HEAD" if activation_commit else "HEAD"
+    proc = gitsnap.git_run(repo, ["rev-list", range_spec])
+    if proc.returncode != 0:
+        raise gitsnap.GitUnavailable(proc.stderr.decode("utf-8", "surrogateescape").strip() or f"git rev-list {range_spec} failed")
+    for commit in proc.stdout.decode("utf-8", "surrogateescape").split():
+        if gitsnap.rev_parse_checked(repo, f"{commit}^") == marker_head and gitsnap.rev_parse_checked(repo, f"{commit}^{{tree}}") == marker_tree:
+            return commit
+    return ""
+
+
+def resolve_abandoned_marker(state: State, *, repo: str) -> str:
+    """Enter ``RECONCILE`` if a commit ``resume --abandon-pending`` gave up on landed anyway.
+
+    Must run **before** anything in this activation approves or reviews a commit: the
+    abandoned commit's own ``PostToolUse`` ran, if at all, in the retired session against a
+    document nothing here ever sees again, so this is the only place left to notice it landed.
+    Returns the bad commit id on a match (already recorded as ``RECONCILE``), or ``""`` --
+    including when there was no marker to check at all.
+
+    Raises ``gitsnap.GitUnavailable`` when the scan itself could not run; callers must deny or
+    block on it rather than let an unreadable history read as "nothing landed" (Rule 1).
+    """
+    marker_tree = state.get("abandoned_pending_tree")
+    if not marker_tree:
+        return ""
+    marker_head = state.get("abandoned_pending_head")
+    activation_commit = state.get("activation_commit")
+    match = find_abandoned_marker_commit(repo, activation_commit=activation_commit, marker_head=marker_head, marker_tree=marker_tree)
+    if not match:
+        return ""
+    with state.transaction():
+        # Re-checked against the reloaded document: a concurrent hook call may already have
+        # resolved (or moved past) this exact marker.
+        if state.get("abandoned_pending_tree") == marker_tree and state.get("abandoned_pending_head") == marker_head:
+            state.update(
+                status="RECONCILE",
+                reason=(
+                    f"a commit abandoned by resume ({match}) landed after all, on top of the marker it was expected to "
+                    f"build on ({marker_head} -> {marker_tree})."
+                ),
+                bad_commit=match,
+                bad_commit_parent=marker_head,
+                abandoned_pending_tree="",
+                abandoned_pending_head="",
+            )
+    return match
 
 
 def deny(hook: Hook, body: str) -> NoReturn:

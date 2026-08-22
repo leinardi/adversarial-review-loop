@@ -89,9 +89,10 @@ Continue in {successor}, or re-arm this worktree from scratch with /opencode-rev
 """
 
 ESCAPE_DENIED: Final = """\
-ocrl finish and ocrl deactivate are user-only escapes. You may not end the review loop yourself.
+ocrl finish, deactivate, resume and config are user-only commands. You may not run them yourself.
 
-If you believe the loop should end, say so and let the user run /opencode-review-loop:finish or /opencode-review-loop:stop.
+If you believe one of them should run, say so and let the user run /opencode-review-loop:finish, \
+/opencode-review-loop:stop, /opencode-review-loop:resume or /opencode-review-loop:config.
 """
 
 PHASES_NOT_FROZEN: Final = """\
@@ -229,6 +230,20 @@ reviewed, and rewinding one breaks that guarantee.
 
 If you meant to unstage something, there is no need — the review snapshot is taken through a
 throwaway index and never reads the real one.
+"""
+
+RECONCILE_FROM_ABANDONED: Final = """\
+The commit resume --abandon-pending gave up on ({bad}) landed after all, on top of the parent \
+it was expected to build on. Nothing here reviewed it.
+
+Recover explicitly: `git reset --soft {parent}`, rebuild the intended complete tree, and \
+commit again through the normal review gate.
+"""
+
+ABANDONED_MARKER_UNVERIFIABLE: Final = """\
+Whether a commit resume --abandon-pending gave up on already landed could not be checked: {error}
+
+The commit is denied: an unreadable history is not the same as nothing having landed.
 """
 
 RESET_OFF_REVIEWED_COMMIT: Final = (
@@ -433,6 +448,16 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
     """Decide on the Bash call that would create a commit, running the review if needed."""
     from ocrl import gitsnap, report, reviewer  # noqa: PLC0415 - reached only by a commit
 
+    # A commit resume --abandon-pending gave up on may still have landed, in the retired
+    # session, after the marker was recorded. Nothing else in this activation ever sees that
+    # commit's own PostToolUse, so this is checked before anything here approves another one.
+    try:
+        bad = hooks.resolve_abandoned_marker(state, repo=repo)
+    except gitsnap.GitUnavailable as exc:
+        hooks.deny(hook, ABANDONED_MARKER_UNVERIFIABLE.format(error=exc))
+    if bad:
+        hooks.deny(hook, RECONCILE_FROM_ABANDONED.format(bad=bad, parent=state.get("bad_commit_parent")))
+
     snap = _prepare(hook, state=state, config=config, repo=repo, command=command)
     tree = snap.tree
     phase = state.get_int("phase")
@@ -555,7 +580,7 @@ def _gate_reset(hook: Hook, *, state: State, repo: str, command: str) -> NoRetur
         hooks.deny(hook, RESET_UNRESOLVED.format(target=target, parent=parent))
     if resolved != parent:
         hooks.deny(hook, RESET_WRONG_TARGET.format(resolved=resolved, parent=parent))
-    if activation and resolved != activation and gitsnap.git_run(repo, ["merge-base", "--is-ancestor", resolved, activation]).returncode == 0:
+    if activation and resolved != activation and gitsnap.is_ancestor(repo, resolved, activation):
         hooks.deny(hook, RESET_PREDATES_ACTIVATION.format(resolved=resolved, activation=activation))
     hook.allow(RESET_ALLOWED.format(resolved=resolved))
 

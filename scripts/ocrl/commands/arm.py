@@ -35,7 +35,7 @@ from ocrl.config import Config
 from ocrl.state import State, pointer_write
 from ocrl.util import now
 
-__all__ = ["run", "split_args"]
+__all__ = ["flag_bool", "flag_str", "parse_flag_tokens", "run", "split_args"]
 
 #: Whitespace the shell's ``[[:space:]]`` matches in the C locale. ``str.strip()`` would
 #: also strip Unicode spaces, which the shell would have left in the path.
@@ -221,39 +221,55 @@ _BOOL_FLAGS: Final = ("--allow-dirty",)
 _VALUE_FLAGS: Final = ("--until", "--model", "--variant")
 
 
-def _parse_flags(tokens: list[str]) -> _Flags:
-    """Turn raw flag tokens into ``_Flags``. Raises ``_ArmFailure`` on the first problem.
+def parse_flag_tokens(tokens: list[str], *, bool_flags: tuple[str, ...], value_flags: tuple[str, ...], usage: str) -> dict[str, str | bool]:
+    """Generic ``--flag`` / ``--flag value`` tokenizer, shared by ``arm`` and ``resume``.
 
-    Every token must be a recognised flag name -- there are no bare positionals here, unlike
-    the plan (which ``_parse`` already separated out), so a stray token from the retired
-    ``"a -x b"``-style split lands here as an unknown flag rather than silently becoming part
-    of a value.
+    Every token must be one of ``bool_flags`` or ``value_flags`` -- there are no bare
+    positionals here, unlike a plan path (which each caller separates out before this runs),
+    so a stray token lands here as an unknown flag rather than silently becoming part of a
+    value. Raises ``_ArmFailure`` on the first problem: an unrecognised flag, or a value flag
+    given nothing -- or another flag -- as its value. A missing value and a value that is
+    itself another flag are the same mistake: nothing was actually given. Without this,
+    ``--variant --allow-dirty`` would silently set ``variant="--allow-dirty"`` instead of
+    reporting that ``--variant`` got no value -- swallowing the next flag whole rather than
+    refusing.
     """
-    values: dict[str, str] = {}
-    allow_dirty = False
+    result: dict[str, str | bool] = {}
     index = 0
     while index < len(tokens):
         token = tokens[index]
-        if token in _BOOL_FLAGS:
-            allow_dirty = True
+        if token in bool_flags:
+            result[token] = True
             index += 1
             continue
-        if token in _VALUE_FLAGS:
-            # A missing value and a value that is itself another flag are the same mistake:
-            # nothing was actually given. Without this, "--variant --allow-dirty" would
-            # silently arm with variant="--allow-dirty" instead of reporting that --variant
-            # got no value -- swallowing the next flag whole rather than refusing.
+        if token in value_flags:
             if index + 1 >= len(tokens) or tokens[index + 1].startswith("--"):
                 raise _ArmFailure(f'"{token}" requires a value')
-            values[token] = tokens[index + 1]
+            result[token] = tokens[index + 1]
             index += 2
             continue
-        raise _ArmFailure(f'unrecognised flag "{token}"; accepted flags are --allow-dirty, --until, --model, --variant')
+        raise _ArmFailure(f'unrecognised flag "{token}"; accepted flags are {usage}')
+    return result
+
+
+def flag_str(raw: dict[str, str | bool], key: str) -> str | None:
+    """Narrow a parsed flag to its string value, or ``None`` when it was not given as one."""
+    value = raw.get(key)
+    return value if isinstance(value, str) else None
+
+
+def flag_bool(raw: dict[str, str | bool], key: str) -> bool:
+    return bool(raw.get(key, False))
+
+
+def _parse_flags(tokens: list[str]) -> _Flags:
+    """Turn raw flag tokens into ``_Flags``. Raises ``_ArmFailure`` on the first problem."""
+    raw = parse_flag_tokens(tokens, bool_flags=_BOOL_FLAGS, value_flags=_VALUE_FLAGS, usage="--allow-dirty, --until, --model, --variant")
     return _Flags(
-        allow_dirty=allow_dirty,
-        until=values.get("--until", ""),
-        model=values.get("--model"),
-        variant=values.get("--variant"),
+        allow_dirty=flag_bool(raw, "--allow-dirty"),
+        until=flag_str(raw, "--until") or "",
+        model=flag_str(raw, "--model"),
+        variant=flag_str(raw, "--variant"),
     )
 
 
@@ -367,17 +383,21 @@ def _freeze_plan(plan: str, act_dir: Path) -> None:
         raise _ArmFailure(f"the plan could not be frozen into the activation directory ({exc})") from exc
 
 
-def _record_failure(state: State, *, session: str, repo: str, reason: str) -> None:
+def _record_failure(state: State, *, session: str, repo: str, reason: str, publish_latest: bool = True) -> None:
     """Persist ``ARM_FAILED`` and make it findable, then leave the message to the caller.
 
-    Both pointers are written on this path too. Without the session pointer the next tool
-    call reads "arming never executed" and denies with a message about a sandbox, hiding the
-    real reason; without the worktree pointer ``status`` cannot find the activation at all.
+    The session pointer is always written: without it the next tool call reads "arming never
+    executed" and denies with a message about a sandbox, hiding the real reason. The worktree
+    (``latest``) pointer is what ``status`` and the other shell-run commands resolve, and
+    ``publish_latest=False`` is for ``resume``'s cross-session failure *before* it has retired
+    the predecessor -- ``latest`` must keep naming the still-live predecessor, not a session
+    that failed to take over from it.
     """
     with state.transaction(create=True):
         state.update(status="ARM_FAILED", reason=reason, session_id=session, worktree=repo, armed_at=now())
     pointer_write(session, repo)
-    commands.write_latest(repo, session)
+    if publish_latest:
+        commands.write_latest(repo, session)
 
 
 def _armed_message(request: _Request, frozen: _Frozen) -> str:

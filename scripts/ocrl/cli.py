@@ -20,7 +20,8 @@ __all__ = ["USAGE", "main"]
 
 USAGE = """usage: ocrl.sh <subcommand> [args]
 
-  arm --session <id> --plan <path> [--allow-dirty]
+  arm --session <id> --plan <path> [--allow-dirty] [--until N] [--model X] [--variant V]
+  resume --session <id> [--until N] [--plan <path>] [--allow-dirty] [--abandon-pending] [--model X] [--variant V]
   set-phases --phase "…" [--phase "…" …]
   pretool | confirm-commit | posttool-failure | gate-stop   (hook entrypoints)
   status | report [n] | defer --reason "…" | finish | deactivate
@@ -69,6 +70,10 @@ def main(argv: list[str]) -> int:  # noqa: PLR0911 - one return per subcommand, 
         from ocrl.commands import arm  # noqa: PLC0415
 
         return arm.run(rest)
+    if sub == "resume":
+        from ocrl.commands import resume  # noqa: PLC0415
+
+        return resume.run(rest)
     if sub == "set-phases":
         from ocrl.commands import phases  # noqa: PLC0415
 

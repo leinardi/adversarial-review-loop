@@ -381,7 +381,7 @@ _GIT: Final = r"(?:[^ \t\v\f\r\n;&|()]*/)?git"
 
 _COMMIT_RE: Final = re.compile(rf"{_BEFORE}{_GIT}({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+commit({_SPACE}|$)", re.MULTILINE)
 _RESET_RE: Final = re.compile(rf"{_BEFORE}{_GIT}({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+reset({_SPACE}|$)", re.MULTILINE)
-_ESCAPE_RE: Final = re.compile(rf"ocrl(\.sh)?{_SPACE}+(finish|deactivate)({_SPACE}|$)", re.MULTILINE)
+_ESCAPE_RE: Final = re.compile(rf"ocrl(\.sh)?{_SPACE}+(finish|deactivate|resume|config)({_SPACE}|$)", re.MULTILINE)
 
 
 def detection_form(command: str) -> str:

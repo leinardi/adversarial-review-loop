@@ -234,6 +234,9 @@ def test_the_loose_detectors(command: str, commit: bool, reset: bool) -> None:
         ("ocrl.sh finish", True),
         ("/x/y/ocrl.sh deactivate", True),
         ("ocrl finish", True),
+        ("ocrl.sh resume", True),
+        ("ocrl.sh config", True),
+        ("/x/y/ocrl.sh resume --until 2", True),
         ("ocrl.sh status", False),
         pytest.param("ocrl.sh finishing", False, id="lookalike-suffix-not-an-escape"),
         pytest.param("finish", False, id="bare-word-without-the-entrypoint-is-not-an-escape"),
@@ -390,7 +393,10 @@ def test_a_disguised_reset_is_detected(command: str) -> None:
     assert cmdshape.mentions_reset(command)
 
 
-@pytest.mark.parametrize("command", [r"oc\rl.sh finish", "/p/'o'crl.sh deactivate", r"ocrl\.sh finish"])
+@pytest.mark.parametrize(
+    "command",
+    [r"oc\rl.sh finish", "/p/'o'crl.sh deactivate", r"ocrl\.sh finish", r"oc\rl.sh resume", r"oc\rl.sh config"],
+)
 def test_a_disguised_escape_is_detected(command: str) -> None:
     assert cmdshape.is_escape(command)
 

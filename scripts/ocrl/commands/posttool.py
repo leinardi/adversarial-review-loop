@@ -350,17 +350,27 @@ def _advance(check: _Check, *, pending: str) -> NoReturn:
     try:
         with state.transaction():
             _still_current(check)
-            state.update(
-                last_approved_tree=pending,
-                pending_approved_tree="",
-                pending_head="",
-                pending_command="",
-                status="ACTIVE",
-                reason="",
-                phase=check.expected.phase + 1,
-                failures=0,
-                stop_blocks=0,
-            )
+            updates: dict[str, object] = {
+                "last_approved_tree": pending,
+                "pending_approved_tree": "",
+                "pending_head": "",
+                "pending_command": "",
+                "status": "ACTIVE",
+                "reason": "",
+                "phase": check.expected.phase + 1,
+                "failures": 0,
+                "stop_blocks": 0,
+            }
+            # The commit just confirmed is deterministically the one an abandoned resume
+            # approval would have produced on a rerun: same parent, same tree. Clearing the
+            # marker here is safe precisely because confirmation is stronger than the marker
+            # -- _verify already proved the parent, the tree and a clean worktree -- and
+            # without this, the most ordinary recovery there is (rerun the phase) turns into a
+            # false RECONCILE one commit later, when the *next* scan matches the pair anyway.
+            if state.get("abandoned_pending_tree") == pending and state.get("abandoned_pending_head") == check.expected.pending_head:
+                updates["abandoned_pending_tree"] = ""
+                updates["abandoned_pending_head"] = ""
+            state.update(updates)
     except commands.Refused as exc:
         check.hook.posttool_context(f"{exc}\nThe phase was NOT advanced.".rstrip("\n"))
 

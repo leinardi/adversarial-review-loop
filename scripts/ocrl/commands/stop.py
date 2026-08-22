@@ -139,6 +139,11 @@ Every mutation stays denied until you run /opencode-review-loop:stop.
 
 SNAPSHOT_FAILED: Final = "opencode-review-loop: the working state could not be snapshotted ({error}), so the turn cannot be approved."
 
+ABANDONED_MARKER_UNVERIFIABLE: Final = (
+    "opencode-review-loop: whether a commit resume --abandon-pending gave up on already landed could not be checked ({error}). "
+    "An unreadable history is not the same as nothing having landed, so the turn cannot end on it."
+)
+
 SWEEP_CHANGES: Final = "opencode-review-loop: the turn is ending with uncommitted work that OpenCode requires changes to."
 
 SWEEP_ESCALATED: Final = "opencode-review-loop: escalated to NEEDS_HUMAN — {error}. This is NOT an approval."
@@ -352,6 +357,18 @@ def _review(gate: _Gate) -> NoReturn:
     from ocrl import gitsnap  # noqa: PLC0415 - not needed to answer from the status alone
 
     state, worktree = gate.state, gate.worktree
+
+    # The same check pretool runs before approving a commit, run here too: a turn must not
+    # end -- and the unreviewed-work sweep must not run -- while a commit resume
+    # --abandon-pending gave up on turns out to have landed after all.
+    try:
+        bad = hooks.resolve_abandoned_marker(state, repo=worktree)
+    except gitsnap.GitUnavailable as exc:
+        _block_counted(gate, ABANDONED_MARKER_UNVERIFIABLE.format(error=exc))
+    if bad:
+        reason = f"a commit abandoned by resume ({bad}) landed after all"
+        _block_counted(gate, RECONCILE.format(reason=reason, parent=state.get("bad_commit_parent")).rstrip("\n"))
+
     try:
         snap = gitsnap.snapshot(worktree)
     except gitsnap.SnapshotError as exc:

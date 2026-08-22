@@ -280,7 +280,10 @@ def test_set_phases_is_the_one_command_allowed_while_armed(git_repo: Path, tmp_p
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("command", ["ocrl.sh finish", "/some/where/ocrl deactivate", "cd /x && ocrl.sh finish"])
+@pytest.mark.parametrize(
+    "command",
+    ["ocrl.sh finish", "/some/where/ocrl deactivate", "cd /x && ocrl.sh finish", "ocrl.sh resume", "ocrl.sh config model x"],
+)
 def test_claude_may_not_end_the_loop_itself(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
@@ -288,7 +291,7 @@ def test_claude_may_not_end_the_loop_itself(git_repo: Path, tmp_path: Path, clea
     verdict, reason = pretool(git_repo, env, command=command)
 
     assert verdict == "deny"
-    assert "user-only escapes" in reason
+    assert "user-only commands" in reason
 
 
 def test_the_escape_denial_outranks_a_commit_in_the_same_command(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -298,7 +301,7 @@ def test_the_escape_denial_outranks_a_commit_in_the_same_command(git_repo: Path,
     verdict, reason = pretool(git_repo, env, command="git commit -m x && ocrl.sh finish")
 
     assert verdict == "deny"
-    assert "user-only escapes" in reason
+    assert "user-only commands" in reason
 
 
 # --------------------------------------------------------------------------
@@ -658,7 +661,7 @@ def test_a_disguised_escape_is_still_denied(git_repo: Path, tmp_path: Path, clea
     verdict, reason = pretool(git_repo, env, command=command)
 
     assert verdict == "deny"
-    assert "user-only escapes" in reason
+    assert "user-only commands" in reason
 
 
 def test_a_disguised_reset_is_classified_as_a_reset(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
