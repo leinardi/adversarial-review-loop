@@ -164,6 +164,18 @@ opencode-review-loop: the worktree is not clean, so the last of the work is not 
 {summary}
 """
 
+PAUSED: Final = """\
+opencode-review-loop: paused -- the pause target (phase {target} of {total}) has been reached.
+
+This is NOT an approval of the whole plan, only of the phases committed so far, and the \
+activation is still ARMED. Next up, phase {phase} of {total}:
+
+    {description}
+
+Continue with /opencode-review-loop:resume --until M, or finish the whole plan now with \
+/opencode-review-loop:finish.
+"""
+
 COMPLETE: Final = """\
 opencode-review-loop: COMPLETE. The final cumulative review of the whole activation (baseline {base} -> {head}) passed, across {total} phases. The mode has disarmed itself; further commits are ungated.
 
@@ -348,16 +360,24 @@ def _review(gate: _Gate) -> NoReturn:
     tree = snap.tree
     phase = state.get_int("phase")
     total = state.phase_count()
+    target = state.get_int("stop_after_phase") or total
+    finish_requested = state.get("finish_requested") == "true"
 
     # Unreviewed work sweep: anything not yet approved gets reviewed now.
     if tree != state.get("last_approved_tree") and not state.tree_approved(tree):
         _sweep(gate, snap=snap, phase=phase)
 
-    if phase <= total and state.get("finish_requested") != "true":
+    if phase <= target and not finish_requested:
         _block_counted(gate, PHASES_OUTSTANDING.format(phase=phase, total=total, description=state.phase_desc(phase)).rstrip("\n"))
 
     if not gitsnap.worktree_clean(worktree):
         _block_counted(gate, NOT_CLEAN.format(summary=gitsnap.dirty_summary(worktree)).rstrip("\n"))
+
+    # The target was reached but the plan is not fully implemented, and the user has not
+    # asked to finish early: pause here. Status, baseline_tree and approved_trees are
+    # untouched, and `_final` never runs -- a pause must never reach COMPLETE, which disarms.
+    if phase <= total and not finish_requested:
+        gate.hook.stop_ok(PAUSED.format(phase=phase, total=total, target=target, description=state.phase_desc(phase)).rstrip("\n"))
 
     # This exact tree already passed a final review, so there is nothing left to say.
     if state.get("final_done_tree") == tree:

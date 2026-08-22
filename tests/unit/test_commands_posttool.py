@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from conftest import git, hook_json, run_bootstrap, run_hook
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
-from test_commands_pretool import SESSION, active, patch_state, payload, pretool
+from test_commands_pretool import SESSION, active, active_until, patch_state, payload, pretool
 
 COMMIT = 'git add -A && git commit -m "phase"'
 
@@ -76,6 +76,42 @@ def test_the_last_phase_hands_over_to_the_stop_gate(git_repo: Path, tmp_path: Pa
     message = context(stdout)
     assert "All 1 phases are now committed" in message
     assert read_state(env, git_repo, SESSION)["phase"] == 2
+
+
+def test_reaching_the_pause_target_says_stop_rather_than_continue(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The pause message replaces NEXT_PHASE exactly at the target, not before or after."""
+    env = armed_env(clean_env)
+    active_until(git_repo, tmp_path, env, 2, "one", "two", "three")
+    gated_commit(git_repo, env, "phase one work\n")
+
+    _, stdout = confirm(git_repo, env, command=COMMIT)
+    message = context(stdout)
+    assert "Continue straight into phase 2 of 3" in message
+    assert "pause target" not in message
+
+    gated_commit(git_repo, env, "phase two work\n")
+    _, stdout = confirm(git_repo, env, command=COMMIT)
+    message = context(stdout)
+    assert "phase 2 of 3 committed and verified" in message
+    assert "The pause target (phase 2 of 3) has been reached" in message
+    assert "End your turn now and report to\nthe user" in message
+    assert "Continue straight into phase 3" not in message
+    assert read_state(env, git_repo, SESSION)["phase"] == 3
+
+
+def test_a_pause_target_beyond_the_phase_count_never_fires(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``phases.py`` clamps an out-of-range target to the frozen count, so a ``--until``
+    given as 99 against a 2-phase plan behaves exactly like an unset target: every commit
+    gets the ordinary NEXT_PHASE message, never a pause."""
+    env = armed_env(clean_env)
+    active_until(git_repo, tmp_path, env, 99, "one", "two")
+    gated_commit(git_repo, env)
+
+    _, stdout = confirm(git_repo, env, command=COMMIT)
+
+    message = context(stdout)
+    assert "Continue straight into phase 2 of 2" in message
+    assert "pause target" not in message
 
 
 # --------------------------------------------------------------------------

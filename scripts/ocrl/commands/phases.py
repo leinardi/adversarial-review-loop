@@ -85,6 +85,7 @@ def run(argv: list[str]) -> int:
     # concurrent calls both pass the check and then both write: the second silently rewrote a
     # phase list the first had already frozen and started reviewing against, which is exactly
     # the redescribe-the-work-to-fit-the-code failure freezing exists to prevent.
+    clamp_warning = ""
     try:
         with state.transaction():
             _refuse_unless_armed(state, activation.config)
@@ -92,7 +93,14 @@ def run(argv: list[str]) -> int:
             if problem:
                 raise commands.Refused(problem)
             write_private_atomic(activation.act_dir / "phases.frozen", "".join(f"{phase}\n" for phase in phases), root=state_root())
-            state.update(phases=phases, phase=1, status="ACTIVE", reason="")
+            stop_after_phase = state.get_int("stop_after_phase")
+            if stop_after_phase > len(phases):
+                clamp_warning = (
+                    f"opencode-review-loop: the pause target (phase {stop_after_phase}) is beyond the {len(phases)} "
+                    f"phases just frozen; clamped to {len(phases)}.\n"
+                )
+                stop_after_phase = len(phases)
+            state.update(phases=phases, phase=1, status="ACTIVE", reason="", stop_after_phase=stop_after_phase)
     except StateLoadError:
         # The document went away between resolving the activation and taking the lock.
         sys.stderr.write("opencode-review-loop: no activation found for this worktree. Run /opencode-review-loop:implement <plan.md> first.\n")
@@ -104,5 +112,7 @@ def run(argv: list[str]) -> int:
     out = [f"opencode-review-loop: {len(phases)} phases frozen. Now on phase 1 of {len(phases)}:\n\n"]
     out += [f"  {index + 1}. {phase}\n" for index, phase in enumerate(phases)]
     out.append("\nImplement phase 1, then commit it. The commit is the review gate.\n")
+    if clamp_warning:
+        out.append(f"\n{clamp_warning}")
     sys.stdout.write("".join(out))
     return 0

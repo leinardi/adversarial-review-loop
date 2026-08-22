@@ -66,6 +66,14 @@ def active(repo: Path, tmp_path: Path, env: dict[str, str], *phases: str) -> Non
     set_phases(repo, env, *(phases or ("phase one",)))
 
 
+def active_until(repo: Path, tmp_path: Path, env: dict[str, str], until: int, *phases: str) -> None:
+    """An armed activation with a pause target and its phase list frozen."""
+    plan = plan_file(tmp_path)
+    proc = run_bootstrap(["arm", "--session", SESSION, "--args", f"{plan} --until {until}"], cwd=repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    set_phases(repo, env, *(phases or ("phase one", "phase two", "phase three")))
+
+
 def patch_state(env: dict[str, str], repo: Path, **values: object) -> None:
     path = state_dir(env, repo, SESSION) / "state.json"
     document = json.loads(path.read_text())

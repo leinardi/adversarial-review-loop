@@ -104,8 +104,23 @@ class _Request:
     session: str
     repo: str
     plan: str
-    flag: str
+    #: Raw flag tokens, exactly as split from argv -- ``["--until", "2", "--allow-dirty"]``.
+    #: Parsed and validated inside ``_arm``, where an unrecognised one becomes ``_ArmFailure``.
+    flags: tuple[str, ...]
     config: Config
+
+
+@dataclass(frozen=True)
+class _Flags:
+    """The four flags ``implement`` accepts, parsed but not yet semantically validated."""
+
+    allow_dirty: bool = False
+    #: Raw ``--until`` text -- "", "0", "all" or a digit string -- resolved by ``_resolve_until``.
+    until: str = ""
+    #: ``None`` means "not given", distinct from an empty string: only a flag the user
+    #: actually typed may override the stored model or variant.
+    model: str | None = None
+    variant: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,14 +132,20 @@ class _Frozen:
     baseline: str
     head_commit: str
     allow_dirty: bool
+    until: int
+    overrides: dict[str, str]
+    #: The config actually probed and armed with -- defaults < user < repo < overrides < env
+    #: already resolved. The one source of truth for "what does this activation actually
+    #: run with", since env may itself outrank a --model/--variant override.
+    effective_config: Config
 
 
 def _rstrip_space(text: str) -> str:
     return text.rstrip(_SPACE)
 
 
-def split_args(raw: str) -> tuple[str, str]:
-    """Split the slash command's single argument string into ``(plan, flag)``.
+def split_args(raw: str) -> tuple[str, list[str]]:
+    """Split the slash command's single argument string into ``(plan, flag_tokens)``.
 
     The whole string arrives as one argument because Claude Code's positional substitution
     is 0-based -- ``$1`` is the *second* argument, and an out-of-range ``$N`` is left in the
@@ -132,36 +153,47 @@ def split_args(raw: str) -> tuple[str, str]:
     is substituted unconditionally and keeps paths containing spaces intact, so the split
     happens here.
 
-    Faithful to the retired shell's ``ocrl_split_args`` including its oddity: the third case
-    matches on *any* whitespace followed by a dash, but then takes the last whitespace-separated
-    word as the flag, whatever it starts with. ``"a -x b"`` therefore yields ``("a -x", "b")``,
-    pinned in ``tests/unit/test_commands_arm.py``. It is harmless because the caller rejects
-    every flag that is not ``--allow-dirty``.
+    Rule: the plan is every token up to the first one starting with ``--``; the rest are
+    flag tokens, whitespace-separated, each kept as its own element so a flag's value is
+    still a separate token from its name -- exactly like ``argv``. This is a strict
+    superset of the retired shell's ``ocrl_split_args`` for the cases that mattered (a path
+    with any run of spaces, ``--allow-dirty`` alone or trailing) but retires its pinned
+    oddity: ``"a -x b"`` used to yield ``("a -x", "b")`` by taking the last word as the flag
+    whatever it started with. A single ``-`` no longer starts a flag boundary either -- only
+    ``--`` does, matching every flag this gate accepts.
+
+    The plan is sliced out of the original string at the boundary's byte offset, not
+    rebuilt by rejoining tokens: a path legitimately containing more than one run of
+    whitespace (``"my  plans/plan.md"``) must come back exactly as typed, or a file that
+    really exists at that path stops resolving the moment a flag is added alongside it.
     """
     raw = raw.strip(_SPACE)
     if not raw:
-        return "", ""
-
-    if re.search(rf"[{re.escape(_SPACE)}]--allow-dirty\Z", raw):
-        return _rstrip_space(raw[: -len("--allow-dirty")]), "--allow-dirty"
-    if raw == "--allow-dirty":
-        return "", "--allow-dirty"
-    if re.search(rf"[{re.escape(_SPACE)}]-", raw):
-        index = max(raw.rfind(char) for char in _SPACE)
-        flag = raw[index + 1 :]
-        return _rstrip_space(raw[: index + 1]), flag
-    return raw, ""
+        return "", []
+    for match in re.finditer(rf"[^{re.escape(_SPACE)}]+", raw):
+        if match.group().startswith("--"):
+            plan = _rstrip_space(raw[: match.start()])
+            flag_tokens = re.split(rf"[{re.escape(_SPACE)}]+", raw[match.start() :].strip(_SPACE))
+            return plan, flag_tokens
+    return raw, []
 
 
-def _parse(argv: list[str]) -> tuple[str, str, str]:
-    """``(session, plan, flag)`` from the dispatcher's arguments.
+def _parse(argv: list[str]) -> tuple[str, str, list[str]]:
+    """``(session, plan, flag_tokens)`` from the dispatcher's arguments.
+
+    ``--session``, ``--plan`` and ``--args`` are the only tokens treated specially --
+    ``--args`` is ``split_args`` on the shim's single substituted string, and every other
+    token (whether it came from ``--args`` or directly on argv, in tests) is appended to the
+    same flat token list, in order. Parsing those tokens into named, validated flags happens
+    in ``_arm``, exactly where the equivalent single-flag check used to live.
 
     An option whose value is missing consumes what is there and stops, rather than the
     shell's ``shift 2`` -- which fails on a one-element list, leaves the arguments untouched
     and spins forever. That is a bug fix, not a behaviour change: no reachable caller can
     tell the difference between "spun forever" and "was rejected".
     """
-    session = plan = flag = ""
+    session = plan = ""
+    flag_tokens: list[str] = []
     index = 0
     while index < len(argv):
         arg = argv[index]
@@ -172,19 +204,85 @@ def _parse(argv: list[str]) -> tuple[str, str, str]:
             elif arg == "--plan":
                 plan = value
             else:
-                plan, parsed_flag = split_args(value)
-                if parsed_flag:
-                    flag = parsed_flag
+                args_plan, args_flags = split_args(value)
+                if args_plan:
+                    plan = args_plan
+                flag_tokens.extend(args_flags)
             index += 2
             continue
-        if arg == "--allow-dirty":
-            flag = "--allow-dirty"
-        elif arg:
-            # An unrecognised positional is reported by name rather than ignored: it is
-            # nearly always a mistyped flag, and silently arming would hide that.
-            flag = arg
+        if arg:
+            flag_tokens.append(arg)
         index += 1
-    return session, plan, flag
+    return session, plan, flag_tokens
+
+
+#: Flags accepted by ``implement``, and whether each one takes a value.
+_BOOL_FLAGS: Final = ("--allow-dirty",)
+_VALUE_FLAGS: Final = ("--until", "--model", "--variant")
+
+
+def _parse_flags(tokens: list[str]) -> _Flags:
+    """Turn raw flag tokens into ``_Flags``. Raises ``_ArmFailure`` on the first problem.
+
+    Every token must be a recognised flag name -- there are no bare positionals here, unlike
+    the plan (which ``_parse`` already separated out), so a stray token from the retired
+    ``"a -x b"``-style split lands here as an unknown flag rather than silently becoming part
+    of a value.
+    """
+    values: dict[str, str] = {}
+    allow_dirty = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _BOOL_FLAGS:
+            allow_dirty = True
+            index += 1
+            continue
+        if token in _VALUE_FLAGS:
+            # A missing value and a value that is itself another flag are the same mistake:
+            # nothing was actually given. Without this, "--variant --allow-dirty" would
+            # silently arm with variant="--allow-dirty" instead of reporting that --variant
+            # got no value -- swallowing the next flag whole rather than refusing.
+            if index + 1 >= len(tokens) or tokens[index + 1].startswith("--"):
+                raise _ArmFailure(f'"{token}" requires a value')
+            values[token] = tokens[index + 1]
+            index += 2
+            continue
+        raise _ArmFailure(f'unrecognised flag "{token}"; accepted flags are --allow-dirty, --until, --model, --variant')
+    return _Flags(
+        allow_dirty=allow_dirty,
+        until=values.get("--until", ""),
+        model=values.get("--model"),
+        variant=values.get("--variant"),
+    )
+
+
+def _resolve_until(raw: str) -> int:
+    """The pause target from ``--until``'s raw text. Raises ``_ArmFailure`` on nonsense.
+
+    ``""``, ``"0"`` and ``"all"`` all mean "no target" -- the flag was not given, or the
+    user explicitly cleared it. Anything else must be a plain positive integer; the upper
+    bound (``N <= phase_count``) cannot be checked yet, since phases are not frozen at arm
+    time, so ``commands/phases.py::run`` checks it again once they are.
+
+    ``str.isdigit()`` is deliberately not used: it answers ``True`` for Unicode digits that
+    ``int()`` cannot parse (superscripts among them), which would raise ``ValueError``
+    straight out of this function instead of the ``_ArmFailure`` every other rejection here
+    goes through -- crashing arming rather than persisting why it failed (Rule 0). A plain
+    ASCII-only pattern rules that out. ``int()`` is still wrapped: an absurdly long digit
+    string hits Python's own conversion length limit and raises ``ValueError`` on its own.
+    """
+    if raw in ("", "0", "all"):
+        return 0
+    if not re.fullmatch(r"[0-9]+", raw):
+        raise _ArmFailure(f'--until "{raw}" is not a positive integer, "0" or "all"')
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise _ArmFailure(f'--until "{raw}" is not a positive integer, "0" or "all"') from exc
+    if value < 1:
+        raise _ArmFailure(f'--until "{raw}" is not a positive integer, "0" or "all"')
+    return value
 
 
 def _resolve_plan(plan: str) -> str:
@@ -283,7 +381,11 @@ def _record_failure(state: State, *, session: str, repo: str, reason: str) -> No
 
 
 def _armed_message(request: _Request, frozen: _Frozen) -> str:
-    config = request.config
+    # frozen.effective_config, not request.config or frozen.overrides directly: the
+    # environment can itself outrank a --model/--variant override (defaults < user < repo <
+    # overrides < env), so the override alone is not always what actually gets probed and
+    # armed with -- only the fully-resolved config is.
+    config = frozen.effective_config
     variant = config.as_str("variant")
     reviewer = f"{config.as_str('model')}{f' (variant {variant})' if variant else ''}"
     return f"""\
@@ -295,6 +397,7 @@ def _armed_message(request: _Request, frozen: _Frozen) -> str:
 - activation commit: {frozen.head_commit or "<empty repository>"}
 - reviewer: {reviewer}
 - pre-existing uncommitted work folded into phase 1: {"true" if frozen.allow_dirty else "false"}
+- pause target: {frozen.until if frozen.until else "none"} (checked again once phases are frozen)
 - block_severity: {config.as_str("block_severity")}
 
 **Phases are not set yet, so every file mutation is currently denied.**
@@ -322,10 +425,10 @@ Constraints while the mode is active:
 
 
 def run(argv: list[str]) -> int:
-    session, plan, flag = _parse(argv)
+    session, plan, flag_tokens = _parse(argv)
 
     repo = commands.current_repo()
-    request = _Request(session=session, repo=repo, plan=plan, flag=flag, config=config_module.load(repo))
+    request = _Request(session=session, repo=repo, plan=plan, flags=tuple(flag_tokens), config=config_module.load(repo))
 
     if not session:
         # Nothing can be recorded without a session id -- it *is* the key state is stored
@@ -363,8 +466,7 @@ def run(argv: list[str]) -> int:
 def _arm(state: State, request: _Request) -> _Frozen:
     """Everything that can fail. Raises ``_ArmFailure``; the caller persists and reports."""
     repo, config = request.repo, request.config
-    if request.flag and request.flag != "--allow-dirty":
-        raise _ArmFailure(f'the second argument was "{request.flag}"; the only accepted value is --allow-dirty')
+    parsed = _parse_flags(list(request.flags))
 
     plan = _resolve_plan(request.plan)
 
@@ -373,14 +475,21 @@ def _arm(state: State, request: _Request) -> _Frozen:
             f"the working directory ({os.getcwd()}) is not inside a git repository; the commit is the phase boundary, so a repository is required"
         )
 
-    allow_dirty = request.flag == "--allow-dirty" or config.as_bool("allow_dirty")
+    allow_dirty = parsed.allow_dirty or config.as_bool("allow_dirty")
     if not allow_dirty and not gitsnap.worktree_clean(repo):
         raise _ArmFailure(
             "the worktree is dirty. Either commit or stash the existing changes, or re-run with "
             f"--allow-dirty to fold them into phase 1's review:\n{gitsnap.dirty_summary(repo)}"
         )
 
-    _check_reviewer(config)
+    until = _resolve_until(parsed.until)
+
+    # The candidate overrides are built, and the config reloaded with them applied, *before*
+    # the reviewer is probed: probing the stored config would validate a model this run will
+    # not use, and pass `--model <invalid>` on the strength of a model nobody asked for.
+    overrides = {key: value for key, value in (("model", parsed.model), ("variant", parsed.variant)) if value is not None}
+    probe_config = config_module.load(repo, overrides=overrides)
+    _check_reviewer(probe_config)
 
     head_commit = gitsnap.head_commit(repo)
     frozen = _Frozen(
@@ -389,6 +498,9 @@ def _arm(state: State, request: _Request) -> _Frozen:
         baseline=_baseline_tree(repo, head_commit),
         head_commit=head_commit,
         allow_dirty=allow_dirty,
+        until=until,
+        overrides=overrides,
+        effective_config=probe_config,
     )
 
     ensure_private_dir(state.act_dir, root=paths.state_root())
@@ -421,6 +533,8 @@ def _arm(state: State, request: _Request) -> _Frozen:
             last_approved_tree=frozen.baseline,
             armed_at=now(),
             allow_dirty=allow_dirty,
+            stop_after_phase=until,
+            overrides=overrides,
         )
         state.mark_tree_approved(frozen.baseline)
         state.save()

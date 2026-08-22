@@ -96,6 +96,8 @@ def status(argv: list[str]) -> int:
     # empty list therefore leaves a blank line exactly where the shell left one.
     phases = "".join(f"  {index + 1}. {phase}\n" for index, phase in enumerate(state.get_array("phases"))).rstrip("\n")
     reports = "".join(f"  {name}\n" for name in report.list_reports(activation.act_dir)).rstrip("\n")
+    stop_after_phase = state.get_int("stop_after_phase")
+    pause_target = f"{stop_after_phase} of {state.phase_count()}" if stop_after_phase else "none"
 
     sys.stdout.write(
         f"""\
@@ -112,6 +114,7 @@ activation commit:   {state.get("activation_commit")}
 last approved tree:  {state.get("last_approved_tree")}
 pending approval:    {state.get("pending_approved_tree")}
 phase:               {state.get("phase")} of {state.phase_count()}
+pause target:        {pause_target}
 consecutive failures:{state.get("failures")} / {config.as_int("max_failures")}
 no-progress blocks:  {state.get("stop_blocks")} / {config.as_int("max_stop_blocks")}
 defers used:         {state.get("defers")} / {config.as_int("max_defers")}

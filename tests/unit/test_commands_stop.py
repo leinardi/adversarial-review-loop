@@ -20,7 +20,7 @@ import pytest
 from conftest import git, run_hook
 from test_commands_arm import armed_env, read_state, state_dir
 from test_commands_posttool import COMMIT, gated_commit
-from test_commands_pretool import SESSION, active, arm, patch_state, payload
+from test_commands_pretool import SESSION, active, active_until, arm, patch_state, payload
 
 
 def stop(repo: Path, env: dict[str, str], **kwargs: object) -> dict[str, object]:
@@ -230,6 +230,81 @@ def test_an_approving_final_review_completes_the_activation(git_repo: Path, tmp_
     document = read_state(env, git_repo, SESSION)
     assert document["status"] == "COMPLETE"
     assert document["final_done_tree"] == git(git_repo, "rev-parse", "HEAD^{tree}")
+
+
+# --------------------------------------------------------------------------
+# The pause target
+# --------------------------------------------------------------------------
+
+
+def test_stop_blocks_below_the_pause_target_exactly_as_without_one(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Below the target, a pause changes nothing: the outstanding-phases block is unchanged."""
+    env = armed_env(clean_env)
+    active_until(git_repo, tmp_path, env, 2, "one", "two", "three")
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "phases 1..3 are still outstanding" in reason
+    assert "one" in reason
+
+
+def test_stop_pauses_at_the_target_without_the_final_review(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    active_until(git_repo, tmp_path, env, 2, "one", "two", "three")
+    committed_phase(git_repo, env, "phase one work\n")
+    committed_phase(git_repo, env, "phase two work\n")
+    before = read_state(env, git_repo, SESSION)
+    baseline, approved_before = before["baseline_tree"], before["approved_trees"]
+
+    message = ended(stop(git_repo, env))
+
+    assert "paused" in message
+    assert "pause target (phase 2 of 3)" in message
+    assert "Next up, phase 3 of 3" in message
+    assert "NOT an approval of the whole plan" in message
+    assert "resume --until M" in message
+    assert "/opencode-review-loop:finish" in message
+
+    document = read_state(env, git_repo, SESSION)
+    # A pause must never reach COMPLETE, which disarms -- the reviewer here always approves,
+    # so if `_final` had run despite the pause, this would be COMPLETE instead.
+    assert document["status"] == "ACTIVE"
+    assert document["final_done_tree"] == ""
+    assert document["baseline_tree"] == baseline
+    assert document["approved_trees"] == approved_before
+
+
+def test_stop_runs_the_final_review_once_the_pause_target_is_reached_and_finish_is_requested(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """``finish_requested`` is what lets the user cut a paused plan short deliberately."""
+    env = armed_env(clean_env)
+    active_until(git_repo, tmp_path, env, 1, "one", "two")
+    committed_phase(git_repo, env)
+    patch_state(env, git_repo, finish_requested=True)
+
+    message = ended(stop(git_repo, env))
+
+    assert "COMPLETE" in message
+    assert read_state(env, git_repo, SESSION)["status"] == "COMPLETE"
+
+
+def test_stop_behaves_as_unset_when_the_pause_target_equals_the_phase_count(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """A target at or above the last phase is no pause at all -- the final review still runs."""
+    env = armed_env(clean_env)
+    active_until(git_repo, tmp_path, env, 1, "only phase")
+    committed_phase(git_repo, env)
+
+    message = ended(stop(git_repo, env))
+
+    assert "COMPLETE" in message
+    assert read_state(env, git_repo, SESSION)["status"] == "COMPLETE"
 
 
 def test_a_blocking_final_review_blocks_and_leaves_the_mode_armed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

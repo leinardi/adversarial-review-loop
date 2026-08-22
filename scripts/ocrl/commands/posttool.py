@@ -116,6 +116,15 @@ Implement it, then commit it the same way.
 """
 )
 
+PAUSE_TARGET_REACHED: Final = (
+    VERIFIED_HEADER
+    + """
+The pause target (phase {target} of {total}) has been reached. End your turn now and report to
+the user rather than continuing into phase {next_phase} -- this is not an approval of the
+remaining phases, only of the ones just committed.
+"""
+)
+
 
 # --------------------------------------------------------------------------
 # Shared binding
@@ -360,6 +369,9 @@ def _advance(check: _Check, *, pending: str) -> NoReturn:
     total = state.phase_count()
     if next_phase > total:
         check.hook.posttool_context(ALL_PHASES_DONE.format(phase=phase, total=total).rstrip("\n"))
+    target = state.get_int("stop_after_phase") or total
+    if next_phase > target:
+        check.hook.posttool_context(PAUSE_TARGET_REACHED.format(phase=phase, total=total, target=target, next_phase=next_phase).rstrip("\n"))
     check.hook.posttool_context(
         NEXT_PHASE.format(phase=phase, total=total, next_phase=next_phase, description=state.phase_desc(next_phase)).rstrip("\n")
     )

@@ -64,31 +64,39 @@ def plan_file(tmp_path: Path, text: str = "# plan\n\nphase one\n") -> Path:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("", ("", "")),
-        ("   ", ("", "")),
-        ("plan.md", ("plan.md", "")),
-        ("  plan.md  ", ("plan.md", "")),
-        ("plan.md --allow-dirty", ("plan.md", "--allow-dirty")),
-        ("plan.md   --allow-dirty", ("plan.md", "--allow-dirty")),
-        ("--allow-dirty", ("", "--allow-dirty")),
-        (" --allow-dirty ", ("", "--allow-dirty")),
-        ("my plans/phase one.md", ("my plans/phase one.md", "")),
-        ("my plans/phase one.md --allow-dirty", ("my plans/phase one.md", "--allow-dirty")),
-        ("plan.md --nonsense", ("plan.md", "--nonsense")),
-        pytest.param("a -x b", ("a -x", "b"), id="last-word-taken-as-the-flag"),
-        ("-x", ("-x", "")),
-        ("plan.md -", ("plan.md", "-")),
-        ("plan.md --allow-dirty extra", ("plan.md --allow-dirty", "extra")),
-        ("~/plan.md --allow-dirty", ("~/plan.md", "--allow-dirty")),
-        ("plan.md\t--allow-dirty", ("plan.md", "--allow-dirty")),
+        ("", ("", [])),
+        ("   ", ("", [])),
+        ("plan.md", ("plan.md", [])),
+        ("  plan.md  ", ("plan.md", [])),
+        ("plan.md --allow-dirty", ("plan.md", ["--allow-dirty"])),
+        ("plan.md   --allow-dirty", ("plan.md", ["--allow-dirty"])),
+        ("--allow-dirty", ("", ["--allow-dirty"])),
+        (" --allow-dirty ", ("", ["--allow-dirty"])),
+        ("my plans/phase one.md", ("my plans/phase one.md", [])),
+        ("my plans/phase one.md --allow-dirty", ("my plans/phase one.md", ["--allow-dirty"])),
+        ("plan.md --nonsense", ("plan.md", ["--nonsense"])),
+        # The retired oddity: only "--" starts a flag boundary now, so a single dash is just
+        # more of the plan, and "the last word is the flag" is gone entirely.
+        pytest.param("a -x b", ("a -x b", []), id="single-dash-is-not-a-flag-boundary"),
+        ("-x", ("-x", [])),
+        ("plan.md -", ("plan.md -", [])),
+        ("plan.md --allow-dirty extra", ("plan.md", ["--allow-dirty", "extra"])),
+        ("~/plan.md --allow-dirty", ("~/plan.md", ["--allow-dirty"])),
+        ("plan.md\t--allow-dirty", ("plan.md", ["--allow-dirty"])),
+        ("plan.md --until 2", ("plan.md", ["--until", "2"])),
+        ("plan.md --model gpt-x --variant fast", ("plan.md", ["--model", "gpt-x", "--variant", "fast"])),
+        # A path may legitimately contain more than one run of whitespace; that must survive
+        # verbatim, not collapse to a single space, or a file that really exists there stops
+        # resolving the moment a flag is added alongside it.
+        pytest.param("my  plans/plan.md --until 2", ("my  plans/plan.md", ["--until", "2"]), id="irregular-whitespace-preserved"),
+        pytest.param("my\tplans/plan.md --allow-dirty", ("my\tplans/plan.md", ["--allow-dirty"]), id="internal-tab-preserved"),
     ],
 )
-def test_split_args(raw: str, expected: tuple[str, str]) -> None:
-    """Pins the exact split, including the ``"a -x b"`` oddity documented on ``split_args``.
+def test_split_args(raw: str, expected: tuple[str, list[str]]) -> None:
+    """Pins the split point: the plan is every token up to the first one starting with ``--``.
 
-    Harmless in practice only because the caller rejects every flag that is not
-    ``--allow-dirty`` -- if that check is ever loosened, this corpus is what tells you the
-    split point moved.
+    Semantic validation of the flag tokens (unknown names, missing values) happens later, in
+    ``_parse_flags`` -- this is only about where the plan ends and the flags begin.
     """
     assert arm.split_args(raw) == expected
 
@@ -291,7 +299,7 @@ def test_a_missing_session_id_records_nothing_and_says_so(git_repo: Path, tmp_pa
         pytest.param([], "no plan path was supplied", id="no-plan"),
         pytest.param(["--plan", "does-not-exist.md"], "does not resolve to an existing regular file", id="missing-file"),
         pytest.param(["--args", 'x"; id; echo "'], "characters that are not safe", id="injection-shaped"),
-        pytest.param(["--args", "plan.md --nonsense"], 'the second argument was "--nonsense"', id="unknown-flag"),
+        pytest.param(["--args", "plan.md --nonsense"], 'unrecognised flag "--nonsense"', id="unknown-flag"),
     ],
 )
 def test_a_refusal_is_persisted_as_arm_failed(
@@ -440,3 +448,220 @@ def test_a_reported_model_is_accepted(git_repo: Path, tmp_path: Path, clean_env:
 
     assert proc.returncode == 0, proc.stdout
     assert read_state(env, git_repo, "s1")["status"] == "ARMED"
+
+
+# --------------------------------------------------------------------------
+# --until, --model, --variant
+# --------------------------------------------------------------------------
+
+
+def test_an_unrecognised_flag_is_refused(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --nope"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 1
+    assert 'unrecognised flag "--nope"' in proc.stdout
+    assert read_state(env, git_repo, "s1")["status"] == "ARM_FAILED"
+
+
+@pytest.mark.parametrize("flag", ["--until", "--model", "--variant"])
+def test_a_value_flag_with_nothing_after_it_is_refused(flag: str, git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} {flag}"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 1
+    assert f'"{flag}" requires a value' in proc.stdout
+
+
+@pytest.mark.parametrize("raw", ["abc", "-1", "1.5", "01x"])
+def test_an_invalid_until_value_is_refused(raw: str, git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --until {raw}"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 1
+    assert f'--until "{raw}" is not a positive integer' in proc.stdout
+
+
+@pytest.mark.parametrize("raw", ["0", "all"])
+def test_until_zero_or_all_means_no_target(raw: str, git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --until {raw}"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, "s1")["stop_after_phase"] == 0
+
+
+def test_a_positive_until_is_persisted(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --until 3"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, "s1")["stop_after_phase"] == 3
+
+
+def test_a_plan_path_with_irregular_whitespace_still_resolves_alongside_a_flag(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """A regression on the split point itself: normalising the plan's whitespace when a flag
+    follows would make a file that really exists at that path stop resolving."""
+    env = armed_env(clean_env)
+    plan = tmp_path / "my  plan.md"
+    plan.write_text("# plan\n\nphase one\n")
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan} --until 2"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, "s1")["plan_path"] == str(plan)
+    assert read_state(env, git_repo, "s1")["stop_after_phase"] == 2
+
+
+@pytest.mark.parametrize(
+    ("raw", "label"),
+    [
+        ("²", "unicode-superscript-digit"),
+        ("1" * 5000, "oversized-digit-string"),
+    ],
+)
+def test_an_untypeable_until_value_is_refused_not_a_crash(raw: str, label: str, git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``str.isdigit()`` accepts Unicode digits ``int()`` cannot parse, and an oversized digit
+    string hits Python's own conversion limit -- both must become ``_ArmFailure``, not an
+    unhandled crash that never persists why arming failed (Rule 0)."""
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --until {raw}"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 1, label
+    assert "is not a positive integer" in proc.stdout, label
+    assert read_state(env, git_repo, "s1")["status"] == "ARM_FAILED", label
+
+
+def test_a_value_flag_cannot_swallow_the_next_flag_as_its_value(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``--variant --allow-dirty`` must refuse, not silently arm with variant="--allow-dirty"."""
+    env = armed_env(clean_env)
+    proc = run_bootstrap(
+        ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --variant --allow-dirty"],
+        cwd=git_repo,
+        env=env,
+    )
+
+    assert proc.returncode == 1
+    assert '"--variant" requires a value' in proc.stdout
+    assert read_state(env, git_repo, "s1")["status"] == "ARM_FAILED"
+
+
+def test_the_armed_banner_reflects_the_environment_not_the_override_alone(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """The environment can itself outrank a --model override; the banner must say so too.
+
+    Both the reviewer probe and the persisted ``overrides`` already used the fully-resolved
+    config -- this pins the one place that used to compute its own, wrong answer.
+    """
+    env = armed_env(clean_env, OCRL_MODEL="vendor/env-wins")
+    proc = run_bootstrap(
+        ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --model vendor/flag-loses"],
+        cwd=git_repo,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert "vendor/env-wins" in proc.stdout
+    assert "vendor/flag-loses" not in proc.stdout
+    # The override is still recorded in state -- it is only not what actually runs here.
+    assert read_state(env, git_repo, "s1")["overrides"] == {"model": "vendor/flag-loses"}
+
+
+def test_an_out_of_range_until_is_clamped_with_a_warning_once_phases_are_frozen(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """The upper bound cannot be checked at arm time: phases do not exist yet."""
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --until 99"], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, "s1")["stop_after_phase"] == 99
+
+    proc = run_bootstrap(["set-phases", "--session", "s1", "--phase", "one", "--phase", "two"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "pause target (phase 99) is beyond the 2 phases just frozen; clamped to 2" in proc.stdout
+    assert read_state(env, git_repo, "s1")["stop_after_phase"] == 2
+
+
+def test_model_and_variant_are_persisted_as_overrides(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    proc = run_bootstrap(
+        ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --model vendor/x --variant fast"],
+        cwd=git_repo,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, "s1")["overrides"] == {"model": "vendor/x", "variant": "fast"}
+    assert "vendor/x" in proc.stdout
+    assert "fast" in proc.stdout
+
+
+def test_no_model_or_variant_flag_leaves_overrides_empty(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, "s1")["overrides"] == {}
+
+
+def test_a_model_override_is_probed_instead_of_the_stored_default(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``--model`` must be validated against itself -- probing the stored model would pass
+    on the strength of a model this run will not use.
+
+    The stored default comes from the repo config, not ``OCRL_MODEL``: the environment
+    would otherwise beat the ``--model`` override in the merge order (Phase 1's
+    ``defaults < user < repo < activation overrides < env``), which would make this test
+    assert the wrong thing rather than exercise the reordering it is named for.
+    """
+    bindir = Path(_path_without_opencode(tmp_path))
+    fake = bindir / "opencode"
+    fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/stored\\n'\n")
+    fake.chmod(0o755)
+    (git_repo / ".opencode-review-loop.json").write_text('{"model": "vendor/stored"}')
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "repo config")
+    env = {**clean_env, "PATH": str(bindir)}
+
+    proc = run_bootstrap(
+        ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --model vendor/not-reported"],
+        cwd=git_repo,
+        env=env,
+    )
+
+    assert proc.returncode == 1
+    assert 'the configured model "vendor/not-reported" is not among the models OpenCode reports' in proc.stdout
+    assert read_state(env, git_repo, "s1")["status"] == "ARM_FAILED"
+    # The stored default was never even the question -- nothing about it appears here.
+    assert "vendor/stored" not in proc.stdout
+
+
+def test_a_model_override_that_is_reported_arms(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    bindir = Path(_path_without_opencode(tmp_path))
+    fake = bindir / "opencode"
+    fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/stored\\nvendor/override\\n'\n")
+    fake.chmod(0o755)
+    (git_repo / ".opencode-review-loop.json").write_text('{"model": "vendor/stored"}')
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "repo config")
+    env = {**clean_env, "PATH": str(bindir)}
+
+    proc = run_bootstrap(
+        ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --model vendor/override"],
+        cwd=git_repo,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    document = read_state(env, git_repo, "s1")
+    assert document["status"] == "ARMED"
+    assert document["overrides"] == {"model": "vendor/override"}
