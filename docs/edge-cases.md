@@ -66,6 +66,15 @@ plan file, no flag typed at all). Mid-phase work sitting in the worktree while t
 that describes it gets silently redefined is exactly the failure this refusal exists to
 block.
 
+## The phase cap
+
+`set-phases` refuses more than `MAX_PHASES` (64) phases in one frozen list — a bound
+against a runaway list, not a judgment on how finely a plan is decomposed. Nothing in the
+gate scales badly with phase count (each is one line in `phases.frozen`, one array entry in
+`state.json`), so the number exists only to catch a model proposing hundreds of phases
+where grouping them is clearly the right call. A `--replan` counts the same way: the
+immutable committed prefix plus the new tail must together stay at or under the cap.
+
 ## Resume, retirement, and "which session is live"
 
 Exactly one activation may be live per worktree. When you `resume` in a *new* session, the

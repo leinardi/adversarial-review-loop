@@ -75,7 +75,7 @@ def test_the_phase_list_cannot_be_rewritten(git_repo: Path, tmp_path: Path, clea
         pytest.param([], 'at least one --phase "…" is required', id="none"),
         pytest.param([""], "empty phase description", id="empty"),
         pytest.param(["   "], "empty phase description", id="spaces"),
-        pytest.param([f"phase {n}" for n in range(31)], "is more than the 30 this gate accepts", id="too-many"),
+        pytest.param([f"phase {n}" for n in range(65)], "is more than the 64 this gate accepts", id="too-many"),
     ],
 )
 def test_set_phases_rejects_an_unusable_list(

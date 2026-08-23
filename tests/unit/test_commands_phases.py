@@ -125,7 +125,30 @@ def test_replan_max_phases_counts_the_whole_combined_list(git_repo: Path, tmp_pa
     # supplied below must push the total (1 committed + N tail) past MAX_PHASES on its own.
     patch_state(env, git_repo, phase=2, replan_pending=True)
 
-    proc = set_phases(git_repo, env, *[f"tail {n}" for n in range(30)])
+    proc = set_phases(git_repo, env, *[f"tail {n}" for n in range(64)])
     assert proc.returncode == 1
-    assert "is more than the 30 this gate accepts" in proc.stderr
+    assert "is more than the 64 this gate accepts" in proc.stderr
     assert read_state(env, git_repo, SESSION)["phases"] == ["phase one", "phase two"]
+
+
+def test_exactly_max_phases_is_accepted(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    proc = set_phases(git_repo, env, *[f"phase {n}" for n in range(64)])
+    assert proc.returncode == 0, proc.stderr
+    assert read_state(env, git_repo, SESSION)["phases"] == [f"phase {n}" for n in range(64)]
+
+
+def test_replan_at_exactly_max_phases_is_accepted(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "phase one", "phase two")
+    # Phase 1 is committed and immutable; the tail below brings the combined total to exactly
+    # MAX_PHASES (1 committed + 63 tail == 64), which must be accepted, not refused.
+    patch_state(env, git_repo, phase=2, replan_pending=True)
+
+    proc = set_phases(git_repo, env, *[f"tail {n}" for n in range(63)])
+    assert proc.returncode == 0, proc.stderr
+    document = read_state(env, git_repo, SESSION)
+    assert document["phases"] == ["phase one", *[f"tail {n}" for n in range(63)]]

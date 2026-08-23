@@ -19,8 +19,8 @@ from ocrl.state import State
 
 __all__ = ["MAX_PHASES", "run"]
 
-#: More than this is a plan, not a phase list, and the gate cannot hold a user to it.
-MAX_PHASES: Final = 30
+#: A bound against a runaway list, not a judgment on how finely a plan is decomposed.
+MAX_PHASES: Final = 64
 
 
 def _parse(argv: list[str]) -> tuple[str, list[str]]:
