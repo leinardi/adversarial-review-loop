@@ -203,6 +203,21 @@ The Python port's fail-closed fallback table (see "The shim is not three lines" 
 
 ---
 
+## Session F — hooks registered twice in one session (item 15)
+
+Untested: `implement` and `resume` both carry the identical `hooks:` block (deliberately — see AGENTS.md, "Resume: a second arming path"). If both run in the *same* session — arm, then later `resume` in that same session to change `--until`, the model, or the plan — Claude Code registers the `PreToolUse`/`PostToolUse`/`PostToolUseFailure`/`Stop` hooks a second time, pointing at the identical command.
+
+The handlers look idempotent by inspection: a second `confirm-commit` firing on the same tool call finds no `pending_approved_tree` and an already-approved `HEAD`, so it has nothing to do; a second `pretool` firing on the same commit finds the tree already approved and takes the cache-hit path rather than reviewing twice. But that is reasoning about what the handler does when called, not a measurement of *how many times Claude Code calls it* — once per tool call regardless of registration count, once per registration (so twice, sequentially), or with the second registration replacing the first. Any of those changes what "idempotent" needs to mean, and only one of the three costs nothing.
+
+1. Arm normally (`implement`), let a phase or two run.
+2. In the *same* session, run `/opencode-review-loop:resume` (same-session path — nothing to retire, nothing new to register against).
+3. Run `/hooks` and count entries: one set of four, or two?
+4. If two: make a commit and watch whether it takes noticeably longer than a single-registration commit did earlier in the same run — a slow reviewer run twice, sequentially, is the one outcome that would not otherwise be visible from the handler's own idempotence.
+
+**Expect**, if Claude Code fires an event once per tool call regardless of registration count: no observable difference from a single registration, and this item closes as a non-issue.
+
+**If it fires once per registration**: latency roughly doubles on every gated tool call for the rest of the session, which is wasteful but not unsafe given the handlers above — confirm that reasoning holds under an actual double firing rather than assuming it, and record whatever is found here.
+
 ## Record the outcome
 
 | Item | Check | Result |
@@ -220,6 +235,7 @@ The Python port's fail-closed fallback table (see "The shim is not three lines" 
 | 12 | `systemMessage` from a Stop hook reaches the user | **open** |
 | 13 | `{"decision":"block"}` takes effect on `PostToolUse` | **open** |
 | 14 | `{"decision":"block"}` takes effect on `PostToolUseFailure` | **open** |
+| 15 | hooks registered twice in one session (`implement` then same-session `resume`) | **open** |
 
 ### Isolation, 2026-08-20
 

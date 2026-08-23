@@ -124,6 +124,60 @@ Check whenever affected direct or indirect:
 - **Tests touch no live state.** Tests use scratch Git repos, isolated
   `HOME`/XDG paths, `OCRL_REVIEWER_CMD`. Never call real model, load user
   OpenCode config, alter real hooks, or leave activation pointers behind.
+- **One live activation per worktree.** Cross-session resume retires predecessor
+  before successor exists; retire-first, no automatic rollback. `RESUMED` block
+  everywhere, never written over — never resurrected by a stray `status="ACTIVE"`
+  write from `_advance` or any other path.
+- **No retirement across a pending approval, either resume path.** Same-session
+  and cross-session both check under the lock that mutates; skip → resurrection
+  window between `pretool` approving and `confirm-commit` verifying.
+- **Same-session resume failure never overwrites a live activation.** A typo in
+  `--model`/`--until` write nothing; only a completed transaction may change the
+  document.
+- **Successor built only from a pre-retirement snapshot**, never by re-reading
+  the predecessor after retirement — that reads back `RESUMED` and the
+  retirement note, losing a `RECONCILE`'s `reason`/`bad_commit`/`bad_commit_parent`.
+- **Frozen-plan files immutable; the live one is named by state.**
+  `plan.frozen.md` plus numbered `plan.rev<n>.md`, never renamed or overwritten.
+  `plan_revisions[*].file` never trusted without containment check
+  (`is_safe_component` + `realpath` prefix) and SHA-256 verification — failure
+  escalates `NEEDS_HUMAN`, never skipped or substituted.
+- **Resume never adds to `approved_trees`** on an unapproved `HEAD`; warns and
+  folds it into the next review instead. Never mutates a retired directory.
+- **Git-facing checks re-run immediately before publication**, not only before
+  retirement — the predecessor stays live through the whole materialisation
+  window, so a background writer or an already-authorised tool call can still
+  touch the worktree in between.
+- **A decided plan revision, or `--replan`, requires a clean worktree.** The
+  condition is "a revision was decided, or `--replan` was passed" — never
+  waived by `--allow-dirty` or `allow_dirty` in config, and not gated on
+  whether `--plan`/`--replan` was literally typed (an automatic revision from
+  an edited plan file counts too).
+- **Every resume bumps `activation_generation`**, same-session included; both
+  `hooks.Activation` and `completion.Fingerprint` carry it, so a resume mid-review
+  invalidates that review rather than letting it complete against stale scope.
+- **`replan_pending` fences every mutation but the exact `set-phases`**, same as
+  `ARMED` before the first freeze; consumed by whichever `set-phases` runs next
+  — the ordinary first freeze included, not only the replan branch, or the
+  token outlives its purpose.
+- **An abandoned pending marker is a `(parent, tree)` pair**, resolved on the
+  path a commit actually takes (`pretool`'s pre-approval scan and `stop`'s
+  sweep, not merely a guard function reachable from neither) before the
+  successor approves anything; cleared on a confirmed `_advance` match, never
+  by tree membership alone (a same-tree empty-phase commit is not the same
+  event as the abandoned one).
+- **Bundle contents are driven from the state document, never inferred from
+  filenames.** `build_bundle` iterates `plan_revisions` and copies exactly what
+  each entry names; a `glob` would silently omit a revision the state does not
+  name. A new bundle file must be wired into both `build_bundle` and
+  `review_argv` — writing one without the other is inert and never reaches the
+  reviewer.
+- **`write_private_atomic` is never rooted outside `state_root()`.** The one
+  path that writes inside the reviewed repo (`config --repo`) uses the separate
+  `write_atomic`, which chmods no parent directory.
+- **A replace never widens a file's mode.** `write_atomic` preserves an existing
+  destination's mode across a replace; only a genuinely new file gets the
+  umask default.
 - **Portability claims stay honest.** Gate need Python 3.12+, stdlib plus
   vendored bashlex; guard shim need Bash 4.4+ and `timeout` binary (GNU or
   uutils). No accidental reliance on current Python, locale, filesystem, or Git

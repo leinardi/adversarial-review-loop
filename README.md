@@ -51,13 +51,30 @@ The variable is read at process start, so restart Claude Code after setting it. 
 
 | Command | Who | What it does |
 | --- | --- | --- |
-| `/opencode-review-loop:implement <plan.md> [--allow-dirty]` | you | Arms the loop for this worktree and starts the phased implementation |
+| `/opencode-review-loop:implement <plan.md> [--allow-dirty] [--until N] [--model X] [--variant V]` | you | Arms the loop for this worktree and starts the phased implementation |
+| `/opencode-review-loop:resume [--until N] [--plan <path>] [--replan] [--allow-dirty] [--abandon-pending] [--model X] [--variant V]` | you | Continues an armed activation — in a new session, or adjusts it in this one — without losing the baseline or any approval. See "Running a long plan across sessions" below |
 | `/opencode-review-loop:status` | anyone | Current state: phase, baseline, approvals, counters, stored reports |
 | `/opencode-review-loop:report [n]` | anyone | Prints a stored review in full, untruncated |
 | `/opencode-review-loop:finish` | you | Runs the final cumulative review now, even with phases outstanding |
 | `/opencode-review-loop:stop` | you | Leaves the mode. Nothing is reverted |
+| `/opencode-review-loop:config [<key> <value> [--repo]] [<key> --unset [--repo]]` | you | Reads or writes the review-loop configuration. Unrelated to any armed activation — never registers the gate |
 
-`implement`, `finish` and `stop` are `disable-model-invocation: true`. **Claude can never arm, finish or stop the mode itself**, and no natural-language phrasing will activate it — you have to type the slash command. That is deliberate: a mode whose whole point is enforcement must not be self-enabling, and the cost is that "use the review loop for this" does nothing.
+`implement`, `finish`, `stop`, `resume` and `config` are `disable-model-invocation: true`. **Claude can never arm, resume, finish, stop, or run the `config` command itself** — no natural-language phrasing invokes any of them, only the exact slash command. That stops the *command*; it does not make `.opencode-review-loop.json` off-limits to ordinary file edits — see "Known limitations" below. That is deliberate: a mode whose whole point is enforcement must not be self-enabling, and the cost is that "use the review loop for this" does nothing.
+
+## Running a long plan across sessions
+
+`implement` always starts fresh: a new baseline, an empty phase list, no approvals carried over. Right for a new plan, wrong for picking an old one back up tomorrow — the 24-hour `ttl_hours` default makes that happen sooner than you'd think. `resume` is the second arming path for exactly that: it continues the *same* activation, in a new session or the current one, without moving the baseline or losing anything already approved.
+
+- **Cross-session** (the normal case — a fresh session picks the plan back up) retires the previous activation into a blocking `RESUMED` status before the new one exists. Only one activation may write to a worktree at a time, so from that moment the old session denies every mutation, naming the session that took over.
+- **Same-session** (re-running `resume` to change `--until`, the model, or the plan without starting a new session) mutates the live activation in place; nothing is retired.
+- The baseline tree and every approved tree carry forward untouched. Whenever the final cumulative review eventually runs, it still covers the whole plan from its *original* baseline, not from wherever the most recent resume happened to start.
+- A commit landed since the last approval but was never reviewed? Resume warns rather than silently treating it as approved, and folds it into the next review.
+
+**Pausing with `--until N`.** Add it to `implement` or `resume` and the loop stops asking for more once phase `N` is committed — the turn ends with a "paused, not an approval of the whole plan" message instead of demanding the next phase. `--until 0` or `--until all` clears the target. It is soft, not a fence: nothing stops Claude from continuing past it if told to, but by default the loop does not push forward on its own.
+
+**Revising the plan mid-run.** Pass `--plan <path>` to `resume`, or just edit the plan file resume already has on record — if its bytes changed, resume freezes a new, timestamped copy (`plan.rev<n>.md`) alongside every earlier revision; nothing already frozen is ever edited or replaced. Add `--replan` and the phases from the *current* one onward may be redefined with `set-phases`, exactly as at first arming — every phase already committed stays immutable, since its description was the evidence a review already ran against. Both a decided revision and `--replan` require a clean worktree, regardless of `--allow-dirty`: that boundary is what keeps "redescribe the work to fit the code that's already there" from happening. From that point on, every reviewer is shown the full revision history and every revision file, not just the diff from the last hop — so a phase reviewed under an earlier revision is still explainable to a review of a later one.
+
+Resume also blunts `ttl_hours`: a TTL-expired activation is `STALE` and still blocks, but the fix is now `resume` — which refreshes the activation rather than resetting it — not a full re-arm that would throw away progress. `ttl_hours` mainly guards a worktree nobody is actively driving anymore.
 
 ## How it works
 
@@ -145,7 +162,7 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 | `max_findings` | `200` | above this → `needs-human`, never a trimmed list |
 | `max_findings_bytes` | `65536` | same, by size |
 | `allow_dirty` | `false` | alternative to passing `--allow-dirty` |
-| `ttl_hours` | `24` | after this, gates block and ask for a re-arm |
+| `ttl_hours` | `24` | after this, gates block and ask for a re-arm — `resume` is usually the fix, not `implement`; see "Running a long plan across sessions" |
 | `ignore_globs` | `[]` | paths whose sole change skips a review |
 
 Environment variables are the upper-cased key with an `OCRL_` prefix (`OCRL_BLOCK_SEVERITY`, `OCRL_MODEL`, …); `OCRL_IGNORE_GLOBS` is comma-separated.
@@ -161,7 +178,7 @@ Example `.opencode-review-loop.json`:
 }
 ```
 
-State lives in `$XDG_STATE_HOME/opencode-review-loop/worktrees/<sha256(worktree)>/<session-id>/` — `state.json`, `plan.frozen.md`, `phases.frozen`, `reports/`, `bundles/`. **Nothing is written inside the repository under review.**
+State lives in `$XDG_STATE_HOME/opencode-review-loop/worktrees/<sha256(worktree)>/<session-id>/` — `state.json`, `plan.frozen.md`, `phases.frozen`, `reports/`, `bundles/`. **No hook, and nothing Claude can invoke itself, ever writes inside the repository under review.** The one exception is `/opencode-review-loop:config <key> <value> --repo`, an explicit, user-only write to the repository's own `.opencode-review-loop.json`.
 
 ## Failure behaviour
 
@@ -181,12 +198,20 @@ State lives in `$XDG_STATE_HOME/opencode-review-loop/worktrees/<sha256(worktree)
 | `git reset --soft` before the activation commit | Denied (equal to it is allowed — that is the phase-1 recovery) |
 | Activation older than `ttl_hours` | `STALE`: gates block and ask for a re-arm. **Never a silent disarm** |
 | No-progress `Stop` blocks past `max_stop_blocks` | `NEEDS_HUMAN`, loud system message. **Not** an approval |
-| Claude tries `ocrl finish` / `deactivate` via Bash | Denied |
+| Claude tries `ocrl finish` / `deactivate` / `resume` / `config` via Bash | Denied — user-only |
+| Any mutation against a `RESUMED` activation | Denied, naming the session that took over; re-arm with `implement` is the only way out |
+| A resume retires its predecessor, then fails before publishing the successor | No automatic rollback: predecessor stays `RESUMED`, successor is `ARM_FAILED` — both deny, and the recovery is `implement` |
+| `resume` with an approval still pending confirmation | Refused, unless `--abandon-pending` |
+| `resume` after history was rewritten (the activation commit is no longer an ancestor of `HEAD`) | Refused; re-arm |
+| A decided plan revision, or `--replan`, on a dirty worktree | Refused — **not** waived by `--allow-dirty` |
+| `--replan` before the phase list has ever been frozen | Refused; there is nothing yet to replan |
+| A `state.json` predating this feature | Migrated on first resume; `ARM_FAILED` (not a crash) if its `plan.frozen.md` is missing |
+| A recorded plan revision whose file fails a path or hash check | `NEEDS_HUMAN` — never attached to a review, never silently skipped |
 
 ## Development
 
 ```console
-make test                    # 278 acceptance assertions against scratch repos, plus the Python unit tests; no model is called
+make test                    # 300+ acceptance assertions against scratch repos, plus the Python unit tests; no model is called
 make test-filter FILTER=stop # one section
 make dry-run                 # print the exact opencode argv and prompt, without invoking it
 make check                   # pre-commit (shellcheck, yamllint, markdownlint, …)
@@ -198,7 +223,7 @@ Before the first real run, work through [`tests/STEP0.md`](tests/STEP0.md): the 
 
 ## Known limitations
 
-- **Honest-agent bar.** Claude could commit through a wrapper script or abuse `defer`. The final cumulative review backstops commit-level dodges; nothing here defends against a deliberately hostile agent, and this design does not pretend to.
+- **Honest-agent bar.** Claude could commit through a wrapper script, abuse `defer`, or edit `.opencode-review-loop.json` directly — `disable-model-invocation` blocks the `config` *command*, not ordinary edits to the file it writes, and nothing else marks that path special. That is exactly why repo config is treated as attacker-controlled input in the first place (see "Adding config" in `AGENTS.md`): a change to it cannot itself run unreviewed code or silently weaken the gate, but it is not fenced off from Claude either. The final cumulative review backstops commit-level dodges; nothing here defends against a deliberately hostile agent, and this design does not pretend to.
 - **The Stop-block cap is residual.** Continuation pressure from `PostToolUse`, progress-aware counting and `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` mitigate it, but a run that repeatedly ends its turn without progress can still exhaust the cap — and exhaustion ends the turn.
 - **A `PreToolUse` hook runs on every tool call**, and it is not free. Measured on Linux with warm caches, through `scripts/ocrl.sh` end to end (the Python port; these numbers supersede the Bash-era ones this table used to carry):
 

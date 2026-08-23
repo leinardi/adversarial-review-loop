@@ -17,8 +17,8 @@ Everything else is detail. These are not negotiable, and a change that weakens o
 0. **A gate that cannot prove it is running denies.** The hooks register when the `implement` skill is invoked, so a dispatcher that runs at all proves the skill was invoked. If it then finds no session pointer, arming never *executed* — a refused sandbox, an unreadable script, an unresolved `${CLAUDE_PLUGIN_ROOT}` — and `commands/arm.py` cannot persist a failure to start. `hooks.record_unstarted_arm` records `ARM_FAILED` itself and denies. Absence of state is never an opt-out. This is why `deactivate` leaves the session pointer in place and relies on `DISARMED` instead of deleting it.
 1. **Nothing converts a failure into an approval.** Missing state, malformed JSON, a snapshot failure, a timeout, a non-zero reviewer exit, empty output, absent markers, an unknown verdict, an evidence ceiling — every one of them blocks or escalates. Operational uncertainty is never "no findings".
 2. **Hook stdout is protocol.** Hook entrypoints (`pretool`, `confirm-commit`, `posttool-failure`, `gate-stop`) emit valid Claude hook JSON or nothing. Diagnostics go to stderr only, through `ocrl.util.log`. A stray `print` in a module that runs under a hook corrupts the response — `report.store` is deliberately silent on stdout for this reason. An uncaught exception at the top level still emits that event's fallback JSON before exiting 0; see "Interpreter invocation" below for the full contract.
-3. **Nothing is written inside the repository under review.** All state, frozen plans, bundles and reports live under `$XDG_STATE_HOME/opencode-review-loop/`. The snapshot uses a throwaway `GIT_INDEX_FILE` and never touches the real index or worktree. `sys.pycache_prefix` keeps `__pycache__` out of both the plugin repo and the reviewed one; see "Interpreter invocation" below.
-4. **The user owns the exits.** `implement`, `finish`, `stop` and `resume` are `disable-model-invocation: true`, and Claude's own route to `finish`, `deactivate` (the escape `stop` runs) and `resume` — Bash — is denied in `commands/pretool.py`. See below for what that does and does not guarantee.
+3. **Nothing is written inside the repository under review, with one explicit exception.** All state, frozen plans, bundles and reports live under `$XDG_STATE_HOME/opencode-review-loop/`. The snapshot uses a throwaway `GIT_INDEX_FILE` and never touches the real index or worktree. `sys.pycache_prefix` keeps `__pycache__` out of both the plugin repo and the reviewed one; see "Interpreter invocation" below. The exception is `config <key> <value> --repo`, which writes the repository's own `.opencode-review-loop.json` — user-only, explicit, documented in the README, and never triggered by a hook or reachable from Claude. No code path that runs on a tool call ever writes inside the reviewed repository.
+4. **The user owns the exits.** `implement`, `finish`, `stop`, `resume` and `config` are `disable-model-invocation: true`, and Claude's own route to `finish`, `deactivate` (the escape `stop` runs), `resume` and `config` — Bash — is denied in `commands/pretool.py`. See below for what that does and does not guarantee.
 
 ### What Rule 4 does and does not guarantee
 
@@ -55,6 +55,51 @@ A parser failure mode unique to bashlex: a command it cannot parse, or hangs on,
 `skills/implement/SKILL.md` passes `--args "$ARGUMENTS"`. Claude Code substitutes `$ARGUMENTS` textually, without shell escaping, and the body runs through `eval`. A plan path of `x"; id; echo "` therefore executes `id`. This is confirmed, not theoretical.
 
 No change to the body fixes it — double quotes are broken by `"`, single quotes by `'`, and the substitution precedes any shell. The containment is `disable-model-invocation: true` on the skill, which means only the user can supply the path. **Do not remove that flag**, and do not add a second interpolated argument without re-reading this. `commands/arm.py`'s character-set check is still worth keeping, but understand what it does and does not do: it runs after any injected command has already executed, so it protects the loop's state, not the machine.
+
+## Resume: a second arming path
+
+`resume` continues an existing activation rather than starting one — across a new session (the ordinary case) or in the current one (to change `--until`, the model, or the plan without a new session). It shares helpers with `arm.py` (`_ArmFailure`, `_resolve_plan`, `_check_reviewer`, the flag parser) but lives in its own module, `commands/resume.py`, because the invariants below are specific to it.
+
+**`skills/resume/SKILL.md` must carry the identical `hooks:` block as `skills/implement/SKILL.md`.** Skill hooks register on invocation, not at plugin load — see "Isolation, 2026-08-20" in `tests/STEP0.md`. A resume skill with no hooks block would adopt an `ACTIVE` activation into a session where no gate runs at all: every commit in that session lands ungated while `state.json` still claims enforcement is active. This is the detail most likely to be silently dropped by anyone touching either skill file in isolation — check both together, always.
+
+### One live activation per worktree
+
+Two activations gating the same worktree independently — each with its own pointer, each approving commits against its own approval set — is the failure every rule below exists to rule out.
+
+**Cross-session resume retires the predecessor before the successor exists, never the reverse.** Retirement writes `status: "RESUMED"` under the predecessor's own lock; only after that succeeds is the successor's directory materialised, its document written, and the pointers repointed. This is the fail-closed order: if the process dies in between, the predecessor is `RESUMED` (denying) and the successor has no state at all (denying, per Rule 0) — both sides deny, **there is no automatic rollback**, and the recovery is `implement`. The reverse order — successor first, predecessor retired second — would leave a real window with two simultaneously `ACTIVE` activations over one worktree.
+
+**A retirement must never span an in-flight approval.** `pretool` sets `pending_approved_tree` under the same lock a retirement takes, so the two serialise: whichever wins, the other observes a consistent world. Skip this and a `pretool` approval can land against the predecessor moments before it is retired, and `confirm-commit` then verifies that commit against the now-retired document. `_advance`'s `status="ACTIVE"` write is what makes this dangerous rather than merely stale: it would resurrect a blocking `RESUMED` activation back into a second live one. `_advance` is kept off `RESUMED` documents two ways — `_REPORT_ONLY` rather than `_RECONCILABLE` keeps `posttool._reconcile` off it, and retirement itself refuses to happen across a pending approval — because a `status="ACTIVE"` write from *any* code path is the resurrection mechanism, not just this one, and both guards exist for exactly that reason.
+
+**A retired activation's directory is never mutated.** Every later revision, every later report, is written into the *successor's* directory — copied byte for byte from the predecessor at retirement time. Editing anything in a retired directory would corrupt evidence a completed review was already run against, and reports already stored there still name it.
+
+### The inverted carry-forward rule
+
+The successor's document is built by copying the whole predecessor document and then resetting a *named* set of fields — never by enumerating what to keep. Enumerating what to keep is how a future field gets silently dropped the day it is added to `new_state_document` and this reset table is not updated to match. It already has one concrete failure mode on record: an explicit keep-list drops `report_seq`, and `reviewer.py` claims the next sequence from state and `shutil.rmtree`s the bundle directory for that sequence — a reset `report_seq` would have the first post-resume review overwrite the copied `001` report and destroy its bundle rather than continuing the sequence.
+
+### `state.json` is not a trust boundary — treat everything read out of it that way
+
+This applies to every field this feature added. A `plan_revisions[*].file` is a filename read out of state and then used to open a file: validate it with `paths.is_safe_component`, resolve it under the activation directory with `os.path.realpath` on both sides (a symlink planted in the activation directory must not redirect the read), and verify its recorded `sha256` before its content is used for anything — including showing it to the reviewer. A missing file, a failed containment check, or a hash mismatch is `NEEDS_HUMAN`, never a skipped attachment and never a silent fallback to `plan.frozen.md`. The same caution applies to `resumed_into`, `abandoned_pending_tree` and `abandoned_pending_head`: read for display or comparison, never trusted on their own to authorize a write.
+
+### `STATE_VERSION` and legacy activations
+
+Activations written before this feature exist on disk with none of the fields it needs — and they are exactly the ones a user wants to resume. Most missing fields degrade safely on their own (`State.get_int`/`get_array`/`get` all answer sane empties). `plan_revisions` does not: the resume and plan-revision code indexes its *last* entry, and an empty list turns that into an `IndexError` inside a hook, which `hookio` converts into a fail-closed denial with no useful message. `STATE_VERSION` makes the migration explicit rather than accidental: a document at version 1 (or missing entirely) synthesizes revision 0 from its own `armed_at` and the plan file as found *right now* — honestly, since no earlier hash was ever recorded to check it against — then bumps to version 2. A missing or unreadable `plan.frozen.md` at that point fails closed as `ARM_FAILED` rather than inventing a plan. A version this build does not recognise refuses outright, on the same allow-list reasoning `_RESUMABLE` uses elsewhere: a newer build wrote that document, and this one cannot know what its fields mean.
+
+### New state fields
+
+`stop_after_phase`, `resumed_from`, `resumed_into`, `resume_count`, `plan_revisions`, `replan_pending`, `overrides`, `abandoned_pending_tree`, `abandoned_pending_head`, `activation_generation`, `finish_requested`. Two carry an invariant beyond "a new field":
+
+- **`activation_generation`** must live on *both* staleness fingerprints — `hooks.Activation` and `completion.Fingerprint` — and be incremented on every resume, same-session included. Both dataclasses document themselves as deliberate equality checks over everything rather than deny-lists, precisely because a missing field fails open; this is that failure, closed. Without it, a same-session resume that revises the plan or overrides the model mid-review leaves an in-flight approval keyed to a reviewer scope that no longer exists.
+- **`replan_pending`** fences every mutation except the one exact `set-phases` command, exactly as `ARMED` does before the first freeze — and is cleared by whichever `set-phases` runs next, the ordinary first freeze included. Without that second clearing, a resume that granted the token before phases were ever frozen leaves it live, and a *later* `set-phases` — issued at any point, mid-implementation — takes the replan branch and rewrites the phase currently being worked on.
+
+### The config overlay's place in the precedence chain
+
+`config.load`'s merge order is defaults < user config < repo config < activation overrides < environment. The overlay — an activation's own `--model`/`--variant`, stored in `overrides` — sits between the repo file and the environment: a per-run override beats config files, but `OCRL_MODEL` still beats everything, including a run's own override. Only keys already in `config.DEFAULTS` are accepted from the overlay; anything else is dropped, because `overrides` is written into `state.json`, which is not a trust boundary this layer should widen.
+
+### The two atomic writers, and which root each may touch
+
+`atomic.write_private_atomic` is the only writer used under `paths.state_root()`: same-directory `os.replace`, and `private_dir_fd` walks every path component down from `root`, `fchmod`ing each `0700` and the file `0600`. That chmod walk is exactly why it must never be pointed anywhere else — rooting it at the repository would chmod the repository directory itself.
+
+`atomic.write_atomic` exists for the one place this plugin writes inside the repository under review: `config <key> <value> --repo`, an explicit, user-only, already-documented write to `.opencode-review-loop.json`. Same create-temp-then-`os.replace`, but with no chmod of any parent — and it preserves an existing file's mode across a replace (`os.stat` the destination first, `fchmod` the temp to match) rather than silently widening a config file the user deliberately left at `0600`.
 
 ## Interpreter invocation
 
@@ -101,11 +146,13 @@ The `PreToolUse` dispatcher runs on **every** tool call, so cost there is multip
 | `scripts/ocrl/cmdshape.py` | deny-list plus bashlex AST walk deciding whether a commit command may run |
 | `scripts/ocrl/globmatch.py` | `[[ $path == $glob ]]` semantics, reimplemented rather than shelled out to |
 | `scripts/ocrl/reviewer.py` | bundle building, OpenCode invocation, contract parsing |
+| `scripts/ocrl/reviewer_probe.py` | the `opencode models` reachability probe shared by `arm`, `resume` and `config` |
+| `scripts/ocrl/planrev.py` | plan-revision bookkeeping: backfilling revision 0, path/hash verification, the active revision |
 | `scripts/ocrl/report.py` | report storage and the text Claude actually sees |
-| `scripts/ocrl/commands/` | one module per subcommand group — `arm`, `phases`, `session`, `completion`, `dryrun`, and the four hook entrypoints in `pretool.py`, `posttool.py`, `stop.py`, `hooks.py` |
+| `scripts/ocrl/commands/` | one module per subcommand group — `arm`, `resume`, `phases`, `session`, `configcmd`, `completion`, `dryrun`, and the four hook entrypoints in `pretool.py`, `posttool.py`, `stop.py`, `hooks.py` |
 | `scripts/ocrl/_vendor/bashlex/` | vendored parser; lint-excluded, `_vendor/README.md` records the upstream version and commit |
 | `prompts/*.md` | the fixed reviewer prompts — Claude composes none of this |
-| `skills/*/SKILL.md` | the five slash commands; `implement` carries the hook registrations |
+| `skills/*/SKILL.md` | the seven slash commands; `implement` and `resume` each carry the identical hook registrations |
 | `tests/selftest.sh` | the whole black-box acceptance suite; scratch repos, no model calls, language-agnostic on purpose |
 | `tests/unit/` | pytest unit tests for the Python modules |
 | `tests/STEP0.md` | runbook for the assumptions only a live session can settle |
