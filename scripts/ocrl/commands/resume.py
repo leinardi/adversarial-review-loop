@@ -38,13 +38,12 @@ import hashlib
 import os
 import re
 import shutil
-import stat
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
-from ocrl import commands, gitsnap, paths
+from ocrl import commands, gitsnap, paths, planrev
 from ocrl import config as config_module
 from ocrl.atomic import DIR_MODE, FILE_MODE, ensure_private_dir, write_private_atomic
 from ocrl.commands import arm
@@ -54,17 +53,7 @@ from ocrl.util import now
 
 __all__ = ["run"]
 
-#: The name ``arm`` freezes the plan under, and the name revision 0 always carries -- kept in
-#: sync with ``ocrl.state._PLAN_FROZEN_NAME`` by convention rather than import, since that name
-#: is private to ``state.py`` and this is the one other place that needs to know it.
-_PLAN_FROZEN_NAME: Final = "plan.frozen.md"
-
-#: What a real ``hashlib.sha256(...).hexdigest()`` looks like -- lowercase, exactly 64 hex
-#: digits. Used to refuse a recorded revision whose ``sha256`` field is missing or malformed
-#: before treating it as "nothing to compare", which a missing value would otherwise look like.
-_SHA256_HEX_RE: Final = re.compile(r"[0-9a-f]{64}")
-
-_BOOL_FLAGS: Final = ("--allow-dirty", "--abandon-pending")
+_BOOL_FLAGS: Final = ("--allow-dirty", "--abandon-pending", "--replan")
 _VALUE_FLAGS: Final = ("--until", "--plan", "--model", "--variant")
 
 #: The only stored statuses resume may continue from -- deliberately an allow-list, not a
@@ -130,12 +119,12 @@ class _EvidenceCorrupted(_ResumeFailure):
     the activation's own frozen evidence -- what every review to date, and every review from
     now on, was and will be run against -- has been deleted, replaced, or no longer matches
     what was recorded. Writing nothing here would leave a corrupted activation reporting
-    ``ACTIVE``, and the *ordinary* commit path (``pretool._gate_commit`` -> ``reviewer.
-    _plan_excerpt``) never verifies ``plan.frozen.md``'s integrity itself -- it would go on
-    consuming whatever is there. So ``run`` escalates the live activation to ``NEEDS_HUMAN``
-    whenever this is raised and retirement has not already happened (see ``retired``): a
-    blocking status the ordinary commit path *does* already check, closing the gap without
-    duplicating this verification into the hot path.
+    ``ACTIVE`` until the *next* commit's review happens to reach ``reviewer.build_bundle``,
+    which verifies the active revision too and would itself escalate to ``NEEDS_HUMAN`` -- but
+    only once a phase is actually reviewed, which can be minutes or phases away. So ``run``
+    escalates the live activation to ``NEEDS_HUMAN`` immediately, whenever this is raised and
+    retirement has not already happened (see ``retired``), rather than leaving the corruption
+    to be discovered by whichever review happens to run next.
     """
 
 
@@ -149,6 +138,8 @@ class _Flags:
     abandon_pending: bool = False
     model: str | None = None
     variant: str | None = None
+    #: Permission to redefine the remaining, not-yet-committed phases. See ``_Decision.replan``.
+    replan: bool = False
 
 
 @dataclass(frozen=True)
@@ -183,10 +174,21 @@ class _Decision:
 
     overrides: dict[str, str]
     revision: _RevisionChange | None
+    #: The warning from deciding ``revision`` -- kept apart from ``warnings`` because a
+    #: same-session (and, for the retirement window, a cross-session) resume re-decides the
+    #: revision under the lock and must replace *only* this part of the banner, not every
+    #: other warning ``_resume`` already collected (an ``--until`` clamp note, notably).
+    revision_warning: str
     until: int
     until_given: bool
+    #: Warnings unrelated to the revision decision (currently: an ``--until`` clamp note).
+    #: Combined with ``revision_warning`` by ``_banner``.
     warnings: str
     allow_dirty: bool
+    #: ``--replan`` was given: permission to redefine phases from the current one onward,
+    #: granted to ``phases.py`` via ``replan_pending``. Requires a clean worktree exactly as a
+    #: decided plan revision does -- see the module docstring and Phase 4's design notes.
+    replan: bool
 
 
 def _parse(argv: list[str]) -> tuple[str, list[str]]:
@@ -226,13 +228,14 @@ def _parse_flags(tokens: list[str]) -> _Flags:
         tokens,
         bool_flags=_BOOL_FLAGS,
         value_flags=_VALUE_FLAGS,
-        usage="--until, --plan, --allow-dirty, --abandon-pending, --model, --variant",
+        usage="--until, --plan, --allow-dirty, --abandon-pending, --replan, --model, --variant",
     )
     return _Flags(
         allow_dirty=arm.flag_bool(raw, "--allow-dirty"),
         until=arm.flag_str(raw, "--until") or "",
         plan=arm.flag_str(raw, "--plan"),
         abandon_pending=arm.flag_bool(raw, "--abandon-pending"),
+        replan=arm.flag_bool(raw, "--replan"),
         model=arm.flag_str(raw, "--model"),
         variant=arm.flag_str(raw, "--variant"),
     )
@@ -243,94 +246,24 @@ def _parse_flags(tokens: list[str]) -> _Flags:
 # --------------------------------------------------------------------------
 
 
-def _read_verified(act_dir: Path, filename: str, expected_sha256: str | None) -> bytes:
-    """The bytes of ``filename`` inside ``act_dir``, checked before they are trusted.
-
-    ``filename`` is untrusted input the moment it comes out of ``plan_revisions`` in
-    ``state.json`` -- AGENTS.md is explicit that file is not a trust boundary -- so it is
-    validated as one safe path component, then required to be a *literal* regular file:
-    ``lstat`` (which does not follow symlinks) must report ``S_ISREG`` for ``act_dir /
-    filename`` itself. A ``realpath``-then-containment check, the shape ``pretool`` uses for
-    the state root, is not enough here and is deliberately not used: it only rules out a
-    symlink that *escapes* the directory, and would happily pass one planted at
-    ``plan.frozen.md`` pointing at another file that legitimately lives inside the same
-    activation directory (a later revision, say) -- silently substituting its content while
-    still resolving "inside the directory". Requiring the component itself to carry no
-    indirection at all is the same discipline ``atomic.py``'s ``O_NOFOLLOW``-based directory
-    walk already applies to the rest of the state tree. When ``expected_sha256`` is given, the
-    content must still match it -- this is what makes a recorded revision actually *frozen*,
-    rather than a filename pointing at whatever bytes happen to be there now. ``None`` is
-    reserved for synthesizing a brand-new revision 0 from scratch, where there is nothing yet
-    to compare against -- every already-recorded entry must supply a real hash, checked by the
-    caller before this is reached, since ``None`` reaching here for one would silently skip
-    verifying it. Raises ``_EvidenceCorrupted`` on any failure; never returns a placeholder.
-    """
-    if not paths.is_safe_component(filename):
-        raise _EvidenceCorrupted(f'a plan revision names an unsafe file ("{filename}"); nothing was resumed.')
-    candidate = act_dir / filename
-    try:
-        info = candidate.lstat()
-    except OSError:
-        info = None
-    if info is None or not stat.S_ISREG(info.st_mode):
-        raise _EvidenceCorrupted(
-            f"the plan revision file ({candidate}) is missing, is a symlink, or is not a plain file directly inside "
-            "the activation directory; it is evidence a review was run against, and it can no longer be verified as "
-            "such. Nothing was resumed."
-        )
-    try:
-        content = candidate.read_bytes()
-    except OSError as exc:
-        raise _EvidenceCorrupted(f"the plan revision file ({candidate}) could not be read ({exc}). Nothing was resumed.") from exc
-    if expected_sha256 is not None and hashlib.sha256(content).hexdigest() != expected_sha256:
-        raise _EvidenceCorrupted(
-            f"the plan revision file ({candidate}) no longer matches the hash recorded when it was written -- its "
-            "content may have changed since. Nothing was resumed."
-        )
-    return content
-
-
 def _revisions_with_backfill(act_dir: Path, existing: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``existing`` (verified), or a synthesized revision 0 when it is empty.
+    """``ocrl.planrev.revisions_with_backfill``, translated into this module's failure type.
 
     Every legacy (pre-resume) document gets a real revision 0 the first time it is loaded,
     through ``State._migrate``. A document ``arm`` wrote *after* that but before ``arm`` itself
-    records revision 0 (a later phase) has none either -- this makes that case behave the same
-    way migration does: honest that the hash only attests to the file as found right now, not
-    as it was when the activation was armed. Once any resume has touched a document, its
-    ``plan_revisions`` is never empty again.
+    records revision 0 has none either -- ``planrev`` treats both the same way migration does:
+    honest that the hash only attests to the file as found right now, not as it was when the
+    activation was armed. Once any resume has touched a document, its ``plan_revisions`` is
+    never empty again.
 
-    Whether ``existing`` is empty or not, this never trusts content it has not itself just
-    read: an empty list gets its revision 0 synthesized from ``plan.frozen.md`` (raising
-    ``_ResumeFailure`` if that cannot be read at all -- a synthesized revision 0 with an
-    empty-content hash would be worse than a refusal, since it is the evidence every review to
-    date was run against). A non-empty list has **every** entry re-verified against the hash it
-    recorded, on **every** call -- not only revision 0's backfill, and not only the *active*
-    (last) entry. Verifying only the active one is not enough while the reviewer still always
-    reads ``plan.frozen.md`` regardless of which revision is active (disclosure is not wired
-    until a later phase, see the banner's own note): revision 0's file could be deleted or
-    replaced while a later revision is active, resume would see only the active entry checked
-    out fine, and the gate would review against evidence nothing here ever looked at again.
+    ``planrev.EvidenceCorrupted`` is caught and re-raised as :class:`_EvidenceCorrupted` here,
+    which is what makes it a ``_ResumeFailure`` -- carrying the ``retired`` flag ``run`` needs
+    to decide what, if anything, may still be written (see the module docstring).
     """
-    if not existing:
-        frozen_bytes = _read_verified(act_dir, _PLAN_FROZEN_NAME, expected_sha256=None)
-        return [{"at": now(), "phase": 1, "sha256": hashlib.sha256(frozen_bytes).hexdigest(), "file": _PLAN_FROZEN_NAME}]
-    revisions = [dict(entry) for entry in existing]
-    for entry in revisions:
-        # `expected_sha256=None` is reserved for the synthesis above, where there is
-        # legitimately nothing yet to compare against -- passing it here for an *already
-        # recorded* entry would silently skip verifying it. A missing or malformed sha256 on
-        # an existing entry is not "nothing to compare"; it is exactly the untrusted-state.json
-        # case this whole function exists to refuse, so it is checked before the file is even
-        # opened.
-        recorded_hash = entry.get("sha256")
-        if not isinstance(recorded_hash, str) or not _SHA256_HEX_RE.fullmatch(recorded_hash):
-            raise _EvidenceCorrupted(
-                f'the plan revision recorded for "{entry.get("file")}" has no valid sha256 recorded; its integrity '
-                "cannot be verified. Nothing was resumed."
-            )
-        _read_verified(act_dir, str(entry.get("file")), expected_sha256=recorded_hash)
-    return revisions
+    try:
+        return planrev.revisions_with_backfill(act_dir, existing)
+    except planrev.EvidenceCorrupted as exc:
+        raise _EvidenceCorrupted(str(exc)) from exc
 
 
 def _active_revision(state: State) -> dict[str, Any]:
@@ -441,6 +374,11 @@ def _build_successor_document(
         data["stop_after_phase"] = decision.until
     if decision.revision is not None:
         data["plan_path"] = decision.revision.source_path
+    if decision.replan:
+        # Not in the reset table above: it is not a per-resume default, it is a permission
+        # explicitly requested by this call. A resume that did *not* pass --replan leaves
+        # whatever the predecessor carried untouched, by the same inverted-allow-list rule.
+        data["replan_pending"] = True
     return data
 
 
@@ -479,11 +417,11 @@ def run(argv: list[str]) -> int:
         message = _resume(identity=identity, prev_state=prev_state, flags=flags)
     except _ResumeFailure as exc:
         # `_EvidenceCorrupted` additionally escalates the *live* activation -- same-session
-        # and pre-retirement cross-session alike -- so the ordinary commit path, which never
-        # verifies plan.frozen.md's integrity itself, is blocked by the NEEDS_HUMAN it already
-        # checks for, rather than silently going on consuming corrupted evidence. See the
-        # exception's own docstring. Once retirement has already happened the predecessor is
-        # RESUMED (already blocking), so nothing further is needed there.
+        # and pre-retirement cross-session alike -- catching corrupted plan evidence right now
+        # rather than leaving it for whichever commit's review happens to run next (`reviewer.
+        # build_bundle` verifies the active revision too, but only once a review actually
+        # runs). See the exception's own docstring. Once retirement has already happened the
+        # predecessor is RESUMED (already blocking), so nothing further is needed there.
         if isinstance(exc, _EvidenceCorrupted) and not exc.retired:
             prev_state.needs_human(str(exc))
         return _fail(session=session, repo=repo, reason=str(exc), same_session=same_session, retired=exc.retired)
@@ -570,12 +508,24 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
 
     revision, revision_warning = _decide_revision(prev_state, explicit_plan=flags.plan)
 
+    # `--replan` grants permission to redefine the phases from the current one onward; there
+    # is nothing to redefine until a first `set-phases` has run, and granting the token on an
+    # unfrozen (`ARMED`) activation would leave it lying around for whatever `set-phases`
+    # freezes the list -- see `phases.py` and AGENTS.md, "the replan fence".
+    if flags.replan and not prev_state.get_array("phases"):
+        raise _ResumeFailure("the phase list is not frozen yet, so there is nothing to replan. Run set-phases normally instead of --replan.")
+
+    # Any decided revision, and --replan, require a clean worktree -- and neither is waived by
+    # --allow-dirty or allow_dirty in config. The condition is "a revision was decided, or
+    # --replan was passed", not "--plan or --replan was typed": an automatic revision (the
+    # recorded plan_path changed on disk, no --plan given) is exactly as much a "clean
+    # boundary" promise as an explicit one.
     allow_dirty = flags.allow_dirty or probe_config.as_bool("allow_dirty")
-    if revision is not None:
+    if revision is not None or flags.replan:
         if not gitsnap.worktree_clean(repo):
             raise _ResumeFailure(
-                "a plan revision was decided (the plan file changed), which requires a clean worktree regardless of "
-                f"--allow-dirty or allow_dirty in config -- commit the current phase first:\n{gitsnap.dirty_summary(repo)}"
+                "a plan revision was decided, or --replan was passed, both of which require a clean worktree regardless "
+                f"of --allow-dirty or allow_dirty in config -- commit the current phase first:\n{gitsnap.dirty_summary(repo)}"
             )
     elif not allow_dirty and not gitsnap.worktree_clean(repo):
         raise _ResumeFailure(
@@ -585,7 +535,7 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
 
     until = prev_state.get_int("stop_after_phase")
     until_given = bool(flags.until)
-    warnings = revision_warning
+    warnings = ""
     if until_given:
         until = arm._resolve_until(flags.until)
         total = prev_state.phase_count()
@@ -598,15 +548,75 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
     # materialisation window that follows -- an already-authorised tool call or a background
     # writer can still move HEAD in that window. `_banner` computes it fresh, immediately
     # before it is shown, against whatever finally got published.
-    decision = _Decision(overrides=overrides, revision=revision, until=until, until_given=until_given, warnings=warnings, allow_dirty=allow_dirty)
+    decision = _Decision(
+        overrides=overrides,
+        revision=revision,
+        revision_warning=revision_warning,
+        until=until,
+        until_given=until_given,
+        warnings=warnings,
+        allow_dirty=allow_dirty,
+        replan=flags.replan,
+    )
     if identity.same_session:
         return _resume_same_session(state=prev_state, identity=identity, flags=flags, decision=decision)
     return _resume_cross_session(prev_state=prev_state, identity=identity, flags=flags, decision=decision)
 
 
+def _apply_revision_and_replan(state: State, *, repo: str, flags: _Flags, decision: _Decision) -> tuple[_RevisionChange | None, str]:
+    """Decide and publish a plan revision, and/or a granted replan token, same-session.
+
+    **The revision is decided again here**, against the document this transaction just
+    reloaded -- ``decision.revision``, decided in ``_resume`` before the lock was taken, is
+    deliberately not trusted for the write. Two concurrent same-session resumes can both call
+    ``_decide_revision`` outside the lock, both see the same predecessor (say revision 0) and
+    both decide "changed": if the first one's write is trusted, the second -- now holding the
+    lock and reloading a document that already carries the first's revision 1 -- would append
+    a second, duplicate revision recording the identical change again, inflating
+    ``plan_revisions``, the bundle attachments and the reviewer's disclosure with a change
+    that never happened a second time. Recomputing here, against the reloaded document,
+    answers "changed" correctly for whichever of the two calls runs second: by the time it
+    looks, the active revision already reflects the first call's write.
+
+    Raises ``commands.Refused``, or lets ``_decide_revision``'s own ``_ResumeFailure`` (or its
+    ``_EvidenceCorrupted`` subclass) propagate directly -- both are still raised from *inside*
+    the caller's transaction, so a refusal aborts the whole resume and nothing is written, and
+    ``run``'s existing handling of ``_EvidenceCorrupted`` still applies unchanged. Split out
+    only to keep ``_resume_same_session``'s branch count readable.
+
+    Returns the (re-)decided revision and its warning, so the caller reports what actually
+    happened -- which may differ from what ``_resume`` decided before the lock -- rather than
+    a decision this call may have just superseded.
+    """
+    revision, revision_warning = _decide_revision(state, explicit_plan=flags.plan)
+    if (revision is not None or decision.replan) and not gitsnap.worktree_clean(repo):
+        what = "the revision" if revision is not None else "--replan"
+        raise commands.Refused(
+            f"the worktree became dirty before {what} could be published; commit the current phase "
+            f"first and resume again:\n{gitsnap.dirty_summary(repo)}\n"
+        )
+    if revision is not None:
+        revisions = _apply_revision(
+            act_dir=state.act_dir, existing=state.data.get("plan_revisions") or [], change=revision, phase=state.get_int("phase")
+        )
+        state.update(plan_revisions=revisions, plan_path=revision.source_path)
+    else:
+        state.update(plan_revisions=_revisions_with_backfill(state.act_dir, state.data.get("plan_revisions") or []))
+    if decision.replan:
+        # Re-checked against the reloaded document: the phase list could have been cleared (a
+        # re-arm cannot happen mid-transaction, but belt and braces costs nothing here) since
+        # `_resume`'s own pre-check.
+        if not state.get_array("phases"):
+            raise commands.Refused("the phase list is not frozen yet, so there is nothing to replan. Run set-phases normally instead.\n")
+        state.update(replan_pending=True)
+    return revision, revision_warning
+
+
 def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, decision: _Decision) -> str:
-    repo, revision = identity.repo, decision.revision
+    repo = identity.repo
     head_warning = ""
+    revision: _RevisionChange | None = None
+    revision_warning = ""
     try:
         with state.transaction():
             # Re-checked against the reloaded document -- a concurrent escalation or `deactivate`
@@ -635,18 +645,7 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
                     pending_head="",
                     pending_command="",
                 )
-            if revision is not None:
-                if not gitsnap.worktree_clean(repo):
-                    raise commands.Refused(
-                        f"the worktree became dirty before the revision could be published; commit the current phase "
-                        f"first and resume again:\n{gitsnap.dirty_summary(repo)}\n"
-                    )
-                revisions = _apply_revision(
-                    act_dir=state.act_dir, existing=state.data.get("plan_revisions") or [], change=revision, phase=state.get_int("phase")
-                )
-                state.update(plan_revisions=revisions, plan_path=revision.source_path)
-            else:
-                state.update(plan_revisions=_revisions_with_backfill(state.act_dir, state.data.get("plan_revisions") or []))
+            revision, revision_warning = _apply_revision_and_replan(state, repo=repo, flags=flags, decision=decision)
             if decision.until_given:
                 state.update(stop_after_phase=decision.until)
             state.update(overrides=decision.overrides, activation_generation=state.get_int("activation_generation") + 1)
@@ -669,16 +668,49 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
     except StateLoadError as exc:
         raise _ResumeFailure(f"the live activation could not be re-read ({exc}).") from exc
 
-    return _banner(state=state, identity=identity, decision=replace(decision, warnings=decision.warnings + head_warning))
+    # The revision reported here is the one just (re-)decided inside the lock, not the one
+    # `_resume` decided before it -- see `_apply_revision_and_replan`'s docstring for why the
+    # two can legitimately differ under a concurrent same-session resume. `decision.warnings`
+    # (the --until clamp note, if any) is carried through untouched -- only the revision part
+    # is replaced, and `head_warning` is appended to the "other" bucket, same as cross-session.
+    fresh = replace(decision, revision=revision, revision_warning=revision_warning, warnings=decision.warnings + head_warning)
+    return _banner(state=state, identity=identity, decision=fresh)
 
 
 def _resume_cross_session(*, prev_state: State, identity: _Identity, flags: _Flags, decision: _Decision) -> str:
     repo, session = identity.repo, identity.session
     snapshot: dict[str, Any] = {}
+    #: Recomputed inside `_retire`'s transaction, replacing `decision.revision` for
+    #: everything downstream -- see `_retire`'s own comment for why.
+    fresh_revision: _RevisionChange | None = None
+    fresh_revision_warning = ""
 
     def _retire() -> None:
-        nonlocal snapshot
+        nonlocal snapshot, fresh_revision, fresh_revision_warning
         _refuse_unless_resumable(prev_state)
+        if decision.replan and not prev_state.get_array("phases"):
+            raise commands.Refused("the phase list is not frozen yet, so there is nothing to replan. Run set-phases normally instead of --replan.\n")
+        # Decided again here, against the document this transaction just reloaded -- exactly
+        # the same reasoning `_apply_revision_and_replan` documents for the same-session path,
+        # and it applies here too: a same-session resume against this *same* predecessor can
+        # publish a revision while this call is still queued for the lock (retirement does not
+        # start until this function runs), and `decision.revision`, decided before the lock,
+        # would then be stale. Trusting it would have `_publish_successor` append a second,
+        # duplicate revision for a change the reloaded document already carries.
+        fresh_revision, fresh_revision_warning = _decide_revision(prev_state, explicit_plan=flags.plan)
+        # Enforced here, before retirement, not only in `_publish_successor`'s later recheck:
+        # the pre-lock check in `_resume` ran against the *old* decision (no revision, say,
+        # with `allow_dirty` in play), so it can pass while this fresh one needs a clean
+        # worktree. Refusing now -- nothing retired yet -- is strictly better than retiring
+        # anyway and finding out only in `_publish_successor`, which would wedge the
+        # predecessor as RESUMED and the successor as ARM_FAILED over a check this call could
+        # have made before committing to either.
+        if (fresh_revision is not None or decision.replan) and not gitsnap.worktree_clean(repo):
+            what = "the revision" if fresh_revision is not None else "--replan"
+            raise commands.Refused(
+                f"the worktree became dirty before {what} could be published; commit the current phase "
+                f"first and resume again:\n{gitsnap.dirty_summary(repo)}\n"
+            )
         pending = prev_state.get("pending_approved_tree")
         if pending:
             if not flags.abandon_pending:
@@ -705,6 +737,14 @@ def _resume_cross_session(*, prev_state: State, identity: _Identity, flags: _Fla
         raise _ResumeFailure(str(exc), retired=False) from exc
     except StateLoadError as exc:
         raise _ResumeFailure(f"the previous activation's state could not be re-read ({exc}). Run /opencode-review-loop:implement <plan.md>.") from exc
+    # `_decide_revision`'s own `_ResumeFailure` (or `_EvidenceCorrupted`) propagates through
+    # here uncaught, deliberately: it is raised before the retirement write above, so
+    # `retired=False` (its default) is already correct, and `run`'s existing handling of
+    # `_EvidenceCorrupted` applies to the still-live predecessor unchanged.
+
+    # `decision.revision`, decided before the lock, is not used again from here on -- only the
+    # fresh one `_retire` just decided against the document it actually reloaded.
+    decision = replace(decision, revision=fresh_revision, revision_warning=fresh_revision_warning)
 
     # The predecessor is retired from here on: any further failure records ARM_FAILED on the
     # successor rather than trying to undo the retirement (module docstring, "No automatic
@@ -758,9 +798,10 @@ def _publish_successor(*, prev_state: State, snapshot: dict[str, Any], identity:
     # --allow-dirty and no plan change is just as much a "clean boundary" promise, and a dirty
     # worktree slipping in during this exact window must not be published over.
     if not gitsnap.worktree_clean(repo):
-        if revision is not None:
+        if revision is not None or decision.replan:
+            what = "the revised plan" if revision is not None else "--replan"
             raise _ResumeFailure(
-                "the worktree became dirty while this resume was publishing the revised plan; commit the current "
+                f"the worktree became dirty while this resume was publishing {what}; commit the current "
                 f"phase first and resume again:\n{gitsnap.dirty_summary(repo)}"
             )
         if not decision.allow_dirty:
@@ -798,7 +839,8 @@ def _publish_successor(*, prev_state: State, snapshot: dict[str, Any], identity:
 
 def _banner(*, state: State, identity: _Identity, decision: _Decision) -> str:
     repo, session, prev_session, same_session = identity.repo, identity.session, identity.prev_session, identity.same_session
-    revision, warnings = decision.revision, decision.warnings
+    revision = decision.revision
+    warnings = decision.revision_warning + decision.warnings
     config = config_module.load(repo, overrides=state.data.get("overrides"))
     variant = config.as_str("variant")
     reviewer = f"{config.as_str('model')}{f' (variant {variant})' if variant else ''}"
@@ -808,13 +850,21 @@ def _banner(*, state: State, identity: _Identity, decision: _Decision) -> str:
     pause_target = f"{target} of {total}" if target else "none"
     plan_revisions_list = state.data.get("plan_revisions") or []
     revision_count = len(plan_revisions_list) or 1
-    # The reviewer (`reviewer._plan_excerpt`) reads a hardcoded plan.frozen.md and does not
-    # yet know a revision exists -- that disclosure is a later phase of this feature. Saying
-    # so here is what stops a revision from being implemented against as if it were already
-    # governing the review it is not shown to.
+    # By the time this banner is printed, whichever path got here has already verified the
+    # active revision in full (`_decide_revision` / `_apply_revision_and_replan` /
+    # `_publish_successor`, all through `planrev.verified_revisions`), so this should never
+    # raise in practice -- but the banner is display only, and a resume that already succeeded
+    # and wrote state must not crash reporting so over a defensive check.
+    try:
+        active_plan_file = planrev.active_filename(plan_revisions_list)
+    except planrev.EvidenceCorrupted as exc:
+        active_plan_file = f"<corrupted: {exc}>"
+    # The reviewer reads whichever revision is active (`reviewer._plan_excerpt`, via
+    # `planrev.verified_revisions`) and discloses every earlier one to it too -- so this is
+    # simply which file on disk is now the one to implement against, not a caveat about what
+    # is or is not enforced.
     revision_note = (
-        "\nNote: a plan revision is recorded, but the reviewer does not yet read revised plan content -- it always "
-        "evaluates against plan.frozen.md (the original). Implement against plan.frozen.md until this is wired up.\n"
+        f"\nNote: revision {revision_count - 1} ({active_plan_file}) is the plan the reviewer evaluates against from here on.\n"
         if len(plan_revisions_list) > 1
         else ""
     )
@@ -827,8 +877,15 @@ def _banner(*, state: State, identity: _Identity, decision: _Decision) -> str:
 
     if state.get("status") == "ARMED":
         next_steps = (
-            f"Phases are not frozen yet. Read the frozen plan ({state.act_dir}/plan.frozen.md) and run:\n\n"
+            "Phases are not frozen yet. Read the frozen plan named above and run:\n\n"
             f'    {commands.plugin_root()}/scripts/ocrl.sh set-phases --phase "…" --phase "…"\n'
+        )
+    elif state.get("replan_pending") == "true":
+        next_steps = (
+            f"--replan was granted: redefine phases {phase}..{total or '?'} only (phase {phase - 1} and earlier are "
+            "immutable and stay as they are). Read the frozen plan named above and run:\n\n"
+            f'    {commands.plugin_root()}/scripts/ocrl.sh set-phases --phase "…" --phase "…"\n\n'
+            f"one --phase per phase, from {phase} onward. Every other mutation is denied until that command has run."
         )
     else:
         next_steps = f"Continue with phase {phase} of {total or '?'}:\n\n    {state.phase_desc(phase)}\n"
@@ -840,7 +897,8 @@ def _banner(*, state: State, identity: _Identity, decision: _Decision) -> str:
 - repository: {repo}
 - session: {session}
 {resumed_from_line}- plan revision: {revision_count} ({"changed just now" if revision is not None else "unchanged"})
-{revision_note}- baseline tree: {state.get("baseline_tree")}
+{revision_note}- frozen plan: {state.act_dir}/{active_plan_file}
+- baseline tree: {state.get("baseline_tree")}
 - activation commit: {state.get("activation_commit") or "<empty repository>"}
 - phase: {phase} of {total or "?"}
 - pause target: {pause_target}

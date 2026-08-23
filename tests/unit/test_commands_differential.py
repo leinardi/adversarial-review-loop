@@ -43,6 +43,13 @@ def normalised_state(env: dict[str, str], repo: Path, session: str) -> dict[str,
     for key in _VOLATILE:
         assert key in document, f"{key} disappeared from the state document"
         document[key] = "<volatile>"
+    # `plan_revisions[*].at` is a clock reading too, one level down: `arm` records it when
+    # revision 0 is frozen, and the shim/bootstrap comparison runs `arm` twice, seconds apart.
+    revisions = document.get("plan_revisions")
+    if isinstance(revisions, list):
+        for entry in revisions:
+            if isinstance(entry, dict) and "at" in entry:
+                entry["at"] = "<volatile>"
     return document
 
 

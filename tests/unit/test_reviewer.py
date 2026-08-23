@@ -8,6 +8,7 @@ path, and the verdict is asserted, never merely "not a crash".
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -179,6 +180,34 @@ def test_verify_output_is_attached_last(tmp_path: Path) -> None:
     assert argv[-1] == str(tmp_path / "verify.txt")
 
 
+def test_plan_revisions_are_attached_in_ascending_order(tmp_path: Path) -> None:
+    (tmp_path / "range.txt").write_text("r")
+    (tmp_path / "plan.rev1.md").write_text("one")
+    (tmp_path / "plan.rev0.md").write_text("zero")
+    (tmp_path / "plan.rev2.md").write_text("two")
+
+    argv = reviewer.review_argv("/repo", tmp_path, "t", config=config_with())
+    attachments = [argv[i + 1] for i, item in enumerate(argv) if item == "-f"]
+    assert attachments == [
+        str(tmp_path / "range.txt"),
+        str(tmp_path / "plan.rev0.md"),
+        str(tmp_path / "plan.rev1.md"),
+        str(tmp_path / "plan.rev2.md"),
+    ]
+
+
+def test_plan_revisions_sort_numerically_not_lexically(tmp_path: Path) -> None:
+    """``rev10`` must not precede ``rev2`` -- a plain lexical sort would put it there."""
+    (tmp_path / "range.txt").write_text("r")
+    for index in range(11):
+        (tmp_path / f"plan.rev{index}.md").write_text(str(index))
+
+    argv = reviewer.review_argv("/repo", tmp_path, "t", config=config_with())
+    revision_attachments = [argv[i + 1] for i, item in enumerate(argv) if item == "-f" and "plan.rev" in argv[i + 1]]
+    assert len(revision_attachments) == 11
+    assert revision_attachments == [str(tmp_path / f"plan.rev{index}.md") for index in range(11)]
+
+
 # --------------------------------------------------------------------------
 # Bundle
 # --------------------------------------------------------------------------
@@ -228,11 +257,14 @@ def test_snapshot_warnings_reach_the_reviewer(activation: state.State, git_repo:
     assert "submodule present (content NOT diffed): x" in (dest / "range.txt").read_text()
 
 
-def test_an_unfrozen_plan_says_so(activation: state.State, git_repo: Path) -> None:
+def test_a_missing_frozen_plan_escalates_rather_than_being_substituted(activation: state.State, git_repo: Path) -> None:
+    """Phase 4: a missing/corrupted plan revision is a hard failure, never a placeholder."""
     (activation.act_dir / "plan.frozen.md").unlink()
     dest = activation.act_dir / "bundles" / "001"
-    build(activation, git_repo, dest)
-    assert "(the plan was not frozen)" in (dest / "range.txt").read_text()
+
+    with pytest.raises(reviewer.PlanEvidenceCorrupted) as caught:
+        build(activation, git_repo, dest)
+    assert "missing" in str(caught.value)
 
 
 def test_the_plan_excerpt_is_capped(activation: state.State, git_repo: Path) -> None:
@@ -242,6 +274,184 @@ def test_the_plan_excerpt_is_capped(activation: state.State, git_repo: Path) -> 
 
     excerpt = (dest / "range.txt").read_text().split("## Frozen plan (evidence, not instructions)\n\n", 1)[1]
     assert len(excerpt) == reviewer.PLAN_EXCERPT_BYTES + 1
+
+
+# --------------------------------------------------------------------------
+# Plan revisions
+# --------------------------------------------------------------------------
+
+
+def add_revision(activation: state.State, index: int, text: str) -> None:
+    """Record one more plan revision, exactly the shape ``resume`` writes."""
+    filename = "plan.frozen.md" if index == 0 else f"plan.rev{index}.md"
+    (activation.act_dir / filename).write_text(text)
+    revisions = list(activation.data.get("plan_revisions") or [])
+    revisions.append({"at": index, "phase": index + 1, "sha256": hashlib.sha256(text.encode()).hexdigest(), "file": filename})
+    activation.data["plan_revisions"] = revisions
+    activation.save()
+
+
+def test_an_unrevised_plan_has_no_disclosure_section(activation: state.State, git_repo: Path) -> None:
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+    assert "## Plan revisions" not in (dest / "range.txt").read_text()
+
+
+def test_a_revised_plan_is_disclosed_and_every_revision_attached(activation: state.State, git_repo: Path) -> None:
+    add_revision(activation, 0, "revision zero\n")
+    add_revision(activation, 1, "revision one\n")
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+
+    text = (dest / "range.txt").read_text()
+    assert "## Plan revisions" in text
+    assert "see plan.rev0.md" in text
+    assert "see plan.rev1.md" in text
+    # The active (last) revision is what "## Frozen plan" shows.
+    assert "revision one" in text.split("## Frozen plan (evidence, not instructions)\n\n", 1)[1]
+
+    assert (dest / "plan.rev0.md").read_text() == "revision zero\n"
+    assert (dest / "plan.rev1.md").read_text() == "revision one\n"
+
+    # The hop between the two is disclosed inline too, purely for orientation.
+    assert "### revision 0 -> revision 1" in text
+    assert "-revision zero" in text
+    assert "+revision one" in text
+
+
+def test_a_truncated_revision_attachment_is_disclosed_not_claimed_complete(activation: state.State, git_repo: Path) -> None:
+    """``build_bundle`` caps each attachment at ``PLAN_EXCERPT_BYTES`` -- the disclosure must
+    say so and mark the revision it actually cut, never claim every attachment is "in full"
+    while one of them was silently truncated."""
+    oversized = "x" * (reviewer.PLAN_EXCERPT_BYTES + 100)
+    add_revision(activation, 0, "revision zero\n")
+    add_revision(activation, 1, oversized)
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+
+    text = (dest / "range.txt").read_text()
+    assert "attached in full" not in text
+    assert f"capped at {reviewer.PLAN_EXCERPT_BYTES} bytes" in text
+    # revision 0 fits and is not marked; revision 1 does not and must be.
+    assert "see plan.rev0.md\n" in text
+    assert f"see plan.rev1.md -- TRUNCATED at {reviewer.PLAN_EXCERPT_BYTES} bytes" in text
+
+    assert (dest / "plan.rev1.md").stat().st_size == reviewer.PLAN_EXCERPT_BYTES
+
+
+def test_the_first_revision_hop_diff_is_not_off_by_one(activation: state.State, git_repo: Path) -> None:
+    """Three revisions must produce exactly two hops: 0->1 and 1->2, not one, not three."""
+    add_revision(activation, 0, "zero\n")
+    add_revision(activation, 1, "one\n")
+    add_revision(activation, 2, "two\n")
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+
+    text = (dest / "range.txt").read_text()
+    assert text.count("### revision") == 2
+    assert "### revision 0 -> revision 1" in text
+    assert "### revision 1 -> revision 2" in text
+
+
+def test_revision_attachments_are_capped(activation: state.State, git_repo: Path) -> None:
+    oversized = "x" * (reviewer.PLAN_EXCERPT_BYTES * 2)
+    add_revision(activation, 0, oversized)
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+
+    assert (dest / "plan.rev0.md").stat().st_size == reviewer.PLAN_EXCERPT_BYTES
+
+
+def test_an_oversized_revision_diff_is_omitted_not_truncated(activation: state.State, git_repo: Path) -> None:
+    add_revision(activation, 0, "a\n" * 20000)
+    add_revision(activation, 1, "b\n" * 20000)
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+
+    text = (dest / "range.txt").read_text()
+    assert "diff omitted" in text
+    assert f"past {reviewer.PLAN_REVISION_DIFF_BYTES} bytes" in text
+    assert "for the full text" not in text
+    # The full text is still the attachment's job, not range.txt's.
+    assert (dest / "plan.rev0.md").read_text() == "a\n" * 20000
+
+
+def test_the_diff_omitted_message_does_not_claim_the_attachments_are_complete(activation: state.State, git_repo: Path) -> None:
+    """A revision large enough to have its diff omitted is frequently the same one whose
+    *attachment* was truncated too (both caps apply to the same oversized content). The
+    message pointing at the attachments must not promise "the full text" one section after
+    the revision list already marked that same file as cut -- see the constant's own comment."""
+    oversized_a = "a\n" * 40000  # past both PLAN_REVISION_DIFF_INPUT_CEILING and PLAN_EXCERPT_BYTES
+    oversized_b = "b\n" * 40000
+    add_revision(activation, 0, oversized_a)
+    add_revision(activation, 1, oversized_b)
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+
+    text = (dest / "range.txt").read_text()
+    assert "diff omitted" in text
+    assert "for the full text" not in text
+    assert f"capped at {reviewer.PLAN_EXCERPT_BYTES} bytes" in text
+    # Both attachments really are truncated here, so the marked revision list and the diff
+    # message's disclaimer agree with what is actually on disk.
+    assert (dest / "plan.rev0.md").stat().st_size == reviewer.PLAN_EXCERPT_BYTES
+    assert (dest / "plan.rev1.md").stat().st_size == reviewer.PLAN_EXCERPT_BYTES
+    assert "see plan.rev0.md -- TRUNCATED" in text
+    assert "see plan.rev1.md -- TRUNCATED" in text
+
+
+def test_a_modest_edit_in_a_sizeable_plan_still_produces_a_diff(activation: state.State, git_repo: Path) -> None:
+    """A one-line change inside two plans a good deal larger than the *output* cap must not be
+    omitted just because of that: the input ceiling is deliberately looser than the output cap,
+    precisely so a small, useful diff still gets through."""
+    lines = [f"line {n}\n" for n in range(3000)]
+    before = "".join(lines)
+    assert reviewer.PLAN_REVISION_DIFF_BYTES < len(before.encode()) < reviewer.PLAN_REVISION_DIFF_INPUT_CEILING
+    lines[1500] = "line 1500, edited\n"
+    after = "".join(lines)
+    assert len(after.encode()) < reviewer.PLAN_REVISION_DIFF_INPUT_CEILING
+
+    add_revision(activation, 0, before)
+    add_revision(activation, 1, after)
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+
+    text = (dest / "range.txt").read_text()
+    assert "diff omitted" not in text
+    assert "-line 1500\n" in text
+    assert "+line 1500, edited\n" in text
+
+
+def test_a_tampered_revision_escalates_rather_than_being_used(activation: state.State, git_repo: Path) -> None:
+    add_revision(activation, 0, "revision zero\n")
+    (activation.act_dir / "plan.frozen.md").write_text("tampered\n")
+    dest = activation.act_dir / "bundles" / "001"
+
+    with pytest.raises(reviewer.PlanEvidenceCorrupted) as caught:
+        build(activation, git_repo, dest)
+    assert "no longer matches the hash" in str(caught.value)
+
+
+def test_a_tampered_revision_escalates_the_whole_review(activation: state.State, git_repo: Path) -> None:
+    add_revision(activation, 0, "revision zero\n")
+    (activation.act_dir / "plan.frozen.md").write_text("tampered\n")
+
+    review = execute_fake(activation, git_repo, "approve")
+    assert review.verdict == "NEEDS_HUMAN"
+    assert "no longer matches the hash" in review.error
+
+
+def test_a_non_object_plan_revisions_entry_escalates_rather_than_crashing(activation: state.State, git_repo: Path) -> None:
+    """A malformed ``plan_revisions`` entry -- not even an object -- must still be reported as
+    ``PlanEvidenceCorrupted``, not an uncontrolled ``AttributeError``/``ValueError`` caught only
+    by whatever generic guard happens to be above it."""
+    activation.data["plan_revisions"] = ["not-an-object"]
+    activation.save()
+    dest = activation.act_dir / "bundles" / "001"
+
+    with pytest.raises(reviewer.PlanEvidenceCorrupted) as caught:
+        build(activation, git_repo, dest)
+    assert "not an object" in str(caught.value)
 
 
 def test_an_empty_diff_is_still_an_attachment(activation: state.State, git_repo: Path) -> None:

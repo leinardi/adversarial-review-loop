@@ -16,8 +16,9 @@ import sys
 from pathlib import Path
 
 import ocrl
-from ocrl import commands, gitsnap, paths, reviewer
+from ocrl import commands, gitsnap, paths, planrev, reviewer
 from ocrl import config as config_module
+from ocrl.atomic import write_private_atomic
 from ocrl.gitsnap import SnapshotError
 from ocrl.state import State
 
@@ -51,6 +52,15 @@ def _activation() -> tuple[str, State, config_module.Config] | None:
             activation_commit=gitsnap.head_commit(root),
             baseline_tree=gitsnap.head_tree(root),
         )
+    # Nothing armed this scratch activation, so there is no real frozen plan to disclose --
+    # but `reviewer.build_bundle` now hard-fails on a missing one (Phase 4: a plan revision's
+    # evidence is never a placeholder). A dry run is not a real review, so a placeholder file
+    # is written here instead, the one place that is honest about what it is.
+    write_private_atomic(
+        state.act_dir / planrev.PLAN_FROZEN_NAME,
+        "(dry run: no activation is armed in this worktree, so there is no real frozen plan)\n",
+        root=paths.state_root(),
+    )
     return root, state, config
 
 

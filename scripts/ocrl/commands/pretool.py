@@ -98,7 +98,7 @@ If you believe one of them should run, say so and let the user run /opencode-rev
 PHASES_NOT_FROZEN: Final = """\
 The phase list has not been frozen yet, so nothing may be changed.
 
-Read the frozen plan ({act_dir}/plan.frozen.md), then run exactly:
+Read the frozen plan ({act_dir}/{plan_file}), then run exactly:
 
     {plugin_root}/scripts/ocrl.sh set-phases --phase "…" --phase "…"
 
@@ -106,7 +106,22 @@ one --phase per phase, in order. Reading the repository is allowed; changing it
 is not, until that command has run.
 """
 
+REPLAN_PENDING: Final = """\
+A resume granted permission to redefine the remaining phases, but that has not happened yet,
+so nothing may be changed.
+
+Read the current frozen plan ({act_dir}/{plan_file}), then run exactly:
+
+    {plugin_root}/scripts/ocrl.sh set-phases --phase "…" --phase "…"
+
+replacing only the phases from the current one onward -- phases already committed are
+immutable and are kept automatically. Reading the repository is allowed; changing it is not,
+until that command has run.
+"""
+
 SET_PHASES_ALLOWED: Final = "opencode-review-loop: set-phases is the one command allowed before the phase list is frozen."
+
+SET_PHASES_ALLOWED_REPLAN: Final = "opencode-review-loop: set-phases is the one command allowed while a replan is pending."
 
 BAD_COMMIT_SHAPE: Final = """\
 This commit command was not accepted: {error}
@@ -366,6 +381,43 @@ def _gate_terminal_status(hook: Hook, *, state: State, config: Config, status: s
         hooks.deny(hook, RESUMED.format(successor=successor))
 
 
+def _verified_plan_file(hook: Hook, *, state: State, config: Config) -> str:
+    """The active plan revision's file name, fully verified, or escalate and deny.
+
+    **Verifies before ``set-phases`` is ever considered for an allow**, not only when this is
+    reached to build a denial message: both ``ARMED`` and ``replan_pending`` are about to let
+    the model redefine phase scope from whatever it read, and if the activation's own record
+    of what that evidence *is* cannot be trusted, that must block the freeze itself, not just
+    the wording of an unrelated denial. So this reads and hash-verifies the active revision in
+    full (:func:`planrev.verified_revisions`, the same check ``reviewer.build_bundle`` runs
+    before a review), not merely its name -- a corrupted or tampered entry must not let
+    ``set-phases`` through on the strength of "the filename looked safe".
+
+    Escalation is **guarded**, exactly as ``pretool._escalate``/``stop._escalate`` already are
+    for every other path that writes ``NEEDS_HUMAN``: ``expected`` is captured before the
+    verification runs, and ``hooks.escalate`` only writes if the activation still matches it
+    when the write actually happens. An unconditional ``state.needs_human(...)`` here could
+    otherwise land after a concurrent ``/opencode-review-loop:stop`` and re-enable the gate the
+    user just turned off (Rule 4) -- the same failure the reviewer-escalation path already
+    guards against, reached this time from a check with no slow operation in between, but the
+    same race in miniature: nothing here holds the lock continuously between the read and the
+    write.
+    """
+    from ocrl import planrev  # noqa: PLC0415 - not on the read-only hot path
+
+    expected = hooks.activation(state, config)
+    try:
+        revisions = planrev.verified_revisions(state.act_dir, state.data.get("plan_revisions") or [])
+    except planrev.EvidenceCorrupted as exc:
+        if hooks.escalate(state, config, expected, str(exc)):
+            hooks.deny(hook, NEEDS_HUMAN.format(reason=str(exc)))
+        with state.transaction():
+            current = hooks.activation(state, config)
+        hooks.deny(hook, ACTIVATION_MOVED.format(change=hooks.describe_move(expected, current), now=current.summary))
+    entry, _content = revisions[-1]
+    return str(entry.get("file"))
+
+
 def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo: str) -> None:
     """Everything from the effective status down. Ends in an emitter on every path."""
     from ocrl import cmdshape  # noqa: PLC0415 - not on the read-only hot path
@@ -380,12 +432,28 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
         hooks.deny(hook, ESCAPE_DENIED)
 
     if status == "ARMED":
+        # Verified *before* `set-phases` is even considered for an allow -- see
+        # `_verified_plan_file`'s own docstring for why the order matters here. Named, not
+        # hardcoded to plan.frozen.md: a resume can decide a revision before phases are ever
+        # frozen, and pointing at the wrong file here would have the model split and freeze
+        # phases against evidence a review will not actually be run against.
+        plan_file = _verified_plan_file(hook, state=state, config=config)
         # The whole command must *be* the exception, not merely contain it, and it must be
         # this gate's own script by exact path -- a basename test trusts any executable named
         # `ocrl` that the repository under review happens to ship. See `cmdshape.is_set_phases`.
         if tool == "Bash" and cmdshape.is_set_phases(command, _entrypoint()):
             hook.allow(SET_PHASES_ALLOWED)
-        hooks.deny(hook, PHASES_NOT_FROZEN.format(act_dir=state.act_dir, plugin_root=commands.plugin_root()))
+        hooks.deny(hook, PHASES_NOT_FROZEN.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file))
+
+    if status == "ACTIVE" and state.get("replan_pending") == "true":
+        # Same fence as ARMED, and for the same reason: a phase list that can be rewritten
+        # while other tool calls are permitted lets work happen, or even be reviewed, before
+        # the description it is meant to match exists. See AGENTS.md, "the replan fence".
+        # Verified before the allow-check, same as the ARMED branch above.
+        plan_file = _verified_plan_file(hook, state=state, config=config)
+        if tool == "Bash" and cmdshape.is_set_phases(command, _entrypoint()):
+            hook.allow(SET_PHASES_ALLOWED_REPLAN)
+        hooks.deny(hook, REPLAN_PENDING.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file))
 
     if tool != "Bash":
         _guard_state_root(hook, payload)

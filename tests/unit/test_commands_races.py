@@ -25,6 +25,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -32,8 +33,10 @@ from pathlib import Path
 
 import pytest
 from conftest import BOOTSTRAP, git, run_bootstrap
-from test_commands_arm import armed_env, read_state, state_dir
+from test_commands_arm import armed_env, plan_file, read_state, state_dir
 from test_commands_session import arm, set_phases
+
+from ocrl.commands import resume
 
 #: Long enough for every spawned process to reach the lock, short enough not to drag the
 #: suite. The assertions do not depend on it: they are invariants that must hold either way.
@@ -451,3 +454,116 @@ def test_finish_still_completes_when_nothing_interferes(git_repo: Path, tmp_path
     document = read_state(env, git_repo, "s1")
     assert document["status"] == "COMPLETE"
     assert document["final_done_tree"] == git(git_repo, "rev-parse", "HEAD^{tree}")
+
+
+# --------------------------------------------------------------------------
+# resume: same-session plan-revision decision
+# --------------------------------------------------------------------------
+
+
+def test_concurrent_same_session_resumes_do_not_duplicate_a_revision(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Two same-session resumes can both decide "changed" against the same predecessor
+    revision before either takes the lock. The second, reloading a document that already
+    carries the first's write, must recognise the plan now matches the active revision and
+    record nothing -- not append a second, duplicate revision for the identical change."""
+    env = armed_env(clean_env)
+    plan = plan_file(tmp_path)
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan)], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    set_phases(git_repo, env, "one")
+    plan.write_text("# plan\n\nphase one, edited\n")
+
+    with activation_lock(env, git_repo):
+        workers = [spawn(["resume", "--session", "s1"], cwd=git_repo, env=env) for _ in range(8)]
+        time.sleep(_SETTLE)
+
+    results = [(worker.wait(), *worker.communicate()) for worker in workers]
+    assert all(code == 0 for code, _out, _err in results), results
+
+    document = read_state(env, git_repo, "s1")
+    revisions = document["plan_revisions"]
+    assert isinstance(revisions, list)
+    # Revision 0 (recorded at arm) plus exactly one new revision for the edit -- not one per
+    # worker that happened to decide "changed" before the lock.
+    assert len(revisions) == 2, revisions
+    assert (state_dir(env, git_repo, "s1") / revisions[1]["file"]).read_text() == "# plan\n\nphase one, edited\n"
+
+
+def test_mixed_same_and_cross_session_resumes_do_not_duplicate_a_revision(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same duplicate-revision race, but between a same-session resume (writes in place)
+    and a cross-session one (retires the predecessor first): both can decide "changed" against
+    the same starting revision before either takes the predecessor's lock. If the same-session
+    write lands first, the cross-session resume's ``_retire`` must see it and record nothing
+    new for the successor -- not append a second, duplicate revision on top of it.
+
+    Forced deterministically rather than hoped for from scheduling, and **without** any
+    production-code rendezvous (a runtime hook that pauses a real resume for an
+    environment-selected duration, keyed off an environment variable nothing validates, is a
+    Rule 3 and reliability hazard of its own -- see the module docstring for what this suite
+    already avoids doing with `activation_lock`/`spawn` instead). This drives ``resume.run``
+    in-process, in a background thread, and monkeypatches ``resume._decide_revision`` for the
+    duration of this test only, to pause the cross-session resume's first (pre-lock) decision
+    until the same-session resume -- run to completion on the main thread in between -- has
+    published. Same technique ``test_reviewer.review_env`` already uses to make ``os.environ``
+    match an isolated env dict for in-process calls.
+    """
+    env = armed_env(clean_env)
+    plan = plan_file(tmp_path)
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan)], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    set_phases(git_repo, env, "one")
+    plan.write_text("# plan\n\nphase one, edited\n")
+
+    for key in list(os.environ):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.chdir(git_repo)
+
+    real_decide_revision = resume._decide_revision
+    first_call_seen = threading.Event()
+    release_first_call = threading.Event()
+
+    def barriered_decide_revision(state: object, *, explicit_plan: str | None) -> object:
+        # The very first call across both threads is necessarily the cross-session resume's
+        # pre-lock one: it is started first, and the same-session resume below is not started
+        # until this call has already paused here.
+        is_first_call = not first_call_seen.is_set()
+        first_call_seen.set()
+        result = real_decide_revision(state, explicit_plan=explicit_plan)  # type: ignore[arg-type]
+        if is_first_call:
+            assert release_first_call.wait(timeout=10), "same-session resume never released the barrier"
+        return result
+
+    monkeypatch.setattr(resume, "_decide_revision", barriered_decide_revision)
+
+    cross_result: list[int] = []
+    cross_thread = threading.Thread(target=lambda: cross_result.append(resume.run(["--session", "s2"])))
+    cross_thread.start()
+    assert first_call_seen.wait(timeout=10), "cross-session resume never reached its pre-lock decision"
+
+    # The cross-session resume has now decided "changed" against the original revision and is
+    # blocked before taking "s1"'s lock. Run the same-session resume to completion here, on the
+    # main thread -- its own decision is made and published fresh, against that same original
+    # revision.
+    same_code = resume.run(["--session", "s1"])
+    assert same_code == 0
+    same_session_revisions = read_state(env, git_repo, "s1")["plan_revisions"]
+    assert isinstance(same_session_revisions, list)
+    assert len(same_session_revisions) == 2, same_session_revisions
+
+    # Release the cross-session resume: `_retire` must now see the same-session write.
+    release_first_call.set()
+    cross_thread.join(timeout=10)
+    assert not cross_thread.is_alive()
+    assert cross_result == [0], cross_result
+
+    document = read_state(env, git_repo, "s2")
+    revisions = document["plan_revisions"]
+    assert isinstance(revisions, list)
+    # Revision 0 (arm) plus exactly the one new revision the same-session resume already
+    # published -- not a second, duplicate one for the identical edit.
+    assert len(revisions) == 2, revisions
+    assert (state_dir(env, git_repo, "s2") / revisions[1]["file"]).read_text() == "# plan\n\nphase one, edited\n"

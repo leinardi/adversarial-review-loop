@@ -20,7 +20,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, NoReturn
 
-from ocrl import commands
+from ocrl import commands, planrev
 from ocrl import config as config_module
 from ocrl.commands import completion, hooks
 from ocrl.hookio import Hook, read_hook_input
@@ -93,7 +93,7 @@ STALE: Final = (
 NOT_FROZEN: Final = """\
 opencode-review-loop: the phase list has not been frozen, so no work can start and no review has run.
 
-Read the frozen plan ({act_dir}/plan.frozen.md) and run exactly:
+Read the frozen plan ({act_dir}/{plan_file}) and run exactly:
 
     {plugin_root}/scripts/ocrl.sh set-phases --phase "…" --phase "…"
 """
@@ -307,6 +307,21 @@ def _ended(gate: _Gate, status: str) -> NoReturn:
     gate.hook.stop_ok()
 
 
+def _named_plan_file(gate: _Gate) -> str:
+    """The active plan revision's file name for a message, or escalate and end the turn.
+
+    Mirrors ``pretool._named_plan_file``: ``planrev.active_filename`` raises when a non-empty
+    ``plan_revisions`` names an unsafe or malformed file, which is not a message this can
+    still print with a placeholder -- see there for why. Ends the turn either way, through
+    ``_escalate``'s existing NEEDS_HUMAN path.
+    """
+    try:
+        return planrev.active_filename(gate.state.data.get("plan_revisions") or [])
+    except planrev.EvidenceCorrupted as exc:
+        _escalate(gate, str(exc))
+        gate.hook.stop_ok(SWEEP_ESCALATED.format(error=str(exc)))
+
+
 def _escalate(gate: _Gate, reason: str) -> None:
     """Escalate, or end the turn saying the activation moved and nothing was written.
 
@@ -341,7 +356,8 @@ def _by_status(gate: _Gate) -> None:
     if status == "STALE":
         _block_counted(gate, STALE.format(ttl_hours=config.as_int("ttl_hours")).rstrip("\n"))
     if status == "ARMED":
-        _block_counted(gate, NOT_FROZEN.format(act_dir=state.act_dir, plugin_root=commands.plugin_root()).rstrip("\n"))
+        plan_file = _named_plan_file(gate)
+        _block_counted(gate, NOT_FROZEN.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file).rstrip("\n"))
     if status == "RECONCILE":
         _block_counted(gate, RECONCILE.format(reason=state.get("reason"), parent=state.get("bad_commit_parent")).rstrip("\n"))
 

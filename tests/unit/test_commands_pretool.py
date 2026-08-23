@@ -276,6 +276,80 @@ def test_set_phases_is_the_one_command_allowed_while_armed(git_repo: Path, tmp_p
 
 
 # --------------------------------------------------------------------------
+# A corrupted plan_revisions entry escalates rather than substituting evidence
+# --------------------------------------------------------------------------
+
+
+def test_a_corrupted_active_revision_escalates_before_allowing_set_phases_while_armed(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str]
+) -> None:
+    """The active revision is verified *before* ``set-phases`` is even considered for an
+    allow: a corrupted record must block the freeze itself, not just an unrelated denial's
+    wording."""
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+    patch_state(env, git_repo, plan_revisions=[{"at": 1, "phase": 1, "sha256": "not-a-real-hash", "file": "plan.frozen.md"}])
+
+    verdict, reason = pretool(git_repo, env, command=f"{ENTRYPOINT} set-phases --phase 'one'")
+
+    assert verdict == "deny"
+    assert "NEEDS_HUMAN" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["status"] == "NEEDS_HUMAN"
+    assert "no valid sha256" in str(document["reason"])
+
+
+def test_a_traversal_file_in_plan_revisions_never_reaches_a_message_while_armed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+    patch_state(env, git_repo, plan_revisions=[{"at": 1, "phase": 1, "sha256": "a" * 64, "file": "../../etc/passwd"}])
+
+    verdict, reason = pretool(git_repo, env, tool="Write")
+
+    assert verdict == "deny"
+    # Denied as NEEDS_HUMAN before `PHASES_NOT_FROZEN` is ever reached -- the traversal path
+    # is quoted in the diagnostic (naming what is wrong), but never turned into an instruction
+    # telling the model to go read it.
+    assert "Read the frozen plan" not in reason
+    assert "NEEDS_HUMAN" in reason
+    assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
+
+
+def test_a_corrupted_active_revision_escalates_during_a_replan(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env, "phase one")
+    patch_state(
+        env,
+        git_repo,
+        replan_pending=True,
+        plan_revisions=[{"at": 1, "phase": 1, "sha256": "a" * 64, "file": "missing.md"}],
+    )
+
+    verdict, reason = pretool(git_repo, env, command=f"{ENTRYPOINT} set-phases --phase 'one revised'")
+
+    assert verdict == "deny"
+    assert "NEEDS_HUMAN" in reason
+    assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
+
+
+def test_a_non_object_plan_revisions_entry_escalates_rather_than_crashing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A malformed ``plan_revisions`` entry (not even an object) must still produce a durable
+    ``NEEDS_HUMAN`` with a diagnostic, not an uncontrolled crash caught only by the generic
+    fail-closed guard."""
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+    patch_state(env, git_repo, plan_revisions=["not-an-object"])
+
+    verdict, reason = pretool(git_repo, env, tool="Write")
+
+    assert verdict == "deny"
+    assert "NEEDS_HUMAN" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["status"] == "NEEDS_HUMAN"
+    assert "not an object" in str(document["reason"])
+
+
+# --------------------------------------------------------------------------
 # Rule 4: the user owns the exits
 # --------------------------------------------------------------------------
 

@@ -9,6 +9,7 @@ wrong reason.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -130,6 +131,13 @@ def test_arm_freezes_the_plan_and_records_the_activation(git_repo: Path, tmp_pat
 
     frozen = state_dir(env, git_repo, "s1") / "plan.frozen.md"
     assert frozen.read_text() == plan.read_text()
+
+    revisions = document["plan_revisions"]
+    assert isinstance(revisions, list)
+    assert len(revisions) == 1
+    assert revisions[0]["phase"] == 1
+    assert revisions[0]["file"] == "plan.frozen.md"
+    assert revisions[0]["sha256"] == hashlib.sha256(frozen.read_bytes()).hexdigest()
 
 
 def test_arm_writes_both_pointers(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

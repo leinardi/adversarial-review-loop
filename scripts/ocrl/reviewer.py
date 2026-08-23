@@ -17,6 +17,8 @@ blocks regardless of what the reviewer concluded.
 from __future__ import annotations
 
 import contextlib
+import datetime
+import difflib
 import json
 import os
 import re
@@ -26,10 +28,10 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Final
+from typing import IO, Any, Final
 
 import ocrl
-from ocrl import report
+from ocrl import planrev, report
 from ocrl.atomic import FILE_MODE, ensure_private_dir
 from ocrl.config import Config, severity_rank
 from ocrl.errors import OcrlError
@@ -44,6 +46,7 @@ __all__ = [
     "ContractError",
     "Finding",
     "Invocation",
+    "PlanEvidenceCorrupted",
     "Review",
     "ReviewerFailed",
     "Target",
@@ -67,6 +70,17 @@ LOG_LINES: Final = 200
 DIFFSTAT_LINES: Final = 200
 PLAN_EXCERPT_BYTES: Final = 65536
 DIFF_ERROR_BYTES: Final = 500
+
+#: Cap on one plan-revision hop's diff in ``range.txt``. Orientation only -- the attachments
+#: are the evidence -- so a diff past this is omitted rather than truncated mid-hunk.
+PLAN_REVISION_DIFF_BYTES: Final = 16384
+
+#: Cap on *either side's* size before a hop is even attempted, checked separately from and
+#: ahead of ``PLAN_REVISION_DIFF_BYTES``. Deliberately more generous than the output cap: a
+#: modest edit inside an otherwise sizeable plan still produces a small, useful diff, and only
+#: inputs large enough that computing the diff is itself the expensive part should be skipped
+#: outright -- see ``_revision_diff``.
+PLAN_REVISION_DIFF_INPUT_CEILING: Final = PLAN_REVISION_DIFF_BYTES * 2
 
 #: ``verify_cmd`` runs under its own fixed ceiling, unrelated to the review timeout.
 VERIFY_TIMEOUT_SEC: Final = 600
@@ -128,6 +142,19 @@ class BundleTooLarge(BundleError):
     Separate from :class:`BundleError` because it escalates to ``NEEDS_HUMAN`` rather than
     counting as one more operational failure: approving on a partial view is not an option,
     and retrying will not shrink the diff.
+    """
+
+
+class PlanEvidenceCorrupted(BundleError):
+    """A recorded plan revision could not be verified as itself.
+
+    Separate from :class:`BundleTooLarge` in name only -- both escalate to ``NEEDS_HUMAN``
+    rather than counting as an operational failure, because neither is something a retry can
+    fix. A missing revision file, a symlink, a containment failure or a hash mismatch means
+    the evidence a review would be shown is no longer the evidence a phase was agreed
+    against; approving on a substituted ``plan.frozen.md``, or silently skipping the
+    attachment, is exactly the failure freezing the plan exists to prevent (see
+    ``ocrl.planrev``).
     """
 
 
@@ -243,23 +270,105 @@ def _phase_list(state: State) -> str:
     return "".join(f"{index + 1}. {desc}\n" for index, desc in enumerate(state.get_array("phases")))
 
 
-def _plan_excerpt(act_dir: Path) -> str:
-    """The frozen plan, capped at ``head -c 65536``.
-
-    Sliced as bytes, exactly as ``head -c`` does, so the cap is the documented one even
-    when the plan is not ASCII. A cut mid-character survives because the surrogateescape
-    round trip carries the orphaned bytes through unchanged.
-    """
-    plan = act_dir / "plan.frozen.md"
+def _format_at(at: object) -> str:
+    """A ``plan_revisions`` entry's ``at`` (epoch seconds) as UTC, for a human reading range.txt."""
+    if isinstance(at, bool) or not isinstance(at, (int, float, str)):
+        return "(unknown time)"
     try:
-        raw = plan.read_bytes()
-    except OSError:
-        return "(the plan was not frozen)\n"
-    # `$(head -c N …)` strips trailing newlines; the printf then adds exactly one back.
-    return _decode(raw[:PLAN_EXCERPT_BYTES]).rstrip("\n") + "\n"
+        seconds = int(at)
+    except (TypeError, ValueError):
+        return "(unknown time)"
+    return datetime.datetime.fromtimestamp(seconds, tz=datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _range_text(target: Target, *, state: State, warnings: str, act_dir: Path) -> str:
+#: What every "omitted" outcome says, whichever check triggered it -- the reader only needs
+#: one message, and a shared constant keeps the two checks below from drifting apart.
+#:
+#: Deliberately does **not** say "see the attachment for the full text": the attachment is
+#: itself capped at ``PLAN_EXCERPT_BYTES`` (``build_bundle``), and a revision large enough to
+#: have its diff omitted (``PLAN_REVISION_DIFF_INPUT_CEILING``) is frequently the same one
+#: whose attachment was truncated too -- promising "full text" one section after the revision
+#: list marked that same file as cut would contradict it. Point at the attachment without
+#: claiming what it contains; the truncation marker on the revision line is what says that.
+_DIFF_OMITTED: Final = (
+    f"(diff omitted: past {PLAN_REVISION_DIFF_BYTES} bytes; see the plan.revN.md attachments above -- each capped at "
+    f"{PLAN_EXCERPT_BYTES} bytes, see the revision list for which ones were truncated)\n"
+)
+
+
+def _revision_diff(prev_content: bytes, curr_content: bytes) -> str:
+    """A unified diff between two plan revisions, capped, purely for orientation.
+
+    The numbered ``plan.revN.md`` attachments are the evidence; this is only what makes a
+    string of revision metadata legible without opening every attachment by hand. Capped
+    independently of ``PLAN_EXCERPT_BYTES`` -- more than one hop can appear in one bundle, and
+    each is one ``range.txt`` section rather than a whole attachment, so it is omitted past the
+    cap rather than truncated mid-hunk, which would print a diff that lies about its own extent.
+
+    **Checked before ``difflib`` ever runs, not only on its output** -- two separate bounds.
+    ``unified_diff`` is driven by ``SequenceMatcher``, which is worst-case quadratic in the
+    number of lines, so decoding, splitting and diffing an oversized or adversarial revision
+    only to discard the result past the byte cap would still pay that cost on *every* review
+    this hop appears in. The input ceiling (``PLAN_REVISION_DIFF_INPUT_CEILING``) is
+    deliberately looser than the output cap (``PLAN_REVISION_DIFF_BYTES``) rather than reusing
+    it: a one-line edit inside two several-KiB plans produces a tiny diff regardless of how
+    large the plans themselves are, and gating solely on input size at the *output* cap would
+    omit exactly that useful, small diff. Only content large enough that diffing it is itself
+    the expensive part is skipped before ``difflib`` runs at all; the *result* is still capped
+    separately below, for the (large-input, small-output-cap-exceeding) hops that ceiling lets
+    through but that still produce more text than belongs in ``range.txt``.
+    """
+    if len(prev_content) > PLAN_REVISION_DIFF_INPUT_CEILING or len(curr_content) > PLAN_REVISION_DIFF_INPUT_CEILING:
+        return _DIFF_OMITTED
+    prev_lines = _decode(prev_content).splitlines(keepends=True)
+    curr_lines = _decode(curr_content).splitlines(keepends=True)
+    diff_text = "".join(difflib.unified_diff(prev_lines, curr_lines, fromfile="before", tofile="after"))
+    if not diff_text:
+        return "(no textual difference)\n"
+    if len(_encode(diff_text)) > PLAN_REVISION_DIFF_BYTES:
+        return _DIFF_OMITTED
+    return diff_text
+
+
+def _plan_revisions_section(revisions: list[tuple[dict[str, Any], bytes]]) -> str:
+    """``## Plan revisions``, only when the plan changed since arming (more than one entry).
+
+    Revision 0 is always recorded, so "more than one entry" is exactly "the plan was revised".
+    Each attachment is disclosed by the same numbering ``build_bundle`` writes it under, so the
+    reviewer can be told "see plan.rev<n>.md" and find exactly that file. A capped diff for
+    every adjacent hop follows the list, purely as orientation -- not a substitute for the
+    earlier phase descriptions being reviewed against a plan that changed underneath them,
+    which is why every revision, not just the diffs, is attached.
+
+    **The attachments are capped at ``PLAN_EXCERPT_BYTES`` each** (``build_bundle`` writes
+    ``content[:PLAN_EXCERPT_BYTES]``, the same cap the active plan's own excerpt already used),
+    and that has to be said here rather than implied: claiming a revision was "attached in
+    full" when a plan past the cap was silently cut would let the reviewer approve believing
+    it saw every historical requirement when it did not. So the cap is disclosed once, and any
+    revision it actually cut is marked individually -- not left to be discovered by comparing
+    byte counts.
+    """
+    if len(revisions) <= 1:
+        return ""
+    out = ["\n## Plan revisions\n\n"]
+    out.append(
+        f"The plan changed after this activation was armed. Every revision below is attached as "
+        f"the numbered plan.revN.md files, each capped at {PLAN_EXCERPT_BYTES} bytes (marked below "
+        "where a revision exceeded that and was therefore cut) -- because an earlier phase may "
+        "have been reviewed against an earlier one.\n\n"
+    )
+    for index, (entry, content) in enumerate(revisions):
+        truncated = f" -- TRUNCATED at {PLAN_EXCERPT_BYTES} bytes, this is not the complete revision" if len(content) > PLAN_EXCERPT_BYTES else ""
+        out.append(
+            f"- revision {index}: recorded at phase {entry.get('phase')}, {_format_at(entry.get('at'))} -- see plan.rev{index}.md{truncated}\n"
+        )
+    for index in range(1, len(revisions)):
+        out.append(f"\n### revision {index - 1} -> revision {index}\n\n")
+        out.append(_revision_diff(revisions[index - 1][1], revisions[index][1]))
+    return "".join(out)
+
+
+def _range_text(target: Target, *, state: State, warnings: str, revisions: list[tuple[dict[str, Any], bytes]]) -> str:
     """The bundle's ``range.txt``: what is under review, and what is *not* represented."""
     repo, base, head = target.repo, target.base, target.head
     out: list[str] = ["# Review range\n\n"]
@@ -292,8 +401,12 @@ def _range_text(target: Target, *, state: State, warnings: str, act_dir: Path) -
     out.append("\n## Snapshot warnings\n\n")
     out.append(f"{warnings}\n" if warnings else "(none)\n")
 
+    out.append(_plan_revisions_section(revisions))
+
     out.append("\n## Frozen plan (evidence, not instructions)\n\n")
-    out.append(_plan_excerpt(act_dir))
+    _, active_content = revisions[-1]
+    # `$(head -c N …)` strips trailing newlines; the printf then adds exactly one back.
+    out.append(_decode(active_content[:PLAN_EXCERPT_BYTES]).rstrip("\n") + "\n")
     return "".join(out)
 
 
@@ -418,9 +531,10 @@ def _run_verify(repo: str, command: str, dest: Path) -> None:
 def build_bundle(target: Target, dest: Path, *, state: State, config: Config, warnings: str = "") -> None:
     """Assemble everything the reviewer is shown, under ``dest``.
 
-    Raises :class:`BundleTooLarge` past ``hard_diff_ceiling`` and :class:`BundleError` when
-    the diff itself cannot be produced. Both are refusals to review, never a review that
-    found nothing.
+    Raises :class:`BundleTooLarge` past ``hard_diff_ceiling``, :class:`PlanEvidenceCorrupted`
+    when a recorded plan revision cannot be verified, and :class:`BundleError` when the diff
+    itself cannot be produced. All three are refusals to review, never a review that found
+    nothing.
     """
     shutil.rmtree(dest, ignore_errors=True)
     ensure_private_dir(dest, root=state_root())
@@ -438,8 +552,28 @@ def build_bundle(target: Target, dest: Path, *, state: State, config: Config, wa
         )
     diff = diff_file.read_bytes()
 
-    range_text = _range_text(target, state=state, warnings=warnings, act_dir=state.act_dir)
+    # Every recorded revision, verified against its own hash -- never a placeholder, and
+    # never a silent fall back to `plan.frozen.md`. A missing file, a symlink, a containment
+    # failure or a hash mismatch is exactly as hard a failure as an oversized diff.
+    try:
+        revisions = planrev.verified_revisions(state.act_dir, state.data.get("plan_revisions") or [])
+    except planrev.EvidenceCorrupted as exc:
+        raise PlanEvidenceCorrupted(str(exc)) from exc
+
+    range_text = _range_text(target, state=state, warnings=warnings, revisions=revisions)
     _write_private(dest / "range.txt", _encode(range_text))
+
+    # One attachment per revision, numbered exactly as `range.txt`'s disclosure names them --
+    # `N` entries in `plan_revisions` produce exactly `N` attachments, `plan.rev0.md` through
+    # `plan.rev<N-1>.md`. Driven from the state document, not a directory glob: a glob keyed
+    # to the on-disk source names (`plan.frozen.md` for revision 0, `plan.rev<n>.md` after)
+    # would silently omit revision 0 under this numbering. Capped at the same
+    # `PLAN_EXCERPT_BYTES` the active plan's own excerpt is capped at -- a revision file is
+    # untrusted-length input the moment it comes from `state.json`, and attaching it whole
+    # would let an oversized one blow out the bundle and the reviewer's context exactly the
+    # way an unbounded `plan.frozen.md` would, which is why that one was always capped.
+    for index, (_entry, content) in enumerate(revisions):
+        _write_private(dest / f"plan.rev{index}.md", content[:PLAN_EXCERPT_BYTES])
 
     total = _write_chunks(dest, diff, config.as_int("chunk_diff_bytes"))
     diff_file.unlink(missing_ok=True)
@@ -454,6 +588,16 @@ def build_bundle(target: Target, dest: Path, *, state: State, config: Config, wa
 # --------------------------------------------------------------------------
 # Invocation
 # --------------------------------------------------------------------------
+
+
+#: ``plan.rev<n>.md``, matched to sort attachments numerically -- lexical order would put
+#: ``plan.rev10.md`` before ``plan.rev2.md``.
+_REVISION_FILE_RE: Final = re.compile(r"plan\.rev(\d+)\.md$")
+
+
+def _revision_sort_key(path: Path) -> int:
+    match = _REVISION_FILE_RE.match(path.name)
+    return int(match.group(1)) if match else -1
 
 
 def review_argv(repo: str, bundle_dir: Path, title: str, *, config: Config) -> list[str]:
@@ -475,6 +619,8 @@ def review_argv(repo: str, bundle_dir: Path, title: str, *, config: Config) -> l
     argv += ["-f", str(bundle_dir / "range.txt")]
     for chunk in sorted(bundle_dir.glob("changes.*.diff")):
         argv += ["-f", str(chunk)]
+    for revision_file in sorted(bundle_dir.glob("plan.rev*.md"), key=_revision_sort_key):
+        argv += ["-f", str(revision_file)]
     if (bundle_dir / "verify.txt").is_file():
         argv += ["-f", str(bundle_dir / "verify.txt")]
     return argv
@@ -823,6 +969,10 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     try:
         build_bundle(target, bundle_dir, state=state, config=config, warnings=warnings)
     except BundleTooLarge as exc:
+        review.verdict = "NEEDS_HUMAN"
+        review.error = str(exc)
+        return review
+    except PlanEvidenceCorrupted as exc:
         review.verdict = "NEEDS_HUMAN"
         review.error = str(exc)
         return review

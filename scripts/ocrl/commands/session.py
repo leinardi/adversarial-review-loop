@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 
-from ocrl import commands, gitsnap, report, reviewer
+from ocrl import commands, gitsnap, planrev, report, reviewer
 from ocrl.commands import completion
 from ocrl.commands.completion import Completion
 from ocrl.config import Config
@@ -98,6 +98,15 @@ def status(argv: list[str]) -> int:
     reports = "".join(f"  {name}\n" for name in report.list_reports(activation.act_dir)).rstrip("\n")
     stop_after_phase = state.get_int("stop_after_phase")
     pause_target = f"{stop_after_phase} of {state.phase_count()}" if stop_after_phase else "none"
+    plan_revisions = state.data.get("plan_revisions") or []
+    # `status` never changes anything (see the docstring above), so a corrupted revision
+    # entry is reported inline rather than escalated the way `pretool`/`gate-stop` do --
+    # there is no mutation here to gate, only a diagnostic to print honestly.
+    try:
+        active_plan_file = planrev.active_filename(plan_revisions)
+    except planrev.EvidenceCorrupted as exc:
+        active_plan_file = f"<corrupted: {exc}>"
+    revision_count = len(plan_revisions) or 1
 
     sys.stdout.write(
         f"""\
@@ -108,7 +117,8 @@ session:             {state.get("session_id")}
 status:              {status_line}
 reason:              {state.get("reason")}
 plan:                {state.get("plan_path")}
-frozen plan:         {activation.act_dir}/plan.frozen.md
+frozen plan:         {activation.act_dir}/{active_plan_file}
+plan revision:       {revision_count - 1} ({revision_count} recorded)
 baseline tree:       {state.get("baseline_tree")}
 activation commit:   {state.get("activation_commit")}
 last approved tree:  {state.get("last_approved_tree")}

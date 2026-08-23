@@ -20,6 +20,7 @@ channel is not escaped".
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -28,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from ocrl import commands, gitsnap, paths
+from ocrl import commands, gitsnap, paths, planrev
 from ocrl import config as config_module
 from ocrl.atomic import ensure_private_dir, locked, write_private_atomic
 from ocrl.config import Config
@@ -361,12 +362,14 @@ def _baseline_tree(repo: str, head_commit: str) -> str:
     return gitsnap.git_run(repo, ["hash-object", "-t", "tree", "/dev/null"]).stdout.decode("utf-8", "surrogateescape").rstrip("\n")
 
 
-def _freeze_plan(plan: str, act_dir: Path) -> None:
-    """Copy the plan into the activation directory. Raises ``_ArmFailure``.
+def _freeze_plan(plan: str, act_dir: Path) -> bytes:
+    """Copy the plan into the activation directory, and answer the raw bytes written.
 
     The frozen copy is what every review is shown, so a plan edited afterwards cannot change
     what the gate believes was agreed. A copy that fails refuses to arm, where the shell's
-    unchecked ``cp`` would have armed with no plan at all.
+    unchecked ``cp`` would have armed with no plan at all. The raw bytes are handed back so
+    the caller can hash exactly what was written as revision 0, rather than reading the file
+    a second time.
     """
     try:
         raw = Path(plan).read_bytes()
@@ -374,13 +377,14 @@ def _freeze_plan(plan: str, act_dir: Path) -> None:
         raise _ArmFailure(f'the plan file could not be read: "{plan}" ({exc})') from exc
     try:
         write_private_atomic(
-            act_dir / "plan.frozen.md",
+            act_dir / planrev.PLAN_FROZEN_NAME,
             raw.decode("utf-8", "surrogateescape"),
             root=paths.state_root(),
             errors="surrogateescape",
         )
     except OSError as exc:
         raise _ArmFailure(f"the plan could not be frozen into the activation directory ({exc})") from exc
+    return raw
 
 
 def _record_failure(state: State, *, session: str, repo: str, reason: str, publish_latest: bool = True) -> None:
@@ -537,7 +541,7 @@ def _arm(state: State, request: _Request) -> _Frozen:
         if not state.load() and state.version_conflict:
             raise _VersionConflict(state.version_conflict_value)
 
-        _freeze_plan(plan, state.act_dir)
+        plan_bytes = _freeze_plan(plan, state.act_dir)
 
         # A fresh document: re-arming the same session starts a new activation, and carrying
         # the old one's approved trees forward would approve a tree nobody reviewed for it.
@@ -555,6 +559,10 @@ def _arm(state: State, request: _Request) -> _Frozen:
             allow_dirty=allow_dirty,
             stop_after_phase=until,
             overrides=overrides,
+            # Revision 0, so the list is never empty and "revised" is exactly "more than one
+            # entry" -- without this baseline there is nothing to compare a first revision
+            # against, and `reviewer._range_text`'s disclosure has no honest form.
+            plan_revisions=[{"at": now(), "phase": 1, "sha256": hashlib.sha256(plan_bytes).hexdigest(), "file": planrev.PLAN_FROZEN_NAME}],
         )
         state.mark_tree_approved(frozen.baseline)
         state.save()
