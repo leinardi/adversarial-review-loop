@@ -178,6 +178,23 @@ sget() {
         else "" end' "$(state_file)"
 }
 
+# state_file_for <session> / sget_for <session> <key> -- same as state_file/sget, but for a
+# specific session's activation directory rather than "whichever state.json find happens to
+# return first". Needed once a case has more than one session live under the same worktree
+# (a resumed predecessor plus its successor), where the plain helpers above are ambiguous.
+# paths.sha256_hex documents itself as matching `printf '%s' … | sha256sum`, so this reproduces
+# the same hash the Python side computes for the worktree directory.
+state_file_for() {
+    printf '%s/worktrees/%s/%s/state.json' "$OCRL_STATE_DIR" "$(printf '%s' "$REPO" | sha256sum | cut -d' ' -f1)" "$1"
+}
+
+sget_for() {
+    jq -r --arg k "$2" '
+        if has($k) and .[$k] != null
+        then (.[$k] | if type == "string" then . else tostring end)
+        else "" end' "$(state_file_for "$1")"
+}
+
 arm_ok() {
     ocrl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
 }
@@ -905,6 +922,111 @@ if start 'stop: defer is honoured once and bounded'; then
     out=$(ocrl defer --reason 'again' 2>&1)
     assert_contains 'the second defer is refused' "$out" 'limit'
     unset OCRL_MAX_DEFERS
+fi
+
+# --------------------------------------------------------------------------
+# Resume and pause
+# --------------------------------------------------------------------------
+
+if start 'resume: continues in a new session, baseline and approvals survive'; then
+    new_case
+    arm_ok && phases_ok
+    printf 'phase one\n' >"$REPO/a.txt"
+    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
+    commit_now 'phase 1'
+    confirm 'git add -A && git commit -m "phase 1"' >/dev/null
+    assert_eq 'phase advanced to 2' "$(sget phase)" '2'
+
+    baseline_before=$(sget baseline_tree)
+    approved_before=$(jq -c '.approved_trees' "$(state_file)")
+    OLD_SESSION=$SESSION
+    NEW_SESSION="sess-$CASE_N-resumed"
+
+    out=$(cd "$REPO" && "$OCRL" resume --session "$NEW_SESSION" 2>&1)
+    assert_contains 'the resume banner confirms' "$out" 'RESUMED for this worktree'
+
+    assert_eq 'the baseline tree is unchanged' "$(sget_for "$NEW_SESSION" baseline_tree)" "$baseline_before"
+    assert_eq 'approved_trees is unchanged' "$(jq -c '.approved_trees' "$(state_file_for "$NEW_SESSION")")" "$approved_before"
+    assert_eq 'phase is still 2' "$(sget_for "$NEW_SESSION" phase)" '2'
+    assert_eq 'the pending approval is empty' "$(sget_for "$NEW_SESSION" pending_approved_tree)" ''
+
+    # Both pointers name the new session: the `latest` pointer (resolve_local_activation's
+    # fallback, exercised through a shell command with no --session) and the per-session
+    # pointer (exercised by driving pretool with the new session id, which only resolves a
+    # worktree at all through pointer_read(session)).
+    s=$(ocrl status)
+    assert_contains 'the latest pointer names the new session' "$s" "session:             $NEW_SESSION"
+    SESSION=$NEW_SESSION
+    printf 'phase two\n' >"$REPO/b.txt"
+    assert_eq 'the session pointer resolves and the phase-2 commit is still gated' \
+        "$(with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x')" 'deny'
+
+    # report_seq continues rather than restarting: the copied 001 report is still on disk
+    # under the successor, and the phase-2 review just above (denied on findings) wrote 002.
+    reports=$(find "$OCRL_STATE_DIR/worktrees" -path "*/$NEW_SESSION/reports/*.md" -exec basename {} \; | sort)
+    assert_contains 'report 001 was carried forward' "$reports" '001-'
+    assert_contains 'report 002 continues the sequence' "$reports" '002-'
+fi
+
+if start 'resume: retires the predecessor, which denies rather than gates live'; then
+    new_case
+    arm_ok && phases_ok
+    printf 'phase one\n' >"$REPO/a.txt"
+    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
+    commit_now 'phase 1'
+    confirm 'git add -A && git commit -m "phase 1"' >/dev/null
+
+    OLD_SESSION=$SESSION
+    NEW_SESSION="sess-$CASE_N-resumed"
+    ocrl resume --session "$NEW_SESSION" >/dev/null 2>&1
+
+    # This is the two-writable-authorities regression: with the old session id back in the
+    # payload, pretool must read the retired document and deny -- never fall through to
+    # treating it as a second, still-live ACTIVE activation.
+    SESSION=$OLD_SESSION
+    d=$(pre Edit)
+    assert_eq 'the retired predecessor denies a mutation' "$d" 'deny'
+    assert_contains 'named as RESUMED, not a generic gate' "$(pre_reason)" 'retired by a resume'
+    assert_contains 'and names the successor' "$(pre_reason)" "$NEW_SESSION"
+
+    assert_eq 'the predecessor is RESUMED on disk' "$(sget_for "$OLD_SESSION" status)" 'RESUMED'
+    assert_eq 'and points at the successor' "$(sget_for "$OLD_SESSION" resumed_into)" "$NEW_SESSION"
+fi
+
+if start 'pause: --until stops the loop early with no final review, resume completes it'; then
+    new_case
+    ocrl arm --session "$SESSION" --plan "$PLAN" --until 1 >/dev/null 2>&1
+    assert_eq 'armed with a pause target' "$(sget status)" 'ARMED'
+    phases_ok
+    assert_contains 'the pause target is reported' "$(ocrl status)" 'pause target:        1 of 2'
+
+    printf 'phase one\n' >"$REPO/a.txt"
+    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
+    commit_now 'phase 1'
+    confirm 'git add -A && git commit -m "phase 1"' >/dev/null
+    assert_eq 'phase advanced to 2' "$(sget phase)" '2'
+
+    # A broken reviewer command proves the final review is never invoked here: the tree is
+    # unchanged since the last approval, so neither the unreviewed-work sweep nor a final
+    # review has anything to call it for, and the turn ends paused instead.
+    out=$(with_env OCRL_REVIEWER_CMD='/nonexistent/reviewer' stop_gate)
+    assert_contains 'the turn ends paused' "$out" 'paused'
+    assert_contains 'not an approval of the whole plan' "$out" 'NOT an approval'
+    assert_eq 'no final review ran' "$(sget final_done_tree)" ''
+    assert_eq 'the activation did not complete' "$(sget status)" 'ACTIVE'
+
+    NEW_SESSION="sess-$CASE_N-resumed"
+    out=$(ocrl resume --session "$NEW_SESSION" --until 2 2>&1)
+    assert_contains 'resumed with the new pause target' "$out" 'pause target: 2 of 2'
+    SESSION=$NEW_SESSION
+
+    printf 'phase two\n' >"$REPO/b.txt"
+    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 2"' >/dev/null
+    commit_now 'phase 2'
+    confirm 'git add -A && git commit -m "phase 2"' >/dev/null
+    d=$(with_env OCRL_FAKE_MODE=approve stop_decision)
+    assert_eq 'the turn ends' "$d" 'ok'
+    assert_eq 'the final review ran and the activation completed' "$(sget_for "$NEW_SESSION" status)" 'COMPLETE'
 fi
 
 # --------------------------------------------------------------------------
