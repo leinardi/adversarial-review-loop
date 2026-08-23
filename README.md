@@ -164,6 +164,7 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 | `allow_dirty` | `false` | alternative to passing `--allow-dirty` |
 | `ttl_hours` | `24` | after this, gates block and ask for a re-arm — `resume` is usually the fix, not `implement`; see "Running a long plan across sessions" |
 | `ignore_globs` | `[]` | paths whose sole change skips a review |
+| `final_review` | `false` | run the final cumulative review at `Stop` |
 
 Environment variables are the upper-cased key with an `OCRL_` prefix (`OCRL_BLOCK_SEVERITY`, `OCRL_MODEL`, …); `OCRL_IGNORE_GLOBS` is comma-separated.
 

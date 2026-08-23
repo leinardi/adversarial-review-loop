@@ -37,6 +37,7 @@ def test_defaults_stand_when_nothing_else_exists(layers: dict[str, str], tmp_pat
     assert cfg.as_str("model") == "openai/gpt-5.6-sol"
     assert cfg.as_int("ttl_hours") == 24
     assert cfg.as_bool("pure") is True
+    assert cfg.as_bool("final_review") is False
     assert cfg.as_list("ignore_globs") == []
 
 
@@ -130,6 +131,26 @@ def test_everything_else_is_false(raw: str, layers: dict[str, str]) -> None:
     """Exact matching, so a typo never silently enables something."""
     layers["OCRL_PURE"] = raw
     assert config.load("", layers).as_bool("pure") is False
+
+
+def test_final_review_env_override(layers: dict[str, str]) -> None:
+    assert config.load("", layers).as_bool("final_review") is False
+    layers["OCRL_FINAL_REVIEW"] = "true"
+    assert config.load("", layers).as_bool("final_review") is True
+
+
+def test_final_review_precedence_across_all_four_layers(layers: dict[str, str], tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    assert config.load(str(repo), layers).as_bool("final_review") is False, "defaults must stand alone"
+
+    write_user_config(layers, {"final_review": True})
+    assert config.load(str(repo), layers).as_bool("final_review") is True, "user must beat defaults"
+
+    write_repo_config(repo, {"final_review": False})
+    assert config.load(str(repo), layers).as_bool("final_review") is False, "repo must beat user"
+
+    layers["OCRL_FINAL_REVIEW"] = "true"
+    assert config.load(str(repo), layers).as_bool("final_review") is True, "environment must beat repo"
 
 
 def test_a_non_numeric_integer_override_is_skipped_not_zeroed(layers: dict[str, str]) -> None:

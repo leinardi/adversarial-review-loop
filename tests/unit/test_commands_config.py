@@ -113,6 +113,14 @@ def test_unset_of_a_key_that_was_never_set_is_a_no_op(git_repo: Path, clean_env:
     assert not user_config_file(clean_env).exists()
 
 
+def test_final_review_is_set_like_any_other_boolean(git_repo: Path, clean_env: dict[str, str]) -> None:
+    proc = run_bootstrap(["config", "final_review", "true"], cwd=git_repo, env=clean_env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "false -> true" in proc.stdout
+    assert json.loads(user_config_file(clean_env).read_text()) == {"final_review": True}
+
+
 def test_a_multi_word_value_is_rejoined_with_spaces(git_repo: Path, clean_env: dict[str, str]) -> None:
     """`$ARGUMENTS` reaches the shim unquoted, so a `verify_cmd` arrives as several tokens."""
     proc = run_bootstrap(["config", "verify_cmd", "npm", "test"], cwd=git_repo, env=clean_env)
@@ -144,6 +152,14 @@ def test_an_unparseable_int_is_refused_rather_than_coerced_to_zero(git_repo: Pat
 
 def test_an_unparseable_bool_is_refused(git_repo: Path, clean_env: dict[str, str]) -> None:
     proc = run_bootstrap(["config", "pure", "sortof"], cwd=git_repo, env=clean_env)
+
+    assert proc.returncode == 1
+    assert "not a boolean" in proc.stdout
+    assert not user_config_file(clean_env).exists()
+
+
+def test_an_unparseable_final_review_bool_is_refused(git_repo: Path, clean_env: dict[str, str]) -> None:
+    proc = run_bootstrap(["config", "final_review", "sortof"], cwd=git_repo, env=clean_env)
 
     assert proc.returncode == 1
     assert "not a boolean" in proc.stdout
