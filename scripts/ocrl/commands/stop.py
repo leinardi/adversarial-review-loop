@@ -87,7 +87,9 @@ Tell the user. They can re-run /opencode-review-loop:implement <plan.md> or /ope
 
 STALE: Final = (
     "opencode-review-loop: this activation is past ttl_hours ({ttl_hours}) and blocks rather than silently disarming. "
-    "Tell the user to re-arm with /opencode-review-loop:implement <plan.md>, or leave the mode with /opencode-review-loop:stop.\n"
+    "Tell the user to continue with /opencode-review-loop:resume, which keeps the baseline and every approval -- that is "
+    "usually the right recovery. Re-arm with /opencode-review-loop:implement <plan.md> only to start over from scratch, "
+    "or leave the mode with /opencode-review-loop:stop.\n"
 )
 
 NOT_FROZEN: Final = """\

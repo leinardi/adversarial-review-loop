@@ -77,9 +77,9 @@ Stop and tell the user. They can leave the mode with /opencode-review-loop:stop.
 """
 
 STALE: Final = """\
-This activation is older than ttl_hours ({ttl_hours}) and its baseline can no longer be trusted. It blocks rather than silently disarming.
+This activation is older than ttl_hours ({ttl_hours}) and is presumed abandoned. It blocks rather than silently disarming.
 
-Re-arm with /opencode-review-loop:implement <plan.md>, or leave the mode with /opencode-review-loop:stop.
+Continue it with /opencode-review-loop:resume, which keeps the baseline and every approval and re-verifies the worktree before picking back up — that is usually the right recovery. Re-arm with /opencode-review-loop:implement <plan.md> only to start over from scratch, or leave the mode with /opencode-review-loop:stop.
 """
 
 RESUMED: Final = """\
