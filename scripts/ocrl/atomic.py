@@ -47,6 +47,7 @@ __all__ = [
     "ensure_private_dir",
     "locked",
     "private_dir_fd",
+    "write_atomic",
     "write_private_atomic",
 ]
 
@@ -173,6 +174,54 @@ def write_private_atomic(path: Path, text: str, *, root: Path, errors: str = "st
         # previous pointer -- and the hooks in a freshly armed worktree would then read the
         # old worktree and scope themselves out of the activation they were registered for.
         os.fsync(dir_fd)
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Publish ``text`` at ``path`` atomically, touching no directory's mode.
+
+    Used by ``config`` for both of its targets -- the user config file and, via an explicit
+    ``--repo``, ``.opencode-review-loop.json`` *inside* the repository under review.
+    ``write_private_atomic`` would be wrong for either: ``private_dir_fd`` walks every
+    component from its root down and ``fchmod``s each one ``0700``, so rooting a write at the
+    repository would tighten the repository directory itself and leave the tracked file
+    ``0600`` -- a permission change on a shared checkout that no one asked for. This writer
+    creates no directory and chmods none; it only ever touches the destination file and its
+    already-existing parent.
+
+    A replace must not widen the file: the temporary file is created at the umask default
+    (correct for a genuinely new destination), but when the destination already exists its
+    mode is read first and stamped onto the temporary file before the rename, so a config a
+    user deliberately left at ``0600`` -- it can hold a ``verify_cmd`` -- comes back ``0600``,
+    not the umask default.
+    """
+    directory = path.parent
+    tmp_path = directory / f"{path.name}.tmp.{os.getpid()}"
+    try:
+        existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        existing_mode = None
+
+    # O_EXCL: even here, a temp name must never be a symlink this process was tricked into
+    # writing through.
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        if existing_mode is not None:
+            os.fchmod(fd, existing_mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+    os.replace(tmp_path, path)
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 @contextlib.contextmanager

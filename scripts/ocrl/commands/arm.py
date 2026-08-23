@@ -23,13 +23,12 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from ocrl import commands, gitsnap, paths, planrev
+from ocrl import commands, gitsnap, paths, planrev, reviewer_probe
 from ocrl import config as config_module
 from ocrl.atomic import ensure_private_dir, locked, write_private_atomic
 from ocrl.config import Config
@@ -44,9 +43,6 @@ _SPACE: Final = " \t\n\v\f\r"
 
 #: Characters a plan path may contain. Anything else is refused rather than quoted.
 _PLAN_RE: Final = re.compile(r"[A-Za-z0-9._/@:+,~-][A-Za-z0-9._/@:+,~ -]*")
-
-#: How long ``opencode models`` is given to answer during the reachability probe.
-MODELS_PROBE_TIMEOUT: Final = 60
 
 ARM_FAILED_MESSAGE: Final = """\
 **opencode-review-loop: ARMING FAILED — the review loop is NOT active.**
@@ -331,20 +327,11 @@ def _check_reviewer(config: Config) -> None:
     if not paths.have("opencode"):
         raise _ArmFailure("the `opencode` binary is not on PATH, so the review gate cannot run")
     try:
-        proc = subprocess.run(["opencode", "models"], capture_output=True, text=True, check=False, timeout=MODELS_PROBE_TIMEOUT)
-    except subprocess.TimeoutExpired as exc:
-        # Whatever it managed to print before the deadline, as `timeout 60 … || true` kept.
-        probe = exc.stdout.decode("utf-8", "surrogateescape") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-    except OSError:
-        probe = ""
-    else:
-        probe = proc.stdout
-    probe = probe.rstrip("\n")
-
-    if not probe:
-        raise _ArmFailure("could not list OpenCode models (`opencode models` returned nothing); the reviewer is unreachable")
+        models = reviewer_probe.list_models(reviewer_probe.MODELS_PROBE_TIMEOUT)
+    except reviewer_probe.ProbeFailed as exc:
+        raise _ArmFailure(f"could not list OpenCode models ({exc}); the reviewer is unreachable") from exc
     model = config.as_str("model")
-    if model not in probe.split("\n"):
+    if model not in models:
         raise _ArmFailure(
             f'the configured model "{model}" is not among the models OpenCode reports. '
             "Set `model` in .opencode-review-loop.json or OCRL_MODEL to one that is."

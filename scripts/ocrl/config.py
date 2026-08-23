@@ -20,7 +20,21 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
 
-__all__ = ["BOOL_KEYS", "CONFIG_KEYS", "DEFAULTS", "INT_KEYS", "Config", "load", "severity_rank", "user_config_path"]
+__all__ = [
+    "BOOL_KEYS",
+    "CONFIG_KEYS",
+    "DEFAULTS",
+    "INT_KEYS",
+    "LIST_KEYS",
+    "REPO_CONFIG_NAME",
+    "SEVERITY_LABELS",
+    "Config",
+    "from_env",
+    "load",
+    "severity_rank",
+    "threshold_rank",
+    "user_config_path",
+]
 
 #: Every supported key, with its default.
 DEFAULTS: Final[dict[str, Any]] = {
@@ -71,6 +85,29 @@ CONFIG_KEYS: Final = tuple(DEFAULTS)
 _TRUE_VALUES: Final = frozenset({"1", "true", "TRUE", "yes", "on"})
 
 REPO_CONFIG_NAME: Final = ".opencode-review-loop.json"
+
+#: Every label ``severity_rank``/``threshold_rank`` recognise, with its rank. The single
+#: source both functions read from, so a label added to one can never drift from the other.
+#: ``critical`` is a real, fifth tier -- the reviewer contract's own ``FINDING`` regex
+#: (``reviewer.py``, ``severity=(?P<severity>info|low|medium|high|critical)``) accepts
+#: exactly these five words and no others, so this dict has to agree with that regex, not
+#: invent its own vocabulary.
+_SEVERITY_RANK: Final[dict[str, int]] = {
+    "info": 1,
+    "trivial": 1,
+    "nit": 1,
+    "low": 2,
+    "minor": 2,
+    "medium": 3,
+    "moderate": 3,
+    "major": 3,
+    "high": 4,
+    "serious": 4,
+    "critical": 5,
+}
+
+#: The labels a `block_severity` setting may be.
+SEVERITY_LABELS: Final[frozenset[str]] = frozenset(_SEVERITY_RANK)
 
 
 def user_config_path(environ: Mapping[str, str] | None = None) -> Path:
@@ -213,17 +250,24 @@ def load(
 def severity_rank(label: str) -> int:
     """Rank a reviewer-supplied severity label.
 
-    An unrecognised label ranks as the most severe. A severity the gate cannot parse must
-    never be a way to slip past it (Rule 1).
+    An unrecognised label ranks as the most severe (5) -- the highest rank a real label ever
+    gets is 4, so this guarantees an unparsable label clears any configured threshold. A
+    severity the gate cannot parse must never be a way to slip past it (Rule 1).
+
+    Not the right function for ranking ``block_severity`` itself -- see ``threshold_rank``.
     """
-    match label.lower():
-        case "info" | "trivial" | "nit":
-            return 1
-        case "low" | "minor":
-            return 2
-        case "medium" | "moderate" | "major":
-            return 3
-        case "high" | "serious":
-            return 4
-        case _:
-            return 5
+    return _SEVERITY_RANK.get(label.lower(), 5)
+
+
+def threshold_rank(label: str) -> int:
+    """Rank a configured ``block_severity`` threshold.
+
+    ``severity_rank``'s "unrecognised ranks highest" rule is fail-closed for a *value being
+    compared* -- an unparsable finding severity must clear any threshold. Applied to the
+    *threshold itself* it is fail-open: ranking an unknown ``block_severity`` at 5 (above
+    every real label) would make almost nothing meet it, so a typo'd or unrecognised
+    threshold would silently block far less than the default, not more. Rule 1 requires the
+    opposite direction here, so an unrecognised threshold ranks at 1 -- the floor a finding's
+    rank clears most easily -- making the gate stricter on bad input, never looser.
+    """
+    return _SEVERITY_RANK.get(label.lower(), 1)

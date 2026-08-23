@@ -33,7 +33,7 @@ from typing import IO, Any, Final
 import ocrl
 from ocrl import planrev, report
 from ocrl.atomic import FILE_MODE, ensure_private_dir
-from ocrl.config import Config, severity_rank
+from ocrl.config import Config, severity_rank, threshold_rank
 from ocrl.errors import OcrlError
 from ocrl.gitsnap import git_run
 from ocrl.paths import state_root
@@ -917,7 +917,11 @@ def parse(out_path: Path, *, config: Config) -> Review:
 
     review.prose = "\n".join(lines[:start]).rstrip("\n")
     review.all_findings = "".join(f"{finding.line}\n" for finding in findings)
-    threshold = severity_rank(config.as_str("block_severity"))
+    # `threshold_rank`, not `severity_rank`: an unrecognised *finding* severity must rank
+    # highest to guarantee it blocks (Rule 1), but the same rule applied to the *threshold*
+    # would do the opposite -- an unknown `block_severity` ranking at 5 would clear almost
+    # nothing, silently blocking far less than the default. See `config.threshold_rank`.
+    threshold = threshold_rank(config.as_str("block_severity"))
     blocking = [f for f in findings if f.actionable and severity_rank(f.severity) >= threshold]
     review.findings = "".join(f"{finding.line}\n" for finding in blocking)
 

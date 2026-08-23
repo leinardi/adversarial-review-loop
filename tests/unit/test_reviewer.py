@@ -978,6 +978,40 @@ def test_the_threshold_is_applied(tmp_path: Path) -> None:
     assert parsed.all_findings.count("FINDING") == 2
 
 
+def test_a_critical_block_severity_blocks_only_critical_findings(tmp_path: Path) -> None:
+    """`critical` is a real fifth tier the reviewer contract's `FINDING` regex accepts, not a
+    typo that should fall through `threshold_rank`'s unrecognised-value fallback (rank 1,
+    which would block on everything instead of the critical-only threshold asked for)."""
+    text = contract(
+        "FINDING severity=high actionable=yes file=a | serious but not critical",
+        "FINDING severity=critical actionable=yes file=b | critical",
+        "VERDICT APPROVED",
+    )
+
+    parsed = parse_text(tmp_path, text, config_with(block_severity="critical"))
+
+    assert parsed.verdict == "CHANGES_REQUIRED"
+    assert parsed.findings == "FINDING severity=critical actionable=yes file=b | critical\n"
+
+
+def test_an_unrecognised_block_severity_blocks_everything_rather_than_nothing(tmp_path: Path) -> None:
+    """``severity_rank``'s "unrecognised ranks highest" rule is fail-*open* if it is applied
+    to the threshold instead of the finding: an unknown ``block_severity`` would rank 5,
+    above every real severity, so nothing would ever meet it and even a ``high`` actionable
+    finding would sail through APPROVED. The threshold must use `threshold_rank`, whose
+    fallback is the opposite direction (rank 1), so a typo'd or unrecognised threshold makes
+    the gate block on everything rather than on nothing (Rule 1)."""
+    text = contract(
+        "FINDING severity=low actionable=yes file=a | trivial-looking",
+        "VERDICT APPROVED",
+    )
+
+    parsed = parse_text(tmp_path, text, config_with(block_severity="hihg"))
+
+    assert parsed.verdict == "CHANGES_REQUIRED"
+    assert "severity=low" in parsed.findings
+
+
 def test_an_unrecognised_verdict_is_a_failure(tmp_path: Path) -> None:
     parsed = parse_text(tmp_path, contract("VERDICT MAYBE"))
     assert parsed.verdict == "OP_FAILURE"

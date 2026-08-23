@@ -191,3 +191,37 @@ def test_severity_rank(label: str, rank: int) -> None:
 def test_an_unrecognised_severity_ranks_most_severe(label: str) -> None:
     """An unparsable label must never be a way to slip past the gate (Rule 1)."""
     assert config.severity_rank(label) == 5
+
+
+@pytest.mark.parametrize(
+    ("label", "rank"),
+    [
+        ("info", 1),
+        ("low", 2),
+        ("MEDIUM", 3),
+        ("high", 4),
+        ("critical", 5),
+    ],
+)
+def test_threshold_rank_agrees_with_severity_rank_on_known_labels(label: str, rank: int) -> None:
+    """``critical`` is a real fifth tier the reviewer contract's own `FINDING` regex accepts
+    -- a `block_severity` of `critical` must rank 5, matching a critical finding exactly, not
+    fall through as if it were a typo."""
+    assert config.threshold_rank(label) == rank == config.severity_rank(label)
+
+
+@pytest.mark.parametrize("label", ["", "unknown", "SEV-2", "hihg"])
+def test_an_unrecognised_threshold_ranks_least_severe(label: str) -> None:
+    """The opposite fallback direction from `severity_rank`: an unrecognised *threshold*
+    must make the gate block on more, not less. Ranking it high (like a finding severity
+    would) is fail-open here -- almost nothing would meet a threshold of 5."""
+    assert config.threshold_rank(label) == 1
+
+
+def test_severity_labels_is_exactly_what_both_rank_functions_recognise() -> None:
+    """Every label in `SEVERITY_LABELS` must be a real dict hit for both functions -- if one
+    were not, `severity_rank` would silently answer 5 (its unrecognised fallback) while
+    `threshold_rank` answered 1 (its own), and this catches that mismatch directly."""
+    for label in config.SEVERITY_LABELS:
+        assert config.severity_rank(label) == config.threshold_rank(label)
+    assert {"info", "trivial", "nit", "low", "minor", "medium", "moderate", "major", "high", "serious", "critical"} == config.SEVERITY_LABELS
