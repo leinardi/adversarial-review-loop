@@ -57,11 +57,13 @@ else
 endif
 
 .PHONY: test-accept
+# The selftest shards itself across the cores by default; OCRL_SELFTEST_JOBS=1 runs it
+# straight through with its output unbuffered, which is what you want when a section fails.
 test-accept: ## Run the ocrl selftest against scratch repositories (no model is called)
-	@$(REPO_ROOT)/tests/selftest.sh
+	@$(REPO_ROOT)/tests/selftest-parallel.sh
 
 .PHONY: test-filter
-test-filter: ## Run only the selftest sections matching FILTER=<substring>
+test-filter: ## Run only the selftest sections matching FILTER=<substring>, serially
 	@$(REPO_ROOT)/tests/selftest.sh "$(FILTER)"
 
 .PHONY: dry-run

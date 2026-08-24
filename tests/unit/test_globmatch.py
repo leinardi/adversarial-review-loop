@@ -11,9 +11,32 @@ from __future__ import annotations
 import itertools
 
 import pytest
-from conftest import bash_glob
+from conftest import bash_glob, bash_glob_many
 
 from ocrl import globmatch
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _one_bash_for_the_whole_module() -> None:
+    """Answer every pair this module asks about from a single bash, up front.
+
+    ``bash_glob`` is still the reference and is still a real ``[[ $p == $g ]]``; this only
+    decides how many shells that costs. Forking one per pair made this the second-slowest
+    file in the suite (~11s of forks for ~4000 pairs). A pair missing from this list is not
+    a failure -- ``bash_glob`` falls back to its own fork -- so adding cases above needs no
+    bookkeeping here.
+    """
+    bash_glob_many(
+        [(path, glob) for path, glob, _ in STATED]
+        + ALL_PAIRS
+        + EXTGLOB
+        + [("@(a|b)", "@(a|b)")]
+        + [(path, glob) for glob in (r"\@(a|b)", r"a\(b", "[@]", "a@b") for path in ("@(a|b)", "a(b", "@", "a@b", "a")]
+        + [(char, f"[[:{name}:]]") for name in CLASS_NAMES for char in ASCII]
+        + [(char, f"[^[:{name}:]]") for name in CLASS_NAMES for char in ASCII]
+        + [("é", "[abc]"), ("é", "[^abc]"), ("é", "[éa]"), ("é", "?"), ("naïve.md", "*.md")]
+    )
+
 
 #: Path, glob and verdict, stated outright: these are the cases a plausible implementation
 #: gets wrong.

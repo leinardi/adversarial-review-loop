@@ -7,7 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,28 @@ BASH_GLOB = PLUGIN_ROOT / "tests" / "fixtures" / "bash-glob.sh"
 FAKE_REVIEWER = PLUGIN_ROOT / "tests" / "fixtures" / "fake-reviewer.sh"
 
 
+#: Verdicts already obtained from bash, keyed by ``(path, glob)``. Answers come from the one
+#: shell in ``bash_glob_many``; a pair nobody pre-declared still forks its own.
+_BASH_GLOB_MEMO: dict[tuple[str, str], bool] = {}
+
+
+def bash_glob_many(pairs: Iterable[tuple[str, str]]) -> None:
+    """Resolve every pair in one bash and memoise the verdicts.
+
+    A fork per pair cost ~2.8ms, and the differential tests ask about ~4000 pairs; batching
+    them turns 11s of the suite into one process. Pairs already answered are not re-asked.
+    """
+    wanted = [pair for pair in dict.fromkeys(pairs) if pair not in _BASH_GLOB_MEMO]
+    if not wanted:
+        return
+    payload = b"".join(f"{path}\0{glob}\0".encode() for path, glob in wanted)
+    proc = subprocess.run([str(BASH_GLOB), "--batch"], input=payload, capture_output=True, check=True)
+    verdicts = proc.stdout.decode().split("\n")[:-1]
+    assert len(verdicts) == len(wanted), f"bash answered {len(verdicts)} of {len(wanted)} pairs"
+    for pair, verdict in zip(wanted, verdicts, strict=True):
+        _BASH_GLOB_MEMO[pair] = verdict == "1"
+
+
 def bash_glob(path: str, glob: str) -> bool:
     """Ask a real bash whether ``[[ $path == $glob ]]``.
 
@@ -31,7 +53,12 @@ def bash_glob(path: str, glob: str) -> bool:
     directly, so it stays as the reference for globmatch's from-scratch reimplementation of
     ``[[ $p == $g ]]`` semantics.
     """
-    return subprocess.run([str(BASH_GLOB), path, glob], capture_output=True, check=False).returncode == 0
+    cached = _BASH_GLOB_MEMO.get((path, glob))
+    if cached is not None:
+        return cached
+    matched = subprocess.run([str(BASH_GLOB), path, glob], capture_output=True, check=False).returncode == 0
+    _BASH_GLOB_MEMO[path, glob] = matched
+    return matched
 
 
 #: Modules a hostile repository under review would shadow to hijack the gate. ``ocrl`` and
@@ -89,8 +116,25 @@ def decision(proc: subprocess.CompletedProcess[str]) -> tuple[str, str]:
     return output["permissionDecision"], output["permissionDecisionReason"]
 
 
+@pytest.fixture(scope="session")
+def shared_pycache(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One bytecode cache directory shared by every test in this session (per xdist worker).
+
+    ``ocrl-bootstrap.py`` puts ``sys.pycache_prefix`` under ``XDG_CACHE_HOME``. Pointing that
+    at each test's own ``tmp_path`` made every one of the ~1200 gate invocations in this suite
+    recompile the whole ``ocrl`` package from source: measured at ~145ms of the ~230ms an
+    ``arm`` took, i.e. the majority of the suite's runtime. The cache is keyed by absolute
+    source path and validated against each source file's mtime and size, so sharing it across
+    tests cannot make one test see another's code.
+
+    Tests *about* the cache (Rule 3, unsafe prefixes) override ``XDG_CACHE_HOME`` themselves,
+    which is what keeps their assertions about a freshly populated cache honest.
+    """
+    return tmp_path_factory.mktemp("shared-pycache")
+
+
 @pytest.fixture
-def clean_env(tmp_path: Path) -> dict[str, str]:
+def clean_env(tmp_path: Path, shared_pycache: Path) -> dict[str, str]:
     """An environment isolated from the developer's real state and cache directories."""
     # Every OCRL_* override goes, not just OCRL_STATE_DIR: a developer's shell may carry
     # one (OCRL_MAX_STOP_BLOCKS is a documented leftover from the STEP0 runs), and it would
@@ -98,7 +142,7 @@ def clean_env(tmp_path: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("OCRL_")}
     env["HOME"] = str(tmp_path / "home")
     env["XDG_STATE_HOME"] = str(tmp_path / "state")
-    env["XDG_CACHE_HOME"] = str(tmp_path / "cache")
+    env["XDG_CACHE_HOME"] = str(shared_pycache)
     env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
     os.makedirs(env["HOME"], exist_ok=True)
     return env

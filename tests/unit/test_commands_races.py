@@ -40,7 +40,60 @@ from ocrl.commands import resume
 
 #: Long enough for every spawned process to reach the lock, short enough not to drag the
 #: suite. The assertions do not depend on it: they are invariants that must hold either way.
+#: It is the ceiling ``settle`` waits up to, and the flat wait wherever the kernel cannot say
+#: who is queued.
 _SETTLE = 1.5
+
+#: Blocked ``flock`` requests appear here as ``->`` continuation lines naming the waiter's
+#: pid and the file's device/inode. Linux only; elsewhere ``settle`` falls back to sleeping.
+_PROC_LOCKS = Path("/proc/locks")
+
+
+def _waiters_on(lock: Path) -> set[int]:
+    """Pids currently *blocked* acquiring a lock on ``lock``, per the kernel.
+
+    Returns an empty set on any system that cannot answer, which the caller reads as "no
+    information" rather than "nobody is waiting".
+    """
+    try:
+        info = lock.stat()
+        locks = _PROC_LOCKS.read_text()
+    except OSError:
+        return set()
+    inode = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
+    waiting: set[int] = set()
+    for line in locks.splitlines():
+        fields = line.split()
+        # "1: -> FLOCK ADVISORY WRITE <pid> <maj:min:ino> <start> <end>"; a granted lock has
+        # no "->" and is one field shorter.
+        if len(fields) < 8 or fields[1] != "->":
+            continue
+        if fields[6] == inode:
+            waiting.add(int(fields[5]))
+    return waiting
+
+
+def settle(workers: list[subprocess.Popen[str]], env: dict[str, str], repo: Path, session: str = "s1") -> None:
+    """Return once every worker is queued on the activation lock, or after ``_SETTLE``.
+
+    A flat ``sleep(_SETTLE)`` was paid in full by every test that used it, and still only
+    guessed. Asking the kernel who is blocked on the lock is both exact and, in the ordinary
+    case, ~30x faster. The deadline is kept because a worker that never reaches the lock is
+    exactly what some of these tests are about: the unfixed code being caught doing its work
+    *before* queueing must not hang the suite, it must proceed and fail the assertion.
+    """
+    lock = state_dir(env, repo, session) / "lock"
+    if not _PROC_LOCKS.exists():
+        time.sleep(_SETTLE)
+        return
+    deadline = time.monotonic() + _SETTLE
+    while time.monotonic() < deadline:
+        pending = {worker.pid for worker in workers if worker.poll() is None}
+        if not pending - _waiters_on(lock):
+            # Every live worker is queued. The kernel records the wait at the moment of the
+            # blocking call, so there is no window left between "seen waiting" and "waiting".
+            return
+        time.sleep(0.01)
 
 
 @contextmanager
@@ -80,7 +133,7 @@ def test_concurrent_defers_cannot_overspend_the_allowance(git_repo: Path, tmp_pa
 
     with activation_lock(env, git_repo):
         workers = [spawn(["defer", "--reason", f"worker {n}"], cwd=git_repo, env=env) for n in range(8)]
-        time.sleep(_SETTLE)
+        settle(workers, env, git_repo)
 
     results = [(worker.wait(), *worker.communicate()) for worker in workers]
     successes = [result for result in results if result[0] == 0]
@@ -101,7 +154,7 @@ def test_a_second_defer_still_succeeds_when_the_limit_allows_it(git_repo: Path, 
 
     with activation_lock(env, git_repo):
         workers = [spawn(["defer", "--reason", f"worker {n}"], cwd=git_repo, env=env) for n in range(5)]
-        time.sleep(_SETTLE)
+        settle(workers, env, git_repo)
 
     codes = [worker.wait() for worker in workers]
     for worker in workers:
@@ -123,7 +176,7 @@ def test_concurrent_set_phases_freezes_exactly_one_list(git_repo: Path, tmp_path
 
     with activation_lock(env, git_repo):
         workers = [spawn(["set-phases", "--phase", f"list {n} phase"], cwd=git_repo, env=env) for n in range(20)]
-        time.sleep(_SETTLE)
+        settle(workers, env, git_repo)
 
     results = [(worker.wait(), *worker.communicate()) for worker in workers]
     successes = [result for result in results if result[0] == 0]
@@ -351,8 +404,10 @@ def test_finish_refuses_when_the_worktree_changes_while_it_waits_for_the_lock(
 
     with activation_lock(env, git_repo):
         Path(env["OCRL_TEST_GO"]).write_text("go\n")
-        time.sleep(_SETTLE)  # completion reaches the lock (and, unfixed, snapshots first)
+        settle([worker], env, git_repo)  # completion reaches the lock (and, unfixed, snapshots first)
         (git_repo / "late.txt").write_text("unreviewed content\n")
+        # Not shortened: this one is the window the *unfixed* code needs to snapshot the
+        # worktree it never locked. Waiting it out is what makes the regression observable.
         time.sleep(_SETTLE)
 
     code = worker.wait()
@@ -479,7 +534,7 @@ def test_concurrent_same_session_resumes_do_not_duplicate_a_revision(git_repo: P
 
     with activation_lock(env, git_repo):
         workers = [spawn(["resume", "--session", "s1"], cwd=git_repo, env=env) for _ in range(8)]
-        time.sleep(_SETTLE)
+        settle(workers, env, git_repo)
 
     results = [(worker.wait(), *worker.communicate()) for worker in workers]
     assert all(code == 0 for code, _out, _err in results), results

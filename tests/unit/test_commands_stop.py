@@ -30,7 +30,7 @@ from conftest import BOOTSTRAP, git, run_bootstrap, run_hook
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
 from test_commands_posttool import COMMIT, gated_commit
 from test_commands_pretool import SESSION, active, active_until, arm, patch_state, payload
-from test_commands_races import _SETTLE, activation_lock, reviewer_stub
+from test_commands_races import activation_lock, reviewer_stub, settle
 
 from ocrl import commands as commands_module
 from ocrl import config as config_module
@@ -1103,9 +1103,8 @@ def test_a_concurrent_finish_request_routes_stop_through_the_real_review_instead
         worker.stdin.write(json.dumps(payload(git_repo)))
         worker.stdin.close()
         worker.stdin = None  # closed already; leaving the attribute set has communicate() try to flush it again
-        time.sleep(_SETTLE)  # the worker reaches the post-sweep finish_requested read and queues
+        settle([worker], env, git_repo, SESSION)  # the worker reaches the post-sweep finish_requested read and queues
         patch_state(env, git_repo, finish_requested=True)
-        time.sleep(_SETTLE)
 
     stdout, stderr = worker.communicate()
     assert worker.returncode == 0, stderr
@@ -1157,9 +1156,8 @@ def test_a_concurrently_enabled_final_review_still_blocks_the_skip_path(
         worker.stdin.write(json.dumps(payload(git_repo)))
         worker.stdin.close()
         worker.stdin = None  # closed already; leaving the attribute set has communicate() try to flush it again
-        time.sleep(_SETTLE)  # the worker reaches `pending.commit()` and queues for the lock
+        settle([worker], env, git_repo, SESSION)  # the worker reaches `pending.commit()` and queues for the lock
         user_config.write_text(json.dumps({"final_review": True}))
-        time.sleep(_SETTLE)
 
     stdout, stderr = worker.communicate()
     assert worker.returncode == 0, stderr
@@ -1215,9 +1213,8 @@ def test_a_terminal_completion_landing_while_queued_for_the_lock_ends_the_turn_q
         worker.stdin.write(json.dumps(payload(git_repo)))
         worker.stdin.close()
         worker.stdin = None  # closed already; leaving the attribute set has communicate() try to flush it again
-        time.sleep(_SETTLE)  # the worker reaches `pending.commit()` and queues for the lock
+        settle([worker], env, git_repo, SESSION)  # the worker reaches `pending.commit()` and queues for the lock
         patch_state(env, git_repo, status="COMPLETE", reason="finished by a concurrent finish", final_done_tree=head_tree)
-        time.sleep(_SETTLE)
 
     stdout, stderr = worker.communicate()
     assert worker.returncode == 0, stderr

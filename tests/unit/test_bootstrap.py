@@ -53,20 +53,29 @@ def test_stdlib_resolves_to_the_stdlib_not_the_repo(hostile_repo: Path, clean_en
     assert not (hostile_repo / "HIJACKED").exists()
 
 
-def test_bytecode_never_lands_in_either_repository(hostile_repo: Path, plugin_copy: Path, clean_env: dict[str, str]) -> None:
+def test_bytecode_never_lands_in_either_repository(
+    hostile_repo: Path,
+    plugin_copy: Path,
+    clean_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
     """Rule 3, applied to ``__pycache__``: neither the reviewed repo nor the plugin repo."""
     bootstrap = plugin_copy / "ocrl-bootstrap.py"
     assert pycache_dirs(plugin_copy) == set()
 
+    # Deliberately not the session-shared cache the other tests run against: the closing
+    # assertion is that *these* invocations populated it, which a pre-warmed directory would
+    # satisfy on its own.
+    env = {**clean_env, "XDG_CACHE_HOME": str(tmp_path / "cache")}
     for _ in range(3):
-        proc = run_bootstrap(["--help"], cwd=hostile_repo, env=clean_env, bootstrap=bootstrap)
+        proc = run_bootstrap(["--help"], cwd=hostile_repo, env=env, bootstrap=bootstrap)
         assert proc.returncode == 0
 
     assert pycache_dirs(plugin_copy) == set(), "the gate wrote bytecode into the plugin repo"
     assert pycache_dirs(hostile_repo) == set(), "the gate wrote bytecode into the reviewed repo"
     assert git_status_ignored(hostile_repo) == "", "the gate dirtied the repository under review"
 
-    cache_root = Path(clean_env["XDG_CACHE_HOME"]) / "opencode-review-loop" / "pycache"
+    cache_root = Path(env["XDG_CACHE_HOME"]) / "opencode-review-loop" / "pycache"
     assert list(cache_root.rglob("*.pyc")), "the bytecode cache was disabled, not relocated"
 
 

@@ -69,6 +69,37 @@ def review_env(clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> di
     return clean_env
 
 
+@pytest.fixture(autouse=True)
+def _short_kill_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shorten the SIGTERM-to-SIGKILL grace for every test in this file.
+
+    The escalation is what is under test, not how long the gate is willing to wait for a
+    build to tear itself down: production keeps the full ``KILL_GRACE_SEC``, and the tests
+    that assert a descendant died still assert exactly that. Left at 2s it was paid, in real
+    seconds, by every timeout test here.
+    """
+    monkeypatch.setattr(reviewer, "KILL_GRACE_SEC", 0.2)
+
+
+#: How long the spawner's descendant waits before touching its marker, and how long past
+#: that a test waits before declaring it never did.
+DESCENDANT_DELAY_SEC = 2.0
+DESCENDANT_MARGIN_SEC = 1.0
+
+
+def assert_descendant_never_ran(marker: Path, *, started: float) -> None:
+    """Wait until the descendant's own deadline is well past, then require its silence.
+
+    Timed from when the reviewer was *launched*, not from when the kill returned: what has
+    to elapse is the descendant's ``sleep``, and sleeping a flat interval afterwards paid for
+    the timeout and the kill grace twice over.
+    """
+    remaining = started + DESCENDANT_DELAY_SEC + DESCENDANT_MARGIN_SEC - time.monotonic()
+    if remaining > 0:
+        time.sleep(remaining)
+    assert not marker.exists(), "a descendant of the reviewer outlived the deadline"
+
+
 def config_with(**overrides: object) -> Config:
     return Config({**ocrl_config.DEFAULTS, **overrides})
 
@@ -702,6 +733,7 @@ def test_a_timeout_kills_what_the_reviewer_spawned(tmp_path: Path) -> None:
     had given up on it.
     """
     marker = tmp_path / "descendant"
+    started = time.monotonic()
     with pytest.raises(ReviewerFailed):
         reviewer.invoke(
             TARGET,
@@ -709,8 +741,7 @@ def test_a_timeout_kills_what_the_reviewer_spawned(tmp_path: Path) -> None:
             config=config_with(timeout_sec=1),
             environ={**os.environ, "OCRL_REVIEWER_CMD": str(spawner(tmp_path, marker))},
         )
-    time.sleep(3)
-    assert not marker.exists(), "the reviewer's descendant outlived the deadline"
+    assert_descendant_never_ran(marker, started=started)
 
 
 @pytest.mark.parametrize("deaf", [False, True])
@@ -724,6 +755,7 @@ def test_a_timeout_kills_a_descendant_that_ignores_sigterm(tmp_path: Path, deaf:
     """
     monkeypatch.setattr(reviewer, "KILL_GRACE_SEC", 0.2)
     marker = tmp_path / f"deaf-{deaf}"
+    started = time.monotonic()
     with pytest.raises(ReviewerFailed):
         reviewer.invoke(
             TARGET,
@@ -731,8 +763,7 @@ def test_a_timeout_kills_a_descendant_that_ignores_sigterm(tmp_path: Path, deaf:
             config=config_with(timeout_sec=1),
             environ={**os.environ, "OCRL_REVIEWER_CMD": str(spawner(tmp_path, marker, deaf=deaf, name=f"deaf-{deaf}.sh"))},
         )
-    time.sleep(3)
-    assert not marker.exists()
+    assert_descendant_never_ran(marker, started=started)
 
 
 def test_a_timeout_kills_what_verify_cmd_spawned(activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -742,11 +773,11 @@ def test_a_timeout_kills_what_verify_cmd_spawned(activation: state.State, git_re
 
     monkeypatch.setattr(reviewer, "VERIFY_TIMEOUT_SEC", 1)
     monkeypatch.setattr(reviewer, "KILL_GRACE_SEC", 0.2)
+    started = time.monotonic()
     build(activation, git_repo, dest, config_with(verify_cmd=str(script)))
 
     assert "[exit status: 124]" in (dest / "verify.txt").read_text()
-    time.sleep(3)
-    assert not marker.exists(), "verify_cmd's descendant kept running inside the worktree"
+    assert_descendant_never_ran(marker, started=started)
 
 
 # --------------------------------------------------------------------------

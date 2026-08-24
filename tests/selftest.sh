@@ -24,12 +24,27 @@ CURRENT=''
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ocrl-selftest.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
 
+# Run only every Nth section, offset by I: OCRL_SELFTEST_SHARD=I/N. Sections share nothing
+# -- each `new_case` builds its own repository under its own $ROOT and its own
+# OCRL_STATE_DIR -- so splitting them across processes is a scheduling decision and not a
+# semantic one. tests/selftest-parallel.sh is what sets this; running the script by hand
+# without it executes everything, in order, exactly as before.
+SHARD=${OCRL_SELFTEST_SHARD:-}
+SHARD_INDEX=${SHARD%%/*}
+SHARD_TOTAL=${SHARD##*/}
+SECTION_N=0
+
 # --------------------------------------------------------------------------
 # Harness
 # --------------------------------------------------------------------------
 
 start() {
     CURRENT=$1
+    SECTION_N=$((SECTION_N + 1))
+    # Counted before the filter so a shard's membership never depends on the filter.
+    if [ -n "$SHARD" ] && [ $(((SECTION_N - 1) % SHARD_TOTAL)) -ne "$SHARD_INDEX" ]; then
+        return 1
+    fi
     if [ -n "$FILTER" ] && [[ $CURRENT != *"$FILTER"* ]]; then
         return 1
     fi
