@@ -215,7 +215,7 @@ def test_the_reason_leads_with_the_headline_and_ends_with_the_instruction() -> N
     text = report.reason(a_review(), "opencode-review-loop: changes required.", config=config_with())
 
     assert text.startswith("opencode-review-loop: changes required.\n")
-    assert text.endswith("Fix the findings above, then commit again. The commit is gated until the review passes.\n")
+    assert text.endswith("Verify and address the findings above, then commit again. The commit is gated until the review passes.\n")
 
 
 def test_every_blocking_finding_is_quoted_inline() -> None:

@@ -78,7 +78,7 @@ The block above is the output of arming, which ran **before you had a turn**. It
 - `git commit --amend`, partial commits (pathspecs, `--only`, `--include`) and command substitution inside the commit command are denied. Commit the whole reviewed tree or nothing.
 - Every phase leaves a clean worktree. Uncommitted leftovers block the turn.
 - You cannot end the mode. `/opencode-review-loop:finish` and `/opencode-review-loop:stop` are the user's; running them yourself via Bash is denied.
-- If you need to stop and ask the user something mid-phase, run `${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh defer --reason "…"` first, then end your turn. It is allowed a limited number of times.
+- If you need to stop and ask the user something mid-phase, run `${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh defer --reason "…"` first, then end your turn. It is allowed a limited number of times — each call permanently spends one of them, so never run it just to see what it does.
 - A failed or malformed review is never an approval. If a review fails, the commit stays denied and you retry it.
 
 Check state at any time with `/opencode-review-loop:status`, and print any stored review in full with `/opencode-review-loop:report [n]`.

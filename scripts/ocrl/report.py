@@ -40,7 +40,7 @@ __all__ = [
     "store",
 ]
 
-_FOOTER = "Fix the findings above, then commit again. The commit is gated until the review passes.\n"
+_FOOTER = "Verify and address the findings above, then commit again. The commit is gated until the review passes.\n"
 
 
 def _timestamp() -> str:
