@@ -158,9 +158,11 @@ def phase_progress_proven(state: State, repo: str) -> bool:
     Editing the document cannot manufacture it.
 
     Requires exactly one entry per frozen phase, numbered ``1..total`` with no gaps or repeats,
-    naming ``total`` **distinct canonical object IDs** that form an ancestry chain from
-    ``activation_commit`` (exclusive, and absent only on an unborn HEAD) through each phase in
-    order to ``HEAD``, **each one moving the tree**. Fails closed on every malformed shape.
+    naming ``total`` **distinct canonical object IDs** that form an ancestry chain from a
+    non-empty ``activation_commit`` (exclusive) through each phase in order, **each one moving
+    the tree**, and ending *at* ``HEAD`` rather than merely below it. Fails closed on every
+    malformed shape, and on the one legitimate shape it cannot verify -- see the comment on
+    ``activation_commit`` below.
 
     An activation armed before ``phase_commits`` existed has none recorded, so this refuses and
     the no-review path escalates rather than disarming on evidence that was never collected.
@@ -178,20 +180,34 @@ def phase_progress_proven(state: State, repo: str) -> bool:
     # phase N's must be an ancestor of phase N+1's -- which no reused or reordered ID can
     # satisfy, since `merge-base --is-ancestor` is reflexive and distinctness is what makes the
     # ancestry strict.
+    # `activation_commit` is what anchors the chain to *this* activation rather than to history
+    # it inherited, so an empty one is refused outright (report 038). `arm` legitimately writes
+    # it empty for an unborn HEAD -- but that is a claim made by the document, and there is
+    # nothing outside mutable state that can confirm it. Trying to confirm it from git alone
+    # does not work: "phase 1 is a non-empty root commit" is satisfied by any seeded
+    # repository's own first commit, so blanking the field and recording real historical
+    # commits would prove phases nobody implemented. The cost is that an activation armed on an
+    # empty repository cannot use the no-review path and escalates instead; the remedy is
+    # `final_review` or `finish`, both documented, and both of which put a reviewer back in the
+    # loop where this evidence cannot go.
     activation = state.get("activation_commit")
-    if chain is None or len(set(chain)) != total or activation in chain:
+    if chain is None or not activation or len(set(chain)) != total or activation in chain:
         return False
-    pairs = list(zip(chain, [*chain[1:], "HEAD"], strict=True))
-    steps = list(itertools.pairwise(chain))
-    if activation:
-        # The chain also has to start strictly after the commit the activation was armed at, so
-        # it is work this activation did rather than history it inherited. An *empty*
-        # `activation_commit` is not a missing one: `arm` writes it empty for an unborn HEAD,
-        # and there is then no earlier commit to start after -- phase 1's own commit is the
-        # start. Refusing on empty would wedge every legitimate empty-repository activation.
-        pairs.insert(0, (activation, chain[0]))
-        steps.insert(0, (activation, chain[0]))
-    if not all(gitsnap.is_ancestor(repo, earlier, later) for earlier, later in pairs):
+    # A *chain*, not a set of ancestors, and it starts strictly after the activation commit.
+    # The last phase commit must *be* HEAD, not merely an ancestor of it (report 039). An
+    # ancestor test leaves room for a commit after the final phase, and one shape of that is
+    # invisible everywhere else: a wrapper committing a tree already in `approved_trees` -- the
+    # baseline, say, which reverts the entire plan. `confirm-commit` stays silent because the
+    # tree was approved, the sweep skips it for the same reason, and the chain still holds. The
+    # activation would then complete with the work undone and nothing having reviewed the undo.
+    try:
+        head = gitsnap.rev_parse_checked(repo, "HEAD")
+    except gitsnap.GitUnavailable:
+        return False
+    if chain[-1] != head:
+        return False
+    links = [(activation, chain[0]), *itertools.pairwise(chain)]
+    if not all(gitsnap.is_ancestor(repo, earlier, later) for earlier, later in links):
         return False
     # Distinct commit IDs prove only that `git commit` ran N times. `git commit --allow-empty`
     # runs it without changing anything, and `pretool` approves an unchanged tree straight from
@@ -199,7 +215,7 @@ def phase_progress_proven(state: State, repo: str) -> bool:
     # otherwise carry an entirely unimplemented plan to COMPLETE with no model in the loop.
     # Requiring each phase commit to *move* the tree is what makes the chain evidence of work:
     # a moved tree is one the gate had to put in front of a reviewer before it could land.
-    return all(_moves_the_tree(repo, earlier, later) for earlier, later in steps)
+    return all(_moves_the_tree(repo, earlier, later) for earlier, later in links)
 
 
 @dataclass(frozen=True)

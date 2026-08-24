@@ -13,7 +13,8 @@ The review is not advice Claude may weigh up. It is a `PreToolUse` gate on the c
         OpenCode reviews the delta since the last approved tree
         approved -> commit proceeds -> phase advances
         findings -> commit denied, findings returned inline
-   -> all phases committed -> turn ends -> final cumulative review
+   -> all phases committed -> turn ends -> COMPLETE
+        (plus a final cumulative review first, if final_review is on)
 ```
 
 ## Requirements
@@ -55,7 +56,7 @@ The variable is read at process start, so restart Claude Code after setting it. 
 | `/opencode-review-loop:resume [--until N] [--plan <path>] [--replan] [--allow-dirty] [--abandon-pending] [--model X] [--variant V]` | you | Continues an armed activation — in a new session, or adjusts it in this one — without losing the baseline or any approval. See "Running a long plan across sessions" below |
 | `/opencode-review-loop:status` | anyone | Current state: phase, baseline, approvals, counters, stored reports |
 | `/opencode-review-loop:report [n]` | anyone | Prints a stored review in full, untruncated |
-| `/opencode-review-loop:finish` | you | Runs the final cumulative review now, even with phases outstanding |
+| `/opencode-review-loop:finish` | you | Runs the final cumulative review now, even with phases outstanding — and regardless of `final_review`, which makes it the way to get one on a default install |
 | `/opencode-review-loop:stop` | you | Leaves the mode. Nothing is reverted |
 | `/opencode-review-loop:config [<key> <value> [--repo]] [<key> --unset [--repo]]` | you | Reads or writes the review-loop configuration. Unrelated to any armed activation — never registers the gate |
 
@@ -67,7 +68,7 @@ The variable is read at process start, so restart Claude Code after setting it. 
 
 - **Cross-session** (the normal case — a fresh session picks the plan back up) retires the previous activation into a blocking `RESUMED` status before the new one exists. Only one activation may write to a worktree at a time, so from that moment the old session denies every mutation, naming the session that took over.
 - **Same-session** (re-running `resume` to change `--until`, the model, or the plan without starting a new session) mutates the live activation in place; nothing is retired.
-- The baseline tree and every approved tree carry forward untouched. Whenever the final cumulative review eventually runs, it still covers the whole plan from its *original* baseline, not from wherever the most recent resume happened to start.
+- The baseline tree and every approved tree carry forward untouched. If a final cumulative review runs at all — `final_review` is off by default, and `finish` runs one regardless — it covers the whole plan from its *original* baseline, not from wherever the most recent resume happened to start.
 - A commit landed since the last approval but was never reviewed? Resume warns rather than silently treating it as approved, and folds it into the next review.
 
 **Pausing with `--until N`.** Add it to `implement` or `resume` and the loop stops asking for more once phase `N` is committed — the turn ends with a "paused, not an approval of the whole plan" message instead of demanding the next phase. `--until 0` or `--until all` clears the target. It is soft, not a fence: nothing stops Claude from continuing past it if told to, but by default the loop does not push forward on its own.
@@ -92,7 +93,7 @@ tree=$(GIT_INDEX_FILE=$tmp git write-tree)
 
 **Approval and commit are separate events.** `PreToolUse` permits the Bash call; `PostToolUse` then verifies that a new commit exists, that its parent is the pre-command `HEAD` (which rejects `--amend`), that `HEAD^{tree}` is exactly the approved tree, and that the worktree is clean. Only then does the phase advance. Anything else enters `RECONCILE` with a prescribed, non-automatic recovery.
 
-**`Stop` is a backstop, not the driver.** It sweeps unreviewed work, enforces outstanding phases, and runs the final cumulative review. Blocks are counted only when no progress happened in between, so alternating work and blocks never escalates.
+**`Stop` is a backstop, not the driver.** It sweeps unreviewed work, enforces outstanding phases, and runs the final cumulative review before completing when `final_review` is on **or a `finish` was requested earlier** — a `finish` whose review found problems leaves that request standing, so the next turn end re-runs the review rather than completing quietly. Blocks are counted only when no progress happened in between, so alternating work and blocks never escalates.
 
 ### What blocks
 
@@ -222,9 +223,31 @@ The selftest drives the hook entrypoints with synthetic payloads and replaces th
 
 Before the first real run, work through [`tests/STEP0.md`](tests/STEP0.md): the harness assumptions that only a live Claude Code session can settle.
 
+## Upgrading to 0.6
+
+**The final cumulative review no longer runs by default.** In 0.5.x, ending the turn with every phase committed always ran a review of the whole activation (baseline → `HEAD`) and reached `COMPLETE` only if it approved. In 0.6.0 that review is behind `final_review`, which defaults to `false`: the Stop gate completes the activation directly instead. One exception survives — if a `finish` was requested and its review did not approve, that request stands, and the next turn end re-runs the cumulative review even with the key off. A failed `finish` never becomes a quiet `COMPLETE`.
+
+To keep 0.5.x behaviour, set it once:
+
+```console
+/opencode-review-loop:config final_review true
+```
+
+That writes user-level config, which is the **lowest**-precedence source above the defaults. `OCRL_FINAL_REVIEW` in the environment and `final_review` in the repository's own `.opencode-review-loop.json` both override it, so if either says `false` the review still will not run. Confirm what actually resolved with `/opencode-review-loop:config` — it prints the effective value of every key and where it came from. `/opencode-review-loop:status` does **not** show this key, so it cannot tell you whether the review will run.
+
+`OCRL_FINAL_REVIEW=true` covers a single run, and `/opencode-review-loop:finish` runs the review whatever the key says. Do not read that as "`finish` always gets you a review": it ignores `final_review` and nothing else. It still refuses, before running any review, on a dirty worktree and on any status outside its allow-list — `STALE`, `NEEDS_HUMAN`, `DISARMED`, `ARM_FAILED` and `RESUMED` all get a refusal rather than a review, and a `STALE` one is reachable just by `ttl_hours` elapsing. The two kinds of refusal differ in what they leave behind, which matters if you are relying on one. An ineligible *status* is checked before the request is recorded, so that refusal is a clean no-op. A dirty worktree is checked after, so the request stands — and once the worktree is clean (Stop blocks on that first), the next turn end runs the cumulative review, skipping the outstanding-phase check as it does, even with `final_review` off. And once an activation is `COMPLETE` it can never be reviewed cumulatively; `finish` and `resume` both refuse it. If you want the pass, run it while the activation is healthy and the worktree is clean.
+
+**Why.** The review covers the whole activation in one pass. Past roughly 40 phases that diff can exceed `hard_diff_ceiling` outright — escalating to `needs-human` with completion wedged — and well before that it exceeds what a model can meaningfully read at once, so you pay for a skim that reads as assurance. The prompt already tells the reviewer not to re-litigate findings a phase review accepted.
+
+**If you have an activation already in flight, finish it before upgrading — or turn the key on.** Completing without a review is not a free pass: the Stop gate first proves phase progress against git, requiring one recorded commit per frozen phase (`phase_commits`, written by `confirm-commit`), all distinct, in ancestry order, each one *moving the tree*, and the last of them being `HEAD` itself — a commit landing after the final phase refuses the completion, even if its tree was approved earlier. An activation armed by 0.5.x has no such record and cannot produce one retroactively, so it escalates to `needs-human` instead of completing — and that escalation also closes the `finish` remedy, since `finish` refuses a `NEEDS_HUMAN` activation. Two other shapes land the same way: a plan with an empty phase commit in it, and any activation armed on a repository with **no commits yet** — its `activation_commit` is legitimately empty, but that field is what anchors the evidence to this activation and nothing outside `state.json` can confirm the claim, so it is refused rather than trusted. For any of these, either set `final_review true` for that activation or run `/opencode-review-loop:finish` before the last turn ends.
+
+**What you lose by leaving it off.** Every phase commit still passed the per-commit gate, and the unreviewed-work sweep still runs at turn end. But "passed the gate" is weaker than "was reviewed": an already-approved tree, or one where `ignore_globs` matched everything, passes without any model call. Under 0.5.x the cumulative review was the one pass that would still have looked at that content; with the key off, nothing does. What else goes is the cross-phase view — phase 7 quietly undoing phase 2, dead ends, interface drift between phases — and one of the two layers `AGENTS.md` names as making the command deny-list defence-in-depth. Worth stating plainly: cross-phase drift is likeliest on exactly the large plans where this review was least able to catch it.
+
+**Also in 0.6.0:** `MAX_PHASES` is 64, up from 30.
+
 ## Known limitations
 
-- **Honest-agent bar.** Claude could commit through a wrapper script, abuse `defer`, or edit `.opencode-review-loop.json` directly — `disable-model-invocation` blocks the `config` *command*, not ordinary edits to the file it writes, and nothing else marks that path special. That is exactly why repo config is treated as attacker-controlled input in the first place (see "Adding config" in `AGENTS.md`): a change to it cannot itself run unreviewed code or silently weaken the gate, but it is not fenced off from Claude either. The final cumulative review backstops commit-level dodges; nothing here defends against a deliberately hostile agent, and this design does not pretend to.
+- **Honest-agent bar.** Claude could commit through a wrapper script, abuse `defer`, or edit `.opencode-review-loop.json` directly — `disable-model-invocation` blocks the `config` *command*, not ordinary edits to the file it writes, and nothing else marks that path special. Repo config is treated as attacker-controlled input for exactly this reason (see "Adding config" in `AGENTS.md`) — but treat that as "validated as untrusted input", not as "harmless". It is policy, and policy written there **can** weaken the gate silently: `ignore_globs: ["**"]` skips the reviewer call on every commit, a raised `block_severity` stops findings from blocking, and `final_review false` removes the cumulative backstop. None of these run unreviewed code; all of them change what the gate does, and nothing fences the file off from Claude. Commit-level dodges are backstopped by the final cumulative review **only if `final_review` is on**, which by default it is not; on a default install the per-commit gate and `confirm-commit`'s reporting are what you have. Nothing here defends against a deliberately hostile agent, and this design does not pretend to.
 - **The Stop-block cap is residual.** Continuation pressure from `PostToolUse`, progress-aware counting and `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` mitigate it, but a run that repeatedly ends its turn without progress can still exhaust the cap — and exhaustion ends the turn.
 - **A `PreToolUse` hook runs on every tool call**, and it is not free. Measured on Linux with warm caches, through `scripts/ocrl.sh` end to end (the Python port; these numbers supersede the Bash-era ones this table used to carry):
 

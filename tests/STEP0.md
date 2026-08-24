@@ -104,7 +104,11 @@ Let Claude do what the skill tells it: propose two phases, run `set-phases`, imp
 Watch for two specific things:
 
 - After a verified commit, Claude should be told to continue into phase 2 **without ending its turn**.
-- After the last phase, ending the turn should trigger the final cumulative review.
+- After the last phase, ending the turn should reach `COMPLETE`. With `final_review` at its
+  default `false` no cumulative review runs — with a clean worktree the sweep has nothing to
+  review either, so expect no reviewer call at all; check `status` and expect the `reason` to
+  say the review was skipped. Run this item with `OCRL_FINAL_REVIEW=true` if you want to
+  exercise the cumulative review instead, which is the path 0.5.x always took.
 
 Expect the reviewer to be strict. In my own end-to-end run it rejected two successive attempts on scope grounds before approving, which is the gate working, not a malfunction.
 

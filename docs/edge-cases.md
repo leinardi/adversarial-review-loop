@@ -66,6 +66,68 @@ plan file, no flag typed at all). Mid-phase work sitting in the worktree while t
 that describes it gets silently redefined is exactly the failure this refusal exists to
 block.
 
+## Completing without a final cumulative review
+
+`final_review` is `false` by default, so ending the turn with every phase committed reaches
+`COMPLETE` without a final cumulative review. That is not the same as "no reviewer call":
+the unreviewed-work sweep runs first as it always did, and if it finds a tree no review has
+approved it calls the reviewer for that, and blocks on findings. What is skipped is the
+baseline-to-`HEAD` pass over the whole activation. Everything else about the Stop gate is
+unchanged: the unreviewed-work sweep still runs, outstanding phases still block, a pause
+target still holds, a dirty worktree still blocks, and a `RECONCILE` activation still cannot
+complete this way — `finish` (which always reviews) is its only route out.
+
+**One exception to "no review runs": a `finish` already requested.** `finish` sets
+`finish_requested` before its review runs and does not clear it when the review returns
+findings — it just returns 1 with the mode still armed. The Stop gate honours that request
+on the next turn end regardless of `final_review`, so a `finish` that found problems is
+re-reviewed rather than quietly completed. Where the flag is written relative to each
+precondition decides what a *refused* `finish` leaves behind: the status allow-list is checked
+first, so a `STALE` or `NEEDS_HUMAN` refusal is a clean no-op, while the worktree-cleanliness
+check comes after, so a `finish` refused for a dirty worktree still leaves the request
+standing. That does not make the next turn end run the review while the worktree is still
+dirty — Stop checks cleanliness first and blocks — but once it is clean, the review runs,
+skipping the outstanding-phase check, so it can complete with phases still left.
+
+**Completing this way has to be earned, and the evidence is git's, not `state.json`'s.**
+With no reviewer in the loop, `phase == len(phases) + 1` proves only that an integer was
+incremented, so the gate proves phase progress against the repository instead:
+`confirm-commit` records the SHA it verified for each phase in `phase_commits`, and
+completion requires one per frozen phase, all distinct canonical object IDs, forming an
+ancestry chain from the activation commit through each phase in order, **each one moving the
+tree**, ending *at* `HEAD` rather than merely below it. The last clause is what stops `git commit --allow-empty` per phase from
+walking an unimplemented plan to `COMPLETE` through the unchanged-tree cache, which never
+calls the reviewer.
+
+It fails closed, and three shapes land on that side of the line. An activation armed before
+`phase_commits` existed has no record and cannot produce one after the fact. A plan containing
+an empty phase commit has a step that does not move the tree. And an activation armed on a
+repository with **no commits at all** has an empty `activation_commit` — which is honest, but
+it is also the field that anchors the chain to this activation rather than to inherited
+history, and nothing outside `state.json` can confirm the claim. Asking git about the shape of
+phase 1 does not help: "a non-empty root commit" is exactly what any seeded repository's own
+first commit looks like. So the empty-repository case is refused rather than special-cased.
+
+All three escalate to `NEEDS_HUMAN` instead of completing, and escalation closes the `finish`
+remedy as well — `finish` refuses a `NEEDS_HUMAN` activation. For any of them, set
+`final_review true` or run `finish` **before** the last turn ends; both put a reviewer back in
+the loop, which is where this evidence cannot reach.
+
+Two further consequences worth knowing.
+
+**There is no remedy afterwards.** A `COMPLETE` activation can never be reviewed
+cumulatively: `finish` refuses one, and so does `resume`. The decision is made at the moment
+the turn ends, not later. If you want the pass, ask for it *before* that —
+`/opencode-review-loop:finish`, which ignores `final_review`.
+
+**Refusals on this path escalate much faster.** When a completion is refused (the activation
+moved underneath it, the TTL shrank mid-turn, the recorded phase evidence doesn't hold up),
+that becomes a counted no-progress block. With the review enabled there was a minutes-long
+reviewer call between attempts; without it, a worktree something else is rewriting can burn
+through `max_stop_blocks` in seconds and escalate to `NEEDS_HUMAN`. That escalation is the
+fail-closed direction and is working as intended — but it arrives sooner than the 0.5.x
+timings would suggest.
+
 ## The phase cap
 
 `set-phases` refuses more than `MAX_PHASES` (64) phases in one frozen list — a bound

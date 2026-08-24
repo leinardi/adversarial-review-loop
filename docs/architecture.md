@@ -26,7 +26,7 @@ as it stands; it doesn't repeat the reasoning behind every design choice.
               commands/pretool.py             commands/posttool.py              commands/stop.py
               (PreToolUse: gate every           (PostToolUse: verify a           (Stop: sweep, enforce
                mutating tool call)               commit landed as approved,       outstanding phases, run
-                                                  PostToolUseFailure: clear        the final review)
+                                                  PostToolUseFailure: clear        the final review if on)
                                                   a stale pending approval)
                        │                                │                                │
                        └────────────────┬───────────────┴────────────────┬───────────────┘
@@ -62,7 +62,10 @@ and `skills/resume/SKILL.md` (this duplication is deliberate — see
 A single phase's commit touches three of these in order: `pretool` reviews and
 conditionally allows the `git commit` to run; `confirm-commit` (or `posttool-failure`, if
 the commit itself failed) verifies what actually landed; `gate-stop` is the backstop that
-catches anything left unreviewed when Claude tries to stop.
+catches anything left unreviewed when Claude tries to stop. Whether `gate-stop` also runs a
+cumulative review of the whole activation before completing depends on `final_review` (off by
+default) **or** on a `finish` having been requested and not yet satisfied; the sweep and the
+outstanding-phase check run either way.
 
 ## The state machine
 
@@ -76,7 +79,7 @@ values that exist:
 | `RECONCILE` | a commit landed that doesn't match what was approved | no — has a prescribed recovery |
 | `NEEDS_HUMAN` | escalated; every mutation denied until the user intervenes | no — `stop` clears it |
 | `RESUMED` | retired by a `resume` into a successor session | **yes** |
-| `COMPLETE` | the final cumulative review passed; mode disarmed | **yes** |
+| `COMPLETE` | the activation is closed and the mode disarmed. Reached three ways: the Stop gate with every phase committed, either directly or after an approving cumulative review when `final_review` is on; the Stop gate following through on a standing `finish_requested`, which skips the outstanding-phase check and so can complete with phases left; or a user-invoked `finish`, which always reviews and likewise need not have every phase committed. The `reason` field records which | **yes** |
 | `ARM_FAILED` | arming (or resuming) failed; nothing was frozen | no — re-arm fixes it |
 | `DISARMED` | the user ran `stop` | no — re-arming starts fresh |
 

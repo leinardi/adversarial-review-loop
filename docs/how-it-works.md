@@ -46,9 +46,13 @@ reporter tries again.
    finds a real problem, the commit is blocked and Claude is told exactly what's wrong, with
    the same specificity a strict human reviewer would give. Claude fixes it and tries again.
    This can repeat as many times as it takes.
-7. **Once every phase is committed, one more review happens** — this time looking at the
-   *entire* change from start to finish, the way a final sign-off would, not just phase by
-   phase. Only after that passes does the tool consider itself done and step out of the way.
+7. **Once every phase is committed, the tool considers itself done and steps out of the
+   way.** You can also ask for one more review first — looking at the *entire* change from
+   start to finish, the way a final sign-off would, rather than phase by phase. That one is
+   off by default because on a long plan it becomes too big to be read properly; turn it on
+   with `final_review true` if you want it every time, or run
+   `/opencode-review-loop:finish` to get it for a single plan. It has to be *before* the
+   tool steps out, though — once it's done, that review can't be run after the fact.
 
 ## Some things worth knowing
 

@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 from conftest import BOOTSTRAP, git, run_bootstrap, run_hook
-from test_commands_arm import armed_env, read_state, state_dir
+from test_commands_arm import armed_env, plan_file, read_state, state_dir
 from test_commands_posttool import COMMIT, gated_commit
 from test_commands_pretool import SESSION, active, active_until, arm, patch_state, payload
 from test_commands_races import _SETTLE, activation_lock, reviewer_stub
@@ -738,25 +738,105 @@ def test_empty_commits_cannot_carry_an_unimplemented_plan_to_completion(git_repo
     assert document["final_done_tree"] == ""
 
 
-def test_an_activation_armed_on_an_unborn_head_still_completes(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    """report 025: ``arm`` writes an empty ``activation_commit`` in a repository with no commits
-    yet, and an empty one is not a missing one.
+def unborn_repo(tmp_path: Path) -> Path:
+    """A repository with no commits at all -- what ``arm`` sees as an unborn HEAD.
 
-    Rejecting it outright would wedge every legitimate empty-repository activation at the very
-    last step -- the phases all committed, the work all gated, and completion escalating to
-    NEEDS_HUMAN on the absence of a commit that never existed. With no earlier commit to start
-    after, phase 1's own commit is where the chain starts.
+    ``git_repo`` is seeded, so the empty-repository path cannot be reached by patching a
+    field: that only produces a document making a claim git would refuse. This is the real
+    thing.
+    """
+    repo = tmp_path / "unborn"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "selftest@example.invalid")
+    git(repo, "config", "user.name", "ocrl selftest")
+    git(repo, "config", "commit.gpgsign", "false")
+    return repo
+
+
+def unborn_active(repo: Path, tmp_path: Path, env: dict[str, str]) -> None:
+    """``active`` for an unborn repository, which arming treats as dirty.
+
+    There is nothing to fold in -- ``--allow-dirty`` is only how an activation gets past a
+    HEAD that does not exist yet.
+    """
+    proc = run_bootstrap(["arm", "--session", SESSION, "--args", f"{plan_file(tmp_path)} --allow-dirty"], cwd=repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    proc = run_bootstrap(["set-phases", "--phase", "phase one"], cwd=repo, env=env)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_an_activation_armed_on_an_unborn_head_still_completes(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """reports 025, 037 and 038 all landed here, and the third settles it: fail closed.
+
+    ``arm`` legitimately writes an empty ``activation_commit`` for a repository with no commits
+    yet. But that field is what anchors the chain to *this* activation, and an empty one is a
+    claim made by the document that nothing outside mutable state can confirm. Asking git about
+    the shape of phase 1 does not confirm it either: "a non-empty root commit" is satisfied by
+    any seeded repository's own first commit, so accepting the empty field would let real
+    history stand as phases nobody implemented (the next test is that shape).
+
+    The empty-repository case therefore pays with an escalation rather than a completion. The
+    remedy is `final_review` or `finish`, both of which put a reviewer back in the loop where
+    this evidence cannot go, and both are documented as the fix.
+    """
+    repo = unborn_repo(tmp_path)
+    env = armed_env(clean_env)
+    unborn_active(repo, tmp_path, env)
+    assert read_state(env, repo, SESSION)["activation_commit"] == ""
+    committed_phase(repo, env)
+
+    message = ended(stop(repo, env))
+
+    assert "unexpected state" in message
+    document = read_state(env, repo, SESSION)
+    assert document["status"] == "NEEDS_HUMAN"
+    assert document["final_done_tree"] == ""
+
+
+def test_a_commit_after_the_last_phase_refuses_the_no_review_completion(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """report 039: the shape that is invisible to every *other* guard on this path.
+
+    A commit landing a tree that is already in ``approved_trees`` -- the baseline, which is to
+    say a revert of the entire plan -- passes ``confirm-commit`` silently (the tree was
+    approved), and the sweep skips it for the same reason. The phase chain still holds, because
+    every recorded phase commit is still an ancestor of HEAD. Requiring the last phase commit to
+    *be* HEAD is the only thing standing between that and a `COMPLETE` activation whose work has
+    been undone by something no reviewer ever saw.
     """
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
-    patch_state(env, git_repo, activation_commit="")
-    env["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer"
+    git(git_repo, "revert", "--no-edit", "HEAD")
+    assert git(git_repo, "rev-parse", "HEAD^{tree}") == git(git_repo, "rev-parse", "HEAD~2^{tree}"), "the revert restores the baseline tree"
 
     message = ended(stop(git_repo, env))
 
-    assert "COMPLETE" in message
-    assert read_state(env, git_repo, SESSION)["status"] == "COMPLETE"
+    assert "unexpected state" in message
+    document = read_state(env, git_repo, SESSION)
+    assert document["status"] == "NEEDS_HUMAN"
+    assert document["final_done_tree"] == ""
+
+
+def test_a_blanked_activation_commit_does_not_complete_a_seeded_repository(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """report 038: why the unborn-HEAD case cannot simply be waved through.
+
+    Blanking ``activation_commit`` in a seeded repository removes the only pair anchoring the
+    chain to the activation. With one phase the tree-movement list is then empty and the
+    ancestry check is reflexive, so a commit already in history stands as proof of a phase this
+    activation never implemented. No question about that commit's *shape* separates it from a
+    genuine first phase, which is why the empty field is refused instead.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    committed_phase(git_repo, env)
+    head = git(git_repo, "rev-parse", "HEAD")
+    patch_state(env, git_repo, activation_commit="", phase_commits=[{"phase": 1, "commit": head}])
+
+    message = ended(stop(git_repo, env))
+
+    assert "unexpected state" in message
+    assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
 
 
 def test_the_activation_commit_cannot_stand_in_for_a_phase(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
