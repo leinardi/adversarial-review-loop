@@ -61,7 +61,7 @@ Hooks identical to `/opencode-review-loop:implement` are registered for this ses
 
    The commit is intercepted and reviewed exactly as under `/opencode-review-loop:implement`.
 6. **If a pause target is set** (the banner names it), stop and report to the user once you reach it — do not continue past it on your own.
-7. **When all phases are committed, end your turn.** The Stop gate runs the final cumulative review over the whole activation, from the *original* baseline to `HEAD`.
+7. **When all phases are committed, end your turn.** The Stop gate sweeps anything unreviewed and then completes the activation. If `final_review` is enabled — by default it is not — it first runs a cumulative review over the whole activation, from the *original* baseline to `HEAD`.
 
 ## Rules while the mode is active
 

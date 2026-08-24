@@ -68,7 +68,7 @@ The block above is the output of arming, which ran **before you had a turn**. It
 
 5. **Keep going.** When a commit is verified you get a message telling you to continue straight into the next phase without ending your turn. Do that.
 
-6. **When all phases are committed, end your turn.** The Stop gate runs a final cumulative review over the whole activation. Ending your turn earlier is fine but it will block with the outstanding phases.
+6. **When all phases are committed, end your turn.** The Stop gate sweeps anything unreviewed and then completes the activation — running a final cumulative review over the whole activation first only if `final_review` is enabled, which by default it is not. Ending your turn earlier is fine but it will block with the outstanding phases.
 
 ## Rules while the mode is active
 
