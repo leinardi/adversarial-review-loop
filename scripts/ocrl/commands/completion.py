@@ -91,9 +91,9 @@ def describe_change(before: Fingerprint, now: Fingerprint, reason: str) -> str:
         )
     if before[5] != now[5]:
         return (
-            "opencode-review-loop: a resume changed the activation while completion was pending "
-            "(the plan or the model may have changed underneath it), so the completion no longer applies. "
-            "The activation stays armed; finish again.\n"
+            "opencode-review-loop: a resume or an accept changed the activation while completion was pending "
+            "(the plan, the model, or an approved tree may have changed underneath it), so the completion no "
+            "longer applies. The activation stays armed; finish again.\n"
         )
     return (
         f"opencode-review-loop: the activation moved from {before[4]} to {now[4]} ({reason}) while completion was pending. "

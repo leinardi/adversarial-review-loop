@@ -89,6 +89,10 @@ def new_state_document() -> dict[str, Any]:
         "abandoned_pending_head": "",
         "activation_generation": 0,
         "finish_requested": False,
+        #: One entry per ``accept``: ``{"at", "phase", "tree", "base", "reason", "reviews",
+        #: "report"}``. Never trimmed -- it is the audit trail for every phase a human approved
+        #: without an approving review.
+        "manual_accepts": [],
     }
 
 

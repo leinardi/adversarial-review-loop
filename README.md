@@ -57,10 +57,17 @@ The variable is read at process start, so restart Claude Code after setting it. 
 | `/opencode-review-loop:status` | anyone | Current state: phase, baseline, approvals, counters, stored reports |
 | `/opencode-review-loop:report [n]` | anyone | Prints a stored review in full, untruncated |
 | `/opencode-review-loop:finish` | you | Runs the final cumulative review now, even with phases outstanding — and regardless of `final_review`, which makes it the way to get one on a default install |
+| `/opencode-review-loop:accept [reason]` | you | Manually approves the current working tree for the current phase, without a review — see "Breaking a stuck review loop" below |
 | `/opencode-review-loop:stop` | you | Leaves the mode. Nothing is reverted |
 | `/opencode-review-loop:config [<key> <value> [--repo]] [<key> --unset [--repo]]` | you | Reads or writes the review-loop configuration. Unrelated to any armed activation — never registers the gate |
 
-`implement`, `finish`, `stop`, `resume` and `config` are `disable-model-invocation: true`. **Claude can never arm, resume, finish, stop, or run the `config` command itself** — no natural-language phrasing invokes any of them, only the exact slash command. That stops the *command*; it does not make `.opencode-review-loop.json` off-limits to ordinary file edits — see "Known limitations" below. That is deliberate: a mode whose whole point is enforcement must not be self-enabling, and the cost is that "use the review loop for this" does nothing.
+`implement`, `finish`, `stop`, `resume`, `config` and `accept` are `disable-model-invocation: true`. **Claude can never arm, resume, finish, stop, accept, or run the `config` command itself** — no natural-language phrasing invokes any of them, only the exact slash command. That stops the *command*; it does not make `.opencode-review-loop.json` off-limits to ordinary file edits — see "Known limitations" below. That is deliberate: a mode whose whole point is enforcement must not be self-enabling, and the cost is that "use the review loop for this" does nothing.
+
+## Breaking a stuck review loop
+
+Some phases will not converge — OpenCode keeps raising a fresh finding every round instead of closing the earlier ones. `/opencode-review-loop:stop` gets you out, but it turns enforcement off for the rest of the session; `/opencode-review-loop:finish` runs a review that is just as likely to keep finding things. `/opencode-review-loop:accept [reason]` is the middle option: it puts the current working tree — exactly as it stands — into the set of approved trees, the same record a passing review would have written. Nothing else changes: the phase does not advance, the activation does not complete, and any further edit changes the tree hash and puts the commit right back under review. It also clears a `NEEDS_HUMAN` escalation, which is otherwise something only a human can do — `/opencode-review-loop:resume` deliberately refuses to.
+
+Every acceptance is recorded: in `/opencode-review-loop:status`, as its own numbered report visible through `/opencode-review-loop:report`, and in a `## Manually accepted phases` section shown to every later review of that activation — including the final cumulative one — so nothing downstream mistakes an accepted phase for one that actually passed a gate.
 
 ## Running a long plan across sessions
 

@@ -368,6 +368,33 @@ def _plan_revisions_section(revisions: list[tuple[dict[str, Any], bytes]]) -> st
     return "".join(out)
 
 
+def _manual_accepts_section(state: State) -> str:
+    """``## Manually accepted phases`` -- omitted entirely when nothing was ever accepted.
+
+    A phase the user accepted with ``ocrl accept`` passed the commit gate without an
+    approving review, and every later review of this activation -- this phase's own next
+    round included, and the final cumulative review most of all -- must be told so plainly.
+    Silence here would let a reviewer, and a reader of ``COMPLETE``, believe every phase
+    passed a gate that one of them did not.
+    """
+    accepts = state.get_array_of_dicts("manual_accepts")
+    if not accepts:
+        return ""
+    out = ["\n## Manually accepted phases\n\n"]
+    out.append(
+        "The user manually accepted the phases below with `ocrl accept`, overriding the review gate for "
+        "that exact tree. No approving review ran for them.\n\n"
+    )
+    for entry in accepts:
+        phase = entry.get("phase")
+        tree = entry.get("tree")
+        at = _format_at(entry.get("at"))
+        reviews = entry.get("reviews")
+        reason = entry.get("reason") or "(none given)"
+        out.append(f"- phase {phase}, tree `{tree}`, accepted at {at}, overriding {reviews} prior review(s): {reason}\n")
+    return "".join(out)
+
+
 def _range_text(target: Target, *, state: State, warnings: str, revisions: list[tuple[dict[str, Any], bytes]]) -> str:
     """The bundle's ``range.txt``: what is under review, and what is *not* represented."""
     repo, base, head = target.repo, target.base, target.head
@@ -400,6 +427,8 @@ def _range_text(target: Target, *, state: State, warnings: str, revisions: list[
 
     out.append("\n## Snapshot warnings\n\n")
     out.append(f"{warnings}\n" if warnings else "(none)\n")
+
+    out.append(_manual_accepts_section(state))
 
     out.append(_plan_revisions_section(revisions))
 

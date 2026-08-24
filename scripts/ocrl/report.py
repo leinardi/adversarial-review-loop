@@ -12,6 +12,8 @@ it is enforced by the signatures.
 
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,7 +26,19 @@ from ocrl.util import truncate
 if TYPE_CHECKING:  # pragma: no cover - import cycle broken for the type checker only
     from ocrl.reviewer import Review, Target
 
-__all__ = ["list_reports", "reason", "render", "render_report", "report_path", "store"]
+__all__ = [
+    "AcceptRecord",
+    "accept_report_path",
+    "list_reports",
+    "promote_accept",
+    "reason",
+    "render",
+    "render_accept",
+    "render_report",
+    "report_path",
+    "stage_accept",
+    "store",
+]
 
 _FOOTER = "Fix the findings above, then commit again. The commit is gated until the review passes.\n"
 
@@ -90,6 +104,82 @@ def store(review: Review, target: Target, *, seq: str, act_dir: Path, config: Co
     write_private_atomic(path, render_report(review, target, seq=seq, config=config), root=state_root(), errors="surrogateescape")
     review.report = str(path)
     return path
+
+
+def accept_report_path(act_dir: Path, seq: str, label: str) -> Path:
+    """Where a manual acceptance's report lands once it is promoted. ``ocrl accept`` only."""
+    return act_dir / "reports" / f"{seq}-{label}-accepted.md"
+
+
+def _accept_staging_path(act_dir: Path, seq: str, label: str) -> Path:
+    """Where a manual acceptance's report is written before it is durable.
+
+    The leading dot and the ``.pending`` suffix both keep it off ``list_reports`` and
+    ``render``'s ``*.md`` globs -- invisible to every reader until ``promote_accept`` renames
+    it onto :func:`accept_report_path`, which only happens once the approval it documents is
+    itself durable. See ``ocrl.commands.accept`` for why the two must not be able to come
+    apart in the unsafe direction.
+    """
+    return act_dir / "reports" / f".accept-{seq}-{label}.pending"
+
+
+@dataclass(frozen=True)
+class AcceptRecord:
+    """Everything one manual acceptance's report needs to render.
+
+    Mirrors the ``manual_accepts`` entry ``ocrl.commands.accept`` writes to ``state.json``,
+    plus the report sequence and the filenames of the reviews it overrides.
+    """
+
+    seq: str
+    phase: int
+    tree: str
+    base: str
+    reason: str
+    reviews: list[str]
+
+
+def render_accept(record: AcceptRecord) -> str:
+    """A manual acceptance's report: what was accepted, and the reviews it overrides."""
+    out: list[str] = [f"# Manual acceptance {record.seq} (phase{record.phase})\n\n"]
+    out.append("- verdict: **ACCEPTED (manual, by the user)**\n")
+    out.append(f"- phase: {record.phase}\n")
+    out.append(f"- tree: `{record.tree}`\n")
+    out.append(f"- base tree (last approved before this acceptance): `{record.base}`\n")
+    out.append(f"- accepted: {_timestamp()}\n")
+    out.append(f"- reviews overridden: {len(record.reviews)}\n")
+    out.append("\n## Reason\n\n")
+    out.append(f"{record.reason or '(none given)'}\n")
+    out.append("\n## Reviews this acceptance overrides\n\n")
+    out.append("".join(f"- {name}\n" for name in record.reviews) if record.reviews else "(none)\n")
+    return "".join(out)
+
+
+def stage_accept(content: str, *, act_dir: Path, seq: str, label: str) -> Path:
+    """Write a manual acceptance's report where no reader can see it yet.
+
+    The caller promotes it with :func:`promote_accept`, and only after the approval it
+    documents is durably written -- see that function's docstring for why the order matters.
+    """
+    path = _accept_staging_path(act_dir, seq, label)
+    ensure_private_dir(path.parent, root=state_root())
+    write_private_atomic(path, content, root=state_root())
+    return path
+
+
+def promote_accept(staged: Path, *, act_dir: Path, seq: str, label: str) -> Path:
+    """Publish a staged acceptance report by renaming it onto its real, discoverable name.
+
+    Same directory as the staged file, so the rename is atomic -- there is no window in which
+    a reader sees a half-written report at the final name. Called only after the transaction
+    that granted the approval has itself saved successfully: an acceptance report at its final
+    name for an approval that was never durably recorded is worse than one left staged and
+    invisible, because a later review can reuse the same report sequence and the accepted
+    report -- ``accepted`` sorts before every other verdict -- would then shadow it.
+    """
+    final = accept_report_path(act_dir, seq, label)
+    os.replace(staged, final)
+    return final
 
 
 def reason(review: Review, headline: str, *, config: Config) -> str:

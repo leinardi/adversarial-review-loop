@@ -63,10 +63,20 @@ Everything else in the codebase is detail against these. Paraphrased from `AGENT
    All state lives outside the repo. The one exception — an explicit, user-only
    `config --repo` — is documented, never triggered by a hook, and never reachable from
    Claude.
-4. **The user owns the exits.** `implement`, `finish`, `stop`, `resume` and `config` are
-   unreachable through natural language — only the literal slash command invokes them —
-   and Claude's own route to running them via `Bash` is denied. See the honest-agent
-   caveat above for exactly what this does and doesn't guarantee against a hostile model.
+4. **The user owns the exits.** `implement`, `finish`, `stop`, `resume`, `config` and
+   `accept` are unreachable through natural language — only the literal slash command
+   invokes them — and Claude's own route to running them via `Bash` is denied. See the
+   honest-agent caveat above for exactly what this does and doesn't guarantee against a
+   hostile model.
+
+   `accept` is the one exit that grants something rather than only ending or adjusting
+   the activation, which is what makes it worth spelling out separately: it mints exactly
+   the artifact a passing review mints — the current tree added to `approved_trees` —
+   and nothing else. It does not advance the phase, complete the activation, or touch any
+   tree but the one it names. That scope is what makes handing it to a user command safe:
+   the grant is bound to one exact tree hash, so it cannot pre-approve future work, and
+   editing anything afterward changes the hash and puts the commit right back under
+   review. Both locks above apply to it exactly as they do to the other four.
 
 (A fifth property, unnumbered in `AGENTS.md` but load-bearing throughout: hook stdout is
 protocol. A hook entrypoint emits valid Claude hook JSON or nothing — never a stray

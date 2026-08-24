@@ -25,6 +25,7 @@ USAGE = """usage: ocrl.sh <subcommand> [args]
   set-phases --phase "…" [--phase "…" …]
   pretool | confirm-commit | posttool-failure | gate-stop   (hook entrypoints)
   status | report [n] | defer --reason "…" | finish | deactivate
+  accept [--reason "…"] [--session <id>]
   config [<key> <value> [--repo] [--force] | <key> --unset [--repo]]
   dry-run | selftest
 """
@@ -40,7 +41,7 @@ def _selftest(argv: list[str]) -> int:
     os.execv(script, [script, *argv])
 
 
-def main(argv: list[str]) -> int:  # noqa: PLR0911 - one return per subcommand, which is the table
+def main(argv: list[str]) -> int:  # noqa: PLR0911, PLR0912 - one return per subcommand, which is the table
     sub = argv[0] if argv else ""
     rest = argv[1:]
 
@@ -90,6 +91,10 @@ def main(argv: list[str]) -> int:  # noqa: PLR0911 - one return per subcommand, 
             "deactivate": session.deactivate,
         }[sub]
         return handler(rest)
+    if sub == "accept":
+        from ocrl.commands import accept  # noqa: PLC0415
+
+        return accept.run(rest)
     if sub == "config":
         from ocrl.commands import configcmd  # noqa: PLC0415
 

@@ -236,6 +236,8 @@ def test_the_loose_detectors(command: str, commit: bool, reset: bool) -> None:
         ("ocrl finish", True),
         ("ocrl.sh resume", True),
         ("ocrl.sh config", True),
+        ("ocrl.sh accept", True),
+        ("ocrl.sh accept --reason x", True),
         ("/x/y/ocrl.sh resume --until 2", True),
         ("ocrl.sh status", False),
         pytest.param("ocrl.sh finishing", False, id="lookalike-suffix-not-an-escape"),

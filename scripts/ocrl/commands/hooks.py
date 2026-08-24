@@ -170,7 +170,7 @@ def describe_move(before: Activation, now: Activation) -> str:
     if before.last_approved_tree != now.last_approved_tree:
         return "another call approved a different tree"
     if before.activation_generation != now.activation_generation:
-        return "a resume changed the activation while this was in progress"
+        return "a resume or an accept changed the activation while this was in progress"
     return "the pending approval changed"
 
 

@@ -461,7 +461,8 @@ def _refuse_unless_resumable(state: State) -> None:
     if stored == "NEEDS_HUMAN":
         raise _ResumeFailure(
             f"this activation escalated to NEEDS_HUMAN ({state.get('reason')}); resuming would clear an escalation only a "
-            "human may clear. Run /opencode-review-loop:stop, then /opencode-review-loop:implement <plan.md> to start over."
+            "human may clear. Run /opencode-review-loop:accept to clear it and keep the loop going, or "
+            "/opencode-review-loop:stop, then /opencode-review-loop:implement <plan.md> to start over."
         )
     if stored == "RESUMED":
         successor = state.get("resumed_into") or "its successor session"

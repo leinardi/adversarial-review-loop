@@ -356,7 +356,15 @@ def test_a_non_object_plan_revisions_entry_escalates_rather_than_crashing(git_re
 
 @pytest.mark.parametrize(
     "command",
-    ["ocrl.sh finish", "/some/where/ocrl deactivate", "cd /x && ocrl.sh finish", "ocrl.sh resume", "ocrl.sh config model x"],
+    [
+        "ocrl.sh finish",
+        "/some/where/ocrl deactivate",
+        "cd /x && ocrl.sh finish",
+        "ocrl.sh resume",
+        "ocrl.sh config model x",
+        "ocrl.sh accept",
+        "ocrl.sh accept --reason x",
+    ],
 )
 def test_claude_may_not_end_the_loop_itself(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
     env = armed_env(clean_env)

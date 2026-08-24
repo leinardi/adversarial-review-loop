@@ -98,6 +98,9 @@ def status(argv: list[str]) -> int:
     reports = "".join(f"  {name}\n" for name in report.list_reports(activation.act_dir)).rstrip("\n")
     stop_after_phase = state.get_int("stop_after_phase")
     pause_target = f"{stop_after_phase} of {state.phase_count()}" if stop_after_phase else "none"
+    manual_accepts = state.get_array_of_dicts("manual_accepts")
+    accepted_phases = ", ".join(str(entry.get("phase")) for entry in manual_accepts)
+    accepts_line = f"{len(manual_accepts)} (phases {accepted_phases})" if manual_accepts else "0"
     plan_revisions = state.data.get("plan_revisions") or []
     # `status` never changes anything (see the docstring above), so a corrupted revision
     # entry is reported inline rather than escalated the way `pretool`/`gate-stop` do --
@@ -128,6 +131,7 @@ pause target:        {pause_target}
 consecutive failures:{state.get("failures")} / {config.as_int("max_failures")}
 no-progress blocks:  {state.get("stop_blocks")} / {config.as_int("max_stop_blocks")}
 defers used:         {state.get("defers")} / {config.as_int("max_defers")}
+manual accepts:      {accepts_line}
 model:               {config.as_str("model")} {config.as_str("variant")}
 block_severity:      {config.as_str("block_severity")}
 state directory:     {activation.act_dir}
