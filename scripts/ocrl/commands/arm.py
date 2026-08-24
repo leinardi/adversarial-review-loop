@@ -410,6 +410,7 @@ def _armed_message(request: _Request, frozen: _Frozen) -> str:
 - pre-existing uncommitted work folded into phase 1: {"true" if frozen.allow_dirty else "false"}
 - pause target: {frozen.until if frozen.until else "none"} (checked again once phases are frozen)
 - block_severity: {config.as_str("block_severity")}
+- final cumulative review at the end: {"enabled" if config.as_bool("final_review") else "disabled (final_review)"}
 
 **Phases are not set yet, so every file mutation is currently denied.**
 

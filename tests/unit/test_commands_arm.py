@@ -140,6 +140,26 @@ def test_arm_freezes_the_plan_and_records_the_activation(git_repo: Path, tmp_pat
     assert revisions[0]["sha256"] == hashlib.sha256(frozen.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize(("setting", "expected"), [("false", "disabled (final_review)"), ("true", "enabled")])
+def test_the_arm_summary_says_whether_a_final_review_will_run(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], setting: str, expected: str
+) -> None:
+    """The upgrade mitigation that actually reaches a person.
+
+    ``final_review`` defaults off, and a user who upgrades gets no other signal at the moment
+    it matters -- the `COMPLETE_UNREVIEWED` message arrives at the end, and reaches the *user*
+    only if `systemMessage` does, which `AGENTS.md` records as assumed rather than verified.
+    This line lands in the slash-command output the moment a plan starts, and reports the
+    fully-resolved value, so a repo config or environment override cannot make it lie.
+    """
+    env = armed_env(clean_env, OCRL_FINAL_REVIEW=setting)
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert f"- final cumulative review at the end: {expected}" in proc.stdout
+
+
 def test_arm_writes_both_pointers(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """The session pointer is what the hooks read; the worktree pointer is what ``status`` reads."""
     env = armed_env(clean_env)
