@@ -661,7 +661,9 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
             if head_tree and not state.tree_approved(head_tree):
                 head_warning = (
                     f"\nWARNING: HEAD's tree ({head_tree}) was never approved by a review. Those commits are folded "
-                    "into the next phase's review and the final cumulative review. last_approved_tree is left untouched.\n"
+                    "into the next phase's review, or -- if no phase is left -- into the unreviewed-work sweep at "
+                    "the next turn's end. last_approved_tree is left untouched, which is what keeps them in scope "
+                    "for either.\n"
                 )
     except commands.Refused as exc:
         raise _ResumeFailure(str(exc)) from exc
@@ -828,7 +830,8 @@ def _publish_successor(*, prev_state: State, snapshot: dict[str, Any], identity:
     if head_tree and head_tree not in (new_data.get("approved_trees") or []):
         head_warning = (
             f"\nWARNING: HEAD's tree ({head_tree}) was never approved by a review. Those commits are folded into "
-            "the next phase's review and the final cumulative review. last_approved_tree is left untouched.\n"
+            "the next phase's review, or -- if no phase is left -- into the unreviewed-work sweep at the next "
+            "turn's end. last_approved_tree is left untouched, which is what keeps them in scope for either.\n"
         )
 
     successor_state = State(repo, session)

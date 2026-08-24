@@ -439,7 +439,51 @@ def test_an_unapproved_head_warns_and_leaves_last_approved_tree_alone(git_repo: 
     assert code == 0, banner
     assert "WARNING" in banner
     assert "never approved" in banner
+    # The warning names only the cover that always exists. Naming the cumulative review here
+    # would be a promise `final_review` can withdraw, on the one banner a user reads when they
+    # have just been told something unreviewed is in their history.
+    assert "final cumulative review" not in banner
+    assert "unreviewed-work sweep" in banner
     assert read_state(env, git_repo, S2)["last_approved_tree"] == last_approved
+
+
+def test_a_same_session_resume_warns_about_an_unapproved_head_the_same_way(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The in-place path builds its own copy of the warning, so it needs its own assertion."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "unreviewed.txt").write_text("slipped in\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "not reviewed")
+
+    code, banner = resume_argv(git_repo, env, S1, [])
+
+    assert code == 0, banner
+    assert "never approved" in banner
+    assert "final cumulative review" not in banner
+    assert "unreviewed-work sweep" in banner
+
+
+def test_the_unapproved_head_warning_names_the_sweep_when_no_phase_is_left(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """report 024: after the last phase there is no "next phase's review" to fold anything into.
+
+    This warning is the one place a user is told their own history holds something no review
+    approved, so it has to name cover that actually exists at that point: the turn-end sweep,
+    which runs from the deliberately untouched ``last_approved_tree`` to whatever the worktree
+    then holds.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, phase=2)
+    (git_repo / "unreviewed.txt").write_text("slipped in\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "not reviewed")
+
+    code, banner = resume(git_repo, env)
+
+    assert code == 0, banner
+    assert "never approved" in banner
+    assert "no phase is left" in banner
+    assert "unreviewed-work sweep" in banner
 
 
 # --------------------------------------------------------------------------

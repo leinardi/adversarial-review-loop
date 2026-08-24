@@ -62,6 +62,10 @@ def new_state_document() -> dict[str, Any]:
         "phase": 1,
         "last_approved_tree": "",
         "approved_trees": [],
+        #: One ``{"phase": n, "commit": sha}`` per phase confirmed by ``posttool``. Evidence of
+        #: phase *progression*, which ``phase`` alone cannot prove -- see
+        #: ``completion.phase_progress_proven``.
+        "phase_commits": [],
         "pending_approved_tree": "",
         "pending_head": "",
         "pending_command": "",
@@ -425,6 +429,19 @@ class State:
             return [str(item) for item in value]
         return []
 
+    def get_array_of_dicts(self, key: str) -> list[dict[str, Any]]:
+        """List-of-objects value, with anything that is not an object dropped.
+
+        Separate from :meth:`get_array`, which stringifies: the callers of this one need the
+        objects back as objects. Non-object members are dropped rather than coerced, so a
+        malformed document degrades to a *shorter* list -- which every caller then fails a
+        length check against, rather than reading a placeholder as a real entry.
+        """
+        value = self.data.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        return []
+
     def update(self, values: Mapping[str, Any] | None = None, /, **kwargs: Any) -> None:
         """Set keys to native Python values.
 
@@ -460,6 +477,42 @@ class State:
 
     def phase_count(self) -> int:
         return len(self.get_array("phases"))
+
+    def phases_match_frozen(self) -> bool:
+        """True when this document's ``phases`` still equals the frozen evidence on disk.
+
+        ``phases.frozen`` is written once by ``set-phases`` (and rewritten wholesale by a
+        granted replan) and is the copy handed to every review as evidence. ``phases`` in the
+        document is the working copy every other check reads. They are written together and
+        must agree; where they do not, the document has been edited by something that was not
+        ``set-phases``, and no count derived from it means anything.
+
+        This exists because ``phase == phase_count() + 1`` -- "every phase was committed" --
+        is only as trustworthy as ``phases`` itself, and AGENTS.md is explicit that
+        ``state.json`` is not a trust boundary. Truncating ``phases`` from two entries to one
+        after the first phase lands satisfies that equality with the second phase never
+        implemented; comparing against the frozen file is what catches it.
+
+        Compared as the **exact bytes** ``set-phases`` writes, rather than by splitting the file
+        back into lines: ``_validate`` rejects only empty and whitespace-only phase
+        descriptions, so a description legitimately containing a newline is accepted and frozen,
+        and parsing lines back out would never reconstruct it. That activation could complete
+        every phase and still be refused here, permanently.
+
+        Read with :meth:`Path.read_bytes`, not :meth:`Path.read_text`, for the same reason at
+        one remove: text mode applies universal-newline translation on the way in, turning a
+        frozen ``\\r\\n`` or ``\\r`` into ``\\n`` and failing the comparison against a
+        description that legitimately contains one. Bytes are what was written (``0600``, UTF-8,
+        ``errors="strict"`` -- matching the ``encode`` below), so bytes are what is compared.
+
+        Fails closed on an unreadable file: a phase list that cannot be checked is not one to
+        disarm on.
+        """
+        try:
+            frozen = (self.act_dir / "phases.frozen").read_bytes()
+        except OSError:
+            return False
+        return frozen == "".join(f"{phase}\n" for phase in self.get_array("phases")).encode("utf-8")
 
     def phase_desc(self, n: int) -> str:
         """Description of phase ``n``, 1-based. Empty when out of range."""

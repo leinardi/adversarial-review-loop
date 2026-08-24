@@ -849,10 +849,40 @@ if start 'stop: the final cumulative review completes the activation'; then
     with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m x' >/dev/null
-    d=$(with_env OCRL_FAKE_MODE=approve stop_decision)
+    d=$(with_env OCRL_FAKE_MODE=approve OCRL_FINAL_REVIEW=true stop_decision)
     assert_eq 'the turn ends' "$d" 'ok'
     assert_eq 'the activation is complete' "$(sget status)" 'COMPLETE'
     assert_eq 'and further commits are ungated' "$(pre Bash 'git commit --amend -m whatever')" 'pass'
+fi
+
+if start 'stop: with final_review at its default off, COMPLETE never calls the reviewer'; then
+    new_case
+    arm_ok && ocrl set-phases --phase 'only phase' >/dev/null 2>&1
+    printf 'x\n' >"$REPO/a.txt"
+    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    commit_now 'phase 1'
+    confirm 'git add -A && git commit -m x' >/dev/null
+    d=$(with_env OCRL_REVIEWER_CMD='/nonexistent/reviewer' stop_decision)
+    assert_eq 'the turn ends' "$d" 'ok'
+    assert_eq 'the activation is complete' "$(sget status)" 'COMPLETE'
+    assert_eq 'final_done_tree is set' "$(sget final_done_tree)" "$(git -C "$REPO" rev-parse 'HEAD^{tree}')"
+    assert_eq 'and further commits are ungated' "$(pre Bash 'git commit --amend -m whatever')" 'pass'
+fi
+
+if start 'finish: the review runs, and can still refuse, with final_review off'; then
+    new_case
+    arm_ok && ocrl set-phases --phase 'only phase' >/dev/null 2>&1
+    printf 'x\n' >"$REPO/a.txt"
+    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    commit_now 'phase 1'
+    confirm 'git add -A && git commit -m x' >/dev/null
+    out=$(with_env OCRL_FAKE_MODE=changes OCRL_FINAL_REVIEW=false ocrl finish 2>&1 || true)
+    assert_contains 'the reviewer ran and refused' "$out" 'did not pass'
+    assert_eq 'so the activation is not complete' "$(sget status)" 'ACTIVE'
+    assert_eq 'and final_done_tree is untouched' "$(sget final_done_tree)" ''
+    out=$(with_env OCRL_FAKE_MODE=approve OCRL_FINAL_REVIEW=false ocrl finish 2>&1)
+    assert_contains 'an approving one completes it' "$out" 'COMPLETE'
+    assert_eq 'through the review, not around it' "$(sget reason)" 'final cumulative review approved (user-invoked finish)'
 fi
 
 if start 'stop: a failing final review blocks rather than completing'; then
@@ -862,7 +892,7 @@ if start 'stop: a failing final review blocks rather than completing'; then
     with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m x' >/dev/null
-    out=$(with_env OCRL_FAKE_MODE=changes stop_gate)
+    out=$(with_env OCRL_FAKE_MODE=changes OCRL_FINAL_REVIEW=true stop_gate)
     assert_contains 'blocked with the findings' "$out" 'Returns success on a failed lookup'
     assert_eq 'not complete' "$(sget status)" 'ACTIVE'
 fi

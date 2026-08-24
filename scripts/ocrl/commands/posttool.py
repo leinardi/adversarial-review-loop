@@ -42,7 +42,8 @@ The phase has NOT advanced. Recover explicitly, in this order:
    normal review gate
 
 Do not commit forward on top of the diverging commit: the per-commit invariant
-is recorded as broken and the final cumulative review will still cover it.
+is recorded as broken, and while it is, the Stop gate will not complete this
+activation at all.
 """
 
 ACTIVATION_MOVED: Final = (
@@ -102,6 +103,20 @@ ALL_PHASES_DONE: Final = (
 All {total} phases are now committed. End your turn — the Stop gate runs the final
 cumulative review over the whole activation (baseline to HEAD) and will come back
 with findings if the phases do not hold together.
+"""
+)
+
+ALL_PHASES_DONE_NO_FINAL_REVIEW: Final = (
+    VERIFIED_HEADER
+    + """
+All {total} phases are now committed. End your turn -- `final_review` is disabled, so the
+Stop gate completes the activation without a cumulative review. Every phase passed the
+per-commit gate before it landed -- which does not always mean a model read it, since an
+unchanged, already-approved or ignore_globs-matched tree passes without a call -- and the
+turn-end sweep still covers anything left uncommitted. What does not run is the cross-phase
+pass, and it is only available *before* the activation completes:
+`/opencode-review-loop:finish` runs one regardless of the key, and once the activation is
+COMPLETE nothing can.
 """
 )
 
@@ -303,7 +318,7 @@ def _verify(check: _Check, *, pending: str) -> NoReturn:
     if not gitsnap.worktree_clean(repo):
         _reconcile(check, detail=DIRTY_AFTERWARDS.format(head=head), bad=head, parent=parent)
 
-    _advance(check, pending=pending)
+    _advance(check, pending=pending, head=head)
 
 
 def _still_current(check: _Check) -> None:
@@ -344,12 +359,26 @@ def _reconcile(check: _Check, *, detail: str, bad: str, parent: str) -> NoReturn
     check.hook.posttool_context(RECONCILE_CONTEXT.format(detail=detail, parent=parent).rstrip("\n"))
 
 
-def _advance(check: _Check, *, pending: str) -> NoReturn:
-    """The commit is exactly what was reviewed: bank the tree and move to the next phase."""
+def _advance(check: _Check, *, pending: str, head: str) -> NoReturn:
+    """The commit is exactly what was reviewed: bank the tree and move to the next phase.
+
+    ``head`` is the commit ``_verify`` just proved: its parent is the approved ``pending_head``,
+    its tree is the approved tree, and the worktree was clean afterwards. Recording it against
+    the phase number builds ``phase_commits``, the only evidence that a phase was *done* rather
+    than merely counted -- ``phase`` is a single integer in a document AGENTS.md is explicit is
+    not a trust boundary, so incrementing it past the work is indistinguishable from doing the
+    work unless something outside that document says otherwise. These SHAs are checked against
+    git history before the no-review completion path may disarm; see
+    ``completion.phase_progress_proven``.
+    """
     state = check.state
     try:
         with state.transaction():
             _still_current(check)
+            # Appended to the reloaded list, never to one read before the lock: two confirmations
+            # racing here would otherwise each write a list missing the other's entry.
+            recorded = [entry for entry in state.get_array_of_dicts("phase_commits") if entry.get("phase") != check.expected.phase]
+            recorded.append({"phase": check.expected.phase, "commit": head})
             updates: dict[str, object] = {
                 "last_approved_tree": pending,
                 "pending_approved_tree": "",
@@ -358,6 +387,7 @@ def _advance(check: _Check, *, pending: str) -> NoReturn:
                 "status": "ACTIVE",
                 "reason": "",
                 "phase": check.expected.phase + 1,
+                "phase_commits": recorded,
                 "failures": 0,
                 "stop_blocks": 0,
             }
@@ -378,7 +408,11 @@ def _advance(check: _Check, *, pending: str) -> NoReturn:
     next_phase = phase + 1
     total = state.phase_count()
     if next_phase > total:
-        check.hook.posttool_context(ALL_PHASES_DONE.format(phase=phase, total=total).rstrip("\n"))
+        # Same `_Check.config` branch as the PAUSE_TARGET_REACHED / NEXT_PHASE choice below:
+        # what the model is told to expect from ending its turn has to match what the Stop
+        # gate will actually do, and with `final_review` off there is no cumulative review.
+        done = ALL_PHASES_DONE if check.config.as_bool("final_review") else ALL_PHASES_DONE_NO_FINAL_REVIEW
+        check.hook.posttool_context(done.format(phase=phase, total=total).rstrip("\n"))
     target = state.get_int("stop_after_phase") or total
     if next_phase > target:
         check.hook.posttool_context(PAUSE_TARGET_REACHED.format(phase=phase, total=total, target=target, next_phase=next_phase).rstrip("\n"))

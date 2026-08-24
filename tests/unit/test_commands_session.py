@@ -22,6 +22,26 @@ def arm(repo: Path, tmp_path: Path, env: dict[str, str], session: str = "s1") ->
     assert proc.returncode == 0, proc.stdout
 
 
+def marking_reviewer(tmp_path: Path, marker: Path) -> Path:
+    """An approving reviewer that leaves proof on disk that it was actually executed.
+
+    ``test_commands_races`` has a richer stub, but it imports *this* module, so a local one is
+    what keeps the dependency pointing one way. All this needs is the marker.
+    """
+    stub = tmp_path / "marking-reviewer.py"
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        f"open({str(marker)!r}, 'w').write('reviewed\\n')\n"
+        "print('Reviewed the whole diff.')\n"
+        "print()\n"
+        "print('<<<OCRL-FINDINGS>>>')\n"
+        "print('VERDICT APPROVED')\n"
+        "print('<<<OCRL-END>>>')\n"
+    )
+    stub.chmod(0o755)
+    return stub
+
+
 def set_phases(repo: Path, env: dict[str, str], *phases: str) -> None:
     argv = ["set-phases"]
     for phase in phases:
@@ -290,6 +310,66 @@ def test_finish_never_completes_on_a_review_that_did_not_approve(
     assert proc.returncode == 1
     assert "the final cumulative review did not pass. The mode stays armed." in proc.stdout
     assert "FINDING severity=" in proc.stdout
+    document = read_state(env, git_repo, "s1")
+    assert document["status"] != "COMPLETE"
+    assert document["final_done_tree"] == ""
+
+
+def test_finish_reviews_even_when_final_review_is_disabled(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Pin: ``finish`` ignores ``final_review`` entirely, and this is what makes it the escape
+    hatch the key's whole design rests on.
+
+    ``session.finish`` calls ``reviewer.execute`` directly rather than routing through
+    ``stop.py::_final``, so the key never comes near it -- no production code was changed to
+    achieve that. This test is the guard on that accident of structure: a later refactor that
+    unified the two paths would make ``final_review=false`` silently disable the *user's*
+    explicit request for a review too, and every message that offers ``finish`` as the way to
+    get one would become a lie. The marker file is the proof the reviewer really ran, rather
+    than the output merely claiming a verdict.
+    """
+    env = armed_env(clean_env, OCRL_FINAL_REVIEW="false")
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    (git_repo / "work.txt").write_text("done\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "phase one")
+    marker = tmp_path / "the-reviewer-ran"
+    env["OCRL_REVIEWER_CMD"] = str(marking_reviewer(tmp_path, marker))
+
+    proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert marker.exists(), "finish must invoke the reviewer whatever final_review says"
+    assert "running the final cumulative review" in proc.stdout
+    document = read_state(env, git_repo, "s1")
+    assert document["status"] == "COMPLETE"
+    assert document["reason"] == "final cumulative review approved (user-invoked finish)"
+
+
+@pytest.mark.parametrize("mode", ["changes", "approve-with-critical"])
+def test_finish_still_refuses_a_failed_review_when_final_review_is_disabled(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    mode: str,
+) -> None:
+    """Pin: the key cannot turn a refusal into a completion.
+
+    The dangerous shape is not "finish skips the review" but "finish runs it, is refused, and
+    completes anyway because nothing downstream is checking". ``final_review=false`` is exactly
+    the configuration under which that would go unnoticed.
+    """
+    env = armed_env(clean_env, OCRL_FAKE_MODE=mode, OCRL_FINAL_REVIEW="false")
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    (git_repo / "work.txt").write_text("done\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "phase one")
+
+    proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 1
+    assert "the final cumulative review did not pass. The mode stays armed." in proc.stdout
     document = read_state(env, git_repo, "s1")
     assert document["status"] != "COMPLETE"
     assert document["final_done_tree"] == ""

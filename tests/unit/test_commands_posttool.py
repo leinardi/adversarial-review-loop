@@ -67,6 +67,28 @@ def test_a_verified_commit_advances_the_phase(git_repo: Path, tmp_path: Path, cl
 
 
 def test_the_last_phase_hands_over_to_the_stop_gate(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Pin: with ``final_review`` on, the hand-over still promises the cumulative review."""
+    env = armed_env(clean_env)
+    env["OCRL_FINAL_REVIEW"] = "true"
+    active(git_repo, tmp_path, env, "the only phase")
+    gated_commit(git_repo, env)
+
+    _, stdout = confirm(git_repo, env, command=COMMIT)
+
+    message = context(stdout)
+    assert "All 1 phases are now committed" in message
+    assert "the Stop gate runs the final" in message
+    assert read_state(env, git_repo, SESSION)["phase"] == 2
+
+
+def test_the_last_phase_promises_no_review_when_final_review_is_disabled(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The default is off, and the hand-over must not promise a review that will never run.
+
+    Telling the model to end its turn *because* a cumulative review follows, when the Stop
+    gate is about to complete the activation without one, is the difference between an
+    informed hand-over and a silent completion. The remedy is named while it still exists:
+    once the activation is COMPLETE, `finish` and `resume` both refuse it forever.
+    """
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env, "the only phase")
     gated_commit(git_repo, env)
@@ -75,6 +97,14 @@ def test_the_last_phase_hands_over_to_the_stop_gate(git_repo: Path, tmp_path: Pa
 
     message = context(stdout)
     assert "All 1 phases are now committed" in message
+    assert "`final_review` is disabled" in message
+    assert "the Stop gate runs the final" not in message
+    # Claims only what the gate can back: a per-commit *gate* pass, not a model review. An
+    # unchanged, already-approved or ignore_globs-matched tree passes without a call, and
+    # COMPLETE_UNREVIEWED says so -- the hand-over that precedes it must not say more.
+    assert "passed the\nper-commit gate" in message
+    assert "reviewed individually" not in message
+    assert "/opencode-review-loop:finish" in message
     assert read_state(env, git_repo, SESSION)["phase"] == 2
 
 
@@ -139,6 +169,11 @@ def test_an_amend_instead_of_a_commit_enters_reconcile(git_repo: Path, tmp_path:
     message = context(stdout)
     assert "not the tree that was reviewed" in message
     assert "That is an amend or a rewrite" in message
+    # The recovery text promises only what holds with `final_review` either way: RECONCILE is
+    # refused by `_by_status` before the Stop gate's completion path is reached at all, so the
+    # activation cannot complete while it stands -- with or without a cumulative review.
+    assert "the Stop gate will not complete this" in message
+    assert "final cumulative review" not in message
     document = read_state(env, git_repo, SESSION)
     assert document["status"] == "RECONCILE"
     assert document["phase"] == 1

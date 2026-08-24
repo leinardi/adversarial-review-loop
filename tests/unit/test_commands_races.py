@@ -289,8 +289,8 @@ def test_finish_refuses_when_the_worktree_changes_during_the_review(
     proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
 
     assert proc.returncode == 1, proc.stdout
-    assert f"the final review approved tree {reviewed}" in proc.stdout
-    assert "content changed while the review was running" in proc.stdout
+    assert f"tree {reviewed} was about to be recorded as complete" in proc.stdout
+    assert "content changed in the meantime" in proc.stdout
     assert "further commits are ungated" not in proc.stdout
     document = read_state(env, git_repo, "s1")
     assert document["status"] != "COMPLETE"
@@ -312,7 +312,7 @@ def test_finish_refuses_when_the_activation_is_replaced_during_the_review(
     proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
 
     assert proc.returncode == 1, proc.stdout
-    assert "re-armed while the final review was running" in proc.stdout
+    assert "re-armed while completion was pending" in proc.stdout
     document = read_state(env, git_repo, "s1")
     assert document["status"] == "ARMED"
     assert document["final_done_tree"] == ""
@@ -359,7 +359,7 @@ def test_finish_refuses_when_the_worktree_changes_while_it_waits_for_the_lock(
     stdout, _ = worker.communicate()
 
     assert code == 1, stdout
-    assert "content changed while the review was running" in stdout
+    assert "content changed in the meantime" in stdout
     assert "further commits are ungated" not in stdout
     document = read_state(env, git_repo, "s1")
     assert document["status"] != "COMPLETE"
@@ -442,8 +442,12 @@ def test_a_stale_finish_names_the_recovery_the_other_gates_name(
 
 
 def test_finish_still_completes_when_nothing_interferes(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    """The guards must not be a blanket refusal: the ordinary path still completes."""
-    env = armed_env(clean_env)
+    """The guards must not be a blanket refusal: the ordinary path still completes.
+
+    ``final_review=true`` here only makes the intent explicit -- ``finish`` always invokes the
+    reviewer regardless of the key; see Phase 5's pins for that guarantee itself.
+    """
+    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true")
     armed_and_committed(git_repo, tmp_path, env)
     env["OCRL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
 
