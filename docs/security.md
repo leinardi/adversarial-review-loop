@@ -79,13 +79,45 @@ Whether a `Bash` command is allowed to run is decided by a deny-list of raw shel
 before anything else runs) plus a real bash-grammar parser (a vendored copy of `bashlex`)
 over whatever's left. The deny-list runs first and is the actual security boundary; the
 parser only turns the small surviving language into words correctly — it doesn't widen what
-the gate accepts. Two things make a bypass here recoverable rather than catastrophic:
+the gate accepts. Two things make a bypass here recoverable rather than catastrophic — but
+only the first of them is unconditional:
 
 - `PostToolUse` independently re-verifies `HEAD^{tree}` against the approved tree and a
-  clean worktree after every commit-shaped command runs. A parser bypass produces a
-  *detected, recoverable* bad commit (`RECONCILE`) — not a silent unreviewed one.
+  clean worktree — but only on the *approved* path, where a pending approval exists and the
+  command matches the one that was approved. A parser bypass has no pending approval to
+  bind against, so it takes the other path, which asks a single, much weaker question: is
+  `HEAD^{tree}` in the set of trees this activation has approved? The guarantee is
+  therefore narrower than "bypasses are caught", and worth stating exactly: **a bypass
+  whose HEAD tree is not in that set is detected and reported, and no configuration key
+  can suppress that.**
+
+  Two gaps sit outside it. A bypass landing a tree *already* in the set returns silently —
+  no parent check, no cleanliness check — and an approved commit that failed still leaves
+  its tree in the set, so a rewrite onto it passes unremarked. And membership in that set
+  is not proof a model reviewed anything: the baseline tree is in it, and so is any tree
+  where `ignore_globs` matched everything.
+
+  Whether it is also *recoverable* depends on the activation's status: an active one enters
+  `RECONCILE`, while one that is already finished, escalated, resumed or expired is reported
+  and left alone, since those must not be reopened. That last case is reachable by config —
+  lowering `ttl_hours` between the gate and the commit makes the activation `STALE` — so
+  detection is unconditional, recovery is not.
 - The final cumulative review covers the whole activation's end state regardless of what
-  happened per commit.
+  happened per commit — **when `final_review` is enabled, which since 0.6.0 it is not by
+  default.** On a default install, the deny-list plus `PostToolUse` verification is the
+  whole of the Stop path's protection, and the end-state pass exists only if someone asks
+  for it: `final_review true`, or `/opencode-review-loop:finish`. `finish` ignores
+  `final_review` — but only that key; it still has to pass the ordinary finishability
+  checks, and those are config-reachable too (a `ttl_hours` low enough to make the
+  activation `STALE` refuses `finish` before any review runs). Once an activation is
+  `COMPLETE`, both routes are closed for good.
+
+`final_review` is deliberately an ordinary key: repository config may set it, exactly as it
+may set every other key. That is not a new capability. A repository config can already set
+`ignore_globs: ["**"]`, which bypasses *every* per-commit review — strictly worse, and
+documented below. What `final_review` gives up is the cross-phase view (a later phase
+quietly undoing an earlier one, dead ends, interface drift) and the second layer above; what
+it cannot do is approve anything, reach `PostToolUse` or the deny-list, or affect `finish`.
 
 ## `state.json` is not a trust boundary
 
