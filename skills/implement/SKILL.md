@@ -58,6 +58,8 @@ The block above is the output of arming, which ran **before you had a turn**. It
 
 3. **Freeze the phases** by running exactly the `set-phases` command printed above, one `--phase "…"` per phase, in plan order. Until you do, every file mutation is denied — that is expected, not a malfunction.
 
+   **Never probe this command with placeholder or shortened phases to check the syntax works.** The freeze is one-shot: the first successful `set-phases` call locks in whatever list it was given, and a second call is refused outright ("the phase list is already frozen"). If a real call errors, fix the invocation and re-run it with the real phases — don't substitute a throwaway list to test the mechanics first. If a placeholder list does get frozen by mistake and no phase has been committed yet, recover with `resume --session <id> --replan` followed by the real `set-phases` call — see AGENTS.md, "the replan fence".
+
 4. **Implement phase 1**, then commit it:
 
    ```
