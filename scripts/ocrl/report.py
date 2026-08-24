@@ -53,8 +53,50 @@ def report_path(act_dir: Path, target: Target, seq: str, verdict: str) -> Path:
     return act_dir / "reports" / f"{seq}-{target.label}-{verdict.lower()}.md"
 
 
+def _session_line(review: Review) -> str:
+    """``- opencode session: `ses_…` (round N[, continued])``, or "" when there is none."""
+    if not review.session:
+        return ""
+    suffix = ", continued" if review.round > 1 else ""
+    return f"- opencode session: `{review.session}` (round {review.round}{suffix})\n"
+
+
+def _findings_and_raw(review: Review, *, heading_level: str = "##") -> str:
+    out = [f"\n{heading_level} Blocking findings\n\n"]
+    out.append(f"```\n{review.findings}```\n" if review.findings else "(none)\n")
+    out.append(f"\n{heading_level} Raw reviewer output\n\n")
+    out.append("````\n")
+    out.append(_raw_text(review.raw))
+    out.append("\n````\n")
+    return "".join(out)
+
+
+def _invocation_section(review: Review, *, heading: str) -> str:
+    """One invocation's own verdict, session, findings and transcript, under ``## heading``.
+
+    Used only for the two-invocation case (``render_report`` inlines the single-invocation
+    shape directly, unchanged, so an ordinary report's headings are exactly what they always
+    were).
+    """
+    out = [f"\n## {heading}\n\n"]
+    out.append(f"- verdict: **{review.verdict or 'UNKNOWN'}**\n")
+    out.append(_session_line(review))
+    if review.error:
+        out.append(f"- gate note: {review.error}\n")
+    out.append(_findings_and_raw(review, heading_level="###"))
+    return "".join(out)
+
+
 def render_report(review: Review, target: Target, *, seq: str, config: Config) -> str:
-    """The stored report's full text, raw reviewer output included verbatim."""
+    """The stored report's full text, raw reviewer output included verbatim.
+
+    When ``review.confirmed`` is set, ``review`` is the cold confirmation and
+    ``review.confirmed`` the continued round it exists to check -- see ``reviewer.execute``'s
+    docstring for the invariant this reflects. Both get their own verdict, findings, session
+    id, round and raw transcript, under headings that say which is which, because the cold
+    verdict recorded at the top is the one the gate acted on and a reader has to be able to
+    tell that apart from the continued round that triggered it.
+    """
     verdict = review.verdict or "UNKNOWN"
     variant = config.as_str("variant")
 
@@ -65,16 +107,23 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
     out.append(f"- model: `{config.as_str('model')}`{f' (variant `{variant}`)' if variant else ''}\n")
     out.append(f"- block_severity: `{config.as_str('block_severity')}`\n")
     out.append(f"- generated: {_timestamp()}\n")
+    if review.confirmed is None:
+        out.append(_session_line(review))
     if review.error:
         out.append(f"- gate note: {review.error}\n")
 
-    out.append("\n## Blocking findings\n\n")
-    out.append(f"```\n{review.findings}```\n" if review.findings else "(none)\n")
-
-    out.append("\n## Raw reviewer output\n\n")
-    out.append("````\n")
-    out.append(_raw_text(review.raw))
-    out.append("\n````\n")
+    if review.confirmed is not None:
+        continued = review.confirmed
+        out.append(
+            "\nThis phase's session was continued and independently returned "
+            f"{continued.verdict or 'UNKNOWN'}. A continued session's approval is never acted "
+            "on by itself: one more, cold review of the same bundle decided, and that cold "
+            "verdict -- the one recorded at the top of this report -- is the one acted on.\n"
+        )
+        out.append(_invocation_section(continued, heading="Continued round"))
+        out.append(_invocation_section(review, heading="Cold confirmation (the verdict acted on)"))
+    else:
+        out.append(_findings_and_raw(review))
     return "".join(out)
 
 

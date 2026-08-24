@@ -54,7 +54,7 @@ def config_with(**overrides: object) -> Config:
     return Config({**ocrl_config.DEFAULTS, **overrides})
 
 
-def a_review(**overrides: str) -> Review:
+def a_review(**overrides: object) -> Review:
     review = Review(
         verdict="CHANGES_REQUIRED",
         findings="FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n",
@@ -135,6 +135,68 @@ def test_output_that_is_not_valid_utf8_is_kept_byte_for_byte(act_dir: Path, tmp_
 def test_a_missing_raw_file_does_not_stop_the_report(act_dir: Path, tmp_path: Path) -> None:
     path = report.store(a_review(raw=str(tmp_path / "gone")), a_target(), seq="001", act_dir=act_dir, config=config_with())
     assert path.is_file()
+
+
+# --------------------------------------------------------------------------
+# Session continuity
+# --------------------------------------------------------------------------
+
+
+def test_a_continued_review_shows_its_session_and_round(act_dir: Path) -> None:
+    review = a_review(session="ses_abc12345", round=2)
+    text = report.store(review, a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
+    assert "- opencode session: `ses_abc12345` (round 2, continued)\n" in text
+
+
+def test_a_fresh_sessions_first_round_is_not_called_continued(act_dir: Path) -> None:
+    review = a_review(session="ses_abc12345", round=1)
+    text = report.store(review, a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
+    assert "- opencode session: `ses_abc12345` (round 1)\n" in text
+    assert "continued" not in text
+
+
+def test_a_cold_review_shows_no_session_line(act_dir: Path) -> None:
+    text = report.store(a_review(session=""), a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
+    assert "opencode session" not in text
+
+
+def test_both_verdicts_are_rendered_when_a_continued_approval_was_cold_confirmed(act_dir: Path, tmp_path: Path) -> None:
+    """The cold-approval invariant's report side: a reader must be able to tell the acted-on
+    verdict apart from the continued round that triggered it."""
+    continued_raw = tmp_path / "continued.out"
+    continued_raw.write_text("the continued round's own transcript\n")
+    cold_raw = tmp_path / "cold.out"
+    cold_raw.write_text("the cold confirmation's own transcript\n")
+
+    continued = a_review(
+        verdict="APPROVED",
+        session="ses_abc12345",
+        round=3,
+        raw=str(continued_raw),
+        findings="",
+        all_findings="",
+    )
+    cold = a_review(
+        verdict="CHANGES_REQUIRED",
+        session="",
+        round=0,
+        raw=str(cold_raw),
+        confirmed=continued,
+    )
+
+    text = report.store(cold, a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
+
+    assert "- verdict (recomputed by the gate): **CHANGES_REQUIRED**\n" in text
+    assert "## Continued round" in text
+    assert "## Cold confirmation (the verdict acted on)" in text
+    assert "ses_abc12345" in text
+    assert "(round 3, continued)" in text
+    assert "the continued round's own transcript" in text
+    assert "the cold confirmation's own transcript" in text
+    assert "the verdict acted on" in text
+    # The top-level session line is only for a single-invocation report -- the two-invocation
+    # case tells the session story inside the labelled sections instead.
+    assert text.split("## Continued round")[0].count("opencode session") == 0
 
 
 def test_the_report_is_private(act_dir: Path) -> None:

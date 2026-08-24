@@ -142,6 +142,42 @@ before its content is trusted for anything, including what gets shown to the rev
 failure here is a hard escalation to `needs-human`, never a silent skip or a fallback to a
 different file.
 
+## Reviewer session continuity does not widen what `state.json` can do
+
+Within one review label (`phase3`, or `final`) consecutive reviews continue the same
+OpenCode session where one can be safely found and claimed, rather than starting cold every
+round — the `reviewer_session` pointer that makes this possible is itself a value read out of
+`state.json`, which the previous section already establishes is not a trust boundary. So the
+pointer is held to the same standard: it is never trusted to *authorize* anything. Concretely,
+**an approving verdict must come from a session whose entire content the gate created.** When
+a continued review returns `APPROVED`, the gate does not act on it — it runs one more review
+of the same bundle in a cold session (no `-s`, evidence built from git, no memory of anything
+the continued session said), and that cold review's verdict is the one that counts. The
+stricter of the two always wins.
+
+What that buys: a tampered `reviewer_session.id` can make the reviewer hold extra, possibly
+misleading context and produce a verdict — but that verdict can never be an approval by
+itself. At worst it denies, which is a stronger failure mode than most of this document's
+findings (a denial-of-service, not a wrong grant), and the user's answer to it is
+`/opencode-review-loop:accept`. Every approval in the system remains exactly as trustworthy as
+it was before continuity existed.
+
+Two costs worth naming so neither is quietly "optimised away" by someone who has not read why
+it is there:
+
+- **One extra model call per phase**, on the approving round only — the price of the
+  invariant above. Rounds 2..n-1 of a phase that is still turning up findings are unaffected;
+  a phase that approves on its first, cold review costs exactly what it cost before continuity
+  existed.
+- **Injection persistence, bounded to one phase.** A poisoned diff used to influence exactly
+  one review; with continuity it can influence every remaining round of that phase, since the
+  reviewer's session may hold it in context across rounds. The label-keyed reset (a new phase,
+  or `final`, always starts a fresh session) bounds the blast radius to one phase, and the
+  cold-approval invariant above means the poisoned context can only ever cause a *denial*, not
+  an approval it should not have gotten. A review loop that will not converge — whether from
+  injected content or an ordinary disagreement — is exactly what
+  `/opencode-review-loop:accept` exists to break out of.
+
 ## Repo config is attacker-controlled input, full stop
 
 `.opencode-review-loop.json`, when present, lives inside the repository under review — the

@@ -12,6 +12,19 @@ markers or emits a verdict the gate does not recognise -- each maps to ``OP_FAIL
 ``NEEDS_HUMAN``. There is no path from an operational failure to ``APPROVED``, and the
 reviewer's own verdict is advisory: an actionable finding at or above ``block_severity``
 blocks regardless of what the reviewer concluded.
+
+**Session continuity, and the invariant it is built around.** Within one review label
+(``phase3``, or ``final``) consecutive reviews continue the same OpenCode session where one
+can be found and safely claimed (``session_ref``); a resume or a new phase starts fresh. The
+session id travels through ``state.json``, which ``AGENTS.md`` is explicit is not a trust
+boundary -- so it must never be able to *authorize* anything. It cannot: **an approving
+verdict must come from a session whose entire content the gate created.** When a continued
+review returns ``APPROVED``, ``execute`` does not act on it. It runs one more review of the
+same bundle in a cold session -- no ``-s``, evidence built from git -- and that cold review's
+verdict is the one every caller acts on. The stricter of the two always wins. A tampered
+session pointer can therefore make the reviewer hold extra context and produce a verdict that
+cannot be an approval; at worst it denies, which the user answers with
+``/opencode-review-loop:accept``. See ``docs/security.md`` for the full argument.
 """
 
 from __future__ import annotations
@@ -22,13 +35,14 @@ import difflib
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, Final
+from typing import IO, TYPE_CHECKING, Any, Final
 
 import ocrl
 from ocrl import planrev, report
@@ -36,9 +50,12 @@ from ocrl.atomic import FILE_MODE, ensure_private_dir
 from ocrl.config import Config, severity_rank, threshold_rank
 from ocrl.errors import OcrlError
 from ocrl.gitsnap import git_run
-from ocrl.paths import state_root
+from ocrl.paths import sha256_hex, state_root
 from ocrl.state import State
-from ocrl.util import log
+from ocrl.util import log, now
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle broken for the type checker only
+    from ocrl.commands import hooks
 
 __all__ = [
     "BundleError",
@@ -49,17 +66,28 @@ __all__ = [
     "PlanEvidenceCorrupted",
     "Review",
     "ReviewerFailed",
+    "SessionRef",
     "Target",
     "build_bundle",
     "byte_lines",
+    "capture_session",
     "execute",
     "invoke",
     "parse",
     "permission",
     "review_argv",
     "run_bounded",
+    "session_ref",
     "split_lines_by_size",
 ]
+
+#: How long a `session list` call is given. Metadata, not a model call -- bounded well below
+#: the review timeout.
+SESSION_LIST_TIMEOUT_SEC: Final = 60
+
+#: A canonical OpenCode session id. Matched before a stored or listed id is ever compared,
+#: joined, or shown to a reviewer -- see `_pointer_structurally_usable` and `capture_session`.
+_SESSION_ID_RE: Final = re.compile(r"^ses_[A-Za-z0-9]{8,64}$")
 
 #: The contract the reviewer prompts demand. Both must be present or the output is refused.
 FINDINGS_MARKER: Final = "<<<OCRL-FINDINGS>>>"
@@ -199,12 +227,21 @@ class Target:
 
 @dataclass(frozen=True)
 class Invocation:
-    """Where one run of the reviewer reads its bundle and writes its answer."""
+    """Where one run of the reviewer reads its bundle and writes its answer.
+
+    ``session_id`` is "" for a fresh run (``--title`` is passed) or a session to continue
+    (``-s``, no ``--title``) -- see ``review_argv``. ``capture`` is only ever true for a fresh
+    run whose session, once it exists, is eligible to become the phase's continuity pointer;
+    a cold confirmation is always ``capture=False``, and so is a fresh run reached because the
+    real pointer was claimed by a live owner elsewhere. See ``session_ref``.
+    """
 
     bundle_dir: Path
     prompt_file: Path
     title: str
     out_path: Path
+    session_id: str = ""
+    capture: bool = True
 
 
 @dataclass(frozen=True)
@@ -234,6 +271,39 @@ class Review:
     report: str = ""
     #: Path of the raw reviewer output.
     raw: str = ""
+    #: The OpenCode session this review ran in, "" for a cold one.
+    session: str = ""
+    #: Which round of that session this was. 0 for a cold confirmation -- it is not a round
+    #: of the continued session, and is never stored as one (see ``session_ref``).
+    round: int = 0
+    #: Set only on the *returned* ``Review`` of an approving continued round: the continued
+    #: verdict that triggered the cold confirmation, kept so the report can show both. The
+    #: returned review is always the cold one -- see ``execute``'s docstring for why that is
+    #: the verdict every caller must act on.
+    confirmed: Review | None = None
+
+
+@dataclass(frozen=True)
+class SessionRef:
+    """What ``session_ref`` decided this review should do about session continuity.
+
+    ``session_id`` is "" for a fresh run. ``claim_id`` is only meaningful when ``session_id``
+    is set -- it is what ``execute`` must present back, unchanged, to release the claim or
+    store the round result; a mismatch at that point means this call no longer owns the
+    pointer and the write is skipped (see the module docstring, "the claim is atomic, owned,
+    and tri-state"). ``capturable`` is only meaningful when ``session_id`` is "": whether a
+    fresh run's session, once it exists, may become the phase's continuity pointer. ``round``
+    is the round this invocation represents, needed before the review even runs (it goes into
+    ``range.txt``) -- 1 for any fresh run, one past the stored round for a continued one.
+
+    A ``session_id`` here is a hint the reviewer may hold extra context, never an
+    authorization: see the module docstring, "the cold-approval invariant".
+    """
+
+    session_id: str
+    claim_id: str
+    capturable: bool
+    round: int
 
 
 # --------------------------------------------------------------------------
@@ -395,11 +465,13 @@ def _manual_accepts_section(state: State) -> str:
     return "".join(out)
 
 
-def _range_text(target: Target, *, state: State, warnings: str, revisions: list[tuple[dict[str, Any], bytes]]) -> str:
+def _range_text(target: Target, *, state: State, warnings: str, revisions: list[tuple[dict[str, Any], bytes]], round_number: int = 0) -> str:
     """The bundle's ``range.txt``: what is under review, and what is *not* represented."""
     repo, base, head = target.repo, target.base, target.head
     out: list[str] = ["# Review range\n\n"]
     out.append(f"scope: {target.scope}\n")
+    if round_number:
+        out.append(f"round: {round_number}\n")
     out.append(f"base_tree: {base}\n")
     out.append(f"head_tree: {head}\n")
     out.append(f"repository: {repo}\n")
@@ -557,13 +629,20 @@ def _run_verify(repo: str, command: str, dest: Path) -> None:
     _write_private(dest / "verify.txt", b"".join([_encode(f"$ {command}\n\n"), tail, _encode(f"\n[exit status: {status}]\n")]))
 
 
-def build_bundle(target: Target, dest: Path, *, state: State, config: Config, warnings: str = "") -> None:
+def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evidence per param; bundling them would be an artificial object
+    target: Target, dest: Path, *, state: State, config: Config, warnings: str = "", round_number: int = 0
+) -> None:
     """Assemble everything the reviewer is shown, under ``dest``.
 
     Raises :class:`BundleTooLarge` past ``hard_diff_ceiling``, :class:`PlanEvidenceCorrupted`
     when a recorded plan revision cannot be verified, and :class:`BundleError` when the diff
     itself cannot be produced. All three are refusals to review, never a review that found
     nothing.
+
+    ``round_number`` is disclosed in ``range.txt`` (0 omits the line -- a cold confirmation's
+    bundle says nothing about rounds, since it is not part of any session). Bundle content is
+    otherwise identical for a continued and a cold call, which is what lets the cold
+    confirmation reuse this same bundle rather than building a second one.
     """
     shutil.rmtree(dest, ignore_errors=True)
     ensure_private_dir(dest, root=state_root())
@@ -589,7 +668,7 @@ def build_bundle(target: Target, dest: Path, *, state: State, config: Config, wa
     except planrev.EvidenceCorrupted as exc:
         raise PlanEvidenceCorrupted(str(exc)) from exc
 
-    range_text = _range_text(target, state=state, warnings=warnings, revisions=revisions)
+    range_text = _range_text(target, state=state, warnings=warnings, revisions=revisions, round_number=round_number)
     _write_private(dest / "range.txt", _encode(range_text))
 
     # One attachment per revision, numbered exactly as `range.txt`'s disclosure names them --
@@ -629,22 +708,48 @@ def _revision_sort_key(path: Path) -> int:
     return int(match.group(1)) if match else -1
 
 
-def review_argv(repo: str, bundle_dir: Path, title: str, *, config: Config) -> list[str]:
+def _isolation_argv(config: Config) -> list[str]:
+    """The flags that keep any reviewer-adjacent OpenCode call structurally isolated.
+
+    Shared by :func:`review_argv` and :func:`_list_sessions`, so a unit test can assert the
+    two cannot drift apart -- see that test's own docstring for why this matters: a
+    ``session list`` call missing these flags would load the repository under review's own
+    OpenCode plugins and project config while running *from inside* that repository, which is
+    exactly the boundary the reviewer's own isolation exists to hold.
+    """
+    return ["--pure"] if config.as_bool("pure") else []
+
+
+def _isolation_env(config: Config, base: dict[str, str]) -> dict[str, str]:
+    """``base``, plus the isolation env vars, iff configured. Never mutates ``base``."""
+    env = dict(base)
+    if config.as_bool("disable_project_config"):
+        env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+    return env
+
+
+def review_argv(repo: str, bundle_dir: Path, title: str, *, config: Config, session_id: str = "") -> list[str]:
     """The flags that follow the prompt.
 
     The prompt is **not** routed through here. ``-f`` is a yargs *array* option, so it keeps
     swallowing arguments: a prompt placed after the attachments would be read as one more
     attachment path. It goes immediately after ``run`` instead.
+
+    ``--title`` and ``-s`` are mutually exclusive: ``-s <session_id>`` continues a remembered
+    session and is passed alone; a fresh run passes ``--title`` instead, and only a fresh run
+    -- re-passing a newer-sequence title on a continuation would rename the row the stored id
+    was matched against. See ``session_ref``.
     """
-    argv: list[str] = []
-    if config.as_bool("pure"):
-        argv.append("--pure")
+    argv: list[str] = [*_isolation_argv(config)]
     argv += ["--dir", repo]
     argv += ["-m", config.as_str("model")]
     variant = config.as_str("variant")
     if variant:
         argv += ["--variant", variant]
-    argv += ["--title", title]
+    if session_id:
+        argv += ["-s", session_id]
+    else:
+        argv += ["--title", title]
     argv += ["-f", str(bundle_dir / "range.txt")]
     for chunk in sorted(bundle_dir.glob("changes.*.diff")):
         argv += ["-f", str(chunk)]
@@ -659,9 +764,13 @@ def permission(bundle_dir: Path) -> str:
     """``OPENCODE_PERMISSION`` for a structurally read-only reviewer.
 
     The bundle lives outside the repository (Rule 3), so ``external_directory`` is denied
-    everywhere except the bundle itself. Patterns are last-match-wins, which is why the
-    broad deny is written first -- and why the key order below is load-bearing rather than
-    cosmetic.
+    everywhere except the bundles root -- ``bundle_dir.parent``, not the activation directory,
+    which also holds ``state.json``, ``plan.frozen.md`` and the reports. Widened from a single
+    bundle to the whole bundles root so a continued reviewer can re-open paths it remembers
+    from an earlier round's bundle; every one of them is still gate-generated evidence only,
+    never model output -- see the module docstring, "bundles/ holds gate-generated evidence
+    only". Patterns are last-match-wins, which is why the broad deny is written first -- and
+    why the key order below is load-bearing rather than cosmetic.
     """
     document = {
         "*": "deny",
@@ -669,7 +778,7 @@ def permission(bundle_dir: Path) -> str:
         "grep": "allow",
         "glob": "allow",
         "list": "allow",
-        "external_directory": {"*": "deny", f"{bundle_dir}/**": "allow"},
+        "external_directory": {"*": "deny", f"{bundle_dir.parent}/**": "allow"},
     }
     return json.dumps(document, separators=(",", ":"), ensure_ascii=False)
 
@@ -775,14 +884,20 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
 
     if reviewer_cmd:
         env["OCRL_BUNDLE_DIR"] = str(run.bundle_dir)
+        if run.session_id:
+            env["OCRL_SESSION_ID"] = run.session_id
         command = [reviewer_cmd, str(run.bundle_dir), str(run.prompt_file)]
     else:
         # `$(cat …)` strips trailing newlines; the prompt is a fixed file in the plugin.
         message = _decode(run.prompt_file.read_bytes()).rstrip("\n")
+        env = _isolation_env(config, env)
         env["OPENCODE_PERMISSION"] = permission(run.bundle_dir)
-        if config.as_bool("disable_project_config"):
-            env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
-        command = ["opencode", "run", message, *review_argv(target.repo, run.bundle_dir, run.title, config=config)]
+        command = [
+            "opencode",
+            "run",
+            message,
+            *review_argv(target.repo, run.bundle_dir, run.title, config=config, session_id=run.session_id),
+        ]
 
     status = _capture_to_file(command, env, run.out_path, timeout_sec)
     if status in _TIMEOUT_STATUSES:
@@ -971,8 +1086,487 @@ def parse(out_path: Path, *, config: Config) -> Review:
 
 
 # --------------------------------------------------------------------------
+# Session continuity
+#
+# Everything here is an optimisation hint, never an authorization -- see the module
+# docstring's "cold-approval invariant". Every failure mode in this section is `log(...)`
+# plus a fresh, uncaptured session; nothing here may ever raise into a review.
+# --------------------------------------------------------------------------
+
+
+def _as_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _reclaim_after(config: Config) -> int:
+    """How long a claim is honoured before it is considered abandoned.
+
+    ``timeout_sec`` alone is not enough: the claim is taken *before* ``build_bundle`` runs,
+    and ``verify_cmd`` -- run inside the bundle build, before the reviewer is ever invoked --
+    can itself take up to :data:`VERIFY_TIMEOUT_SEC`. A grace window of ``timeout_sec + 60``
+    can then expire while the legitimate owner is still inside its own, still-running
+    ``verify_cmd`` plus review, and a second review would reclaim and invoke the same session
+    the first is still talking to -- the exact interleaving the claim exists to prevent,
+    arriving through a window the grace period did not account for.
+    """
+    return config.as_int("timeout_sec") + VERIFY_TIMEOUT_SEC + 60
+
+
+def _claim_is_live(pointer: dict[str, Any], config: Config) -> bool:
+    """Is ``pointer`` held by an owner who has not yet had time to finish?
+
+    A pointer carrying one of ``claimed_at``/``claim_id`` without the other is unusable --
+    they are written together and cleared together, so a half-true pair means something else
+    is already wrong with it. Not live, not trusted.
+    """
+    claimed_at = pointer.get("claimed_at")
+    claim_id = pointer.get("claim_id")
+    if not (claimed_at and claim_id):
+        return False
+    return (now() - _as_int(claimed_at)) <= _reclaim_after(config)
+
+
+def _unique_title(state: State, target: Target, label: str) -> str:
+    """A ``--title`` unique enough that a listing match is reliable. See ``capture_session``."""
+    base = f"review-loop phase {target.phase}" if target.is_phase else "review-loop final review"
+    fingerprint = sha256_hex(str(state.act_dir))[:8]
+    return f"{base} [{fingerprint}/{label}]"
+
+
+def _same_repo(directory: object, repo: str) -> bool:
+    """Canonicalised on both sides, so a symlinked path reads as neither a false mismatch
+    nor a false match."""
+    return isinstance(directory, str) and os.path.realpath(directory) == os.path.realpath(repo)
+
+
+def _list_sessions(target: Target, *, config: Config, act_dir: Path, seq: str) -> list[Any] | None:
+    """``opencode session list --format json -n 50``, parsed -- or ``None`` on anything else.
+
+    Written to ``act_dir/tmp/session-list-<seq>.json`` and deleted in a ``finally``, never
+    inside the bundle: the bundle is what a continued reviewer can read back
+    (``permission``), and this listing names every other OpenCode session in the repository --
+    ids, titles and all, including the user's own unrelated work.
+
+    ``OCRL_SESSION_LIST_CMD`` is the test seam, parallel to ``OCRL_REVIEWER_CMD``: a stand-in
+    that writes the same JSON shape to stdout. When the reviewer seam is active and this one
+    is not, the call is skipped entirely rather than reaching a real ``opencode`` -- exactly
+    like every other reviewer-adjacent call under that seam.
+    """
+    reviewer_cmd = os.environ.get("OCRL_REVIEWER_CMD", "")
+    session_list_cmd = os.environ.get("OCRL_SESSION_LIST_CMD", "")
+    if reviewer_cmd and not session_list_cmd:
+        return None
+
+    if session_list_cmd:
+        argv = [session_list_cmd]
+        env = dict(os.environ)
+    else:
+        argv = ["opencode", *_isolation_argv(config), "session", "list", "--format", "json", "-n", "50"]
+        env = _isolation_env(config, dict(os.environ))
+
+    listing_path = act_dir / "tmp" / f"session-list-{seq}.json"
+    try:
+        ensure_private_dir(listing_path.parent, root=state_root())
+        fd = os.open(listing_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, FILE_MODE)
+        with os.fdopen(fd, "wb") as sink:
+            status = run_bounded(argv, stdout=sink, timeout_sec=SESSION_LIST_TIMEOUT_SEC, env=env, cwd=target.repo)
+        if status != 0:
+            log(f"session list exited with status {status}")
+            return None
+        data = json.loads(listing_path.read_bytes())
+        if not isinstance(data, list):
+            log("session list output was not a JSON list")
+            return None
+    except Exception as exc:
+        log(f"session list failed: {exc}")
+        return None
+    finally:
+        listing_path.unlink(missing_ok=True)
+    return data
+
+
+def _pointer_structurally_usable(pointer: dict[str, Any], state: State, target: Target) -> bool:
+    """The cheap checks -- no subprocess -- that decide whether a listing verify is worth
+    running at all."""
+    session_id = pointer.get("id")
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+        return False
+    if pointer.get("label") != target.label:
+        return False
+    if pointer.get("revisions") != len(state.data.get("plan_revisions") or []):
+        return False
+    return pointer.get("generation") == state.get_int("activation_generation")
+
+
+def _exactly_one_match(rows: list[Any], *, session_id: str, title: object, created: object, repo: str) -> bool:
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("id") == session_id
+        and row.get("title") == title
+        and row.get("created") == created
+        and _same_repo(row.get("directory"), repo)
+    ]
+    return len(matches) == 1
+
+
+def _try_claim(state: State, *, target: Target, session_id: str, config: Config) -> tuple[str | None, int]:
+    """Atomically claim the pointer for ``session_id``, re-verified fresh under the lock.
+
+    Re-checks *identity* (the id, and every structural field :func:`_pointer_structurally_usable`
+    covers) against a fresh reload rather than comparing the whole pointer dict against a
+    snapshot taken before the (slow) listing verify -- a snapshot comparison would treat any
+    change at all as "moved", including a concurrent round on this *same* session completing
+    and releasing in the meantime, which only ever touches ``round``/``claimed_at``/``claim_id``.
+    Discarding continuity and overwriting that round's own result on a benign advance like
+    that is exactly the corruption the claim exists to prevent, arriving through the one
+    field this function used to trust from before the lock.
+
+    Returns ``(None, 1)`` when the pointer no longer names this session at all -- a genuinely
+    different capture replaced it, or a structural field (label, revisions, generation)
+    changed -- treated as "no usable pointer": fresh, capturable. Returns ``("", 1)`` when a
+    live owner already holds it: fresh, but **not** capturable -- storing this call's own
+    fresh session over a claim someone else is still using would be the same corruption,
+    arriving one step later. Otherwise the new claim id and the round to use, read fresh so a
+    concurrent round that already completed is built on rather than discarded.
+
+    The read and the write happen in one ``state.transaction()``, deliberately: two reviews
+    can overlap (a commit gate and a `gate-stop` phase review), and both reading the same
+    unclaimed pointer before either writes would put two ``opencode run -s <id>`` against one
+    conversation, interleaving two different prospective trees.
+    """
+    claimed: str | None = None
+    round_number = 1
+    with state.transaction():
+        current = state.data.get("reviewer_session")
+        current = current if isinstance(current, dict) else {}
+        if current.get("id") != session_id or not _pointer_structurally_usable(current, state, target):
+            claimed = None
+        elif _claim_is_live(current, config):
+            claimed = ""
+        else:
+            claimed = secrets.token_hex(8)
+            round_number = _as_int(current.get("round")) + 1
+            current["claimed_at"] = now()
+            current["claim_id"] = claimed
+            state.data["reviewer_session"] = current
+    return claimed, round_number
+
+
+def session_ref(state: State, target: Target, *, config: Config) -> SessionRef:
+    """Decide whether this review continues a remembered session. Never raises.
+
+    Two phases, deliberately: the listing verify below can take up to
+    :data:`SESSION_LIST_TIMEOUT_SEC` and runs with **no lock held**, exactly like every other
+    slow operation in this gate. Only the final claim -- a reload, a comparison and a write --
+    takes the activation lock, and it is fast (:func:`_try_claim`).
+
+    Reads ``state.data`` as the caller already loaded it, deliberately without a defensive
+    reload here: this runs synchronously inside the same call chain that loaded it (no slow
+    work has happened yet), and a reload that transiently failed would silently replace a
+    document the caller already validated with an empty one -- turning a caller's guarantee
+    into corruption for the rest of this review. ``execute`` requires an already-loaded
+    ``state``, same as every other reviewer entry point.
+
+    These checks catch a stale id, an accidental collision and a wrong-project match, which
+    are the failures that will actually happen -- but they are **not** what makes continuity
+    safe, and that has to stay true reading this function in isolation: the safety comes from
+    the cold-approval invariant in :func:`execute`, not from anything here. Anything
+    unverifiable falls back to a fresh session, never to an error (Rule 1).
+    """
+    pointer = state.data.get("reviewer_session")
+    pointer = pointer if isinstance(pointer, dict) else {}
+    if not _pointer_structurally_usable(pointer, state, target):
+        return SessionRef(session_id="", claim_id="", capturable=True, round=1)
+
+    session_id = str(pointer["id"])
+    rows = _list_sessions(target, config=config, act_dir=state.act_dir, seq=f"verify-{secrets.token_hex(4)}")
+    if rows is None or not _exactly_one_match(
+        rows, session_id=session_id, title=pointer.get("title"), created=pointer.get("created"), repo=target.repo
+    ):
+        return SessionRef(session_id="", claim_id="", capturable=True, round=1)
+
+    claim_id, round_number = _try_claim(state, target=target, session_id=session_id, config=config)
+    if claim_id is None:
+        return SessionRef(session_id="", claim_id="", capturable=True, round=1)
+    if claim_id == "":
+        return SessionRef(session_id="", claim_id="", capturable=False, round=1)
+    return SessionRef(session_id=session_id, claim_id=claim_id, capturable=False, round=round_number)
+
+
+def _reconfirm_claim(state: State, ref: SessionRef, *, config: Config) -> bool:
+    """Re-validate a held claim immediately before ``invoke``, refreshing its lease.
+
+    The claim is taken (in :func:`session_ref`) before :func:`build_bundle` runs, and
+    building the bundle -- ordinary git calls today, ``verify_cmd`` when configured -- has no
+    fixed upper bound: :func:`ocrl.gitsnap.git_run` is not itself time-boxed. No finite
+    padding on the reclaim window (:func:`_reclaim_after`) can cover an unbounded wait, so
+    instead of widening it further, ownership is re-checked here, right before the one
+    operation the claim actually protects (``-s <id>``), and the lease is refreshed if it is
+    still ours. ``False`` means someone else has already reclaimed the pointer -- the caller
+    must fall back to a fresh, non-capturable review rather than risking two
+    ``opencode run -s <id>`` calls against the same conversation. A no-op, returning ``True``,
+    for a review that never held a claim in the first place.
+    """
+    if not ref.session_id:
+        return True
+    held = False
+    with state.transaction():
+        pointer = state.data.get("reviewer_session")
+        if isinstance(pointer, dict) and pointer.get("claim_id") == ref.claim_id:
+            held = True
+            pointer["claimed_at"] = now()
+            state.data["reviewer_session"] = pointer
+    return held
+
+
+def _downgrade_bundle_round(bundle_dir: Path) -> None:
+    """Correct ``range.txt``'s ``round:`` line after a post-build fallback to a fresh review.
+
+    Reached only when :func:`_reconfirm_claim` finds the claim already lost -- rare, and
+    never a reason to fail the review over it: this is orientation text, not evidence the
+    verdict is computed from, so a failure here is logged and left as it was rather than
+    raised. Left uncorrected, the bundle would tell the reviewer it is round N of a
+    continuing session while the invocation that follows is cold and carries no such
+    history, which is exactly the confusion the continuation paragraph in the prompt exists
+    to prevent.
+    """
+    path = bundle_dir / "range.txt"
+    try:
+        text = _decode(path.read_bytes())
+    except OSError as exc:
+        log(f"could not read range.txt to correct its round line: {exc}")
+        return
+    corrected = re.sub(r"(?m)^round: \d+\n", "round: 1\n", text, count=1)
+    if corrected == text:
+        return
+    try:
+        _write_private(path, _encode(corrected))
+    except OSError as exc:
+        log(f"could not rewrite range.txt's round line: {exc}")
+
+
+@dataclass(frozen=True)
+class _CaptureContext:
+    """Everything a fresh run's capture needs to know about the review it belongs to."""
+
+    target: Target
+    title: str
+    round_number: int
+
+
+@dataclass(frozen=True)
+class _Captured:
+    """A fresh run's session, if exactly one row matched. Falsy when nothing did."""
+
+    session_id: str = ""
+    created: int = 0
+
+    def __bool__(self) -> bool:
+        return bool(self.session_id)
+
+
+def capture_session(ctx: _CaptureContext, *, config: Config, act_dir: Path, seq: str, started_ms: int) -> _Captured:
+    """The session ``opencode session list`` shows for this fresh run's title, or falsy.
+
+    Every failure -- non-zero exit, timeout, unparseable JSON, a row predating this run, no
+    match -- is :func:`log` plus the empty result; this must never be able to fail a review.
+    **Exactly one** matching row is required: two rows carrying our title inside the window
+    means something else created one, so the answer is a cold session, not a guess.
+    """
+    rows = _list_sessions(ctx.target, config=config, act_dir=act_dir, seq=seq)
+    if rows is None:
+        return _Captured()
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("title") == ctx.title
+        and isinstance(row.get("id"), str)
+        and _SESSION_ID_RE.match(row["id"])
+        and isinstance(row.get("created"), (int, float))
+        and row["created"] >= started_ms
+        and _same_repo(row.get("directory"), ctx.target.repo)
+    ]
+    if len(matches) != 1:
+        if matches:
+            log(f"capture_session: {len(matches)} rows matched title {ctx.title!r} in the window; not guessing")
+        return _Captured()
+    row = matches[0]
+    return _Captured(session_id=str(row["id"]), created=int(row["created"]))
+
+
+def _store_captured_session(state: State, ctx: _CaptureContext, captured: _Captured, *, expected: hooks.Activation, config: Config) -> None:
+    """Store a fresh, capturable run's session as the phase's new continuity pointer.
+
+    Fingerprinted like every other post-slow-work write: ``expected`` was captured before
+    ``invoke`` ran, and a concurrent same-session ``resume --replan`` bumping
+    ``activation_generation`` in between must not have this land in a scope that no longer
+    applies. On any mismatch: logged, nothing written -- the review's own verdict is
+    unaffected either way.
+
+    **Also refuses to overwrite a pointer someone else is actively using.** This call was
+    "capturable" because *this* review found no usable pointer to continue -- but a second
+    review can have claimed one in the time since (the review itself, between deciding
+    "capturable" and this write, is exactly the slow work that window spans). Overwriting a
+    still-live claim here would be the same corruption the claim exists to prevent, arriving
+    one step later: the owner mid-conversation with that session would have its round result
+    silently discarded the moment it tries to release. So the current pointer is re-read and,
+    if a live claim holds it, this capture is dropped instead.
+    """
+    from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
+
+    if not captured:
+        return
+    with state.transaction():
+        current = hooks.activation(state, config)
+        if current != expected:
+            log("session capture: the activation moved while the review ran; not storing")
+            return
+        existing = state.data.get("reviewer_session")
+        existing = existing if isinstance(existing, dict) else {}
+        if _claim_is_live(existing, config):
+            log("session capture: another review is actively using the pointer; not overwriting")
+            return
+        state.data["reviewer_session"] = {
+            "label": ctx.target.label,
+            "id": captured.session_id,
+            "title": ctx.title,
+            "created": captured.created,
+            "revisions": len(state.data.get("plan_revisions") or []),
+            "generation": state.get_int("activation_generation"),
+            "round": ctx.round_number,
+            "claimed_at": "",
+            "claim_id": "",
+        }
+
+
+def _release_if_claimed(state: State, ref: SessionRef, *, expected: hooks.Activation, config: Config, round_number: int | None) -> None:
+    """``_release_claim`` when this call actually holds one; a no-op for a fresh review.
+
+    Called on *every* path out of a review that claimed a continuation -- a bundle build
+    failure before ``opencode`` was ever launched, a reviewer that failed to run to
+    completion, or an ordinary finished round -- so nothing about how this review ends leaves
+    the claim stranded a moment longer than its own lifetime requires. ``round_number=None``
+    on the first two: no round of this session actually happened, so the stored round is left
+    exactly as it was; only the claim itself is released.
+    """
+    if ref.session_id:
+        _release_claim(state, claim_id=ref.claim_id, round_number=round_number, expected=expected, config=config)
+
+
+def _release_claim(state: State, *, claim_id: str, round_number: int | None, expected: hooks.Activation, config: Config) -> None:
+    """Release the claim, recording the round result iff ``round_number`` is given.
+
+    ``claim_id`` is what makes this safe against the ABA sequence the module docstring
+    describes: A's claim expires, B reclaims with a new id, A finally finishes and releases.
+    Comparing the token means A's release, arriving after B's, is a no-op rather than an
+    overwrite of B's still-live claim. Fingerprinted the same way ``_store_captured_session``
+    is, for the same reason.
+    """
+    from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
+
+    with state.transaction():
+        current = hooks.activation(state, config)
+        if current != expected:
+            log("session claim release: the activation moved while the review ran; not writing")
+            return
+        pointer = state.data.get("reviewer_session")
+        if not isinstance(pointer, dict) or pointer.get("claim_id") != claim_id:
+            log("session claim release: no longer the owner of this claim; not writing")
+            return
+        if round_number is not None:
+            pointer["round"] = round_number
+        pointer["claimed_at"] = ""
+        pointer["claim_id"] = ""
+        state.data["reviewer_session"] = pointer
+
+
+# --------------------------------------------------------------------------
 # One full review
 # --------------------------------------------------------------------------
+
+
+def _run_invocation(target: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+    """One invoke()+parse() cycle. The bool says whether the process ran to completion --
+    only then is there anything for ``capture_session``/``_release_claim`` to act on."""
+    review = Review()
+    review.raw = str(run.out_path)
+    try:
+        invoke(target, run, config=config)
+    except ReviewerFailed as exc:
+        review.verdict = "OP_FAILURE"
+        review.error = str(exc)
+        return review, False
+    review = parse(run.out_path, config=config)
+    review.raw = str(run.out_path)
+    return review, True
+
+
+@dataclass(frozen=True)
+class _ReviewRun:
+    """Everything about one ``execute()`` call its helpers need, gathered once so each of
+    them takes a handful of arguments instead of independently re-deriving or re-threading
+    the same half-dozen values."""
+
+    target: Target
+    state: State
+    config: Config
+    label: str
+    title: str
+    bundle_dir: Path
+    raw_dir: Path
+    prompt_file: Path
+    #: Captured once, before any slow work -- see ``execute``'s own comment on why.
+    expected: hooks.Activation
+
+
+def _settle_pointer(rr: _ReviewRun, ref: SessionRef, *, started_ms: int, invoked: bool) -> str:
+    """Release a claimed continuation, or store a fresh capturable one. Called on *every*
+    path out of a review that claimed or could capture a continuation, failed or not -- a
+    claim left held past a failed invocation is a claim no live retry can actually continue
+    (the next attempt would find it "busy" and be forced fresh instead), which defeats the
+    reason the claim was taken in the first place.
+
+    ``invoked`` controls only whether a *round* is recorded: a stuck loop turning up
+    ``CHANGES_REQUIRED`` every round is exactly what continuity exists to help with, so a
+    finished round is settled regardless of its verdict -- but a reviewer that never ran to
+    completion produced no round at all, and must not advance the stored counter over one
+    that did not happen. Returns the freshly captured session id, if any -- "" otherwise --
+    so the caller can record it on a first round's own ``Review`` (see ``execute``).
+    """
+    if ref.session_id:
+        _release_if_claimed(rr.state, ref, expected=rr.expected, config=rr.config, round_number=(ref.round if invoked else None))
+        return ""
+    if not invoked or not ref.capturable:
+        return ""
+    ctx = _CaptureContext(target=rr.target, title=rr.title, round_number=ref.round)
+    captured = capture_session(ctx, config=rr.config, act_dir=rr.state.act_dir, seq=rr.label, started_ms=started_ms)
+    _store_captured_session(rr.state, ctx, captured, expected=rr.expected, config=rr.config)
+    return captured.session_id
+
+
+def _confirm_cold(rr: _ReviewRun, continued: Review) -> Review:
+    """The cold-approval invariant: one more, session-less review of the same bundle, in
+    place of ``continued`` -- with ``continued`` attached via ``.confirmed`` so the report can
+    show both. See ``execute``'s own docstring."""
+    cold_run = Invocation(
+        bundle_dir=rr.bundle_dir,
+        prompt_file=rr.prompt_file,
+        title=rr.title,
+        out_path=rr.raw_dir / f"{rr.label}-{rr.target.label}-cold.out",
+        session_id="",
+        capture=False,
+    )
+    cold, _invoked = _run_invocation(rr.target, cold_run, config=rr.config)
+    cold.confirmed = continued
+    return cold
 
 
 def execute(target: Target, *, state: State, config: Config, warnings: str = "") -> Review:
@@ -983,46 +1577,89 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     here. That is the same contract ``State._escalate`` documents, and it is what stops two
     concurrent reviews from claiming the same sequence number and overwriting each other's
     report.
+
+    **The cold-approval invariant lives here.** When the (possibly continued) round below
+    returns ``APPROVED`` and it *was* continuing a session, that verdict is never acted on
+    directly: :func:`_confirm_cold` runs one more, cold review of the same bundle, and its
+    verdict is what this function returns. See the module docstring for why.
     """
+    from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
+
     with state.transaction():
         seq = state.get_int("report_seq") + 1
         state.update(report_seq=seq)
 
     label = f"{seq:03d}"
     bundle_dir = state.act_dir / "bundles" / label
+    raw_dir = state.act_dir / "raw"
     ensure_private_dir(state.act_dir / "reports", root=state_root())
-    run = Invocation(
+    ensure_private_dir(raw_dir, root=state_root())
+
+    # Captured before `session_ref`'s listing verify and before `invoke` -- both are slow,
+    # and a concurrent `resume --replan` bumping `activation_generation` in between must not
+    # have this review's own capture or claim-release land in a scope that moved on.
+    expected = hooks.activation(state, config)
+    ref = session_ref(state, target, config=config)
+    title = _unique_title(state, target, label)
+    rr = _ReviewRun(
+        target=target,
+        state=state,
+        config=config,
+        label=label,
+        title=title,
         bundle_dir=bundle_dir,
+        raw_dir=raw_dir,
         prompt_file=ocrl.prompt_path("reviewer-phase" if target.is_phase else "reviewer-final"),
-        title=f"review-loop phase {target.phase}" if target.is_phase else "review-loop final review",
-        out_path=bundle_dir / "reviewer.out",
+        expected=expected,
     )
 
     review = Review()
     try:
-        build_bundle(target, bundle_dir, state=state, config=config, warnings=warnings)
-    except BundleTooLarge as exc:
+        build_bundle(target, bundle_dir, state=state, config=config, warnings=warnings, round_number=ref.round)
+    except (BundleTooLarge, PlanEvidenceCorrupted) as exc:
         review.verdict = "NEEDS_HUMAN"
         review.error = str(exc)
-        return review
-    except PlanEvidenceCorrupted as exc:
-        review.verdict = "NEEDS_HUMAN"
-        review.error = str(exc)
+        _release_if_claimed(state, ref, expected=expected, config=config, round_number=None)
         return review
     except BundleError as exc:
         review.verdict = "OP_FAILURE"
         review.error = str(exc)
+        _release_if_claimed(state, ref, expected=expected, config=config, round_number=None)
         return review
 
-    review.raw = str(run.out_path)
-    try:
-        invoke(target, run, config=config)
-    except ReviewerFailed as exc:
-        review.verdict = "OP_FAILURE"
-        review.error = str(exc)
-    else:
-        review = parse(run.out_path, config=config)
-        review.raw = str(run.out_path)
+    if not _reconfirm_claim(state, ref, config=config):
+        # Lost between the claim and here -- building the bundle has no fixed upper bound, so
+        # this window cannot be closed by widening the reclaim timeout alone. Fall back to a
+        # fresh, non-capturable round rather than risk `-s <id>` against a conversation this
+        # call no longer owns. The bundle was already built disclosing the old (continued)
+        # round -- corrected here so the reviewer is not told it is round N of a session this
+        # cold invocation carries no history of.
+        log(f"session claim: lost ownership before invoking; falling back to a fresh review for {target.label}")
+        _downgrade_bundle_round(bundle_dir)
+        ref = SessionRef(session_id="", claim_id="", capturable=False, round=1)
+
+    run = Invocation(
+        bundle_dir=bundle_dir,
+        prompt_file=rr.prompt_file,
+        title=title,
+        out_path=raw_dir / f"{label}-{target.label}.out",
+        session_id=ref.session_id,
+        capture=(not ref.session_id) and ref.capturable,
+    )
+
+    started_ms = int(time.time() * 1000)
+    review, invoked = _run_invocation(target, run, config=config)
+    review.session = ref.session_id
+    review.round = ref.round
+
+    captured_id = _settle_pointer(rr, ref, started_ms=started_ms, invoked=invoked)
+    if captured_id:
+        # A fresh round's own session is not known until after it ran -- record it now so
+        # this round's report can name the session it just created.
+        review.session = captured_id
+
+    if review.verdict == "APPROVED" and ref.session_id:
+        review = _confirm_cold(rr, review)
 
     # Stored on both paths: a failed review is exactly the one whose raw output is worth
     # keeping, and the report is what the denial message points at.

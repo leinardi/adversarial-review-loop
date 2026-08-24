@@ -147,7 +147,8 @@ $XDG_STATE_HOME/opencode-review-loop/
         ├── plan.rev<n>.md           later revisions, each immutable once written
         ├── phases.frozen            the split phase list
         ├── reports/NNN-*.md         every review, in full, never deleted
-        └── bundles/NNN/             what was actually shown to the reviewer for report NNN
+        ├── raw/NNN-<label>[-cold].out  the reviewer's own transcript for report NNN — never inside bundles/
+        └── bundles/NNN/             gate-generated evidence shown to the reviewer for report NNN — no model output, ever
 ```
 
 Nothing here lives inside the repository under review, with one narrow exception —

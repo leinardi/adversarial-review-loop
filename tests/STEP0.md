@@ -251,7 +251,7 @@ Note precisely what that establishes. A second session has no `ocrl` hooks regis
 
 Two phases against `openai/gpt-5.6-sol`, roughly 80 seconds in total: arm at expansion, `set-phases` via the one permitted Bash call, mutations allowed only after the phases were frozen, both commits intercepted and reviewed, `confirm-commit` verifying each tree and advancing the phase, then the final cumulative review completing the activation and disarming the mode.
 
-Three real reviews landed in `reports/` with their bundles. The reviewer globbed the repository, read `greet.py` and `README.md`, read the diff from the bundle under `$XDG_STATE_HOME`, and emitted the marker block correctly — worth checking `bundles/NNN/reviewer.out` yourself the first time, since an approval is only as good as the evidence the reviewer actually opened.
+Three real reviews landed in `reports/` with their bundles. The reviewer globbed the repository, read `greet.py` and `README.md`, read the diff from the bundle under `$XDG_STATE_HOME`, and emitted the marker block correctly — worth checking the reviewer's own transcript yourself the first time (`raw/NNN-<label>.out`, next to `bundles/` rather than inside it), since an approval is only as good as the evidence the reviewer actually opened.
 
 A second full run on 2026-08-20 repeated this against genuinely broken code (`greet.py` rewound to the seed), producing commits `9a8cb7e` and `57625c9`, three more real `gpt-5.6-sol` reviews, and a clean `COMPLETE`.
 

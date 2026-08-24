@@ -93,6 +93,11 @@ def new_state_document() -> dict[str, Any]:
         #: "report"}``. Never trimmed -- it is the audit trail for every phase a human approved
         #: without an approving review.
         "manual_accepts": [],
+        #: The reviewer session continuity pointer, or ``{}`` when none is held. A pure
+        #: optimisation hint -- see ``ocrl.reviewer``'s module docstring for why it is never
+        #: trusted to authorize anything -- holding ``{"label", "id", "title", "created",
+        #: "revisions", "generation", "round", "claimed_at", "claim_id"}`` once populated.
+        "reviewer_session": {},
     }
 
 

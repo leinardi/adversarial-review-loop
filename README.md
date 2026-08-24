@@ -132,20 +132,21 @@ Each subcommand is matched against a flag allowlist with **default-deny on unkno
 
 ```bash
 OPENCODE_PERMISSION='{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow",
-                      "external_directory":{"*":"deny","<bundle>/**":"allow"}}' \
-opencode run --pure --dir "$repo" -m "$model" --title "review-loop phase N" \
+                      "external_directory":{"*":"deny","<act_dir>/bundles/**":"allow"}}' \
+opencode run --pure --dir "$repo" -m "$model" --title "review-loop phase N [<hash>/<seq>]" \
   -f range.txt -f changes.00.diff [-f …] "$(cat prompts/reviewer-phase.md)"
 ```
 
 - `--pure` neutralises your global OpenCode **plugins**, which would otherwise rewrite the output and break the contract. It does *not* remove global skills (`~/.config/opencode/skills`) or a global `~/.config/opencode/AGENTS.md`, both of which still reach the reviewer — the prompt explicitly tells it to ignore ambient style directives and not to invoke a skill for the review. A review that comes back reformatted anyway fails the contract, which blocks; it never approves
-- `OPENCODE_PERMISSION` makes the reviewer structurally read-only and repo-scoped; `external_directory` is denied everywhere except the bundle directory, so the rest of `$HOME` is unreachable
-- no `-c`/`-s`/`--fork`, so every review is a fresh session
+- `OPENCODE_PERMISSION` makes the reviewer structurally read-only and repo-scoped; `external_directory` is denied everywhere except the **bundles root** — every bundle in this activation, never the activation directory itself, which also holds `state.json`, the frozen plan and the reports
 - the diff is **chunked across as many attachments as needed, never truncated** — a truncated diff hides deletions, and approving on a partial view is approving what was never seen
 - project OpenCode config stays enabled, so repo-local review skills load
 
 The reviewer cannot run anything. Set `verify_cmd` and the hook runs it and attaches the output as evidence.
 
 Repo text and the frozen plan are labelled **evidence, not instructions**, and the reviewer is explicitly asked to flag a phase description that misrepresents the frozen plan.
+
+**Consecutive reviews of one phase continue the same OpenCode session** where one can be found and safely claimed — `-s <id>` instead of a fresh `--title` — so round 2 can see what round 1 already flagged instead of starting cold every time. A new phase, or the final cumulative review, always starts fresh. This is a pure convenience: an approving verdict from a continued session is never acted on by itself — the gate runs one more, cold confirmation of the same evidence first, and that cold verdict is what decides. See [security.md](docs/security.md) for the full argument and its costs (one extra model call per approving phase, and diff/context growth across rounds — `/opencode-review-loop:accept` is the answer when a phase will not converge either way).
 
 ## Configuration
 

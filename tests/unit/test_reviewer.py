@@ -22,8 +22,10 @@ from conftest import FAKE_REVIEWER, git, git_status_ignored
 
 from ocrl import config as ocrl_config
 from ocrl import gitsnap, report, reviewer, state
+from ocrl.commands import hooks
 from ocrl.config import Config
 from ocrl.reviewer import BundleError, BundleTooLarge, Invocation, Review, ReviewerFailed, Target
+from ocrl.util import now as ocrl_now
 
 SESSION = "revsess"
 
@@ -148,20 +150,37 @@ def dirty(repo: Path, text: str = "phase one\n") -> str:
 
 
 def test_the_permission_document_denies_everything_but_reading(tmp_path: Path) -> None:
-    document = json.loads(reviewer.permission(tmp_path))
+    bundle_dir = tmp_path / "bundles" / "003"
+    document = json.loads(reviewer.permission(bundle_dir))
 
     assert document["*"] == "deny"
     assert document["read"] == "allow"
     assert document["external_directory"]["*"] == "deny"
-    assert document["external_directory"][f"{tmp_path}/**"] == "allow"
+    # Widened to the bundles root -- a continued reviewer re-opens paths it remembers from an
+    # earlier round's bundle -- but no further: see `test_permission_denies_the_activation_dir`.
+    assert document["external_directory"][f"{bundle_dir.parent}/**"] == "allow"
     assert "write" not in document
     assert "bash" not in document
 
 
+def test_permission_denies_the_activation_dir_and_state_json(tmp_path: Path) -> None:
+    """The bundles root, not the activation directory -- which also holds ``state.json``,
+    ``plan.frozen.md`` and the reports -- is what a continued reviewer may read."""
+    act_dir = tmp_path / "activation"
+    bundle_dir = act_dir / "bundles" / "003"
+    document = json.loads(reviewer.permission(bundle_dir))
+
+    external = document["external_directory"]
+    assert f"{bundle_dir.parent}/**" in external
+    assert f"{act_dir}/**" not in external
+    assert str(act_dir / "state.json") not in external
+
+
 def test_the_broad_external_deny_is_written_before_the_bundle_allow(tmp_path: Path) -> None:
     """Patterns are last-match-wins, so the order of these two keys is the policy."""
-    external = reviewer.permission(tmp_path).split('"external_directory":', 1)[1]
-    assert external.index('"*":"deny"') < external.index(f'"{tmp_path}/**":"allow"')
+    bundle_dir = tmp_path / "bundles" / "003"
+    external = reviewer.permission(bundle_dir).split('"external_directory":', 1)[1]
+    assert external.index('"*":"deny"') < external.index(f'"{bundle_dir.parent}/**":"allow"')
 
 
 # --------------------------------------------------------------------------
@@ -1153,3 +1172,678 @@ def test_a_final_review_names_itself_as_such(activation: state.State, git_repo: 
 def test_a_review_writes_nothing_into_the_repository(activation: state.State, git_repo: Path) -> None:
     execute_fake(activation, git_repo, "approve")
     assert git_status_ignored(git_repo) == "?? a.txt\n"
+
+
+# --------------------------------------------------------------------------
+# Session continuity
+# --------------------------------------------------------------------------
+
+
+def continuity_reviewer(tmp_path: Path) -> Path:
+    """Approves iff told it is continuing a session, via ``OCRL_SESSION_ID`` -- the env hook
+    ``invoke`` sets on the stub path when ``run.session_id`` is non-empty. Drives the
+    cold-approval invariant deterministically: the continued round approves, the cold
+    confirmation (which never carries a session id) does not.
+    """
+    script = tmp_path / "continuity-reviewer.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ -n "${OCRL_SESSION_ID:-}" ]; then\n'
+        "    printf 'Continuing.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<OCRL-END>>>\\n'\n"
+        "else\n"
+        "    printf 'Fresh or cold.\\n\\n<<<OCRL-FINDINGS>>>\\n"
+        "FINDING severity=high actionable=yes file=a.txt:1 | still there\\n"
+        "VERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+        "fi\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def session_list_script(tmp_path: Path, rows: list[dict[str, object]], *, name: str = "session-list.sh") -> Path:
+    """A stand-in for ``opencode session list --format json``, wired via ``OCRL_SESSION_LIST_CMD``."""
+    script = tmp_path / name
+    script.write_text(f"#!/usr/bin/env bash\ncat <<'JSON'\n{json.dumps(rows)}\nJSON\n")
+    script.chmod(0o755)
+    return script
+
+
+def generation_bumping_reviewer(tmp_path: Path, state_path: Path) -> Path:
+    """Bumps ``activation_generation`` from inside the reviewer, then answers -- stands in for
+    a concurrent ``resume --replan`` landing while this review's slow work runs."""
+    script = tmp_path / "gen-bump-reviewer.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "python3 - <<'PY'\n"
+        "import json, pathlib\n"
+        f"p = pathlib.Path({str(state_path)!r})\n"
+        "d = json.loads(p.read_text())\n"
+        'd["activation_generation"] = d.get("activation_generation", 0) + 1\n'
+        "p.write_text(json.dumps(d))\n"
+        "PY\n"
+        "printf 'Fine.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _future_ms() -> int:
+    """A ``created`` timestamp guaranteed to be >= any ``started_ms`` computed during a test."""
+    return int(time.time() * 1000) + 10_000_000
+
+
+def stored_pointer(
+    *, session_id: str = "ses_deadbeef01", label: str = "phase1", revisions: int = 0, generation: int = 0, round_number: int = 1, **extra: object
+) -> dict[str, object]:
+    return {
+        "label": label,
+        "id": session_id,
+        "title": "review-loop phase 1 [aaaaaaaa/001]",
+        "created": 1234567890000,
+        "revisions": revisions,
+        "generation": generation,
+        "round": round_number,
+        "claimed_at": "",
+        "claim_id": "",
+        **extra,
+    }
+
+
+def matching_row(pointer: dict[str, object], repo: Path) -> dict[str, object]:
+    return {"id": pointer["id"], "title": pointer["title"], "created": pointer["created"], "directory": str(repo)}
+
+
+# -- the shared isolation helper --------------------------------------------
+
+
+def test_isolation_argv_and_env_cannot_drift_between_invoke_and_session_list(git_repo: Path) -> None:
+    pure_on = config_with(pure=True, disable_project_config=True)
+    pure_off = config_with(pure=False, disable_project_config=False)
+
+    assert reviewer._isolation_argv(pure_on) == ["--pure"]
+    assert reviewer._isolation_argv(pure_off) == []
+    assert reviewer._isolation_env(pure_on, {})["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+    assert "OPENCODE_DISABLE_PROJECT_CONFIG" not in reviewer._isolation_env(pure_off, {})
+
+    # `review_argv` (invoke's real path) is built from exactly this helper's output.
+    invoke_argv = reviewer.review_argv("/repo", Path("/bundle"), "t", config=pure_on)
+    assert invoke_argv[: len(reviewer._isolation_argv(pure_on))] == reviewer._isolation_argv(pure_on)
+    plain_argv = reviewer.review_argv("/repo", Path("/bundle"), "t", config=pure_off)
+    assert "--pure" not in plain_argv
+
+
+# -- argv: -s vs --title -----------------------------------------------------
+
+
+def test_argv_carries_s_when_continuing_and_title_when_fresh(tmp_path: Path) -> None:
+    (tmp_path / "range.txt").write_text("r")
+    fresh = reviewer.review_argv("/repo", tmp_path, "a title", config=config_with())
+    assert "--title" in fresh
+    assert "-s" not in fresh
+
+    continued = reviewer.review_argv("/repo", tmp_path, "a title", config=config_with(), session_id="ses_abc12345")
+    assert "-s" in continued
+    assert continued[continued.index("-s") + 1] == "ses_abc12345"
+    assert "--title" not in continued
+
+
+# -- session_ref: structural resets ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda p: p.update(label="phase2"), id="label-change"),
+        pytest.param(lambda p: p.update(label="final"), id="phase-to-final"),
+        pytest.param(lambda p: p.update(revisions=1), id="revisions-grown"),
+        pytest.param(lambda p: p.update(generation=1), id="generation-bumped"),
+        pytest.param(lambda p: p.update(id="not-a-session-id"), id="malformed-id"),
+        pytest.param(lambda p: p.update(id=""), id="empty-id"),
+        pytest.param(lambda p: p.update(id="ses_" + "x" * 100), id="id-too-long"),
+        pytest.param(lambda p: p.update(id="ses_../../etc/passwd"), id="id-path-traversal-shaped"),
+    ],
+)
+def test_session_ref_resets_on_a_structural_mismatch(activation: state.State, git_repo: Path, mutate: object) -> None:
+    pointer = stored_pointer()
+    mutate(pointer)  # type: ignore[operator]
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+
+    assert ref.session_id == ""
+    assert ref.capturable is True
+    assert ref.round == 1
+
+
+# -- session_ref: the listing verify -----------------------------------------
+
+
+def test_session_ref_rejects_an_unrelated_session_in_the_same_repo(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """The case that motivates the check: an id belonging to the user's own TUI session in
+    the same repository must not be joined."""
+    pointer = stored_pointer()
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    row = {"id": "ses_unrelated9", "title": "someone's TUI session", "created": 1, "directory": str(git_repo)}
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+
+    assert ref.session_id == ""
+    assert ref.capturable is True
+
+
+def test_session_ref_rejects_a_title_mismatch(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    pointer = stored_pointer()
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    row = matching_row(pointer, git_repo)
+    row["title"] = "a different title"
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+    assert ref.session_id == ""
+
+
+def test_session_ref_rejects_a_created_mismatch(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    pointer = stored_pointer()
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    row = matching_row(pointer, git_repo)
+    row["created"] = 999
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+    assert ref.session_id == ""
+
+
+def test_session_ref_accepts_a_symlinked_directory_and_rejects_a_different_repo(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    pointer = stored_pointer()
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+
+    symlinked = tmp_path / "symlinked-repo"
+    symlinked.symlink_to(git_repo)
+    row = matching_row(pointer, symlinked)
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    accepted = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+    assert accepted.session_id == pointer["id"]
+
+    other_repo = tmp_path / "genuinely-different"
+    other_repo.mkdir()
+    row_wrong = matching_row(pointer, other_repo)
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row_wrong], name="session-list-2.sh"))
+    rejected = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+    assert rejected.session_id == ""
+
+
+def test_session_ref_falls_back_to_fresh_when_the_listing_is_unavailable(activation: state.State, git_repo: Path) -> None:
+    """No ``OCRL_SESSION_LIST_CMD`` -- the listing call is skipped, and an unverifiable
+    pointer falls back to a fresh session, never to an error."""
+    pointer = stored_pointer()
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    os.environ.pop("OCRL_SESSION_LIST_CMD", None)
+    os.environ["OCRL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+    assert ref.session_id == ""
+    assert ref.capturable is True
+
+
+# -- the atomic claim ---------------------------------------------------------
+
+
+def test_session_ref_claims_an_unclaimed_pointer(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    pointer = stored_pointer(round_number=1)
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+
+    assert ref.session_id == pointer["id"]
+    assert ref.claim_id != ""
+    assert ref.round == 2
+    stored = activation.data["reviewer_session"]
+    assert stored["claim_id"] == ref.claim_id
+    assert stored["claimed_at"] != ""
+
+
+def test_session_ref_treats_a_live_claim_as_busy(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    pointer = stored_pointer(claimed_at=ocrl_now(), claim_id="owner-token")
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+
+    assert ref.session_id == ""
+    assert ref.capturable is False
+    stored = activation.data["reviewer_session"]
+    assert stored["claim_id"] == "owner-token"
+
+
+def test_session_ref_reclaims_an_expired_claim(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    pointer = stored_pointer(claimed_at=ocrl_now() - 10_000, claim_id="dead-token")
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(timeout_sec=1))
+
+    assert ref.session_id == pointer["id"]
+    assert ref.claim_id not in ("", "dead-token")
+
+
+def test_a_stale_owners_release_is_a_no_op_after_reclaim(activation: state.State, git_repo: Path) -> None:
+    """The ABA case the claim token exists to prevent: A's claim expires, B reclaims with a
+    new token, then A's release must not clear B's still-live claim."""
+    pointer = stored_pointer(claimed_at=1, claim_id="A-token")
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    config = config_with()
+    expected = hooks.activation(activation, config)
+
+    # B reclaims (A's claim is ancient -> expired).
+    activation.data["reviewer_session"]["claim_id"] = "B-token"
+    activation.data["reviewer_session"]["claimed_at"] = ocrl_now()
+    activation.save()
+
+    reviewer._release_claim(activation, claim_id="A-token", round_number=99, expected=expected, config=config)
+
+    stored = activation.data["reviewer_session"]
+    assert stored["claim_id"] == "B-token"
+    assert stored["round"] != 99
+
+
+# -- capture_session ----------------------------------------------------------
+
+
+def test_capture_session_requires_exactly_one_match(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    target = target_for(git_repo)
+    ctx = reviewer._CaptureContext(target=target, title="review-loop phase 1 [x/001]", round_number=1)
+    started_ms = _future_ms() - 1_000_000
+    act_dir = activation.act_dir
+
+    # None at all.
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [], name="none.sh"))
+    assert not reviewer.capture_session(ctx, config=config_with(), act_dir=act_dir, seq="001", started_ms=started_ms)
+
+    # Two rows carrying the title -- not a guess at which is ours.
+    row = {"id": "ses_aaaaaaaa", "title": ctx.title, "created": _future_ms(), "directory": str(git_repo)}
+    row2 = {**row, "id": "ses_bbbbbbbb"}
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row, row2], name="two.sh"))
+    assert not reviewer.capture_session(ctx, config=config_with(), act_dir=act_dir, seq="002", started_ms=started_ms)
+
+    # A row that predates the run.
+    stale = {**row, "created": started_ms - 1}
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [stale], name="stale.sh"))
+    assert not reviewer.capture_session(ctx, config=config_with(), act_dir=act_dir, seq="003", started_ms=started_ms)
+
+    # Exactly one, valid, in-window match.
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row], name="one.sh"))
+    captured = reviewer.capture_session(ctx, config=config_with(), act_dir=act_dir, seq="004", started_ms=started_ms)
+    assert captured.session_id == "ses_aaaaaaaa"
+    assert bool(captured) is True
+
+
+def test_capture_session_survives_a_non_json_listing(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    ctx = reviewer._CaptureContext(target=target_for(git_repo), title="t", round_number=1)
+    script = tmp_path / "broken.sh"
+    script.write_text("#!/usr/bin/env bash\nprintf 'not json'\n")
+    script.chmod(0o755)
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(script)
+
+    captured = reviewer.capture_session(ctx, config=config_with(), act_dir=activation.act_dir, seq="001", started_ms=0)
+    assert not captured
+
+
+# -- the cold-approval invariant ----------------------------------------------
+
+
+def test_capture_and_reuse_a_session_across_rounds(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    target = target_for(git_repo)
+    label = f"{activation.get_int('report_seq') + 1:03d}"
+    title = reviewer._unique_title(activation, target, label)
+    session_id = "ses_deadbeef01"
+    row = {"id": session_id, "title": title, "created": _future_ms(), "directory": str(git_repo)}
+
+    os.environ["OCRL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+
+    first = reviewer.execute(target, state=activation, config=config_with())
+    assert first.verdict == "CHANGES_REQUIRED"
+    # The captured session is not known until after the round ran, but the round's own
+    # report must still be able to say which session it created.
+    assert first.session == session_id
+    assert first.round == 1
+    assert first.confirmed is None
+
+    pointer = activation.data["reviewer_session"]
+    assert pointer["id"] == session_id
+    assert pointer["label"] == target.label
+    assert pointer["round"] == 1
+    assert pointer["claim_id"] == ""
+    assert pointer["claimed_at"] == ""
+
+    second = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    # The cold-approval invariant: the continued round approved, but the returned, acted-on
+    # review is the cold confirmation -- which this stub always denies.
+    assert second.verdict == "CHANGES_REQUIRED"
+    assert second.session == ""
+    assert second.round == 0
+    assert second.confirmed is not None
+    assert second.confirmed.verdict == "APPROVED"
+    assert second.confirmed.session == session_id
+    assert second.confirmed.round == 2
+
+    pointer = activation.data["reviewer_session"]
+    assert pointer["round"] == 2
+    assert pointer["claim_id"] == ""
+    assert pointer["claimed_at"] == ""
+
+    raw_dir = activation.act_dir / "raw"
+    assert (raw_dir / f"002-{target.label}.out").is_file()
+    assert (raw_dir / f"002-{target.label}-cold.out").is_file()
+
+
+def test_a_continued_changes_required_triggers_no_cold_call(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    target = target_for(git_repo)
+    label = f"{activation.get_int('report_seq') + 1:03d}"
+    title = reviewer._unique_title(activation, target, label)
+    session_id = "ses_cafebabe1"
+    row = {"id": session_id, "title": title, "created": _future_ms(), "directory": str(git_repo)}
+
+    os.environ["OCRL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
+    os.environ["OCRL_FAKE_MODE"] = "changes"
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+
+    reviewer.execute(target, state=activation, config=config_with())
+    second = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert second.session == session_id
+    assert second.verdict == "CHANGES_REQUIRED"
+    assert second.confirmed is None
+
+    raw_names = {p.name for p in (activation.act_dir / "raw").iterdir()}
+    assert not any("cold" in name for name in raw_names)
+
+
+def test_a_cold_approval_triggers_no_second_call(activation: state.State, git_repo: Path) -> None:
+    """No ``OCRL_SESSION_LIST_CMD`` -- capture and verify are both skipped, so every review
+    here is cold by construction, and a first, already-cold approval must not double-review."""
+    review = execute_fake(activation, git_repo, "approve")
+    assert review.verdict == "APPROVED"
+    assert review.confirmed is None
+
+
+def test_capture_is_fingerprinted_against_a_concurrent_generation_bump(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    target = target_for(git_repo)
+    label = f"{activation.get_int('report_seq') + 1:03d}"
+    title = reviewer._unique_title(activation, target, label)
+    row = {"id": "ses_race000001", "title": title, "created": _future_ms(), "directory": str(git_repo)}
+
+    os.environ["OCRL_REVIEWER_CMD"] = str(generation_bumping_reviewer(tmp_path, activation.act_dir / "state.json"))
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+
+    review = reviewer.execute(target, state=activation, config=config_with())
+
+    assert review.verdict == "CHANGES_REQUIRED"  # the review's own verdict is unaffected
+    activation.load()
+    assert activation.data.get("reviewer_session") == {}
+
+
+def test_bundles_directory_holds_only_gate_generated_evidence(activation: state.State, git_repo: Path) -> None:
+    """The invariant the cold-approval design rests on: a continued reviewer's
+    ``external_directory`` reach is the bundles root, so nothing in here may be model output."""
+    execute_fake(activation, git_repo, "approve")
+    bundle_dir = activation.act_dir / "bundles" / "001"
+    names = {p.name for p in bundle_dir.iterdir()}
+    for name in names:
+        assert name in {"range.txt", "chunks"} or name.startswith(("changes.", "plan.rev")), name
+    assert "reviewer.out" not in names
+    assert not any(name.startswith("session-list") for name in names)
+
+
+def test_the_range_text_discloses_the_round(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    target = target_for(git_repo)
+    label = f"{activation.get_int('report_seq') + 1:03d}"
+    title = reviewer._unique_title(activation, target, label)
+    row = {"id": "ses_round0002", "title": title, "created": _future_ms(), "directory": str(git_repo)}
+
+    os.environ["OCRL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
+    os.environ["OCRL_FAKE_MODE"] = "changes"
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+
+    reviewer.execute(target, state=activation, config=config_with())
+    bundle_dir = activation.act_dir / "bundles" / "001"
+    assert "round: 1\n" in (bundle_dir / "range.txt").read_text()
+
+    reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+    second_bundle_dir = activation.act_dir / "bundles" / "002"
+    assert "round: 2\n" in (second_bundle_dir / "range.txt").read_text()
+
+
+def test_the_permission_scope_allows_the_bundles_root_for_a_continued_reviewer(activation: state.State, git_repo: Path) -> None:
+    """A continued reviewer remembers paths from an earlier round's bundle -- confirmed by
+    actually invoking the fake reviewer in `echo-bundle` mode against the bundles root."""
+    execute_fake(activation, git_repo, "approve")
+    document = json.loads(reviewer.permission(activation.act_dir / "bundles" / "001"))
+    bundles_root = activation.act_dir / "bundles"
+    assert document["external_directory"][f"{bundles_root}/**"] == "allow"
+    assert f"{activation.act_dir}/**" not in document["external_directory"]
+
+
+# --------------------------------------------------------------------------
+# Fixes from adversarial review: reload safety, reclaim window, claim races
+# --------------------------------------------------------------------------
+
+
+def test_session_ref_reads_state_as_the_caller_loaded_it(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """``session_ref`` must not defensively reload state itself: a transient reload failure
+    would silently replace an already-loaded, caller-validated document with an empty one,
+    corrupting the rest of this review's evidence for no reason. The structural read is
+    exactly ``state.data`` as the caller (``execute``) already has it -- proven here by an
+    in-memory mutation that is visible immediately, with no ``.save()`` in between."""
+    pointer = stored_pointer()
+    activation.data["reviewer_session"] = pointer
+    target = target_for(git_repo)
+    assert reviewer._pointer_structurally_usable(pointer, activation, target) is True
+
+    # Persisting only now is what lets the (legitimate, atomic) claim step below succeed --
+    # it always reloads under its own lock, by design; only the earlier structural read must
+    # not.
+    activation.save()
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    ref = reviewer.session_ref(activation, target, config=config_with())
+    assert ref.session_id == pointer["id"]
+
+
+def test_the_reclaim_window_accounts_for_verify_cmd_time(git_repo: Path) -> None:
+    config = config_with(timeout_sec=900)
+    assert reviewer._reclaim_after(config) == 900 + reviewer.VERIFY_TIMEOUT_SEC + 60
+
+
+def test_a_concurrent_live_claim_stops_a_fresh_capture_from_overwriting_it(activation: state.State, git_repo: Path) -> None:
+    """The window between deciding "capturable" (no usable pointer) and this write is the
+    review itself -- long enough for someone else to have claimed a pointer in the meantime.
+    Overwriting that live claim would be the same corruption the claim exists to prevent."""
+    target = target_for(git_repo)
+    ctx = reviewer._CaptureContext(target=target, title="t", round_number=1)
+    captured = reviewer._Captured(session_id="ses_freshcapture1", created=1)
+    config = config_with()
+    expected = hooks.activation(activation, config)
+
+    live_pointer = stored_pointer(session_id="ses_liveowner001", claimed_at=ocrl_now(), claim_id="live-token")
+    activation.data["reviewer_session"] = live_pointer
+    activation.save()
+
+    reviewer._store_captured_session(activation, ctx, captured, expected=expected, config=config)
+
+    stored = activation.data["reviewer_session"]
+    assert stored["id"] == "ses_liveowner001"
+    assert stored["claim_id"] == "live-token"
+
+
+def test_a_bundle_failure_releases_the_claim_without_advancing_the_round(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    pointer = stored_pointer(round_number=1)
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with(hard_diff_ceiling=1))
+
+    assert review.verdict == "NEEDS_HUMAN"
+    stored = activation.data["reviewer_session"]
+    assert stored["claim_id"] == ""
+    assert stored["claimed_at"] == ""
+    assert stored["round"] == 1
+
+
+def failing_then_working_reviewer(tmp_path: Path) -> Path:
+    """Fails (non-zero exit) on its first call, then answers ``CHANGES_REQUIRED`` -- proves a
+    failed invocation releases its claim so an immediate retry can actually continue it,
+    rather than finding it "busy" and being forced fresh until the reclaim window elapses.
+    Always denies once past the marker, deliberately, so this stays a claim-release test and
+    never triggers the (separately tested) cold-approval confirmation."""
+    marker = tmp_path / "failing-reviewer-ran-once"
+    seen = tmp_path / "seen-session-id"
+    script = tmp_path / "failing-then-working.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f"if [ ! -f {str(marker)!r} ]; then\n"
+        f"    touch {str(marker)!r}\n"
+        "    echo boom >&2\n"
+        "    exit 3\n"
+        "fi\n"
+        f'if [ -n "${{OCRL_SESSION_ID:-}}" ]; then echo "$OCRL_SESSION_ID" > {str(seen)!r}; fi\n'
+        "printf 'Fine.\\n\\n<<<OCRL-FINDINGS>>>\\n"
+        "FINDING severity=high actionable=yes file=a.txt:1 | still there\\n"
+        "VERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_a_failed_invocation_releases_its_claim_so_a_retry_can_continue_it(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    pointer = stored_pointer(round_number=1)
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    os.environ["OCRL_REVIEWER_CMD"] = str(failing_then_working_reviewer(tmp_path))
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+
+    first = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+    assert first.verdict == "OP_FAILURE"
+    stored = activation.data["reviewer_session"]
+    assert stored["claim_id"] == ""
+    assert stored["claimed_at"] == ""
+    assert stored["round"] == 1
+
+    second = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+    assert (tmp_path / "seen-session-id").read_text().strip() == pointer["id"]
+    assert second.session == pointer["id"]
+
+
+# --------------------------------------------------------------------------
+# Fixes from a second adversarial review: unbounded bundle time, benign advances
+# --------------------------------------------------------------------------
+
+
+def test_a_benign_round_advance_is_not_treated_as_a_moved_pointer(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """A concurrent round on the *same* session completing and releasing only touches
+    round/claimed_at/claim_id -- that must not be read as "the pointer moved", or this call
+    would discard continuity and later overwrite the completed round with a brand new
+    session, losing its findings and round history."""
+    pointer = stored_pointer(round_number=1)
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    target = target_for(git_repo)
+
+    # Between a listing verify and a claim attempt, someone else completed a round and
+    # released, advancing `round` -- a benign field-level change to the same session.
+    activation.data["reviewer_session"] = dict(pointer, round=5)
+    activation.save()
+
+    claim_id, round_number = reviewer._try_claim(activation, target=target, session_id=str(pointer["id"]), config=config_with())
+
+    assert claim_id not in (None, "")
+    assert round_number == 6  # built on the completed round, not discarded
+
+
+def test_try_claim_still_resets_on_a_genuine_identity_change(activation: state.State, git_repo: Path) -> None:
+    """The re-verification is narrower, not weaker: a *different* session id, or a structural
+    field actually changing, is still treated as moved."""
+    pointer = stored_pointer(round_number=1)
+    target = target_for(git_repo)
+
+    activation.data["reviewer_session"] = dict(pointer, id="ses_somethingnew1")
+    activation.save()
+    claim_id, _ = reviewer._try_claim(activation, target=target, session_id=str(pointer["id"]), config=config_with())
+    assert claim_id is None
+
+    activation.data["reviewer_session"] = dict(pointer, generation=7)
+    activation.save()
+    claim_id, _ = reviewer._try_claim(activation, target=target, session_id=str(pointer["id"]), config=config_with())
+    assert claim_id is None
+
+
+def test_reconfirm_claim_detects_a_reclaim_before_invoking(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    pointer = stored_pointer(round_number=1)
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    target = target_for(git_repo)
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+
+    ref = reviewer.session_ref(activation, target, config=config_with())
+    assert ref.session_id == pointer["id"]
+    assert reviewer._reconfirm_claim(activation, ref, config=config_with()) is True
+
+    # Someone else reclaims the pointer -- our claim id no longer matches.
+    stored = activation.data["reviewer_session"]
+    stored["claim_id"] = "someone-else"
+    activation.data["reviewer_session"] = stored
+    activation.save()
+
+    assert reviewer._reconfirm_claim(activation, ref, config=config_with()) is False
+
+
+def test_execute_falls_back_to_fresh_when_the_claim_is_lost_before_invoking(
+    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closes the gap padding the reclaim window cannot: bundle building (ordinary git calls,
+    ``verify_cmd``) has no fixed upper bound, so ownership is re-checked right before the one
+    call the claim actually protects -- simulated here by stealing the claim from inside
+    ``build_bundle`` itself, standing in for a build that outlasted the reclaim window."""
+    pointer = stored_pointer(round_number=1)
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    os.environ["OCRL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+
+    real_build_bundle = reviewer.build_bundle
+
+    def stealing_build_bundle(*args: object, **kwargs: object) -> None:
+        stored = activation.data["reviewer_session"]
+        stored["claim_id"] = "thief"
+        activation.data["reviewer_session"] = stored
+        activation.save()
+        real_build_bundle(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(reviewer, "build_bundle", stealing_build_bundle)
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    # `continuity_reviewer` approves iff OCRL_SESSION_ID is set -- it must not be, since the
+    # claim was lost before invoke ran, so this must be a fresh, uncontinued round.
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.confirmed is None
+    assert review.session == ""
+
+    # The bundle was built disclosing the old, continued round (2) -- it must not still tell
+    # the reviewer that, now that the invocation actually sent is cold.
+    range_text = (activation.act_dir / "bundles" / "001" / "range.txt").read_text()
+    assert "round: 1\n" in range_text
+    assert "round: 2\n" not in range_text
