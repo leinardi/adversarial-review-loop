@@ -271,6 +271,18 @@ def test_supersedes_lines_are_rendered_in_the_stored_report(act_dir: Path) -> No
     assert "retracted after re-reading the caller" in body
 
 
+def test_oscillating_points_are_carried_back_in_the_reason() -> None:
+    review = a_review(oscillating="- `loop.py` (severity medium): reversed 2 time(s) via SUPERSEDES -- raised in round(s) with seq 1, 2, 3\n")
+    text = report.reason(review, "h", config=config_with())
+    assert "Oscillating points" in text
+    assert "not a new finding" in text
+    assert "loop.py" in text
+
+
+def test_no_oscillating_section_when_the_review_has_none() -> None:
+    assert "Oscillating" not in report.reason(a_review(), "h", config=config_with())
+
+
 def test_the_report_path_is_offered_when_there_is_one() -> None:
     assert "\nFull report: /state/001.md\n" in report.reason(a_review(report="/state/001.md"), "h", config=config_with())
     assert "Full report:" not in report.reason(a_review(), "h", config=config_with())

@@ -1495,6 +1495,61 @@ def test_prior_rounds_only_counts_this_labels_rounds_at_this_generation(activati
     assert not (activation.act_dir / "context" / "002-prior-rounds.txt").exists()
 
 
+def _run_scripted(activation: state.State, repo: Path, tmp_path: Path, name: str, contract: str) -> Review:
+    """One round whose reviewer output is a fixed script -- ``execute_fake``'s canned modes
+    all repeat the same finding every round, which cannot exercise a reversal."""
+    script = tmp_path / f"{name}.sh"
+    script.write_text(f"#!/usr/bin/env bash\nprintf '%b' '{contract}'\n")
+    script.chmod(0o755)
+    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    return reviewer.execute(target_for(repo), state=activation, config=config_with())
+
+
+_ROUND_1 = "Looks off.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=warn.py:1 | needs warn-before\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n"
+_ROUND_2 = "Different concern.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=other.py:1 | needs something else\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n"
+_ROUND_3 = "Back to the first concern.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=warn.py:9 | needs warn-before after all\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n"
+
+
+def test_review_oscillating_is_set_once_a_finding_reappears(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    _run_scripted(activation, git_repo, tmp_path, "round2", _ROUND_2)
+    review3 = _run_scripted(activation, git_repo, tmp_path, "round3", _ROUND_3)
+
+    assert "warn.py" in review3.oscillating
+    assert "reappeared" in review3.oscillating
+
+
+def test_review_oscillating_is_empty_when_nothing_reversed(activation: state.State, git_repo: Path) -> None:
+    review = execute_fake(activation, git_repo, "changes")
+    assert review.oscillating == ""
+
+
+def test_report_reason_carries_the_oscillating_block_end_to_end(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    _run_scripted(activation, git_repo, tmp_path, "round2", _ROUND_2)
+    review3 = _run_scripted(activation, git_repo, tmp_path, "round3", _ROUND_3)
+
+    text = report.reason(review3, "denied", config=config_with())
+    assert "Oscillating points" in text
+    assert "warn.py" in text
+
+
+def test_the_context_files_oscillating_section_only_ever_sees_rounds_before_the_current_one(
+    activation: state.State, git_repo: Path, tmp_path: Path
+) -> None:
+    """Round 3's own attachment (built before round 3 runs) cannot show round 3's
+    reappearance -- only a round 4 attachment, built from rounds 1-3, can."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    _run_scripted(activation, git_repo, tmp_path, "round2", _ROUND_2)
+    _run_scripted(activation, git_repo, tmp_path, "round3", _ROUND_3)
+    assert "Oscillating" not in (activation.act_dir / "context" / "003-prior-rounds.txt").read_text()
+
+    execute_fake(activation, git_repo, "approve")
+    text = (activation.act_dir / "context" / "004-prior-rounds.txt").read_text()
+    assert "## Oscillating points" in text
+    assert "warn.py" in text
+
+
 def test_review_argv_attaches_prior_rounds_after_the_plan_revisions(tmp_path: Path) -> None:
     bundle = tmp_path / "bundles" / "002"
     bundle.mkdir(parents=True)

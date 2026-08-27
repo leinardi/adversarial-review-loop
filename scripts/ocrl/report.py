@@ -252,6 +252,11 @@ def reason(review: Review, headline: str, *, config: Config) -> str:
     if review.supersedes:
         out.append("\nReversals of earlier rounds (SUPERSEDES lines) -- recorded, not verdict-changing:\n\n")
         out.append(review.supersedes)
+    if review.oscillating:
+        out.append(
+            "\nOscillating points -- these anchors reappeared or were reversed more than once across earlier rounds of this same review; this is a reversal, not a new finding:\n\n"
+        )
+        out.append(review.oscillating)
     if review.prose:
         out.append("\nReviewer prose:\n\n")
         out.append(truncate(review.prose, config.as_int("max_reason_bytes")))

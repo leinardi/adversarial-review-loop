@@ -63,7 +63,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Final
 
 import ocrl
-from ocrl import planrev, report
+from ocrl import oscillation, planrev, report
 from ocrl.atomic import FILE_MODE, ensure_private_dir
 from ocrl.config import Config, severity_rank, threshold_rank
 from ocrl.errors import OcrlError
@@ -319,6 +319,13 @@ class Review:
     #: Every ``SUPERSEDES`` line, newline-terminated. Recorded only -- it never changes
     #: ``verdict`` (a reversal still blocks exactly as its ``FINDING`` lines say).
     supersedes: str = ""
+    #: Rendered by :func:`oscillation.render`, one line per anchor that reappeared or was
+    #: named by 2+ ``SUPERSEDES`` lines across this label's ``round_history`` -- gate-computed
+    #: text, not reviewer prose. Empty when nothing oscillates. Set in :func:`execute`, after
+    #: this round's own entry has been appended, so it reflects this round too -- unlike
+    #: ``_prior_rounds_section``'s own "## Oscillating points", which by construction only
+    #: ever sees rounds before this one. Never changes ``verdict``, same as ``supersedes``.
+    oscillating: str = ""
     #: Everything before the marker block.
     prose: str = ""
     #: Path of the stored report.
@@ -536,6 +543,27 @@ def _is_single_stored_line(value: object) -> bool:
     return isinstance(value, str) and value.splitlines()[0:1] == [value]
 
 
+def _oscillating_chunk(rounds: list[dict[str, object]], target: Target, *, total: int, max_lines: int, max_bytes: int) -> tuple[str, bool]:
+    """The ``## Oscillating points`` chunk of :func:`_prior_rounds_section`, and whether it
+    was dropped for being past ``max_findings_bytes``. ``("", False)`` when there is simply
+    nothing to say. Split out to keep ``_prior_rounds_section`` under the branch count ruff
+    enforces; the byte check is the same accounting the rest of that function does inline.
+    """
+    points = oscillation.reversals(rounds, target.label)
+    if not points:
+        return "", False
+    chunk = (
+        "## Oscillating points\n\n"
+        "The anchors below changed position across the rounds shown above -- reappeared "
+        "after being absent, or were reversed more than once. Treat a match against one of "
+        "these as a reversal, not a fresh finding.\n\n"
+        f"{oscillation.render(points, max_points=max_lines, max_bytes=max_bytes)}\n"
+    )
+    if total + len(chunk.encode("utf-8", "surrogateescape")) > max_bytes:
+        return "", True
+    return chunk, False
+
+
 def _prior_rounds_section(state: State, target: Target, config: Config) -> str:
     """``## Earlier rounds of this review`` -- empty until a second round of this phase runs.
 
@@ -553,6 +581,11 @@ def _prior_rounds_section(state: State, target: Target, config: Config) -> str:
     by ``max_findings`` lines and ``max_findings_bytes`` *encoded* bytes -- headers and
     metadata included, not just the finding lines -- so a tampered history degrades to a
     shorter attachment, never to smuggled prose and never to an unbounded one.
+
+    A trailing ``## Oscillating points`` subsection (:mod:`ocrl.oscillation`) names any
+    anchor that reappeared after being absent, or was named by 2+ ``SUPERSEDES`` lines, in
+    the rounds shown above -- it only ever sees rounds *before* this one, unlike
+    ``Review.oscillating`` (set in :func:`execute`), which also covers this round.
     """
     if not target.is_phase:
         return ""
@@ -611,6 +644,13 @@ def _prior_rounds_section(state: State, target: Target, config: Config) -> str:
         total += len(chunk_text.encode("utf-8", "surrogateescape"))
         if capped:
             break
+
+    if not capped:
+        osc_chunk, osc_capped = _oscillating_chunk(rounds, target, total=total, max_lines=max_lines, max_bytes=max_bytes)
+        if osc_chunk:
+            out.append(osc_chunk)
+            total += len(osc_chunk.encode("utf-8", "surrogateescape"))
+        capped = capped or osc_capped
 
     if capped:
         out.append("(further earlier rounds are past the max_findings / max_findings_bytes cap and are not shown)\n")
@@ -2103,6 +2143,24 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
             # error, an evidence ceiling -- appends nothing, which keeps phase 5's stall
             # check and phase 6's retry budget from counting the same stuck phase twice.
             _append_round_history(rr, review, round_number=ref.round)
+            if target.is_phase:
+                # Unlike `_prior_rounds_section`'s own "## Oscillating points" (built before
+                # this round ran, from rounds strictly before it), this reads the history
+                # back out *after* the append above, so it covers this round too -- the
+                # denial text this feeds (`report.reason`) is about the round that just
+                # happened. `final` has no `round_history` label of its own to oscillate on
+                # (`_prior_rounds_section` excludes it the same way).
+                generation = state.get_int("activation_generation")
+                history = [
+                    entry
+                    for entry in state.get_array_of_dicts("round_history")
+                    if entry.get("label") == target.label and entry.get("generation") == generation
+                ]
+                review.oscillating = oscillation.render(
+                    oscillation.reversals(history, target.label),
+                    max_points=config.as_int("max_findings"),
+                    max_bytes=config.as_int("max_findings_bytes"),
+                )
     else:
         log(f"review for {target.label}: the activation moved after the review ran; not storing its report or recording the round")
     return review
