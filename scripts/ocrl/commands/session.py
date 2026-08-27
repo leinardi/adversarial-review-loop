@@ -18,7 +18,7 @@ from ocrl.commands.completion import Completion
 from ocrl.config import Config
 from ocrl.gitsnap import SnapshotError
 from ocrl.state import State
-from ocrl.util import log
+from ocrl.util import log, now
 
 __all__ = ["deactivate", "defer", "finish", "report_cmd", "status"]
 
@@ -124,6 +124,12 @@ def status(argv: list[str]) -> int:
     persisting_points = oscillation.persisting(phase_history, phase_label, stall_rounds) if stall_rounds > 0 else []
     persisting_line = f"persisting findings:  {', '.join(point.anchor.file for point in persisting_points)}\n" if persisting_points else ""
 
+    # Phase 6: the transient-failure budget and any active retry backoff -- distinct from
+    # `operational failures` above, which is the ordinary operational/contract/bundle budget.
+    retry_not_before = state.get_int("retry_not_before")
+    remaining = retry_not_before - now()
+    backoff_line = f"retry backoff:       {remaining}s remaining\n" if remaining > 0 else ""
+
     sys.stdout.write(
         f"""\
 opencode-review-loop status
@@ -141,8 +147,9 @@ last approved tree:  {state.get("last_approved_tree")}
 pending approval:    {state.get("pending_approved_tree")}
 phase:               {state.get("phase")} of {state.phase_count()}
 pause target:        {pause_target}
-consecutive failures:{state.get("failures")} / {config.as_int("max_failures")}
-no-progress blocks:  {state.get("stop_blocks")} / {config.as_int("max_stop_blocks")}
+operational failures:{state.get("failures")} / {config.as_int("max_failures")}
+transient failures:  {state.get("transient_failures")} / {config.as_int("max_transient_failures")}
+{backoff_line}no-progress blocks:  {state.get("stop_blocks")} / {config.as_int("max_stop_blocks")}
 defers used:         {state.get("defers")} / {config.as_int("max_defers")}
 manual accepts:      {accepts_line}
 model:               {config.as_str("model")} {config.as_str("variant")}

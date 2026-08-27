@@ -150,6 +150,29 @@ case "$mode" in
         printf 'boom\n' >&2
         exit 3
         ;;
+    rate-limited)
+        # A plain non-zero exit whose own output names the reason -- classified "transient"
+        # (phase 6), unlike `nonzero` above, which carries no such signal and is
+        # "operational". Real provider CLIs report a rate limit this way, not with a
+        # dedicated exit status.
+        printf 'Error: rate limit exceeded, please retry later\n' >&2
+        exit 1
+        ;;
+    rate-limited-elsewhere)
+        # Simulates a genuinely concurrent, winning review of the same label approving --
+        # writing `pending_approved_tree`, one of `hooks.Activation`'s own fields -- while
+        # this one is still deciding it hit a rate limit. `pretool._review_failed`'s
+        # fingerprint guard must refuse to count this against the transient budget once it
+        # notices the activation moved underneath it. Same technique as `clarify-mutate`.
+        root="${OCRL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-review-loop}"
+        sf=$(find "$root" -name state.json 2>/dev/null | head -n1)
+        if [ -n "$sf" ]; then
+            tmp=$(mktemp)
+            jq '.pending_approved_tree = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"' "$sf" >"$tmp" && mv "$tmp" "$sf"
+        fi
+        printf 'Error: rate limit exceeded, please retry later\n' >&2
+        exit 1
+        ;;
     slow)
         sleep 30
         ;;

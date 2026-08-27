@@ -144,6 +144,34 @@ MAX_CHUNKS: Final = 100
 #: Exit statuses ``timeout`` uses for "killed before it finished".
 _TIMEOUT_STATUSES: Final = frozenset({124, 137})
 
+#: Phase 6's "transient" class is an allow-list, not a catch-all -- five attempts against a
+#: missing ``opencode`` binary must not spend the same budget as five genuine rate limits. A
+#: timeout is unambiguous (``_TIMEOUT_STATUSES``); a plain non-zero exit is only "transient"
+#: when the process's own output says so, and only the head of it is read, bounded, so a
+#: reviewer transcript large enough to be truncated is never scanned in full for this.
+_TRANSIENT_OUTPUT_HEAD_BYTES: Final = 4096
+
+#: Known provider/CLI phrasing for a rate or usage limit, case-insensitive. Deliberately
+#: specific multi-word phrases rather than a bare "limit" or "quota" -- this is read from a
+#: non-zero exit's raw output, which past this point is CLI/provider error text, not
+#: reviewer-composed findings prose, but the anchoring stays defensive regardless: an
+#: unmatched byte string must classify as "operational" (Rule 1's fail-closed direction --
+#: the wider budget, not the one with retry pacing that gives a stuck phase more attempts).
+#: ``\b`` on the left of every alternative, and only a space/hyphen/underscore (never an
+#: arbitrary character) between "rate" and "limit" -- a bare ``.?`` would also glue onto a run
+#: of other letters (``rateXlimit``) or match "rate"/"limit" as a substring buried inside an
+#: unrelated word (``\b`` only exists at the edges of a run of word characters, so it cannot
+#: match mid-word either way). The right edge is a negative lookahead for a following
+#: letter/digit, not a second ``\b``: a trailing ``\b`` would reject a real, snake_cased
+#: provider error code like ``rate_limit_exceeded`` -- underscore is itself a word character,
+#: so ``\b`` finds no boundary between "limit" and the "_exceeded" that follows it -- while
+#: still correctly rejecting "limit" as the front half of a longer word like "limitation".
+#: What no purely lexical pattern can rule out is a negation that still contains the literal
+#: phrase ("not a rate limit") -- accepted, because at this point in the flow the byte string
+#: is CLI/provider error text on a non-zero exit, not reviewer prose arguing about rate limits
+#: as a topic.
+_RATE_LIMIT_RE: Final = re.compile(rb"(?i)\b(rate[ _-]?limit(?:ed|ing)?|too many requests|quota exceeded|usage limit reached)(?![A-Za-z0-9])")
+
 #: OpenCode writes a styled transcript; the escape codes carry no information and would
 #: otherwise be quoted back at Claude.
 _ANSI_RE: Final = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]")
@@ -218,6 +246,16 @@ class PlanEvidenceCorrupted(BundleError):
 
 class ReviewerFailed(OcrlError):
     """The reviewer did not run to completion. Always ``OP_FAILURE``, never an approval."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        """``status`` is the exit code ``invoke`` observed (124/137 for a timeout, the
+        process's own for anything else). :func:`_classify_op_failure` reads this rather than
+        pattern-matching ``message`` -- the status is the fact; the message is prose. ``None``
+        only for a caller that has no status to give, which no call site in this module does
+        today.
+        """
+        super().__init__(message)
+        self.status = status
 
 
 class ContractError(OcrlError):
@@ -312,6 +350,18 @@ class Review:
     verdict: str = ""
     #: Why, for ``OP_FAILURE`` / ``NEEDS_HUMAN``.
     error: str = ""
+    #: Set only when ``verdict == "OP_FAILURE"``: ``"transient"`` (a timeout, a matched
+    #: rate/usage-limit signal -- see :func:`_classify_op_failure` -- or the active-review
+    #: slot already being held, which needs the same "retry shortly, do not spend the
+    #: ordinary budget" treatment), ``"operational"`` (every other non-zero exit, a
+    #: missing/non-executable binary and a bad ``--model`` included), ``"contract"`` (the
+    #: reviewer ran to completion but its output was not the documented contract -- every
+    #: :class:`ContractError` path, the NUL refusal, and an unrecognised ``VERDICT``) or
+    #: ``"bundle"`` (:class:`BundleError`). ``pretool._review_failed`` reads this to decide
+    #: which budget and pacing apply (phase 6) -- ``ReviewerFailed`` is *not* one failure
+    #: class, and treating it as one would spend the same budget on a missing ``opencode``
+    #: binary as on a genuine rate limit. ``""`` for every other verdict.
+    kind: str = ""
     #: Blocking ``FINDING`` lines, newline-terminated.
     findings: str = ""
     #: Every ``FINDING`` line, newline-terminated.
@@ -1155,9 +1205,9 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
 
     status = _capture_to_file(command, env, run.out_path, timeout_sec)
     if status in _TIMEOUT_STATUSES:
-        raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s")
+        raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s", status=status)
     if status != 0:
-        raise ReviewerFailed(f"the reviewer exited with status {status}")
+        raise ReviewerFailed(f"the reviewer exited with status {status}", status=status)
 
 
 def clarify_argv(repo: str, attachments: list[Path], question_file: Path, title: str, *, config: Config) -> list[str]:
@@ -1264,11 +1314,15 @@ def _classify(review: Review, verdict: str) -> None:
         review.verdict = "CHANGES_REQUIRED"
     else:
         review.verdict = "OP_FAILURE"
+        review.kind = "contract"
         review.error = f"the reviewer emitted an unrecognised verdict: {verdict}"
 
 
 def _fail(review: Review, error: str) -> Review:
+    """Every caller is inside :func:`parse`, i.e. the reviewer ran to completion and its
+    output was not the documented contract -- always ``"contract"`` (phase 6)."""
     review.verdict = "OP_FAILURE"
+    review.kind = "contract"
     review.error = error
     return review
 
@@ -1991,6 +2045,26 @@ def _release_active_review(state: State, *, claim_id: str, expected: hooks.Activ
 # --------------------------------------------------------------------------
 
 
+def _classify_op_failure(exc: ReviewerFailed, out_path: Path) -> str:
+    """ "transient" for a timeout or a matched rate/usage-limit signal, "operational" for
+    every other non-zero exit -- ``126``/``127``, a bad ``--model``, a rejected ``--variant``
+    and an expired credential all included. See ``Review.kind`` for why the split matters.
+    """
+    if exc.status in _TIMEOUT_STATUSES:
+        return "transient"
+    try:
+        # `.read(n)`, not `.read_bytes()[:n]` -- a reviewer that failed non-zero can still
+        # have written an unbounded amount to `out_path` before it did, and slicing after the
+        # fact would read the whole file into memory just to keep the first few bytes of it.
+        with out_path.open("rb") as handle:
+            head = handle.read(_TRANSIENT_OUTPUT_HEAD_BYTES)
+    except OSError:
+        head = b""
+    if _RATE_LIMIT_RE.search(head):
+        return "transient"
+    return "operational"
+
+
 def _run_invocation(target: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
     """One invoke()+parse() cycle. The bool says whether the process ran to completion --
     only then is there anything for ``capture_session``/``_release_claim`` to act on."""
@@ -2001,6 +2075,7 @@ def _run_invocation(target: Target, run: Invocation, *, config: Config) -> tuple
     except ReviewerFailed as exc:
         review.verdict = "OP_FAILURE"
         review.error = str(exc)
+        review.kind = _classify_op_failure(exc, run.out_path)
         return review, False
     review = parse(run.out_path, config=config, allow_supersedes=target.is_phase)
     review.raw = str(run.out_path)
@@ -2359,7 +2434,15 @@ def _reserve_round(state: State, target: Target, config: Config) -> tuple[Review
             return stall, 0, ""
         claim_id = _claim_active_review(state, target, config)
         if claim_id is None:
-            return Review(verdict="OP_FAILURE", error=_ACTIVE_REVIEW_BUSY.format(label=target.label)), 0, ""
+            # Phase 6: contention alone should not spend the ordinary `failures` budget --
+            # the other holder finishing (or its claim expiring) is what a retry needs, not
+            # a different reviewer command or model. Classified "transient" so it paces with
+            # backoff against `max_transient_failures` instead, per AGENTS.md's own note that
+            # counting a busy slot against `max_failures` was "a known rough edge, left for
+            # phase 6's transient-failure budget to do better by".
+            busy = Review(verdict="OP_FAILURE", error=_ACTIVE_REVIEW_BUSY.format(label=target.label))
+            busy.kind = "transient"
+            return busy, 0, ""
         seq = state.get_int("report_seq") + 1
         state.update(report_seq=seq)
     return None, seq, claim_id
@@ -2458,6 +2541,7 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
         return review
     except BundleError as exc:
         review.verdict = "OP_FAILURE"
+        review.kind = "bundle"
         review.error = str(exc)
         _release_reservations(state, ref, claim_id=claim_id, expected=expected, config=config)
         return review

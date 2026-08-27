@@ -197,8 +197,11 @@ def _accept(state: State, *, config: Config, tree: str, expected: hooks.Activati
 
         state.mark_tree_approved(tree)
         # A stuck loop's counters are exactly what this command exists to reset -- leaving
-        # them would let the next hiccup re-escalate immediately.
-        updates: dict[str, object] = {"failures": 0, "stop_blocks": 0, "stop_marker": ""}
+        # them would let the next hiccup re-escalate immediately. `transient_failures` and
+        # `retry_not_before` (phase 6) are the same kind of counter as `failures` -- an accept
+        # that left a backoff standing would have the very tree it just approved still denied
+        # by `pretool._check_retry_backoff` for up to `max_transient_failures`' worth of delay.
+        updates: dict[str, object] = {"failures": 0, "transient_failures": 0, "retry_not_before": 0, "stop_blocks": 0, "stop_marker": ""}
         # Left untouched during RECONCILE: `reason` there is the divergence explanation
         # `stop.py`'s reconcile block and `status` both surface (`bad_commit_parent` alongside
         # it), and it must keep saying why the invariant broke -- the acceptance not clearing

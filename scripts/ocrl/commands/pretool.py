@@ -23,6 +23,7 @@ from ocrl import config as config_module
 from ocrl.commands import hooks
 from ocrl.hookio import Hook, read_hook_input
 from ocrl.state import State, pointer_read
+from ocrl.util import now
 
 if TYPE_CHECKING:  # pragma: no cover - the hot path must not import these to type-check
     from ocrl import reviewer
@@ -210,7 +211,7 @@ denying until one of them runs.
 """
 
 FAILURES_EXHAUSTED: Final = """\
-The reviewer failed {failures} times in a row (limit {limit}), so this escalated to NEEDS_HUMAN. A failed review is never an approval.
+The reviewer failed {failures} times since the last approval (limit {limit}), so this escalated to NEEDS_HUMAN. A failed review is never an approval.
 
 Last failure: {error}
 
@@ -218,13 +219,37 @@ Stop here and tell the user.
 """
 
 REVIEW_FAILED: Final = """\
-The review could not be completed ({failures} of {limit} consecutive failures), so the commit is denied. A failed review is never an approval.
+The review could not be completed ({failures} of {limit} operational failures since the last approval), so the commit is denied. A failed review is never an approval.
 
 {error}
 
 Raw output: {raw}
 
 Commit again to retry.
+"""
+
+RETRY_BACKOFF: Final = """\
+The reviewer hit a transient failure (a timeout, a rate/usage limit, or contention with another review of this phase already in progress) and this commit is denied without spending another provider call while it paces retries.
+
+Retry in {remaining}s.
+"""
+
+TRANSIENT_FAILURES_EXHAUSTED: Final = """\
+The reviewer hit {failures} transient failures since the last approval (limit {limit}), so this escalated to NEEDS_HUMAN. A failed review is never an approval.
+
+Last failure: {error}
+
+Stop here and tell the user.
+"""
+
+TRANSIENT_REVIEW_FAILED: Final = """\
+The review could not be completed ({failures} of {limit} transient failures since the last approval — a timeout, a rate/usage limit, or contention with another concurrent review), so the commit is denied. A failed review is never an approval.
+
+{error}
+
+Raw output: {raw}
+
+The next attempt will wait at least {backoff}s before retrying.
 """
 
 RESET_REJECTED: Final = """\
@@ -547,6 +572,31 @@ def _checked_base_tree(hook: Hook, state: State) -> str:
     return base
 
 
+def _check_retry_backoff(hook: Hook, state: State) -> None:
+    """Phase 6: a transient failure (timeout, rate limit, or busy-slot contention) paces its
+    own retries.
+
+    Called from ``_gate_commit`` only once every free shortcut (byte-identical tree, an
+    already-approved tree, no content diff, an ignore_globs-only change) has been ruled out
+    -- ahead of the reviewer call itself, so a backoff denies without spending another
+    provider call, but **never** ahead of those shortcuts. It used to run first, before even
+    ``_prepare``; moved here because a stale ``retry_not_before`` -- set by a review that lost
+    a busy-slot race and only got around to recording its own failure *after* a genuinely
+    concurrent review for the same label had already approved the tree -- must not then block
+    the commit ``state.tree_approved(tree)`` would otherwise allow for free. The counter
+    mutation in ``_review_failed`` still is not made fully race-proof by this (that would need
+    the busy check and the failure recording to share one lock, which they structurally do
+    not); this closes the actual, observable failure instead: an already-approved tree is
+    never denied by a backoff, whichever order the two writes land in.
+    """
+    retry_not_before = state.get_int("retry_not_before")
+    if not retry_not_before:
+        return
+    remaining = retry_not_before - now()
+    if remaining > 0:
+        hooks.deny(hook, RETRY_BACKOFF.format(remaining=remaining))
+
+
 def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command: str) -> None:
     """Decide on the Bash call that would create a commit, running the review if needed."""
     from ocrl import gitsnap, report, reviewer  # noqa: PLC0415 - reached only by a commit
@@ -590,7 +640,14 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
                 if current != expected:
                     raise commands.Refused(ACTIVATION_MOVED.format(change=hooks.describe_move(expected, current), now=current.summary))
                 state.mark_tree_approved(tree)
-                state.update(pending_approved_tree=tree, pending_head=head, pending_command=command, failures=0)
+                state.update(
+                    pending_approved_tree=tree,
+                    pending_head=head,
+                    pending_command=command,
+                    failures=0,
+                    transient_failures=0,
+                    retry_not_before=0,
+                )
         except commands.Refused as exc:
             hooks.deny(hook, str(exc))
         hook.allow(message)
@@ -613,6 +670,11 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
 
     if gitsnap.all_paths_ignored(repo, base, tree, config):
         approve("opencode-review-loop: every changed path matches ignore_globs, so the review was skipped. Commit allowed.")
+
+    # Phase 6: checked only once every free shortcut above (byte-identical, already-approved,
+    # no diff, ignore_globs) has been ruled out -- a stale or racy backoff must never deny a
+    # tree that one of those would have allowed for free. See `_check_retry_backoff`.
+    _check_retry_backoff(hook, state)
 
     target = reviewer.Target(repo=repo, base=base, head=tree, scope="phase", phase=phase)
     review = reviewer.execute(target, state=state, config=config, warnings=snap.warnings)
@@ -655,14 +717,63 @@ def _review_failed(hook: Hook, *, state: State, config: Config, expected: hooks.
     Counted **inside** the transaction, against the document it reloads: two overlapping
     commits that each read the same starting count would otherwise both write the same value,
     so a run of failures would never reach the limit.
+
+    ``review.kind == "transient"`` (a timeout, a matched rate/usage-limit signal, or a busy
+    active-review slot -- ``reviewer._classify_op_failure`` and ``_reserve_round``) is counted
+    and paced separately from every other operational failure (phase 6): a missing binary, a
+    bad ``--model``, an expired credential or a malformed-contract response burns the ordinary
+    ``failures``/``max_failures`` budget unchanged, with no retry pacing, because retrying
+    sooner cannot fix any of those.
+
+    The transient counter's mutation is guarded by the same ``expected`` fingerprint check
+    ``approve()`` uses, and for the identical reason: a busy-slot refusal is decided quickly,
+    but *this* function -- the one that actually counts it -- can run much later relative to a
+    genuinely concurrent, winning review of the same label, which may have approved the tree,
+    advanced the phase, or otherwise moved the activation in the meantime (``approve()`` does
+    change the fingerprint: it writes ``pending_approved_tree``, which is one of
+    ``hooks.Activation``'s own fields). Counting the failure against whatever state exists by
+    the time this runs would attribute it to a phase or activation it has nothing to do with;
+    the mismatch denies this specific attempt instead, without touching the counter at all.
     """
+    if review.kind == "transient":
+        try:
+            with state.transaction():
+                current = hooks.activation(state, config)
+                if current != expected:
+                    raise commands.Refused(ACTIVATION_MOVED.format(change=hooks.describe_move(expected, current), now=current.summary))
+                failures = state.get_int("transient_failures") + 1
+                backoff = min(30 * 2 ** (failures - 1), 300)
+                state.update(transient_failures=failures, retry_not_before=now() + backoff)
+        except commands.Refused as exc:
+            hooks.deny(hook, str(exc))
+        limit = config.as_int("max_transient_failures")
+
+        if failures > limit:
+            _escalate(
+                hook,
+                state=state,
+                config=config,
+                expected=expected,
+                reason=f"the reviewer hit {failures} transient failures since the last approval: {review.error}",
+            )
+            hooks.deny(hook, TRANSIENT_FAILURES_EXHAUSTED.format(failures=failures, limit=limit, error=review.error))
+        hooks.deny(
+            hook, TRANSIENT_REVIEW_FAILED.format(failures=failures, limit=limit, error=review.error, raw=review.raw or "<none>", backoff=backoff)
+        )
+
     with state.transaction():
         failures = state.get_int("failures") + 1
         state.update(failures=failures)
     limit = config.as_int("max_failures")
 
     if failures > limit:
-        _escalate(hook, state=state, config=config, expected=expected, reason=f"the reviewer failed {failures} times in a row: {review.error}")
+        _escalate(
+            hook,
+            state=state,
+            config=config,
+            expected=expected,
+            reason=f"the reviewer failed {failures} times since the last approval: {review.error}",
+        )
         hooks.deny(hook, FAILURES_EXHAUSTED.format(failures=failures, limit=limit, error=review.error))
     hooks.deny(hook, REVIEW_FAILED.format(failures=failures, limit=limit, error=review.error, raw=review.raw or "<none>"))
 

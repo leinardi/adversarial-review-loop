@@ -43,6 +43,7 @@ DEFAULTS: Final[dict[str, Any]] = {
     "block_severity": "low",
     "timeout_sec": 900,
     "max_failures": 2,
+    "max_transient_failures": 5,
     "max_stop_blocks": 3,
     "max_defers": 3,
     "verify_cmd": "",
@@ -67,6 +68,7 @@ BOOL_KEYS: Final = ("pure", "disable_project_config", "allow_dirty", "final_revi
 INT_KEYS: Final = (
     "timeout_sec",
     "max_failures",
+    "max_transient_failures",
     "max_stop_blocks",
     "max_defers",
     "chunk_diff_bytes",

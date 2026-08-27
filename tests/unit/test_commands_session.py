@@ -8,6 +8,7 @@ pointer in place, and ``finish`` must reach ``COMPLETE`` only through an approvi
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -193,8 +194,29 @@ def test_status_reports_the_activation(git_repo: Path, tmp_path: Path, clean_env
     assert "status:              ACTIVE\n" in proc.stdout
     assert f"baseline tree:       {git(git_repo, 'rev-parse', 'HEAD^{tree}')}\n" in proc.stdout
     assert "phase:               1 of 2\n" in proc.stdout
-    assert "consecutive failures:0 / 2\n" in proc.stdout
+    assert "operational failures:0 / 2\n" in proc.stdout
+    assert "transient failures:  0 / 5\n" in proc.stdout
     assert "phases:\n  1. first thing\n  2. second thing\n\nreports:\n\n" in proc.stdout
+
+
+def test_status_shows_an_active_retry_backoff(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Phase 6: a pending backoff is surfaced the same way phase 5's persisting findings
+    are -- only when there is one to show.
+    """
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing")
+
+    path = state_dir(env, git_repo, "s1") / "state.json"
+    document = json.loads(path.read_text())
+    document["retry_not_before"] = int(time.time()) + 100
+    path.write_text(json.dumps(document))
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "retry backoff:       " in proc.stdout
+    assert "s remaining\n" in proc.stdout
 
 
 def test_status_shows_the_effective_status_alongside_the_stored_one(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

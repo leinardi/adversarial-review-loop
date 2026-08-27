@@ -69,6 +69,8 @@ Some phases will not converge — OpenCode keeps raising a fresh finding every r
 
 **When a finding actually repeats, the loop notices on its own.** `stall_rounds` (default `2`) consecutive rounds raising the same finding unchanged, or one that reappears after being absent, or is reversed (`SUPERSEDES`) more than once, escalates straight to `NEEDS_HUMAN` — the reviewer is not called again for it, and `/opencode-review-loop:status` shows the persisting finding. That does not cover every stuck phase: a reviewer that raises a genuinely new, non-repeating objection every round never trips it, and `accept` is still the only bound for that case — see [edge-cases.md](docs/edge-cases.md#a-phase-that-never-converges).
 
+**A timeout or a rate limit is not the same failure as a missing binary.** `max_failures` still governs every operational, contract or bundle failure exactly as before, with no pacing — retrying immediately is the right move for those. A timeout, a matched rate/usage-limit signal, or contention with another review of the same phase already in flight is counted separately, against `max_transient_failures` (default `5`), and paced with backoff (`30s`, doubling, capped at `300s`): the next commit attempt is denied with the remaining wait rather than spending another provider call on a limit that has not reset yet. Both counters run independently and neither resets the other, so they bound the *total* number of failing attempts since the last approval, not strictly-consecutive runs of one kind — a stuck phase alternating between the two still escalates, just possibly after `max_failures + max_transient_failures` attempts rather than either limit alone. Both budgets, exhausted, escalate to `NEEDS_HUMAN` the same way.
+
 Every acceptance is recorded: in `/opencode-review-loop:status`, as its own numbered report visible through `/opencode-review-loop:report`, and in a `## Manually accepted phases` section shown to every later review of that activation — including the final cumulative one — so nothing downstream mistakes an accepted phase for one that actually passed a gate.
 
 Before accepting, though: when a finding is just *unclear* — or two rounds seem to contradict each other — Claude can run `ocrl.sh clarify --question "…"` to get one prose answer about the review that already ran, with no new commit attempt and no new round. It is not a slash command (Claude invokes it directly), it changes nothing, and it is capped at `max_clarifications` per run. A genuine standing disagreement still ends at `accept`.
@@ -162,7 +164,8 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 | `variant` | unset | reasoning effort (`high`, `max`, …) |
 | `block_severity` | `low` | blocks when `actionable=yes AND severity >= this` |
 | `timeout_sec` | `900` | per review run |
-| `max_failures` | `2` | consecutive op failures before `needs-human` |
+| `max_failures` | `2` | op failures since the last approval before `needs-human` (transient failures excluded — see `max_transient_failures`) |
+| `max_transient_failures` | `5` | timeouts/rate-limits/busy-review-slot failures since the last approval before `needs-human`; paced with backoff |
 | `max_stop_blocks` | `3` | **no-progress** Stop blocks before escalating |
 | `max_defers` | `3` | pause escapes per activation |
 | `verify_cmd` | unset | run by the hook, output attached as evidence |

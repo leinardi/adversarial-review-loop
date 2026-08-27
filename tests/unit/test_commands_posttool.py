@@ -10,6 +10,7 @@ approval looks like afterwards.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,27 @@ def test_a_verified_commit_advances_the_phase(git_repo: Path, tmp_path: Path, cl
     assert document["status"] == "ACTIVE"
     assert document["pending_approved_tree"] == ""
     assert document["last_approved_tree"] == git(git_repo, "rev-parse", "HEAD^{tree}")
+
+
+def test_advancing_the_phase_clears_a_transient_backoff_left_standing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Phase 6: whatever left ``transient_failures``/``retry_not_before`` standing at the
+
+    moment of confirmation -- a late busy-slot write racing the approval, most plausibly --
+    must not carry into the next phase. ``_advance`` resets both, the same way it already
+    resets ``failures``. Simulated directly, by patching the counters in after the approval
+    already landed, rather than through real concurrency.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env, "phase one", "phase two")
+    gated_commit(git_repo, env)
+    patch_state(env, git_repo, transient_failures=1, retry_not_before=int(time.time()) + 100)
+
+    confirm(git_repo, env, command=COMMIT)
+
+    document = read_state(env, git_repo, SESSION)
+    assert document["phase"] == 2
+    assert document["transient_failures"] == 0
+    assert document["retry_not_before"] == 0
 
 
 def test_the_last_phase_hands_over_to_the_stop_gate(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

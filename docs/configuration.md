@@ -34,7 +34,8 @@ guessing.
 | `variant` | unset | reasoning effort (`high`, `max`, …) |
 | `block_severity` | `low` | blocks when `actionable=yes AND severity >= this` |
 | `timeout_sec` | `900` | per review run |
-| `max_failures` | `2` | consecutive op failures before `needs-human` |
+| `max_failures` | `2` | op failures since the last approval before `needs-human` (transient failures excluded — see `max_transient_failures`) |
+| `max_transient_failures` | `5` | timeouts/rate-limits/busy-review-slot failures since the last approval before `needs-human`; paced with backoff, no provider call spent while it waits |
 | `max_stop_blocks` | `3` | **no-progress** Stop blocks before escalating |
 | `max_defers` | `3` | pause escapes per activation |
 | `verify_cmd` | unset | run by the hook, output attached as evidence |

@@ -111,6 +111,28 @@ def test_accept_clears_a_needs_human_escalation(git_repo: Path, tmp_path: Path, 
     assert "manually accepted by the user" in document["reason"]  # type: ignore[operator]
 
 
+def test_accept_clears_a_pending_transient_backoff(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Phase 6: a transient failure sets ``transient_failures``/``retry_not_before``. Left
+    standing, the very tree an accept just approved would still be denied by
+    ``pretool._check_retry_backoff`` for up to ``max_transient_failures``' worth of delay --
+    exactly the "stuck loop" case ``accept`` exists to break.
+    """
+    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited")
+    active(git_repo, tmp_path, env, "phase one")
+    (git_repo / "new.txt").write_text("work\n")
+    pretool(git_repo, env, command='git add -A && git commit -m "x"')
+    before = read_state(env, git_repo, SESSION)
+    assert before["transient_failures"] == 1
+    assert before["retry_not_before"]
+
+    code, out = accept(git_repo, env, "--reason", "verified by hand")
+
+    assert code == 0, out
+    document = read_state(env, git_repo, SESSION)
+    assert document["transient_failures"] == 0
+    assert document["retry_not_before"] == 0
+
+
 def test_accept_does_not_clear_a_reconcile(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env, "phase one")

@@ -671,6 +671,51 @@ if start 'commit gate: repeated failures escalate to needs-human'; then
     unset OCRL_MAX_FAILURES
 fi
 
+if start 'transient failures: a rate-limited exit paces retries and denies without invoking the reviewer'; then
+    new_case
+    arm_ok && phases_ok
+    printf 'x\n' >"$REPO/a.txt"
+    export OCRL_MAX_FAILURES=1
+    d=$(with_env OCRL_FAKE_MODE=rate-limited pre Bash 'git add -A && git commit -m x')
+    assert_eq 'the commit is denied' "$d" 'deny'
+    assert_contains 'and the message names it as transient' "$(pre_reason)" 'transient'
+    assert_eq 'the ordinary failure budget is untouched' "$(sget failures)" '0'
+    assert_eq 'the transient counter moved instead' "$(sget transient_failures)" '1'
+    before=$(sget report_seq)
+
+    # A reviewer command that does not exist proves the very next attempt never reaches it:
+    # the backoff denies before another provider call, not merely before another approval.
+    d=$(with_env OCRL_REVIEWER_CMD=/nonexistent/reviewer-must-not-run pre Bash 'git add -A && git commit -m x')
+    assert_eq 'the backed-off retry still denies' "$d" 'deny'
+    assert_contains 'and names the remaining wait' "$(pre_reason)" 'Retry in'
+    assert_eq 'no report sequence was reserved for it' "$(sget report_seq)" "$before"
+    unset OCRL_MAX_FAILURES
+fi
+
+if start 'transient failures: exhausting the budget escalates, and a later approval clears both counters'; then
+    new_case
+    arm_ok && phases_ok
+    printf 'x\n' >"$REPO/a.txt"
+    export OCRL_MAX_TRANSIENT_FAILURES=1
+    with_env OCRL_FAKE_MODE=rate-limited pre Bash 'git add -A && git commit -m x' >/dev/null
+
+    # Clears the backoff so this attempt reaches the reviewer rather than being denied by
+    # the wait itself -- this case is about the budget being exhausted, not about pacing.
+    f=$(state_file)
+    jq '.retry_not_before = 1' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+    d=$(with_env OCRL_FAKE_MODE=rate-limited pre Bash 'git add -A && git commit -m x')
+    assert_eq 'the second transient failure denies' "$d" 'deny'
+    assert_eq 'and escalates once the transient budget is exhausted' "$(sget status)" 'NEEDS_HUMAN'
+    unset OCRL_MAX_TRANSIENT_FAILURES
+
+    jq '.status = "ACTIVE" | .retry_not_before = 1' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+    printf 'y\n' >"$REPO/a.txt"
+    d=$(with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x')
+    assert_eq 'a later approval succeeds' "$d" 'allow'
+    assert_eq 'and clears the transient counter' "$(sget transient_failures)" '0'
+    assert_eq 'and any pending backoff' "$(sget retry_not_before)" '0'
+fi
+
 if start 'commit gate: the findings cap escalates instead of trimming'; then
     new_case
     arm_ok && phases_ok

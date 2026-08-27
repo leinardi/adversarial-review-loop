@@ -817,6 +817,148 @@ def test_a_timeout_kills_what_verify_cmd_spawned(activation: state.State, git_re
 
 
 # --------------------------------------------------------------------------
+# Phase 6: failure classification
+# --------------------------------------------------------------------------
+
+
+def test_reviewer_failed_carries_the_exit_status(tmp_path: Path) -> None:
+    with pytest.raises(ReviewerFailed) as caught:
+        invoke_fake(tmp_path, "nonzero")
+    assert caught.value.status == 3
+
+
+def test_a_timeout_carries_its_own_exit_status(tmp_path: Path) -> None:
+    with pytest.raises(ReviewerFailed) as caught:
+        invoke_fake(tmp_path, "slow", config=config_with(timeout_sec=1))
+    assert caught.value.status in reviewer._TIMEOUT_STATUSES
+
+
+@pytest.mark.parametrize(
+    ("status", "kind"),
+    [
+        (124, "transient"),  # `timeout`'s own SIGTERM status
+        (137, "transient"),  # `timeout`'s own SIGKILL status
+        (126, "operational"),  # not executable
+        (127, "operational"),  # no `opencode` on PATH
+        (1, "operational"),  # a generic non-zero exit, no rate-limit signal in its output
+    ],
+)
+def test_classify_op_failure_is_an_allow_list_not_a_catch_all(tmp_path: Path, status: int, kind: str) -> None:
+    """A bad ``--model``/``--variant`` and an expired credential all exit non-zero the same
+
+    way ``126``/``127`` do -- five attempts against any of them must burn the ordinary
+    ``failures`` budget, not the transient one, or a missing binary alone would exhaust
+    ``max_transient_failures`` on nothing but dead waiting.
+    """
+    out = tmp_path / "o"
+    out.write_text("some ordinary CLI error text, no known signal in it\n")
+    exc = ReviewerFailed(f"the reviewer exited with status {status}", status=status)
+    assert reviewer._classify_op_failure(exc, out) == kind
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Error: rate limit exceeded, please retry later\n",
+        "429 Too Many Requests\n",
+        "quota exceeded for this model\n",
+        "usage limit reached, try again tomorrow\n",
+        "Rate-Limited: backing off\n",
+    ],
+)
+def test_a_matched_rate_limit_signal_is_transient_even_on_a_plain_exit(tmp_path: Path, text: str) -> None:
+    out = tmp_path / "o"
+    out.write_text(text)
+    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
+    assert reviewer._classify_op_failure(exc, out) == "transient"
+
+
+@pytest.mark.parametrize("text", ["command not found\n", "permission denied\n", ""])
+def test_output_with_no_rate_limit_phrase_stays_operational(tmp_path: Path, text: str) -> None:
+    out = tmp_path / "o"
+    out.write_text(text)
+    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
+    assert reviewer._classify_op_failure(exc, out) == "operational"
+
+
+def test_the_rate_limit_signal_is_only_read_from_the_head_of_the_output(tmp_path: Path) -> None:
+    """ "Bounded" -- a signal past the head is not scanned for, so a large transcript is never
+    read in full just to classify a failure."""
+    out = tmp_path / "o"
+    out.write_text(("x" * reviewer._TRANSIENT_OUTPUT_HEAD_BYTES) + "rate limit exceeded\n")
+    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
+    assert reviewer._classify_op_failure(exc, out) == "operational"
+
+
+def test_classify_op_failure_never_reads_the_whole_file_into_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-zero exit can still have written an unbounded amount to ``out_path`` before it
+
+    did; the classifier must read only the bounded head from disk, never load the whole file
+    first and slice it after the fact.
+    """
+    out = tmp_path / "o"
+    out.write_text("rate limit exceeded\n")
+
+    def forbidden(self: Path) -> bytes:
+        raise AssertionError("_classify_op_failure must not call Path.read_bytes()")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
+    assert reviewer._classify_op_failure(exc, out) == "transient"
+
+
+@pytest.mark.parametrize("text", ["rateXlimit exceeded\n", "notarratelimiter\n", "arbitraryrate_limitingtoken\n", "rate limitation for this month\n"])
+def test_the_rate_limit_pattern_does_not_glue_across_unrelated_characters(tmp_path: Path, text: str) -> None:
+    """A bare ``.?`` between "rate" and "limit" would also match "rateXlimit" or catch the
+
+    phrase glued onto an unrelated identifier -- only a real word, bounded and separated by
+    nothing, a space, a hyphen or an underscore, counts.
+    """
+    out = tmp_path / "o"
+    out.write_text(text)
+    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
+    assert reviewer._classify_op_failure(exc, out) == "operational"
+
+
+@pytest.mark.parametrize("text", ["rate_limit_exceeded\n", "RATE-LIMIT hit\n", "ratelimit reached\n"])
+def test_every_documented_rate_limit_separator_still_matches(tmp_path: Path, text: str) -> None:
+    out = tmp_path / "o"
+    out.write_text(text)
+    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
+    assert reviewer._classify_op_failure(exc, out) == "transient"
+
+
+def test_a_missing_out_path_falls_back_to_operational(tmp_path: Path) -> None:
+    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
+    assert reviewer._classify_op_failure(exc, tmp_path / "never-written") == "operational"
+
+
+def test_run_invocation_classifies_a_timeout_as_transient(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OCRL_REVIEWER_CMD", str(FAKE_REVIEWER))
+    monkeypatch.setenv("OCRL_FAKE_MODE", "slow")
+    review, invoked = reviewer._run_invocation(TARGET, invocation(tmp_path), config=config_with(timeout_sec=1))
+    assert invoked is False
+    assert review.verdict == "OP_FAILURE"
+    assert review.kind == "transient"
+
+
+def test_run_invocation_classifies_a_plain_nonzero_exit_as_operational(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OCRL_REVIEWER_CMD", str(FAKE_REVIEWER))
+    monkeypatch.setenv("OCRL_FAKE_MODE", "nonzero")
+    review, invoked = reviewer._run_invocation(TARGET, invocation(tmp_path), config=config_with())
+    assert invoked is False
+    assert review.verdict == "OP_FAILURE"
+    assert review.kind == "operational"
+
+
+def test_execute_classifies_a_bundle_error_as_kind_bundle(activation: state.State, git_repo: Path) -> None:
+    target = Target(repo=str(git_repo), base="deadbeef", head=dirty(git_repo), scope="phase", phase=1)
+    review = reviewer.execute(target, state=activation, config=config_with())
+    assert review.verdict == "OP_FAILURE"
+    assert review.kind == "bundle"
+
+
+# --------------------------------------------------------------------------
 # Contract parsing
 # --------------------------------------------------------------------------
 
@@ -881,6 +1023,25 @@ def test_a_missing_output_file_is_a_failure(tmp_path: Path) -> None:
     parsed = reviewer.parse(tmp_path / "never-written", config=config_with())
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.error == "the reviewer produced no output"
+    assert parsed.kind == "contract"
+
+
+def test_missing_markers_carry_kind_contract(tmp_path: Path) -> None:
+    out = tmp_path / "o"
+    out.write_text("VERDICT APPROVED\n")
+    assert reviewer.parse(out, config=config_with()).kind == "contract"
+
+
+def test_a_nul_refusal_carries_kind_contract(tmp_path: Path) -> None:
+    out = tmp_path / "o"
+    out.write_bytes(b"\0prose\n<<<OCRL-FINDINGS>>>\nVERDICT APPROVED\n<<<OCRL-END>>>\n")
+    assert reviewer.parse(out, config=config_with()).kind == "contract"
+
+
+def test_an_unrecognised_verdict_carries_kind_contract(tmp_path: Path) -> None:
+    parsed = parse_text(tmp_path, contract("VERDICT MAYBE"))
+    assert parsed.verdict == "OP_FAILURE"
+    assert parsed.kind == "contract"
 
 
 def test_output_that_is_not_valid_utf8_is_refused(tmp_path: Path) -> None:
@@ -1806,6 +1967,10 @@ def test_a_second_overlapping_execute_is_refused_without_invoking_and_a_retry_af
 
     assert review.verdict == "OP_FAILURE"
     assert "already in progress" in review.error
+    # Phase 6: contention is not a "the reviewer is broken" failure -- it paces with backoff
+    # against `max_transient_failures` rather than spending the ordinary budget on a rival
+    # invocation that will most likely have released the slot by the next attempt.
+    assert review.kind == "transient"
     assert activation.get_int("report_seq") == 0, "the refused attempt reserved nothing"
 
     reviewer._release_active_review(activation, claim_id=held, expected=expected, config=config)

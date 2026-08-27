@@ -389,6 +389,15 @@ def _advance(check: _Check, *, pending: str, head: str) -> NoReturn:
                 "phase": check.expected.phase + 1,
                 "phase_commits": recorded,
                 "failures": 0,
+                # Phase 6: a transient failure/backoff belongs to the phase whose review hit
+                # it. `approve()` already clears both the moment its own review approves, but
+                # a busy-slot loser can still record one afterwards, in its own later
+                # transaction (see `_review_failed`'s fingerprint guard for why that write is
+                # now refused when it is stale -- this reset is what covers the ordinary,
+                # non-racy case: a transient failure earlier in *this* phase, retried
+                # successfully, must not carry its counters into the next one).
+                "transient_failures": 0,
+                "retry_not_before": 0,
                 "stop_blocks": 0,
             }
             # The commit just confirmed is deterministically the one an abandoned resume

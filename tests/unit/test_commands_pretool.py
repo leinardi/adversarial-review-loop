@@ -11,6 +11,7 @@ The invariant every test in this file is ultimately about: **no failure becomes 
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -522,13 +523,146 @@ def test_a_failing_reviewer_counts_and_then_escalates(git_repo: Path, tmp_path: 
 
     first = pretool(git_repo, env, command=command)
     assert first[0] == "deny"
-    assert "1 of 1 consecutive failures" in first[1]
+    assert "1 of 1 operational failures since the last approval" in first[1]
     assert read_state(env, git_repo, SESSION)["failures"] == 1
 
     second = pretool(git_repo, env, command=command)
     assert second[0] == "deny"
     assert "escalated to NEEDS_HUMAN" in second[1]
     assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
+
+
+def test_a_transient_failure_is_counted_separately_from_operational_ones(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A timeout or a rate limit is not the same failure as a missing binary (phase 6): it
+    paces its own retries against ``max_transient_failures`` and leaves the ordinary
+    ``failures``/``max_failures`` budget untouched.
+    """
+    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited", OCRL_MAX_FAILURES="1")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    command = 'git add -A && git commit -m "x"'
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "1 of 5 transient failures since the last approval" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["failures"] == 0
+    assert document["transient_failures"] == 1
+    assert int(document["retry_not_before"]) > 0  # type: ignore[call-overload]
+
+
+def test_a_backoff_in_effect_denies_without_invoking_the_reviewer(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The retry-not-before check runs after the snapshot and the free-shortcut checks
+    (byte-identical tree, already-approved tree, no diff, ignore_globs) -- see
+    ``_check_retry_backoff``'s docstring for why it is not ahead of them -- but always ahead
+    of another provider call. Proven here by pointing the retried attempt at a reviewer
+    command that does not exist: if the check were skipped, that attempt would crash rather
+    than deny, and if it invoked anyway ``report_seq`` would advance.
+    """
+    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    command = 'git add -A && git commit -m "x"'
+
+    pretool(git_repo, env, command=command)
+    before = read_state(env, git_repo, SESSION)["report_seq"]
+
+    missing_reviewer_env = {**env, "OCRL_REVIEWER_CMD": str(tmp_path / "reviewer-must-not-run")}
+    verdict, reason = pretool(git_repo, missing_reviewer_env, command=command)
+
+    assert verdict == "deny"
+    assert "Retry in" in reason
+    assert read_state(env, git_repo, SESSION)["report_seq"] == before
+
+
+def test_exhausting_the_transient_budget_escalates_to_needs_human(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited", OCRL_MAX_TRANSIENT_FAILURES="1")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    command = 'git add -A && git commit -m "x"'
+
+    pretool(git_repo, env, command=command)
+    # Clears the backoff so this attempt reaches the reviewer rather than being denied by
+    # the wait itself -- this test is about the budget being exhausted, not about pacing.
+    patch_state(env, git_repo, retry_not_before=0)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "escalated to NEEDS_HUMAN" in reason
+    assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
+
+
+def test_an_approval_clears_the_transient_counters(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    command = 'git add -A && git commit -m "x"'
+
+    pretool(git_repo, env, command=command)
+    assert read_state(env, git_repo, SESSION)["transient_failures"] == 1
+    patch_state(env, git_repo, retry_not_before=0)
+
+    approving_env = {**env, "OCRL_FAKE_MODE": "approve"}
+    verdict, _ = pretool(git_repo, approving_env, command=command)
+
+    assert verdict == "allow"
+    document = read_state(env, git_repo, SESSION)
+    assert document["transient_failures"] == 0
+    assert document["retry_not_before"] == 0
+
+
+def test_a_stale_backoff_never_blocks_a_tree_already_approved(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A busy-slot loser records its own transient failure -- and sets a fresh
+
+    ``retry_not_before`` -- independently of whatever a concurrent, winning review for the
+    same label did; the two writes are not ordered against each other. If the winner's
+    approval happens first, the loser's later write must not have the backoff it sets block
+    the tree the approval already cleared -- ``_check_retry_backoff`` runs only after every
+    free shortcut (byte-identical tree, an already-approved tree, no diff, ignore_globs) has
+    been ruled out, so this survives regardless of write order. Simulated directly, by
+    setting ``retry_not_before`` into the future *after* the approval already landed, rather
+    than through real concurrency.
+    """
+    env = armed_env(clean_env, OCRL_FAKE_MODE="approve")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    command = 'git add -A && git commit -m "x"'
+
+    verdict, _ = pretool(git_repo, env, command=command)
+    assert verdict == "allow"
+
+    patch_state(env, git_repo, retry_not_before=int(time.time()) + 100)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "allow"
+    assert "already approved" in reason
+
+
+def test_a_transient_failure_whose_activation_moved_first_is_not_counted(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Phase 6's fingerprint guard in ``_review_failed``. A genuinely concurrent, winning
+
+    review of the same label can approve -- writing ``pending_approved_tree``, one of
+    ``hooks.Activation``'s own fields -- while this attempt is still deciding it hit a rate
+    limit; counting the failure against whatever state exists by the time it is recorded
+    would attribute it to an activation this specific attempt never saw. The fake reviewer
+    mutates ``pending_approved_tree`` itself, mid-invocation, the same technique
+    ``clarify-mutate`` uses.
+    """
+    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited-elsewhere")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    command = 'git add -A && git commit -m "x"'
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "while this commit was being gated" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["transient_failures"] == 0
+    assert document["retry_not_before"] == 0
 
 
 def test_an_oversized_file_is_never_silently_left_out_of_the_snapshot(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
