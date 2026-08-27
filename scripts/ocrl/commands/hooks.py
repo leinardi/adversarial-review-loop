@@ -211,8 +211,14 @@ def find_abandoned_marker_commit(repo: str, *, activation_commit: str, marker_he
     if not activation_commit and not gitsnap.rev_parse_checked(repo, "HEAD"):
         return ""
 
+    if activation_commit and not gitsnap.looks_like_object_id(activation_commit):
+        # state.json is not a trust boundary: a tampered `activation_commit` shaped like a
+        # git option must not be interpolated into `rev-list` argv. Fail closed -- the caller
+        # denies on a raised GitUnavailable, exactly as it would for any unreadable range.
+        raise gitsnap.GitUnavailable(f"the recorded activation commit {activation_commit!r} is not a usable git object id")
+
     range_spec = f"{activation_commit}..HEAD" if activation_commit else "HEAD"
-    proc = gitsnap.git_run(repo, ["rev-list", range_spec])
+    proc = gitsnap.git_run(repo, ["rev-list", range_spec, "--"])
     if proc.returncode != 0:
         raise gitsnap.GitUnavailable(proc.stderr.decode("utf-8", "surrogateescape").strip() or f"git rev-list {range_spec} failed")
     for commit in proc.stdout.decode("utf-8", "surrogateescape").split():

@@ -108,6 +108,29 @@ def test_cross_session_resume_preserves_baseline_and_approvals(git_repo: Path, t
     assert read_state(env, git_repo, S2)["phase"] == 3
 
 
+def test_resume_carries_round_history_but_resets_the_convergence_counters(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``round_history`` is evidence -- carried forward like the reports. ``transient_failures``,
+    ``retry_not_before`` and ``clarifications`` are counters -- a fresh run starts them at zero."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    history = [
+        {"seq": 1, "label": "phase1", "phase": 1, "verdict": "CHANGES_REQUIRED", "findings": ["FINDING severity=high actionable=yes file=a | x"]}
+    ]
+    predecessor_path = state_dir(env, git_repo, S1) / "state.json"
+    document = json.loads(predecessor_path.read_text())
+    document.update(round_history=history, transient_failures=3, retry_not_before=9999999999, clarifications=2)
+    predecessor_path.write_text(json.dumps(document))
+
+    code, banner = resume(git_repo, env)
+    assert code == 0, banner
+
+    after = read_state(env, git_repo, S2)
+    assert after["round_history"] == history, "evidence is carried into the successor untouched"
+    assert after["transient_failures"] == 0
+    assert after["retry_not_before"] == 0
+    assert after["clarifications"] == 0
+
+
 def test_the_predecessor_is_retired_and_denies_every_mutation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
@@ -297,6 +320,29 @@ def test_same_session_resume_updates_the_pause_target_in_place(git_repo: Path, t
     assert after["activation_generation"] == before_generation + 1
     # In-place: no successor directory, no new pointers.
     assert not (state_dir(env, git_repo, S2)).exists()
+
+
+def test_same_session_resume_resets_the_convergence_counters_but_keeps_round_history(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str]
+) -> None:
+    """The in-place path is a fresh start too: an inherited retry backoff or an exhausted
+    clarification budget must not survive it. ``round_history`` is evidence and stays."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    history = [{"seq": 1, "label": "phase1", "phase": 1, "verdict": "CHANGES_REQUIRED"}]
+    path = state_dir(env, git_repo, S1) / "state.json"
+    document = json.loads(path.read_text())
+    document.update(round_history=history, transient_failures=4, retry_not_before=9999999999, clarifications=2)
+    path.write_text(json.dumps(document))
+
+    code, banner = resume_argv(git_repo, env, S1, ["--until", "2"])
+    assert code == 0, banner
+
+    after = read_state(env, git_repo, S1)
+    assert after["transient_failures"] == 0
+    assert after["retry_not_before"] == 0
+    assert after["clarifications"] == 0
+    assert after["round_history"] == history
 
 
 def test_same_session_resume_refuses_a_pending_approval(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -709,7 +755,15 @@ def test_git_failure_during_the_abandoned_marker_scan_denies_rather_than_passing
     monkeypatch.setattr(gitsnap, "git_run", broken_git_run)
 
     with pytest.raises(gitsnap.GitUnavailable):
-        hooks.find_abandoned_marker_commit(str(git_repo), activation_commit="deadbeef", marker_head="deadbeef", marker_tree="cafefeed")
+        # A well-formed id, so the shape guard passes and the broken `rev-list` is what raises.
+        hooks.find_abandoned_marker_commit(str(git_repo), activation_commit="a" * 40, marker_head="deadbeef", marker_tree="cafefeed")
+
+
+def test_a_git_option_shaped_activation_commit_is_refused_before_rev_list(git_repo: Path) -> None:
+    """state.json is not a trust boundary: a tampered `activation_commit` shaped like a git
+    option must not be interpolated into `rev-list` argv."""
+    with pytest.raises(gitsnap.GitUnavailable, match="not a usable git object id"):
+        hooks.find_abandoned_marker_commit(str(git_repo), activation_commit="--output=/tmp/x", marker_head="a" * 40, marker_tree="b" * 40)
 
 
 def test_publication_time_dirty_recheck_applies_even_without_a_plan_revision(

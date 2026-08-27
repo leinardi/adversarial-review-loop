@@ -88,6 +88,20 @@ time (`state.effective_status`). An activation can be stored as `ACTIVE` and ans
 today, then answer `ACTIVE` again tomorrow if `resume` refreshes `armed_at`. See
 [edge-cases.md](edge-cases.md#a-stale-activation) for what that means in practice.
 
+### `round_history`
+
+`STATE_VERSION` 3 adds `round_history`: one entry per *parsed* review (`APPROVED` or
+`CHANGES_REQUIRED` only — an `OP_FAILURE` or a `NEEDS_HUMAN` is not a round), appended by
+`reviewer.execute` under a fingerprint-guarded transaction. Each entry records the
+sequence number, label, phase, `activation_generation`, round number, verdict, the tree
+and base it was judged against, and the review's `FINDING` lines. It is **evidence, not a
+counter** — carried across a `resume` untouched, like the stored reports and
+`manual_accepts`. It changes no behaviour on its own; later work reads it to give the
+reviewer memory of its own prior verdicts, to detect an oscillating finding, and to
+escalate a phase that is demonstrably stuck. Every consumer treats `state.json` as
+untrusted: stored finding lines are re-validated before rendering, and any tree id from an
+entry is resolved through `gitsnap.checked_tree` before it reaches a git command line.
+
 ## One commit, start to finish
 
 ```text

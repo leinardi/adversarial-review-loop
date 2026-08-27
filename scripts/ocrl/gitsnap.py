@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -36,6 +37,7 @@ __all__ = [
     "SnapshotError",
     "all_paths_ignored",
     "changed_paths",
+    "checked_tree",
     "dirty_summary",
     "format_oversized",
     "git_run",
@@ -43,6 +45,8 @@ __all__ = [
     "head_tree",
     "head_tree_checked",
     "is_ancestor",
+    "is_ancestor_checked",
+    "looks_like_object_id",
     "oversized",
     "rev_parse",
     "rev_parse_checked",
@@ -54,6 +58,20 @@ __all__ = [
 
 #: Lines of ``git status --porcelain`` kept for a denial message, as ``head -n 40`` did.
 DIRTY_SUMMARY_LINES: Final = 40
+
+#: A full-length git object id -- 40 hex (SHA-1) or 64 hex (SHA-256) -- which is the shape a
+#: commit, tree or blob id all share. A value read out of ``state.json``
+#: (``last_approved_tree``, ``activation_commit``, a ``round_history`` entry's ``tree``) that
+#: is not exactly this shape must never reach a git command line: ``git diff --output=<file>``
+#: and ``git log --output=<file>`` are real options, so a crafted
+#: ``"--output=../../repo/x"`` would have git write *inside* the repository under review,
+#: breaking Rule 3 -- and its empty stdout would then read as "no changes" and approve,
+#: breaking Rule 1. ``state.json`` is not a trust boundary. A trailing ``--`` on the argv
+#: does **not** help here: the hostile value is a leading option, before the ``--``.
+#:
+#: Matched with :meth:`re.Pattern.fullmatch`, never ``match`` -- ``$`` also matches just
+#: before a trailing ``\n``, so ``match`` would accept ``"<40 hex>\n"``.
+_OBJECT_ID_RE: Final = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 class GitUnavailable(OcrlError):
@@ -146,11 +164,30 @@ def head_tree(repo: str) -> str:
 def is_ancestor(repo: str, ancestor: str, descendant: str) -> bool:
     """Is ``ancestor`` reachable by walking ``descendant``'s first-parent-and-beyond history?
 
-    False on anything git cannot resolve, which is the safe direction for every caller here:
-    ``resume`` uses it to refuse rather than trust a baseline it cannot place, and ``pretool``
-    uses it to refuse a recovery reset that predates the activation.
+    ``False`` on anything git cannot resolve. That is the safe direction **only for a caller
+    that refuses unless the answer is a confirmed yes** -- ``resume``, which will not trust a
+    baseline it cannot place. A caller that instead *denies on a yes* (``pretool``'s recovery
+    reset guard) must use :func:`is_ancestor_checked`: for it, "git could not answer" has to
+    deny too, and this function would silently let it through.
     """
     return git_run(repo, ["merge-base", "--is-ancestor", ancestor, descendant]).returncode == 0
+
+
+def is_ancestor_checked(repo: str, ancestor: str, descendant: str) -> bool:
+    """:func:`is_ancestor`, but a git error is raised rather than folded into ``False``.
+
+    ``git merge-base --is-ancestor`` exits ``0`` for yes, ``1`` for a definite no, and
+    ``128`` (or anything else) when it could not evaluate the question at all -- an
+    unresolvable ref, a corrupt object. The plain helper cannot tell the last two apart, so
+    a caller that treats ``False`` as "safe to allow" would allow on an unreadable ref.
+    Raises :class:`GitUnavailable` for that case; the caller denies on it (Rule 1).
+    """
+    proc = git_run(repo, ["merge-base", "--is-ancestor", ancestor, descendant])
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    raise GitUnavailable(_decode(proc.stderr).strip() or f"git merge-base --is-ancestor exited with status {proc.returncode} in {repo}")
 
 
 def rev_parse_checked(repo: str, spec: str) -> str:
@@ -179,6 +216,41 @@ def head_tree_checked(repo: str) -> str:
     cannot be mistaken for "there is nothing here to look at".
     """
     return rev_parse_checked(repo, "HEAD^{tree}")
+
+
+def checked_tree(repo: str, value: object) -> str:
+    """Resolve a **state-supplied** object id to its tree id, or ``""`` on any failure.
+
+    ``state.json`` is not a trust boundary, and ``value`` comes straight out of it. It is
+    matched against :data:`_OBJECT_ID_RE` (via :func:`looks_like_object_id`) *before* it is
+    allowed anywhere near argv -- a value
+    like ``--output=../x`` never reaches git -- and then resolved through ``<value>^{tree}``
+    so a blob id, a tag, or a commit that no longer exists all fail rather than being
+    diffed. ``""`` on every failure path, never an exception and never the raw ``value``.
+
+    A caller building a git command from the result must **still** terminate its argument
+    list with ``--``: this helper guarantees the id is well formed, not that every other
+    argument on that line is.
+    """
+    if not looks_like_object_id(value):
+        return ""
+    try:
+        return rev_parse_checked(repo, f"{value}^{{tree}}")
+    except GitUnavailable:
+        return ""
+
+
+def looks_like_object_id(value: object) -> bool:
+    """Whether ``value`` is *shaped* like a full-length git object id (40 or 64 hex).
+
+    The cheap, no-subprocess guard for a **state-supplied** id that is about to be
+    interpolated into a git argument -- ``last_approved_tree`` reaching ``git diff`` on the
+    commit hot path, ``activation_commit`` reaching ``git log`` in the bundle. It rejects
+    every ``--option``-shaped value (see :data:`_OBJECT_ID_RE`) without paying for a
+    ``rev-parse``; :func:`checked_tree` is the stricter check for the paths that can afford
+    one. ``state.json`` is not a trust boundary.
+    """
+    return isinstance(value, str) and _OBJECT_ID_RE.fullmatch(value) is not None
 
 
 # --------------------------------------------------------------------------
@@ -321,7 +393,7 @@ def dirty_summary(repo: str) -> str:
 
 def changed_paths(repo: str, base: str, head: str) -> list[str]:
     """Paths differing between two tree-ish ids. Empty on any failure."""
-    proc = git_run(repo, ["diff", "--name-only", base, head])
+    proc = git_run(repo, ["diff", "--name-only", base, head, "--"])
     if proc.returncode != 0:
         return []
     return [line for line in _decode(proc.stdout).splitlines() if line]

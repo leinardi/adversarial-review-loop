@@ -159,6 +159,14 @@ The diff between the last approved tree ({base}) and the working state ({head}) 
 The commit is denied: an unreadable diff is not "no changes".
 """
 
+BASE_TREE_UNUSABLE: Final = """\
+The last approved tree recorded in this activation's state ({base}) is not a usable git object id.
+
+state.json is not a trust boundary, and a value shaped like a git option there would be
+passed to git as one -- `git diff --output=<file>` writes a file and reports no changes,
+which this gate would read as an approval. The commit is denied until the state is repaired.
+"""
+
 STATE_ROOT_DENIED: Final = """\
 This tool would write inside the review loop's own state directory:
 
@@ -232,6 +240,11 @@ RESET_WRONG_TARGET: Final = (
 
 RESET_PREDATES_ACTIVATION: Final = (
     "The reset target {resolved} is strictly before the activation commit {activation}. The loop may not rewind history that predates it.\n"
+)
+
+RESET_ANCESTRY_UNVERIFIABLE: Final = (
+    "Whether the reset target {resolved} predates the activation commit could not be checked: {error}\n"
+    "The reset is denied rather than allowed on an unresolved history question.\n"
 )
 
 RESET_ALLOWED: Final = "opencode-review-loop: bounded recovery reset to {resolved} permitted. Rebuild the intended complete tree, then commit again."
@@ -513,6 +526,24 @@ def _prepare(hook: Hook, *, state: State, config: Config, repo: str, command: st
         hooks.deny(hook, SNAPSHOT_FAILED.format(error=exc))
 
 
+def _checked_base_tree(hook: Hook, state: State) -> str:
+    """``last_approved_tree``, refused unless it is shaped like a git object id.
+
+    ``state.json`` is not a trust boundary, and this value is interpolated into ``git diff``
+    argv (and reaches ``reviewer.execute`` as ``Target.base``). A value shaped like
+    ``--output=<file>`` would have git write inside the reviewed repo (Rule 3) and report an
+    empty diff, which the gate downstream reads as "no changes" and approves (Rule 1). The
+    shape check is enough to stop that and costs no subprocess; a well-formed id that does
+    not resolve is caught by the ``git diff`` exit status a few lines on.
+    """
+    from ocrl import gitsnap  # noqa: PLC0415 - reached only by a commit, never on the hot path
+
+    base = state.get("last_approved_tree")
+    if not gitsnap.looks_like_object_id(base):
+        hooks.deny(hook, BASE_TREE_UNUSABLE.format(base=base))
+    return base
+
+
 def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command: str) -> None:
     """Decide on the Bash call that would create a commit, running the review if needed."""
     from ocrl import gitsnap, report, reviewer  # noqa: PLC0415 - reached only by a commit
@@ -530,7 +561,7 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
     snap = _prepare(hook, state=state, config=config, repo=repo, command=command)
     tree = snap.tree
     phase = state.get_int("phase")
-    base = state.get("last_approved_tree")
+    base = _checked_base_tree(hook, state)
     head = gitsnap.head_commit(repo)
     # Captured after any stale approval is cleared and before anything slow runs. A review
     # takes minutes, and an approval that lands on an activation which moved during them is
@@ -569,7 +600,9 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
     # The shell tested `[ -z "$(git diff --name-only …)" ]`, which cannot tell "no changes"
     # from "git failed" -- and read a failure as an approval. Rule 1 says it must not, so the
     # exit status is checked here and a failed diff denies.
-    diff = gitsnap.git_run(repo, ["diff", "--name-only", base, tree])
+    # `--` so a base tree id that also happens to name a path is read as a revision, not a
+    # pathspec -- git would otherwise deny a legitimate commit with "ambiguous argument".
+    diff = gitsnap.git_run(repo, ["diff", "--name-only", base, tree, "--"])
     if diff.returncode != 0:
         hooks.deny(hook, DIFF_FAILED.format(base=base, head=tree))
     if not diff.stdout:
@@ -649,8 +682,25 @@ def _gate_reset(hook: Hook, *, state: State, repo: str, command: str) -> NoRetur
         hooks.deny(hook, RESET_UNRESOLVED.format(target=target, parent=parent))
     if resolved != parent:
         hooks.deny(hook, RESET_WRONG_TARGET.format(resolved=resolved, parent=parent))
-    if activation and resolved != activation and gitsnap.is_ancestor(repo, resolved, activation):
-        hooks.deny(hook, RESET_PREDATES_ACTIVATION.format(resolved=resolved, activation=activation))
+    if activation and resolved != activation:
+        # `activation_commit` is state-supplied; state.json is not a trust boundary. An
+        # option-shaped or otherwise unresolvable value would make the plain `is_ancestor`
+        # fold git's error into `False` -- read here as "does not predate", i.e. allow. Both
+        # the shape check and `is_ancestor_checked` (which raises rather than returning
+        # `False` on a git error) close that: an unanswered history question denies.
+        if not gitsnap.looks_like_object_id(activation):
+            hooks.deny(
+                hook,
+                RESET_ANCESTRY_UNVERIFIABLE.format(
+                    resolved=resolved, error=f"the recorded activation commit {activation!r} is not a usable git object id"
+                ),
+            )
+        try:
+            predates = gitsnap.is_ancestor_checked(repo, resolved, activation)
+        except gitsnap.GitUnavailable as exc:
+            hooks.deny(hook, RESET_ANCESTRY_UNVERIFIABLE.format(resolved=resolved, error=exc))
+        if predates:
+            hooks.deny(hook, RESET_PREDATES_ACTIVATION.format(resolved=resolved, activation=activation))
     hook.allow(RESET_ALLOWED.format(resolved=resolved))
 
 

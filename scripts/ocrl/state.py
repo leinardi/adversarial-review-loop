@@ -37,9 +37,11 @@ __all__ = ["STATE_VERSION", "State", "new_state_document", "pointer_clear", "poi
 #: with a generic re-arm prompt.
 _TTL_EXEMPT: Final = frozenset({"COMPLETE", "ARM_FAILED", "NEEDS_HUMAN", "RESUMED"})
 
-#: Version 2 adds resume, pause, plan revision and the config overlay's fields. See
-#: ``State._migrate`` for the upgrade from a version-1 (or unversioned) document.
-STATE_VERSION: Final = 2
+#: Version 2 adds resume, pause, plan revision and the config overlay's fields. Version 3
+#: adds ``round_history`` and the convergence counters. See ``State._migrate`` for the
+#: upgrade from any earlier (or unversioned) document -- a version-1 document reaches the
+#: current version in one pass.
+STATE_VERSION: Final = 3
 
 #: The name ``arm`` freezes the plan under, and the name revision 0 always carries.
 _PLAN_FROZEN_NAME: Final = "plan.frozen.md"
@@ -89,6 +91,20 @@ def new_state_document() -> dict[str, Any]:
         "abandoned_pending_head": "",
         "activation_generation": 0,
         "finish_requested": False,
+        #: One entry per *parsed* review (``APPROVED`` / ``CHANGES_REQUIRED`` only), appended
+        #: by ``reviewer.execute``: ``{seq, label, phase, generation, round, verdict, tree,
+        #: base, at, findings: [line, ...], supersedes: [line, ...]}``. Evidence, not a
+        #: counter -- carried across a resume, never reset, like ``manual_accepts`` and the
+        #: reports. ``state.json`` is not a trust boundary: every consumer re-validates each
+        #: stored finding line before rendering it, and any git command built from ``tree``
+        #: runs it through ``gitsnap.checked_tree`` first.
+        "round_history": [],
+        #: Infra-failure retry pacing (phase 6: ``transient_failures``, ``retry_not_before``)
+        #: and the clarify allowance (phase 3: ``clarifications``). Counters, so ``resume``
+        #: resets all three -- see ``commands.resume._build_successor_document``.
+        "transient_failures": 0,
+        "retry_not_before": 0,
+        "clarifications": 0,
         #: One entry per ``accept``: ``{"at", "phase", "tree", "base", "reason", "reviews",
         #: "report"}``. Never trimmed -- it is the audit trail for every phase a human approved
         #: without an approving review.
@@ -272,16 +288,26 @@ class State:
         self.data = new_state_document()
 
     def _migrate(self) -> None:
-        """Upgrade a document written before ``STATE_VERSION`` existed, lock already held.
+        """Upgrade a document written by an older build, lock already held.
 
-        Most fields this version added degrade correctly on their own through the typed
-        accessors below -- ``get_int`` answers ``0`` for a missing key, ``get_array``
-        answers ``[]``, ``get`` answers ``""``. ``plan_revisions`` is the one exception:
-        later code indexes its *last* entry, and an empty list turns that into an
-        ``IndexError`` raised from inside a hook -- which the fail-closed guard in
-        ``hookio.Hook.run`` turns into a denial that says nothing useful. So a legacy
-        document is upgraded explicitly, once, here, under the lock ``transaction`` already
-        holds.
+        Applied as ordered arms so a version-1 (or unversioned) document reaches the current
+        version in a single pass:
+
+        * **1 -> 2** synthesizes ``plan_revisions`` revision 0 from ``plan.frozen.md`` as
+          found *now* -- no earlier hash was ever recorded to check it against -- and
+          defaults the resume / config-overlay fields. Later code indexes ``plan_revisions``'
+          last entry, and an empty list turns that into an ``IndexError`` raised from inside
+          a hook, which the fail-closed guard in ``hookio.Hook.run`` converts into a denial
+          that says nothing useful. A missing, unreadable or symlinked ``plan.frozen.md``
+          fails closed as ``ARM_FAILED`` -- inventing a plan is worse than refusing.
+        * **2 -> 3** adds ``round_history`` and the three convergence counters. No evidence
+          recovery is needed: every one of those fields degrades correctly through the typed
+          accessors (``get_int`` answers ``0``, ``get_array_of_dicts`` answers ``[]``), so a
+          plain ``setdefault`` from :func:`new_state_document` is the whole arm.
+
+        Most other fields this build added degrade correctly on their own too; the explicit
+        arms exist for the ones that do not, and to make each upgrade a single recorded step
+        rather than an accident of accessor defaults.
 
         Must not call back into :meth:`transaction` or :meth:`_escalate` on any path: both
         take the activation lock, and ``flock`` does not nest across two descriptors opened
@@ -303,6 +329,16 @@ class State:
         if version == STATE_VERSION:
             return
 
+        defaults = new_state_document()
+        if version < 2:
+            self._migrate_1_to_2(defaults)
+        if version < 3:
+            for key in ("round_history", "transient_failures", "retry_not_before", "clarifications"):
+                self.data.setdefault(key, defaults[key])
+            self.data["version"] = 3
+
+    def _migrate_1_to_2(self, defaults: dict[str, Any]) -> None:
+        """The 1 -> 2 arm of :meth:`_migrate`: synthesize revision 0, default the resume fields."""
         # `os.path.realpath` on both the activation directory and the plan file, then a
         # containment check by exact parent-directory equality -- the same shape
         # ``pretool._guard_state_root`` uses -- so a symlink planted at either level is
@@ -330,7 +366,6 @@ class State:
             self.save()
             raise StateLoadError(self.data["reason"]) from None
 
-        defaults = new_state_document()
         for key in (
             "stop_after_phase",
             "resumed_from",
@@ -358,7 +393,7 @@ class State:
                 "file": _PLAN_FROZEN_NAME,
             }
         ]
-        self.data["version"] = STATE_VERSION
+        self.data["version"] = 2
 
     @contextmanager
     def transaction(self, *, create: bool = False) -> Iterator[State]:

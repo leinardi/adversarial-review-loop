@@ -291,6 +291,21 @@ def test_the_bundle_describes_the_range_under_review(activation: state.State, gi
     assert "Do the thing." in text
 
 
+def test_a_git_option_shaped_activation_commit_is_not_interpolated_into_git_log(activation: state.State, git_repo: Path) -> None:
+    """state.json is not a trust boundary. A tampered ``activation_commit`` shaped like
+    ``--output=<file>`` would have ``git log`` write inside the reviewed repo (Rule 3); the
+    disclosure section degrades to a note instead."""
+    pwned = git_repo / "PWNED"
+    activation.update(activation_commit=f"--output={pwned}")
+    activation.save()
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+
+    text = (dest / "range.txt").read_text()
+    assert "activation commit is unreadable" in text
+    assert not pwned.exists()
+
+
 def test_a_final_review_is_scoped_to_every_phase(activation: state.State, git_repo: Path) -> None:
     dest = activation.act_dir / "bundles" / "001"
     build_final(activation, git_repo, dest)
@@ -598,7 +613,9 @@ def test_an_unresolvable_range_is_an_error_not_an_empty_diff(activation: state.S
     dest = activation.act_dir / "bundles" / "001"
     with pytest.raises(BundleError) as caught:
         reviewer.build_bundle(Target(str(git_repo), "deadbeef", "HEAD", "phase", 1), dest, state=activation, config=config_with())
-    assert "git diff deadbeef..HEAD failed" in str(caught.value)
+    # ``deadbeef`` is not a full-length object id, so it is refused before it can reach
+    # ``git diff`` at all -- see the hostile-base tests further down.
+    assert "not a usable git object id" in str(caught.value)
 
 
 def test_verify_output_records_the_exit_status(activation: state.State, git_repo: Path) -> None:
@@ -864,6 +881,37 @@ def test_a_missing_output_file_is_a_failure(tmp_path: Path) -> None:
     parsed = reviewer.parse(tmp_path / "never-written", config=config_with())
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.error == "the reviewer produced no output"
+
+
+def test_output_that_is_not_valid_utf8_is_refused(tmp_path: Path) -> None:
+    """``_decode`` is ``surrogateescape``; a lone surrogate that reached ``round_history``
+    could not be encoded when ``state.json`` is saved and would crash the whole review. A
+    UTF-8 text protocol that is not valid UTF-8 fails the contract, like a NUL byte."""
+    out = tmp_path / "o"
+    out.write_bytes(b"prose\n<<<OCRL-FINDINGS>>>\nFINDING severity=high actionable=yes file=a | bad \xff byte\nVERDICT APPROVED\n<<<OCRL-END>>>\n")
+
+    parsed = reviewer.parse(out, config=config_with())
+
+    assert parsed.verdict == "OP_FAILURE"
+    assert parsed.error == "the reviewer output is not valid UTF-8, so the contract cannot be validated"
+
+
+def test_a_non_utf8_review_appends_no_round_history_and_still_reports(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    script = tmp_path / "bad-utf8-reviewer.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'p\\n\\n<<<OCRL-FINDINGS>>>\\n'\n"
+        r"printf 'FINDING severity=high actionable=yes file=a | \xff\n'" + "\n"
+        "printf 'VERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+    )
+    script.chmod(0o755)
+    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert review.verdict == "OP_FAILURE"
+    assert activation.get_array_of_dicts("round_history") == []
+    assert Path(review.report).is_file()
 
 
 def contract(*lines: str) -> str:
@@ -1172,6 +1220,133 @@ def test_a_final_review_names_itself_as_such(activation: state.State, git_repo: 
 def test_a_review_writes_nothing_into_the_repository(activation: state.State, git_repo: Path) -> None:
     execute_fake(activation, git_repo, "approve")
     assert git_status_ignored(git_repo) == "?? a.txt\n"
+
+
+# --------------------------------------------------------------------------
+# round_history
+# --------------------------------------------------------------------------
+
+
+def test_a_parsed_verdict_appends_one_round_history_entry(activation: state.State, git_repo: Path) -> None:
+    review = execute_fake(activation, git_repo, "changes")
+
+    history = activation.get_array_of_dicts("round_history")
+    assert len(history) == 1
+    entry = history[0]
+    assert entry["seq"] == 1
+    assert entry["label"] == "phase1"
+    assert entry["phase"] == 1
+    assert entry["verdict"] == "CHANGES_REQUIRED" == review.verdict
+    assert entry["generation"] == activation.get_int("activation_generation")
+    assert entry["round"] == review.round
+    assert entry["base"] == activation.get("baseline_tree")
+    assert len(entry["tree"]) in (40, 64), "the reviewed snapshot tree id"
+    assert any("Returns success on a failed lookup" in line for line in entry["findings"])
+    assert entry["supersedes"] == []
+
+
+def test_an_approved_verdict_also_appends(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "approve")
+    history = activation.get_array_of_dicts("round_history")
+    assert [e["verdict"] for e in history] == ["APPROVED"]
+
+
+def test_consecutive_rounds_accumulate_in_order(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")
+    execute_fake(activation, git_repo, "approve")
+    history = activation.get_array_of_dicts("round_history")
+    assert [(e["seq"], e["verdict"]) for e in history] == [(1, "CHANGES_REQUIRED"), (2, "APPROVED")]
+
+
+def test_a_finding_detail_with_a_unicode_line_separator_stays_one_record(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """``round_history`` finding lines are split on ``\\n`` only (``_records``), never
+    ``str.splitlines`` -- so a valid detail carrying U+2028 is not persisted as two
+    fragments that a later re-validation would drop."""
+    script = tmp_path / "u2028-reviewer.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'Look.\\n\\n<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf 'FINDING severity=high actionable=yes file=a.txt:1 | first line\\u2028second line\\n'\n"
+        "printf 'VERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+    )
+    script.chmod(0o755)
+    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+    assert review.verdict == "CHANGES_REQUIRED"
+
+    history = activation.get_array_of_dicts("round_history")
+    assert len(history) == 1
+    findings = history[0]["findings"]
+    assert len(findings) == 1, f"the U+2028 must not have split the record: {findings!r}"
+    assert "first line" in findings[0] and "second line" in findings[0]
+    assert "\u2028" in findings[0], "the separator itself is kept; the record was not split"
+
+
+def test_an_op_failure_appends_no_round_history_entry(activation: state.State, git_repo: Path) -> None:
+    """A failed run is not a round -- phase 5's stall check and phase 6's budget must not see it."""
+    review = execute_fake(activation, git_repo, "nonzero")
+
+    assert review.verdict == "OP_FAILURE"
+    assert activation.get_array_of_dicts("round_history") == []
+    assert Path(review.report).is_file(), "the failure is still reported"
+
+
+def test_a_needs_human_review_appends_no_round_history_entry(activation: state.State, git_repo: Path) -> None:
+    (git_repo / "big.txt").write_text("x\n" * 5000)
+    review = execute_fake(activation, git_repo, "approve", config=config_with(hard_diff_ceiling=1024))
+
+    assert review.verdict == "NEEDS_HUMAN"
+    assert activation.get_array_of_dicts("round_history") == []
+
+
+def test_the_cold_confirmation_verdict_is_the_one_recorded(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """When the cold-approval invariant overrides a continued APPROVED, the cold verdict is
+    what lands in round_history -- not the continued one. Mirrors
+    ``test_capture_and_reuse_a_session_across_rounds``."""
+    target = target_for(git_repo)
+    label = f"{activation.get_int('report_seq') + 1:03d}"
+    title = reviewer._unique_title(activation, target, label)
+    session_id = "ses_deadbeef01"
+    row = {"id": session_id, "title": title, "created": _future_ms(), "directory": str(git_repo)}
+
+    os.environ["OCRL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+
+    reviewer.execute(target, state=activation, config=config_with())
+    second = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert second.verdict == "CHANGES_REQUIRED"
+    assert second.confirmed is not None and second.confirmed.verdict == "APPROVED"
+
+    history = activation.get_array_of_dicts("round_history")
+    assert [(e["round"], e["verdict"]) for e in history] == [(1, "CHANGES_REQUIRED"), (2, "CHANGES_REQUIRED")]
+
+
+# -- a state-supplied base tree must not reach a git command line unchecked ----------
+
+
+def test_a_hostile_base_tree_in_state_never_reaches_git_diff(git_repo: Path, tmp_path: Path) -> None:
+    pwned = git_repo / "PWNED"
+    hostile = Target(repo=str(git_repo), base=f"--output={pwned}", head=dirty(git_repo), scope="phase", phase=1)
+
+    with pytest.raises(reviewer.BundleError, match="not a usable git object id"):
+        reviewer._write_diff(hostile, tmp_path / "diff.txt")
+    assert not pwned.exists(), "git must never have been asked to write this file"
+
+
+def test_a_well_formed_but_unknown_base_tree_is_refused_not_diffed(git_repo: Path, tmp_path: Path) -> None:
+    """The pre-existing target.base path, covered by the same fix."""
+    hostile = Target(repo=str(git_repo), base="0" * 40, head=dirty(git_repo), scope="phase", phase=1)
+    with pytest.raises(reviewer.BundleError, match="not a usable git object id"):
+        reviewer._write_diff(hostile, tmp_path / "diff.txt")
+
+
+def test_a_real_base_tree_still_diffs_normally(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """The ``--`` terminator did not break the ordinary path."""
+    size = reviewer._write_diff(target_for(git_repo), tmp_path / "diff.txt")
+    assert size > 0
+    assert "a.txt" in (tmp_path / "diff.txt").read_text()
 
 
 # --------------------------------------------------------------------------
@@ -1594,6 +1769,51 @@ def test_capture_is_fingerprinted_against_a_concurrent_generation_bump(activatio
     assert review.verdict == "CHANGES_REQUIRED"  # the review's own verdict is unaffected
     activation.load()
     assert activation.data.get("reviewer_session") == {}
+    assert activation.get_array_of_dicts("round_history") == [], "a round in a scope that moved on is not recorded"
+
+
+def test_no_reviewer_transaction_rewrites_a_state_json_retired_mid_review(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """A cross-session ``resume`` can retire this activation into ``RESUMED`` while the review
+    runs. Everything ``execute`` still controls at that point must stay out of the retired
+    directory: every no-write ``state.transaction()`` branch (`_store_captured_session`,
+    `_release_claim`, `_append_round_history`) aborts rather than resaves, and the stored
+    report is withheld too (`_activation_still_current`).
+
+    ``bundles/<seq>/`` and ``raw/<seq>-*`` were written by ``build_bundle`` / ``invoke``
+    *before* retirement and cannot be unwound -- a review holds no lock across its run by
+    design (AGENTS.md). Those are the documented exception; this asserts everything else."""
+    state_path = activation.act_dir / "state.json"
+    marker = tmp_path / "after-retire.json"
+    target = target_for(git_repo)
+    label = f"{activation.get_int('report_seq') + 1:03d}"
+    title = reviewer._unique_title(activation, target, label)
+    row = {"id": "ses_retire0001", "title": title, "created": _future_ms(), "directory": str(git_repo)}
+
+    script = tmp_path / "retiring-reviewer.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "python3 - <<'PY'\n"
+        "import json, pathlib\n"
+        f"p = pathlib.Path({str(state_path)!r})\n"
+        f"m = pathlib.Path({str(marker)!r})\n"
+        "d = json.loads(p.read_text())\n"
+        'd["status"] = "RESUMED"\n'
+        'd["resumed_into"] = "some-other-session"\n'
+        "p.write_text(json.dumps(d))\n"
+        "m.write_text(p.read_text())\n"
+        "PY\n"
+        "printf 'Fine.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+    )
+    script.chmod(0o755)
+    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+
+    review = reviewer.execute(target, state=activation, config=config_with())
+
+    assert state_path.read_text() == marker.read_text(), "state.json of the retired activation must not be rewritten at all"
+    reports = activation.act_dir / "reports"
+    assert not reports.exists() or list(reports.iterdir()) == [], "no report may be stored into the retired directory"
+    assert review.report == "", "the review returns no stored-report path when the activation moved"
 
 
 def test_bundles_directory_holds_only_gate_generated_evidence(activation: state.State, git_repo: Path) -> None:

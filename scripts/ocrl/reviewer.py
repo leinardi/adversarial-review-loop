@@ -49,7 +49,7 @@ from ocrl import planrev, report
 from ocrl.atomic import FILE_MODE, ensure_private_dir
 from ocrl.config import Config, severity_rank, threshold_rank
 from ocrl.errors import OcrlError
-from ocrl.gitsnap import git_run
+from ocrl.gitsnap import checked_tree, git_run, looks_like_object_id
 from ocrl.paths import sha256_hex, state_root
 from ocrl.state import State
 from ocrl.util import log, now
@@ -196,6 +196,18 @@ class ContractError(OcrlError):
     Caught inside :func:`parse` and turned into ``OP_FAILURE``. It exists so that every way
     of failing the contract leaves through one place, rather than each check having to
     remember to return rather than fall through to the verdict.
+    """
+
+
+class _TransactionAborted(Exception):
+    """Raised inside a ``state.transaction()`` block to abort it **without a save**.
+
+    ``State.transaction`` calls ``save`` on every clean exit, so a branch that decides not
+    to write cannot just ``return`` -- that still rewrites ``state.json``, and a
+    content-identical rewrite of a *retired* activation's document is exactly what AGENTS.md
+    forbids ("a retired activation's directory is never mutated"). Every fingerprint-mismatch
+    and lost-ownership branch in this module raises this instead; each caller catches it
+    right outside its own ``with`` block and carries on.
     """
 
 
@@ -486,15 +498,23 @@ def _range_text(target: Target, *, state: State, warnings: str, revisions: list[
     out.append(_phase_list(state))
 
     out.append("\n## Commits in range\n\n")
-    log_proc = git_run(repo, ["log", "--oneline", "--no-decorate", f"{state.get('activation_commit')}..HEAD"])
-    # The shell wrote `git log … | head -n 200 || printf '(none)\n'`, where the `||` tests
-    # `head`, not `git`: a failed log produced an empty section and never the fallback.
-    # Preserved rather than "fixed", because Phase 4 is a translation -- and an empty
-    # section is honest, whereas "(none)" would assert there were no commits.
-    out.append("".join(_byte_records(log_proc.stdout)[:LOG_LINES]))
+    activation_commit = state.get("activation_commit")
+    if activation_commit and not looks_like_object_id(activation_commit):
+        # state.json is not a trust boundary: a tampered `activation_commit` shaped like
+        # `--output=<file>` would have `git log` write inside the reviewed repo (Rule 3).
+        # This section is disclosure only, so degrade to nothing rather than fail the bundle.
+        out.append("(the recorded activation commit is unreadable; commit list omitted)\n")
+    else:
+        spec = f"{activation_commit}..HEAD" if activation_commit else "HEAD"
+        # The shell wrote `git log … | head -n 200 || printf '(none)\n'`, where the `||` tests
+        # `head`, not `git`: a failed log produced an empty section and never the fallback.
+        # Preserved rather than "fixed", because Phase 4 is a translation -- and an empty
+        # section is honest, whereas "(none)" would assert there were no commits.
+        log_proc = git_run(repo, ["log", "--oneline", "--no-decorate", spec, "--"])
+        out.append("".join(_byte_records(log_proc.stdout)[:LOG_LINES]))
 
     out.append("\n## Diffstat\n\n")
-    stat_proc = git_run(repo, ["diff", "--stat", "-M", base, head])
+    stat_proc = git_run(repo, ["diff", "--stat", "-M", base, head, "--"])
     out.append("".join(_byte_records(stat_proc.stdout)[-DIFFSTAT_LINES:]))
 
     out.append("\n## Snapshot warnings\n\n")
@@ -591,12 +611,20 @@ def _write_diff(target: Target, path: Path) -> int:
     Raises :class:`BundleError` naming git's own complaint, capped the way the shell capped
     it. The diff file is left where it is on failure, exactly as the shell left it: the
     bundle directory is rebuilt from scratch on the next attempt anyway.
+
+    ``target.base`` comes from ``last_approved_tree`` in ``state.json``, which is not a
+    trust boundary, and it reaches this argv -- so it is run through
+    :func:`ocrl.gitsnap.checked_tree` first (``git diff --output=<file>`` is a real option),
+    and the argument list is terminated with ``--`` so neither tree id can be read as one.
     """
     range_name = f"{target.base}..{target.head}"
+    base = checked_tree(target.repo, target.base)
+    if not base:
+        raise BundleError(f"git diff {range_name}: the base tree id from state is not a usable git object id")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, FILE_MODE)
     try:
         with os.fdopen(fd, "wb") as sink:
-            command = ["git", "-C", target.repo, "diff", "-M", target.base, target.head]
+            command = ["git", "-C", target.repo, "diff", "-M", base, target.head, "--"]
             proc = subprocess.run(command, stdout=sink, stderr=subprocess.PIPE, check=False)
     except OSError as exc:
         raise BundleError(f"git diff {range_name} could not be run: {exc}") from exc
@@ -1025,6 +1053,31 @@ def _ceiling_exceeded(count: int, block_bytes: int, config: Config) -> str:
     return ""
 
 
+def _byte_contract_violation(raw: bytes) -> str:
+    """A reason the raw reviewer bytes fail the contract before any line parsing, or ``""``.
+
+    Two byte-level refusals, both for the same reason the contract must be read strictly:
+
+    - **A NUL byte.** Python would carry it through and reject the line it corrupts, so this
+      is not what protects *this* parser on its own. It is here because the retired Bash gate
+      could not hold a NUL at all -- command substitution deleted it, repairing
+      ``actionable=n\\0o`` into a valid ``actionable=no`` -- and an explicit refusal keeps that
+      historical leniency from being reintroduced by accident.
+    - **Not valid UTF-8.** ``_decode`` is ``surrogateescape``, so invalid bytes would survive
+      as lone surrogates. That is fine for the bundle files (``report.store`` writes them back
+      ``surrogateescape``), but a surrogate that reaches ``round_history`` cannot be encoded
+      when ``state.json`` is saved and would crash the whole review. The contract is a UTF-8
+      text protocol; output that is not valid UTF-8 fails it, exactly like a NUL.
+    """
+    if NUL in raw:
+        return "the reviewer output contains a NUL byte, so the contract cannot be validated"
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "the reviewer output is not valid UTF-8, so the contract cannot be validated"
+    return ""
+
+
 def parse(out_path: Path, *, config: Config) -> Review:
     """Turn the reviewer's output into a :class:`Review`, recomputing the verdict.
 
@@ -1041,13 +1094,9 @@ def parse(out_path: Path, *, config: Config) -> Review:
         raw = b""
     if not raw:
         return _fail(review, "the reviewer produced no output")
-    if NUL in raw:
-        # Python would carry the NUL through and reject the line it corrupts, so this check
-        # is not what protects *this* parser on its own. It is here because the plugin's
-        # retired Bash gate could not hold a NUL at all -- command substitution deleted it,
-        # repairing `actionable=n\0o` into a valid `actionable=no` -- and an explicit refusal
-        # here keeps that historical leniency from ever being reintroduced by accident.
-        return _fail(review, "the reviewer output contains a NUL byte, so the contract cannot be validated")
+    byte_violation = _byte_contract_violation(raw)
+    if byte_violation:
+        return _fail(review, byte_violation)
 
     lines = _records(_decode(raw))
     try:
@@ -1239,23 +1288,29 @@ def _try_claim(state: State, *, target: Target, session_id: str, config: Config)
     The read and the write happen in one ``state.transaction()``, deliberately: two reviews
     can overlap (a commit gate and a `gate-stop` phase review), and both reading the same
     unclaimed pointer before either writes would put two ``opencode run -s <id>`` against one
-    conversation, interleaving two different prospective trees.
+    conversation, interleaving two different prospective trees. The two "no usable claim"
+    branches write nothing and abort the transaction rather than resave -- see
+    :class:`_TransactionAborted`.
     """
     claimed: str | None = None
     round_number = 1
-    with state.transaction():
-        current = state.data.get("reviewer_session")
-        current = current if isinstance(current, dict) else {}
-        if current.get("id") != session_id or not _pointer_structurally_usable(current, state, target):
-            claimed = None
-        elif _claim_is_live(current, config):
-            claimed = ""
-        else:
+    try:
+        with state.transaction():
+            current = state.data.get("reviewer_session")
+            current = current if isinstance(current, dict) else {}
+            if current.get("id") != session_id or not _pointer_structurally_usable(current, state, target):
+                claimed = None
+                raise _TransactionAborted
+            if _claim_is_live(current, config):
+                claimed = ""
+                raise _TransactionAborted
             claimed = secrets.token_hex(8)
             round_number = _as_int(current.get("round")) + 1
             current["claimed_at"] = now()
             current["claim_id"] = claimed
             state.data["reviewer_session"] = current
+    except _TransactionAborted:
+        pass
     return claimed, round_number
 
 
@@ -1312,17 +1367,22 @@ def _reconfirm_claim(state: State, ref: SessionRef, *, config: Config) -> bool:
     still ours. ``False`` means someone else has already reclaimed the pointer -- the caller
     must fall back to a fresh, non-capturable review rather than risking two
     ``opencode run -s <id>`` calls against the same conversation. A no-op, returning ``True``,
-    for a review that never held a claim in the first place.
+    for a review that never held a claim in the first place. When the claim is no longer
+    ours the transaction is aborted rather than resaved (:class:`_TransactionAborted`).
     """
     if not ref.session_id:
         return True
     held = False
-    with state.transaction():
-        pointer = state.data.get("reviewer_session")
-        if isinstance(pointer, dict) and pointer.get("claim_id") == ref.claim_id:
+    try:
+        with state.transaction():
+            pointer = state.data.get("reviewer_session")
+            if not isinstance(pointer, dict) or pointer.get("claim_id") != ref.claim_id:
+                raise _TransactionAborted
             held = True
             pointer["claimed_at"] = now()
             state.data["reviewer_session"] = pointer
+    except _TransactionAborted:
+        pass
     return held
 
 
@@ -1408,8 +1468,10 @@ def _store_captured_session(state: State, ctx: _CaptureContext, captured: _Captu
     Fingerprinted like every other post-slow-work write: ``expected`` was captured before
     ``invoke`` ran, and a concurrent same-session ``resume --replan`` bumping
     ``activation_generation`` in between must not have this land in a scope that no longer
-    applies. On any mismatch: logged, nothing written -- the review's own verdict is
-    unaffected either way.
+    applies. On any mismatch: logged, nothing written -- and the transaction is aborted
+    rather than resaved, so a cross-session ``resume`` that retired this activation mid-review
+    does not have its ``state.json`` rewritten (:class:`_TransactionAborted`). The review's
+    own verdict is unaffected either way.
 
     **Also refuses to overwrite a pointer someone else is actively using.** This call was
     "capturable" because *this* review found no usable pointer to continue -- but a second
@@ -1424,27 +1486,30 @@ def _store_captured_session(state: State, ctx: _CaptureContext, captured: _Captu
 
     if not captured:
         return
-    with state.transaction():
-        current = hooks.activation(state, config)
-        if current != expected:
-            log("session capture: the activation moved while the review ran; not storing")
-            return
-        existing = state.data.get("reviewer_session")
-        existing = existing if isinstance(existing, dict) else {}
-        if _claim_is_live(existing, config):
-            log("session capture: another review is actively using the pointer; not overwriting")
-            return
-        state.data["reviewer_session"] = {
-            "label": ctx.target.label,
-            "id": captured.session_id,
-            "title": ctx.title,
-            "created": captured.created,
-            "revisions": len(state.data.get("plan_revisions") or []),
-            "generation": state.get_int("activation_generation"),
-            "round": ctx.round_number,
-            "claimed_at": "",
-            "claim_id": "",
-        }
+    try:
+        with state.transaction():
+            current = hooks.activation(state, config)
+            if current != expected:
+                log("session capture: the activation moved while the review ran; not storing")
+                raise _TransactionAborted
+            existing = state.data.get("reviewer_session")
+            existing = existing if isinstance(existing, dict) else {}
+            if _claim_is_live(existing, config):
+                log("session capture: another review is actively using the pointer; not overwriting")
+                raise _TransactionAborted
+            state.data["reviewer_session"] = {
+                "label": ctx.target.label,
+                "id": captured.session_id,
+                "title": ctx.title,
+                "created": captured.created,
+                "revisions": len(state.data.get("plan_revisions") or []),
+                "generation": state.get_int("activation_generation"),
+                "round": ctx.round_number,
+                "claimed_at": "",
+                "claim_id": "",
+            }
+    except _TransactionAborted:
+        pass
 
 
 def _release_if_claimed(state: State, ref: SessionRef, *, expected: hooks.Activation, config: Config, round_number: int | None) -> None:
@@ -1468,24 +1533,29 @@ def _release_claim(state: State, *, claim_id: str, round_number: int | None, exp
     describes: A's claim expires, B reclaims with a new id, A finally finishes and releases.
     Comparing the token means A's release, arriving after B's, is a no-op rather than an
     overwrite of B's still-live claim. Fingerprinted the same way ``_store_captured_session``
-    is, for the same reason.
+    is, for the same reason -- and, like it, a branch that writes nothing aborts the
+    transaction rather than resaving a possibly-retired ``state.json``
+    (:class:`_TransactionAborted`).
     """
     from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
 
-    with state.transaction():
-        current = hooks.activation(state, config)
-        if current != expected:
-            log("session claim release: the activation moved while the review ran; not writing")
-            return
-        pointer = state.data.get("reviewer_session")
-        if not isinstance(pointer, dict) or pointer.get("claim_id") != claim_id:
-            log("session claim release: no longer the owner of this claim; not writing")
-            return
-        if round_number is not None:
-            pointer["round"] = round_number
-        pointer["claimed_at"] = ""
-        pointer["claim_id"] = ""
-        state.data["reviewer_session"] = pointer
+    try:
+        with state.transaction():
+            current = hooks.activation(state, config)
+            if current != expected:
+                log("session claim release: the activation moved while the review ran; not writing")
+                raise _TransactionAborted
+            pointer = state.data.get("reviewer_session")
+            if not isinstance(pointer, dict) or pointer.get("claim_id") != claim_id:
+                log("session claim release: no longer the owner of this claim; not writing")
+                raise _TransactionAborted
+            if round_number is not None:
+                pointer["round"] = round_number
+            pointer["claimed_at"] = ""
+            pointer["claim_id"] = ""
+            state.data["reviewer_session"] = pointer
+    except _TransactionAborted:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -1567,6 +1637,75 @@ def _confirm_cold(rr: _ReviewRun, continued: Review) -> Review:
     cold, _invoked = _run_invocation(rr.target, cold_run, config=rr.config)
     cold.confirmed = continued
     return cold
+
+
+def _activation_still_current(rr: _ReviewRun) -> bool:
+    """A fresh, lock-free read: does the activation still match ``rr.expected``?
+
+    Best-effort. Used to skip the post-review writes into ``state.act_dir`` (the stored
+    report, and -- via :func:`_append_round_history`, which re-checks authoritatively under
+    the lock -- the ``round_history`` entry) when a cross-session ``resume`` has retired this
+    activation while the review ran. ``build_bundle`` and ``invoke`` wrote earlier and cannot
+    be unwound; this keeps everything still in the gate's hands out of the retired directory.
+    """
+    from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
+
+    probe = State(rr.state.worktree, rr.state.session)
+    return probe.load() and hooks.activation(probe, rr.config) == rr.expected
+
+
+def _append_round_history(rr: _ReviewRun, review: Review, *, round_number: int) -> None:
+    """Append one ``round_history`` entry for a review that produced a parsed verdict.
+
+    Called only for ``APPROVED`` / ``CHANGES_REQUIRED``. ``OP_FAILURE`` and ``NEEDS_HUMAN``
+    are not rounds -- recording them would double-count against phase 5's stall detection
+    and phase 6's retry budget. When the cold-approval invariant has already replaced a
+    continued ``APPROVED`` with a cold ``CHANGES_REQUIRED``, ``review`` is the cold one by
+    the time this runs, so the acted-on (cold) verdict is what is recorded.
+
+    Fingerprint-guarded like :func:`_store_captured_session`: ``rr.expected`` was captured
+    before the slow work, so a concurrent same-session ``resume --replan`` bumping
+    ``activation_generation``, or a cross-session ``resume`` retiring this activation into
+    ``RESUMED`` mid-review, must not have this entry land in a scope that has moved on. The
+    check runs inside the transaction, against the freshly reloaded document and under the
+    activation lock, so it serialises with a concurrent retirement. On a mismatch it raises
+    :class:`_TransactionAborted` rather than returning: ``State.transaction`` saves on a
+    clean exit, and a retired activation's ``state.json`` must not be rewritten at all, not
+    even a content-identical resave (AGENTS.md).
+
+    Every stored value is either gate-derived (``rr.target``) or the gate's own recomputed
+    verdict and finding lines. Finding lines are split with :func:`_records` -- ``\\n`` only,
+    never ``str.splitlines`` -- so a ``FINDING`` detail carrying a stray ``\\r`` or a Unicode
+    line separator stays the one validated record it was, not two fragments a later
+    re-validation would drop.
+    """
+    from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
+
+    state, target, config = rr.state, rr.target, rr.config
+    try:
+        with state.transaction():
+            if hooks.activation(state, config) != rr.expected:
+                raise _TransactionAborted
+            stored = state.data.get("round_history")
+            history = list(stored) if isinstance(stored, list) else []
+            history.append(
+                {
+                    "seq": int(rr.label),
+                    "label": target.label,
+                    "phase": target.phase,
+                    "generation": state.get_int("activation_generation"),
+                    "round": round_number,
+                    "verdict": review.verdict,
+                    "tree": target.head,
+                    "base": target.base,
+                    "at": now(),
+                    "findings": [line for line in _records(review.all_findings) if line],
+                    "supersedes": [line for line in _records(str(getattr(review, "supersedes", ""))) if line],
+                }
+            )
+            state.data["round_history"] = history
+    except _TransactionAborted:
+        log("round history: the activation moved while the review ran; not recording this round")
 
 
 def execute(target: Target, *, state: State, config: Config, warnings: str = "") -> Review:
@@ -1661,7 +1800,23 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     if review.verdict == "APPROVED" and ref.session_id:
         review = _confirm_cold(rr, review)
 
-    # Stored on both paths: a failed review is exactly the one whose raw output is worth
-    # keeping, and the report is what the denial message points at.
-    report.store(review, target, seq=label, act_dir=state.act_dir, config=config)
+    # `build_bundle` and `invoke` already wrote `bundles/<seq>/` and `raw/<seq>-*` into
+    # `state.act_dir`; a cross-session `resume` that retired this activation while `invoke`
+    # ran cannot have those unwound (a review holds no lock across its minutes-long run --
+    # see AGENTS.md). What *can* still be withheld from the retired directory is everything
+    # decided here: the stored report and the `round_history` entry. Both are skipped when a
+    # fresh read shows the activation has moved -- `_append_round_history` re-checks under the
+    # lock as the authoritative guard, this probe keeps the retired directory clean in the
+    # ordinary case and orders the two writes.
+    if _activation_still_current(rr):
+        # Report first, then history: if `report.store` fails, no `round_history` entry is
+        # left pointing at a round with no durable report.
+        report.store(review, target, seq=label, act_dir=state.act_dir, config=config)
+        if review.verdict in ("APPROVED", "CHANGES_REQUIRED"):
+            # A round is a *parsed verdict*. Everything else -- a build failure, a contract
+            # error, an evidence ceiling -- appends nothing, which keeps phase 5's stall
+            # check and phase 6's retry budget from counting the same stuck phase twice.
+            _append_round_history(rr, review, round_number=ref.round)
+    else:
+        log(f"review for {target.label}: the activation moved after the review ran; not storing its report or recording the round")
     return review

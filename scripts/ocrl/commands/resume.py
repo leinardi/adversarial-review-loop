@@ -363,6 +363,12 @@ def _build_successor_document(
         pending_head="",
         pending_command="",
         finish_requested=False,
+        # Counters, not evidence: a fresh run starts its retry-pacing and clarify budgets
+        # from zero. ``round_history`` is deliberately *not* here -- it is carried forward
+        # like the reports, per the inverted carry-forward rule in AGENTS.md.
+        transient_failures=0,
+        retry_not_before=0,
+        clarifications=0,
         resumed_from=identity.prev_session,
         resumed_into="",
         resume_count=int(data.get("resume_count") or 0) + 1,
@@ -650,6 +656,11 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
             if decision.until_given:
                 state.update(stop_after_phase=decision.until)
             state.update(overrides=decision.overrides, activation_generation=state.get_int("activation_generation") + 1)
+            # Convergence counters are per-run, exactly as in `_build_successor_document`: a
+            # resume is a fresh start, so an inherited retry backoff (`retry_not_before` is a
+            # future timestamp) or an exhausted clarification budget must not carry over.
+            # `round_history` is evidence and is left untouched.
+            state.update(transient_failures=0, retry_not_before=0, clarifications=0)
 
             # Verified with the *checked* read, inside the transaction, so a genuine git
             # failure aborts the whole resume rather than silently skipping the warning: the

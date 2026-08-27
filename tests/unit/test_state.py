@@ -667,7 +667,7 @@ def test_escalation_persists_immediately(state_env: dict[str, str]) -> None:
 
 def test_new_state_document_carries_the_resume_fields(state_env: dict[str, str]) -> None:
     doc = state.new_state_document()
-    assert doc["version"] == state.STATE_VERSION == 2
+    assert doc["version"] == state.STATE_VERSION == 3
     assert doc["stop_after_phase"] == 0
     assert doc["resumed_from"] == ""
     assert doc["resumed_into"] == ""
@@ -681,14 +681,23 @@ def test_new_state_document_carries_the_resume_fields(state_env: dict[str, str])
     assert doc["finish_requested"] is False
 
 
+def test_new_state_document_carries_the_convergence_fields(state_env: dict[str, str]) -> None:
+    doc = state.new_state_document()
+    assert doc["round_history"] == []
+    assert doc["transient_failures"] == 0
+    assert doc["retry_not_before"] == 0
+    assert doc["clarifications"] == 0
+
+
 def test_a_fresh_document_needs_no_migration(state_env: dict[str, str]) -> None:
     st = state.State(WORKTREE, SESSION)
     with st.transaction(create=True):
         st.update(status="ARMED")
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 2
+    assert reread.data["version"] == 3
     assert reread.data["plan_revisions"] == []
+    assert reread.data["round_history"] == []
 
 
 # -- legacy migration --------------------------------------------------------
@@ -713,7 +722,7 @@ def test_a_legacy_document_migrates_on_the_first_transaction(state_env: dict[str
 
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 2
+    assert reread.data["version"] == 3
     assert reread.data["plan_revisions"] == [
         {
             "at": before["armed_at"],
@@ -730,6 +739,11 @@ def test_a_legacy_document_migrates_on_the_first_transaction(state_env: dict[str
     assert reread.data["overrides"] == {}
     assert reread.data["activation_generation"] == 0
     assert reread.data["finish_requested"] is False
+    # ... including the ones the 2 -> 3 arm adds, in the same single pass.
+    assert reread.data["round_history"] == []
+    assert reread.data["transient_failures"] == 0
+    assert reread.data["retry_not_before"] == 0
+    assert reread.data["clarifications"] == 0
     # ... and everything the legacy document already had is untouched.
     assert reread.data["status"] == before["status"]
     assert reread.data["phase"] == before["phase"]
@@ -844,6 +858,52 @@ def test_migration_refuses_a_symlinked_plan_frozen(state_env: dict[str, str], tm
     assert reread.load()
     assert reread.data["status"] == "ARM_FAILED"
     assert not reread.data.get("plan_revisions"), "the symlinked content must never be recorded as revision 0"
+
+
+def _install_v2_state(worktree: str, session: str, **overrides: object) -> state.State:
+    """A version-2 document: the current schema minus everything the 2 -> 3 arm adds."""
+    st = state.State(worktree, session)
+    doc = state.new_state_document()
+    for key in ("round_history", "transient_failures", "retry_not_before", "clarifications"):
+        del doc[key]
+    doc["version"] = 2
+    doc.update(status="ACTIVE", phases=["one"], phase=1, report_seq=4, **overrides)
+    write_private_atomic(st.state_file, json.dumps(doc), root=paths.state_root())
+    return st
+
+
+def test_a_v2_document_migrates_to_v3_with_no_evidence_recovery(state_env: dict[str, str]) -> None:
+    """The 2 -> 3 arm is a plain setdefault + version bump -- it needs no ``plan.frozen.md``."""
+    st = _install_v2_state(WORKTREE, SESSION)
+    # Deliberately no plan.frozen.md written: the 1 -> 2 arm must not run for a v2 document.
+
+    with st.transaction():
+        st.update(reason="touched during 2->3 migration")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["version"] == 3
+    assert reread.data["round_history"] == []
+    assert reread.data["transient_failures"] == 0
+    assert reread.data["retry_not_before"] == 0
+    assert reread.data["clarifications"] == 0
+    # Untouched: the 1 -> 2 arm did not run, so nothing was re-synthesized.
+    assert reread.data["report_seq"] == 4
+    assert reread.data["reason"] == "touched during 2->3 migration"
+
+
+def test_the_2_to_3_arm_preserves_an_existing_round_history(state_env: dict[str, str]) -> None:
+    """``setdefault`` -- a document that somehow already carries entries keeps them."""
+    existing = [{"seq": 1, "label": "phase1", "verdict": "CHANGES_REQUIRED"}]
+    st = _install_v2_state(WORKTREE, SESSION, round_history=existing)
+
+    with st.transaction():
+        st.update(reason="migrate")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["version"] == 3
+    assert reread.data["round_history"] == existing
 
 
 def test_migration_runs_only_once(state_env: dict[str, str]) -> None:

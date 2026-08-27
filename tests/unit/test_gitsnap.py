@@ -368,3 +368,91 @@ def test_a_path_that_is_not_valid_utf8_does_not_crash_the_gate(git_repo: Path) -
 
     assert name in gitsnap.stageable(str(git_repo))
     assert gitsnap.snapshot(str(git_repo)).tree != gitsnap.head_tree(str(git_repo))
+
+
+# -- checked_tree: a state-supplied object id must never reach argv unchecked ----------
+
+
+def test_checked_tree_resolves_a_real_tree_id(git_repo: Path) -> None:
+    tree = gitsnap.head_tree(str(git_repo))
+    assert gitsnap.checked_tree(str(git_repo), tree) == tree
+
+
+def test_checked_tree_resolves_a_commit_id_to_its_tree(git_repo: Path) -> None:
+    commit = git(git_repo, "rev-parse", "HEAD")
+    assert gitsnap.checked_tree(str(git_repo), commit) == gitsnap.head_tree(str(git_repo))
+
+
+def test_checked_tree_rejects_a_git_option_shaped_value(git_repo: Path) -> None:
+    """``git diff --output=<file>`` is a real option -- a crafted ``tree`` must not reach it."""
+    for hostile in (
+        "--output=../../repo/x",
+        "--output=/tmp/x",
+        "-O",
+        "..",
+        "../etc/passwd",
+        "HEAD",
+        "@",
+        "main",
+        "",
+        "  ",
+        "deadbeef",  # too short
+        "g" * 40,  # not hex
+        "a" * 39,
+        "a" * 41,
+        "a" * 63,
+        "a" * 65,
+    ):
+        assert gitsnap.checked_tree(str(git_repo), hostile) == "", hostile
+
+
+def test_checked_tree_rejects_a_non_string(git_repo: Path) -> None:
+    for value in (None, 40, ["a" * 40], {"tree": "a" * 40}):
+        assert gitsnap.checked_tree(str(git_repo), value) == ""
+
+
+def test_checked_tree_rejects_a_well_formed_id_that_is_not_a_tree(git_repo: Path) -> None:
+    blob = git(git_repo, "rev-parse", "HEAD:seed.txt")
+    assert gitsnap.checked_tree(str(git_repo), blob) == ""
+
+
+def test_checked_tree_rejects_a_well_formed_id_that_does_not_exist(git_repo: Path) -> None:
+    assert gitsnap.checked_tree(str(git_repo), "0" * 40) == ""
+
+
+def test_looks_like_object_id_is_the_cheap_shape_guard(git_repo: Path) -> None:
+    assert gitsnap.looks_like_object_id("a" * 40)
+    assert gitsnap.looks_like_object_id("0" * 64)
+    assert gitsnap.looks_like_object_id(git(git_repo, "rev-parse", "HEAD^{tree}"))
+    for bad in (
+        "--output=/x",
+        "-O",
+        "HEAD",
+        "main",
+        "",
+        "A" * 40,  # uppercase hex is not what git emits
+        "a" * 39,
+        "a" * 41,
+        "deadbeef",
+        "a" * 40 + "\n",
+        None,
+        40,
+        ["a" * 40],
+    ):
+        assert not gitsnap.looks_like_object_id(bad), bad
+
+
+def test_is_ancestor_checked_distinguishes_no_from_cannot_answer(git_repo: Path) -> None:
+    root = git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "next.txt").write_text("n\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "next")
+    tip = git(git_repo, "rev-parse", "HEAD")
+
+    assert gitsnap.is_ancestor_checked(str(git_repo), root, tip) is True
+    assert gitsnap.is_ancestor_checked(str(git_repo), tip, root) is False  # a definite "no"
+
+    with pytest.raises(gitsnap.GitUnavailable):
+        gitsnap.is_ancestor_checked(str(git_repo), root, "--output=/tmp/x")
+    with pytest.raises(gitsnap.GitUnavailable):
+        gitsnap.is_ancestor_checked(str(git_repo), root, "0" * 40)  # well-formed but absent

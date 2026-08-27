@@ -438,6 +438,37 @@ def test_an_unchanged_tree_needs_no_review(git_repo: Path, tmp_path: Path, clean
     assert "byte-identical to the last approved tree" in reason
 
 
+def test_a_git_option_shaped_base_tree_in_state_is_refused_not_run(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``state.json`` is not a trust boundary. A ``last_approved_tree`` shaped like
+    ``--output=<file>`` would have ``git diff`` write inside the reviewed repo and report an
+    empty diff -- which the gate would read as "no changes" and approve. It must deny."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    pwned = git_repo / "PWNED"
+    patch_state(env, git_repo, last_approved_tree=f"--output={pwned}")
+    (git_repo / "new.txt").write_text("work\n")
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "not a usable git object id" in reason
+    assert not pwned.exists(), "git must never have been asked to write this file"
+    assert not read_state(env, git_repo, SESSION)["pending_approved_tree"]
+
+
+def test_a_well_formed_but_unresolvable_base_tree_still_denies(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Shape is fine, so it reaches ``git diff`` -- whose non-zero exit then denies (Rule 1)."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, last_approved_tree="0" * 40)
+    (git_repo / "new.txt").write_text("work\n")
+
+    verdict, _ = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert not read_state(env, git_repo, SESSION)["pending_approved_tree"]
+
+
 def test_an_approving_review_allows_the_commit_and_records_the_pending_tree(
     git_repo: Path,
     tmp_path: Path,
@@ -573,6 +604,42 @@ def test_a_reset_to_anything_but_the_diverging_parent_is_denied(git_repo: Path, 
 
     assert verdict == "deny"
     assert "the only permitted target during this reconcile" in reason
+
+
+def test_a_reset_target_that_predates_the_activation_commit_is_denied(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The guard working as intended: `bad_commit_parent` is a real ancestor of the
+    activation commit, so resetting to it would rewind history the loop started after."""
+    older = git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "later.txt").write_text("later\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "later")
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)  # armed at the "later" commit
+    patch_state(env, git_repo, status="RECONCILE", bad_commit_parent=older)
+
+    verdict, reason = pretool(git_repo, env, command=f"git reset --soft {older}")
+
+    assert verdict == "deny"
+    assert "rewind history that predates it" in reason
+
+
+def test_a_tampered_activation_commit_denies_the_reset_rather_than_failing_open(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """state.json is not a trust boundary. An option-shaped `activation_commit` would make
+    the plain ancestry check fold git's error into "does not predate" -> allow. The shape
+    guard plus `is_ancestor_checked` deny on an unanswered history question instead."""
+    older = git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "later.txt").write_text("later\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "later")
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status="RECONCILE", bad_commit_parent=older, activation_commit=f"--output={git_repo / 'PWNED'}")
+
+    verdict, reason = pretool(git_repo, env, command=f"git reset --soft {older}")
+
+    assert verdict == "deny"
+    assert "could not be checked" in reason
+    assert not (git_repo / "PWNED").exists()
 
 
 def test_a_hard_reset_is_denied_during_a_reconcile(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
