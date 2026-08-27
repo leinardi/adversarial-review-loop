@@ -64,6 +64,9 @@ def _session_line(review: Review) -> str:
 def _findings_and_raw(review: Review, *, heading_level: str = "##") -> str:
     out = [f"\n{heading_level} Blocking findings\n\n"]
     out.append(f"```\n{review.findings}```\n" if review.findings else "(none)\n")
+    if review.supersedes:
+        out.append(f"\n{heading_level} Reversals of earlier rounds (SUPERSEDES)\n\n")
+        out.append(f"```\n{review.supersedes}```\n")
     out.append(f"\n{heading_level} Raw reviewer output\n\n")
     out.append("````\n")
     out.append(_raw_text(review.raw))
@@ -246,6 +249,9 @@ def reason(review: Review, headline: str, *, config: Config) -> str:
     if review.all_findings and review.all_findings != review.findings:
         out.append("\nAll findings reported (non-blocking ones included, for context):\n\n")
         out.append(review.all_findings)
+    if review.supersedes:
+        out.append("\nReversals of earlier rounds (SUPERSEDES lines) -- recorded, not verdict-changing:\n\n")
+        out.append(review.supersedes)
     if review.prose:
         out.append("\nReviewer prose:\n\n")
         out.append(truncate(review.prose, config.as_int("max_reason_bytes")))

@@ -167,6 +167,23 @@ case "$mode" in
         ls -1 "$bundle"
         printf '\n<<<OCRL-FINDINGS>>>\nVERDICT APPROVED\n<<<OCRL-END>>>\n'
         ;;
+    echo-context)
+        # Dumps the context/ attachments the real path would pass with -f, so the selftest
+        # can assert round 2 is actually shown round 1's findings. Still a blocking verdict
+        # so the denial reason carries the dump back.
+        printf 'Prior rounds seen by this reviewer:\n'
+        if [ -n "${OCRL_CONTEXT_FILES:-}" ]; then
+            printf '%s\n' "$OCRL_CONTEXT_FILES" | while IFS= read -r f; do
+                [ -n "$f" ] && cat "$f"
+            done
+        else
+            printf '(no context files were passed)\n'
+        fi
+        printf '\n<<<OCRL-FINDINGS>>>\n'
+        printf 'FINDING severity=high actionable=yes file=a.txt:1 | round two is still unhappy\n'
+        printf 'VERDICT CHANGES_REQUIRED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
     *)
         printf 'unknown OCRL_FAKE_MODE: %s\n' "$mode" >&2
         exit 2

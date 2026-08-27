@@ -709,6 +709,32 @@ if start 'commit gate: ignore_globs skip the review'; then
     assert_eq 'a change confined to ignore_globs is allowed without a review' "$d" 'allow'
 fi
 
+if start 'prior rounds: round 2 is shown round 1 findings, and no bundle file holds them'; then
+    new_case
+    arm_ok && phases_ok
+
+    printf 'phase one\n' >"$REPO/a.txt"
+    with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+
+    printf 'phase one, revised\n' >"$REPO/a.txt"
+    d=$(with_env OCRL_FAKE_MODE=echo-context pre Bash 'git add -A && git commit -m x')
+    assert_eq 'round 2 still denies' "$d" 'deny'
+
+    act=$(dirname "$(state_file)")
+    pr="$act/context/002-prior-rounds.txt"
+    if [ -f "$pr" ]; then ok 'round 2 wrote context/002-prior-rounds.txt beside bundles/'; else bad 'round 2 wrote context/002-prior-rounds.txt beside bundles/'; fi
+    assert_eq 'round 1 wrote no such file' "$(ls "$act/context/001-prior-rounds.txt" 2>/dev/null)" ''
+    assert_contains 'the attachment carries round 1 findings' "$(cat "$pr" 2>/dev/null)" 'Returns success on a failed lookup'
+    assert_contains 'round 2 reviewer received it inline' "$(pre_reason)" 'Returns success on a failed lookup'
+
+    # The invariant: bundles/ holds gate-generated evidence only -- no model output, ever.
+    if grep -rqF 'Returns success on a failed lookup' "$act"/bundles/ 2>/dev/null; then
+        bad 'no file under bundles/ contains a stored finding line'
+    else
+        ok 'no file under bundles/ contains a stored finding line'
+    fi
+fi
+
 # --------------------------------------------------------------------------
 # Commit divergence and reconcile
 # --------------------------------------------------------------------------

@@ -252,6 +252,25 @@ def test_short_prose_is_left_alone() -> None:
     assert "truncated at" not in report.reason(a_review(), "h", config=config_with())
 
 
+def test_supersedes_lines_are_carried_back_in_the_reason() -> None:
+    review = a_review(supersedes="SUPERSEDES round=1 file=b.txt:2 | round 1 was wrong about this\n")
+    text = report.reason(review, "h", config=config_with())
+    assert "Reversals of earlier rounds (SUPERSEDES lines)" in text
+    assert "round 1 was wrong about this" in text
+
+
+def test_no_supersedes_section_when_the_review_has_none() -> None:
+    assert "SUPERSEDES" not in report.reason(a_review(), "h", config=config_with())
+
+
+def test_supersedes_lines_are_rendered_in_the_stored_report(act_dir: Path) -> None:
+    review = a_review(supersedes="SUPERSEDES round=1 file=b.txt:2 | retracted after re-reading the caller\n", raw="raw text")
+    report.store(review, a_target(), seq="001", act_dir=act_dir, config=config_with())
+    body = Path(review.report).read_text()
+    assert "Reversals of earlier rounds (SUPERSEDES)" in body
+    assert "retracted after re-reading the caller" in body
+
+
 def test_the_report_path_is_offered_when_there_is_one() -> None:
     assert "\nFull report: /state/001.md\n" in report.reason(a_review(report="/state/001.md"), "h", config=config_with())
     assert "Full report:" not in report.reason(a_review(), "h", config=config_with())

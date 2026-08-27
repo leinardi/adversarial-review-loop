@@ -162,6 +162,7 @@ $XDG_STATE_HOME/opencode-review-loop/
         ├── phases.frozen            the split phase list
         ├── reports/NNN-*.md         every review, in full, never deleted
         ├── raw/NNN-<label>[-cold].out  the reviewer's own transcript for report NNN — never inside bundles/
+        ├── context/NNN-*.txt        model-/Claude-derived attachments for report NNN (prior-rounds) — a sibling of bundles/, passed with -f and never re-openable by path; omitted from a cold confirmation
         └── bundles/NNN/             gate-generated evidence shown to the reviewer for report NNN — no model output, ever
 ```
 
