@@ -105,6 +105,12 @@ def new_state_document() -> dict[str, Any]:
         "transient_failures": 0,
         "retry_not_before": 0,
         "clarifications": 0,
+        #: The sequence a ``commands.clarify`` run numbers its ``context/<n>-question.txt``
+        #: with. Not ``report_seq`` -- a clarify writes neither a bundle nor a report -- and
+        #: **not a counter**: like ``report_seq`` it is carried across a resume, never reset,
+        #: so a post-resume clarify cannot overwrite a question file copied forward from the
+        #: predecessor's ``context/``.
+        "clarify_seq": 0,
         #: One entry per ``accept``: ``{"at", "phase", "tree", "base", "reason", "reviews",
         #: "report"}``. Never trimmed -- it is the audit trail for every phase a human approved
         #: without an approving review.
@@ -300,10 +306,11 @@ class State:
           a hook, which the fail-closed guard in ``hookio.Hook.run`` converts into a denial
           that says nothing useful. A missing, unreadable or symlinked ``plan.frozen.md``
           fails closed as ``ARM_FAILED`` -- inventing a plan is worse than refusing.
-        * **2 -> 3** adds ``round_history`` and the three convergence counters. No evidence
-          recovery is needed: every one of those fields degrades correctly through the typed
-          accessors (``get_int`` answers ``0``, ``get_array_of_dicts`` answers ``[]``), so a
-          plain ``setdefault`` from :func:`new_state_document` is the whole arm.
+        * **2 -> 3** adds ``round_history``, the three convergence counters, and
+          ``clarify_seq``. No evidence recovery is needed: every one of those fields degrades
+          correctly through the typed accessors (``get_int`` answers ``0``,
+          ``get_array_of_dicts`` answers ``[]``), so a plain ``setdefault`` from
+          :func:`new_state_document` is the whole arm.
 
         Most other fields this build added degrade correctly on their own too; the explicit
         arms exist for the ones that do not, and to make each upgrade a single recorded step
@@ -333,7 +340,7 @@ class State:
         if version < 2:
             self._migrate_1_to_2(defaults)
         if version < 3:
-            for key in ("round_history", "transient_failures", "retry_not_before", "clarifications"):
+            for key in ("round_history", "transient_failures", "retry_not_before", "clarifications", "clarify_seq"):
                 self.data.setdefault(key, defaults[key])
             self.data["version"] = 3
 

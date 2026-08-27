@@ -54,6 +54,7 @@ DEFAULTS: Final[dict[str, Any]] = {
     "max_reason_bytes": 32768,
     "max_findings": 200,
     "max_findings_bytes": 65536,
+    "max_clarifications": 2,
     "allow_dirty": False,
     "ttl_hours": 24,
     "ignore_globs": [],
@@ -73,6 +74,7 @@ INT_KEYS: Final = (
     "max_reason_bytes",
     "max_findings",
     "max_findings_bytes",
+    "max_clarifications",
     "ttl_hours",
 )
 

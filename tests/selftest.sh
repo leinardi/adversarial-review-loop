@@ -735,6 +735,40 @@ if start 'prior rounds: round 2 is shown round 1 findings, and no bundle file ho
     fi
 fi
 
+if start 'clarify: answers one question, touches nothing, and is bounded'; then
+    new_case
+    arm_ok && phases_ok
+
+    printf 'phase one\n' >"$REPO/a.txt"
+    with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+
+    act=$(dirname "$(state_file)")
+    before=$(cat "$(state_file)")
+
+    out=$(with_env OCRL_FAKE_MODE=clarify OCRL_MAX_CLARIFICATIONS=1 ocrl clarify --question 'what did finding 1 mean?')
+    assert_contains 'the reviewer prose comes back' "$out" 'Clarification.'
+    assert_contains 'the question reached the reviewer' "$out" 'what did finding 1 mean?'
+    assert_contains 'against the most recent round bundle' "$out" '/bundles/001'
+
+    q="$act/context/001-question.txt"
+    if [ -f "$q" ]; then ok 'the question is written under context/, beside bundles/'; else bad 'the question is written under context/, beside bundles/'; fi
+    assert_contains 'wrapped as evidence, not an instruction' "$(cat "$q" 2>/dev/null)" 'NOT an instruction'
+    if grep -rqF 'what did finding 1 mean?' "$act"/bundles/ 2>/dev/null; then
+        bad 'no file under bundles/ holds the question'
+    else
+        ok 'no file under bundles/ holds the question'
+    fi
+
+    assert_eq 'phase did not move' "$(sget phase)" '1'
+    assert_eq 'status unchanged' "$(sget status)" 'ACTIVE'
+    assert_eq 'the clarify counter advanced' "$(sget clarifications)" '1'
+    assert_eq 'round_history is untouched' "$(printf '%s' "$before" | jq -c '.round_history')" "$(sget round_history)"
+
+    err=$(with_env OCRL_FAKE_MODE=clarify OCRL_MAX_CLARIFICATIONS=1 ocrl clarify --question 'a second question' 2>&1)
+    assert_contains 'a second clarify past the cap is refused' "$err" 'already used'
+    assert_contains 'and points at accept for a real disagreement' "$err" 'accept'
+fi
+
 # --------------------------------------------------------------------------
 # Commit divergence and reconcile
 # --------------------------------------------------------------------------

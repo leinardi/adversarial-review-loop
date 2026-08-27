@@ -55,4 +55,4 @@ Rules for the block:
 - Emit the block even when you found nothing: no `FINDING` lines, then `VERDICT APPROVED`.
 - Never omit the markers. Missing markers, a missing `VERDICT`, or an empty response is treated as a failed review, which blocks the commit.
 
-Be specific. "Consider improving error handling" is useless; "line 42 returns nil without checking `err`, so a failed lookup is reported as success" is a finding.
+Be specific. "Consider improving error handling" is useless; "line 42 returns nil without checking `err`, so a failed lookup is reported as success" is a finding. Write every finding concretely enough that the implementing agent does not have to guess what you meant — it can come back with one clarifying question, and a vague finding wastes that exchange.

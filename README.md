@@ -69,6 +69,8 @@ Some phases will not converge — OpenCode keeps raising a fresh finding every r
 
 Every acceptance is recorded: in `/opencode-review-loop:status`, as its own numbered report visible through `/opencode-review-loop:report`, and in a `## Manually accepted phases` section shown to every later review of that activation — including the final cumulative one — so nothing downstream mistakes an accepted phase for one that actually passed a gate.
 
+Before accepting, though: when a finding is just *unclear* — or two rounds seem to contradict each other — Claude can run `ocrl.sh clarify --question "…"` to get one prose answer about the review that already ran, with no new commit attempt and no new round. It is not a slash command (Claude invokes it directly), it changes nothing, and it is capped at `max_clarifications` per run. A genuine standing disagreement still ends at `accept`.
+
 ## Running a long plan across sessions
 
 `implement` always starts fresh: a new baseline, an empty phase list, no approvals carried over. Right for a new plan, wrong for picking an old one back up tomorrow — the 24-hour `ttl_hours` default makes that happen sooner than you'd think. `resume` is the second arming path for exactly that: it continues the *same* activation, in a new session or the current one, without moving the baseline or losing anything already approved.
@@ -170,6 +172,7 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 | `max_reason_bytes` | `32768` | prose cap; `FINDING` lines exempt |
 | `max_findings` | `200` | above this → `needs-human`, never a trimmed list |
 | `max_findings_bytes` | `65536` | same, by size |
+| `max_clarifications` | `2` | `clarify` questions per run before it points at `accept` |
 | `allow_dirty` | `false` | alternative to passing `--allow-dirty` |
 | `ttl_hours` | `24` | after this, gates block and ask for a re-arm — `resume` is usually the fix, not `implement`; see "Running a long plan across sessions" |
 | `ignore_globs` | `[]` | paths whose sole change skips a review |

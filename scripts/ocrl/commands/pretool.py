@@ -620,7 +620,11 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
     if review.verdict == "CHANGES_REQUIRED":
         # No preamble: the report's own headline already says what this is, as it did in the
         # shell -- `ocrl_deny "$(ocrl_report_reason …)"`, with no `ocrl_deny_preamble`.
-        headline = f"opencode-review-loop: OpenCode requires changes before phase {phase} can be committed."
+        headline = (
+            f"opencode-review-loop: OpenCode requires changes before phase {phase} can be committed.\n"
+            "If a finding is ambiguous, or contradicts an earlier round, ask one question with "
+            f'`{_entrypoint()} clarify --question "..."` before guessing at a fix -- a wrong guess burns another whole round.'
+        )
         hook.deny(report.reason(review, headline, config=config).rstrip("\n"))
     if review.verdict == "NEEDS_HUMAN":
         _escalate(hook, state=state, config=config, expected=expected, reason=review.error)

@@ -46,6 +46,7 @@ guessing.
 | `max_reason_bytes` | `32768` | prose cap in a denial message; `FINDING` lines are exempt |
 | `max_findings` | `200` | above this → `needs-human`, never a trimmed list |
 | `max_findings_bytes` | `65536` | same cap, measured by size instead of count |
+| `max_clarifications` | `2` | `clarify` questions per run before it points at `accept` |
 | `allow_dirty` | `false` | alternative to passing `--allow-dirty` every time |
 | `ttl_hours` | `24` | after this, gates block and ask for a re-arm — `resume` is usually the right fix, not a fresh `implement` |
 | `ignore_globs` | `[]` | paths whose sole change skips a review entirely |

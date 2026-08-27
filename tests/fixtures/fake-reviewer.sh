@@ -184,6 +184,51 @@ case "$mode" in
         printf 'VERDICT CHANGES_REQUIRED\n'
         printf '<<<OCRL-END>>>\n'
         ;;
+    clarify-mutate)
+        # Simulates a resume/accept/stop landing while the reviewer answers: bumps
+        # activation_generation in state.json so clarify's post-invoke fingerprint check
+        # fires and the reply is discarded rather than printed.
+        root="${OCRL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-review-loop}"
+        sf=$(find "$root" -name state.json 2>/dev/null | head -n1)
+        if [ -n "$sf" ]; then
+            tmp=$(mktemp)
+            jq '.activation_generation = ((.activation_generation // 0) + 1)' "$sf" >"$tmp" && mv "$tmp" "$sf"
+        fi
+        printf 'Clarification, but the activation moved underneath it.\n'
+        ;;
+    clarify-supersede)
+        # Simulates a concurrent reviewer.execute finishing a newer round while this clarify
+        # runs: appends a round_history entry with the next seq, without touching any
+        # hooks.Activation field -- so clarify's post-invoke "still the latest round?" check
+        # fires (not the fingerprint check).
+        root="${OCRL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-review-loop}"
+        sf=$(find "$root" -name state.json 2>/dev/null | head -n1)
+        if [ -n "$sf" ]; then
+            tmp=$(mktemp)
+            jq '.round_history += [{
+                "seq": ((.round_history | map(.seq) | max) + 1),
+                "label": ("phase" + (.phase | tostring)),
+                "phase": .phase, "generation": .activation_generation,
+                "round": ((.round_history | length) + 1),
+                "verdict": "CHANGES_REQUIRED", "tree": "x", "base": "y",
+                "at": 0, "findings": [], "supersedes": []
+            }]' "$sf" >"$tmp" && mv "$tmp" "$sf"
+        fi
+        printf 'Clarification about a round that just got superseded.\n'
+        ;;
+    clarify)
+        # A clarify run: prose only, no findings block. Echoes the bundle it was pointed at
+        # and the question it was handed, so the selftest and unit tests can assert both.
+        printf 'Clarification.\n\n'
+        printf 'bundle: %s\n' "$bundle"
+        if [ -f "$bundle/range.txt" ]; then grep -E '^(base_tree|head_tree|round):' "$bundle/range.txt" || true; fi
+        if [ -n "${OCRL_QUESTION_FILE:-}" ] && [ -f "$OCRL_QUESTION_FILE" ]; then
+            printf 'question seen:\n'
+            cat "$OCRL_QUESTION_FILE"
+        else
+            printf '(no question file was passed)\n'
+        fi
+        ;;
     *)
         printf 'unknown OCRL_FAKE_MODE: %s\n' "$mode" >&2
         exit 2

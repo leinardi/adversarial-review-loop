@@ -25,6 +25,7 @@ USAGE = """usage: ocrl.sh <subcommand> [args]
   set-phases --phase "…" [--phase "…" …]
   pretool | confirm-commit | posttool-failure | gate-stop   (hook entrypoints)
   status | report [n] | defer --reason "…" | finish | deactivate
+  clarify --question "…" [--session <id>]
   accept [--reason "…"] [--session <id>]
   config [<key> <value> [--repo] [--force] | <key> --unset [--repo]]
   dry-run | selftest
@@ -91,6 +92,10 @@ def main(argv: list[str]) -> int:  # noqa: PLR0911, PLR0912 - one return per sub
             "deactivate": session.deactivate,
         }[sub]
         return handler(rest)
+    if sub == "clarify":
+        from ocrl.commands import clarify  # noqa: PLC0415
+
+        return clarify.run(rest)
     if sub == "accept":
         from ocrl.commands import accept  # noqa: PLC0415
 

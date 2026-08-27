@@ -365,7 +365,10 @@ def _build_successor_document(
         finish_requested=False,
         # Counters, not evidence: a fresh run starts its retry-pacing and clarify budgets
         # from zero. ``round_history`` is deliberately *not* here -- it is carried forward
-        # like the reports, per the inverted carry-forward rule in AGENTS.md.
+        # like the reports, per the inverted carry-forward rule in AGENTS.md. Nor is
+        # ``clarify_seq``: it numbers ``context/`` question files, ``context/`` is copied
+        # forward byte for byte, and resetting it would have a post-resume clarify overwrite
+        # a carried-forward question file -- the same failure a reset ``report_seq`` causes.
         transient_failures=0,
         retry_not_before=0,
         clarifications=0,

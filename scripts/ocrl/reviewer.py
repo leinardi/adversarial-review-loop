@@ -1,7 +1,14 @@
 """Building the reviewer bundle, invoking OpenCode, and parsing the contract.
 
-Ports ``scripts/lib/reviewer.sh``. Claude composes none of this: every attachment is
-generated from git, and the prompt is a fixed file shipped with the plugin.
+Ports ``scripts/lib/reviewer.sh``. For a *review* Claude composes none of this: every
+attachment is generated from git, and the prompt is a fixed file shipped with the plugin.
+
+**One bounded exception, and it never reaches a verdict.** :func:`run_clarify` attaches a
+single Claude-composed question to a fresh, session-less OpenCode call that parses no
+``VERDICT`` and touches no approval state. It is admissible for exactly that reason: the
+question never enters a bundle, never reaches a review that can approve anything, and
+cannot persist into a session a later review continues -- ``commands/clarify.py`` runs it
+cold, always, for this reason. See that module's docstring.
 
 The shell carried its result in seven ``OCRL_REVIEW_*`` globals; here it is one
 :class:`Review`, returned by :func:`execute` and rendered by :mod:`ocrl.report`.
@@ -82,6 +89,7 @@ __all__ = [
     "build_bundle",
     "byte_lines",
     "capture_session",
+    "clarify_argv",
     "context_attachments",
     "execute",
     "invoke",
@@ -89,6 +97,7 @@ __all__ = [
     "permission",
     "review_argv",
     "run_bounded",
+    "run_clarify",
     "session_ref",
     "split_lines_by_size",
 ]
@@ -1109,6 +1118,82 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
         raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s")
     if status != 0:
         raise ReviewerFailed(f"the reviewer exited with status {status}")
+
+
+def clarify_argv(repo: str, attachments: list[Path], question_file: Path, title: str, *, config: Config) -> list[str]:
+    """The bounded argv for a clarify run.
+
+    Deliberately narrower than :func:`review_argv`: exactly ``attachments`` -- the stored
+    bundle's ``range.txt`` then its ``changes.NN.diff`` chunks, **as a caller-supplied list,
+    never a directory glob here** -- then the one question file. No plan revisions, no
+    ``prior-rounds.txt``, no ``verify.txt``, and above all **no ``-s``**. A clarify never
+    continues a session (see ``commands/clarify.py`` for why binding it to the continuity
+    pointer would be wrong) and never captures one, so ``--title`` is passed purely because
+    ``opencode run`` wants one -- the row it names is never matched against later.
+
+    The attachment list comes from ``commands.clarify._bundle_attachments``, which builds it
+    from the bundle's own ``chunks`` manifest and refuses any extra or symlinked
+    ``changes.*.diff`` -- so a file dropped into ``bundles/<seq>/`` cannot be inlined to the
+    provider through ``-f`` by riding a glob.
+    """
+    argv: list[str] = [*_isolation_argv(config)]
+    argv += ["--dir", repo]
+    argv += ["-m", config.as_str("model")]
+    variant = config.as_str("variant")
+    if variant:
+        argv += ["--variant", variant]
+    argv += ["--title", title]
+    for path in attachments:
+        argv += ["-f", str(path)]
+    argv += ["-f", str(question_file)]
+    return argv
+
+
+def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invocation, exactly as review_argv notes
+    repo: str,
+    bundle_dir: Path,
+    attachments: list[Path],
+    question_file: Path,
+    *,
+    prompt_file: Path,
+    title: str,
+    out_path: Path,
+    config: Config,
+    environ: dict[str, str] | None = None,
+) -> str:
+    """Answer one question about a review already given, from its stored bundle.
+
+    Cold and session-less, like :func:`_confirm_cold`: no ``-s``, the bundle-scoped
+    ``permission`` document, and the ``context/`` question is the only model-derived text in
+    the call. ``bundle_dir`` scopes the permission document; ``attachments`` is the exact,
+    manifest-validated ``-f`` list (see :func:`clarify_argv`). **No ``VERDICT`` is parsed** --
+    the caller prints the prose reply verbatim and the gate never reads an approval out of
+    it. Raises :class:`ReviewerFailed` on a timeout or a non-zero exit, exactly as
+    :func:`invoke` does, so a failed clarify is reported, not silently empty.
+
+    ``OCRL_REVIEWER_CMD`` is honoured for the selftest: the stub is handed
+    ``OCRL_QUESTION_FILE`` so it can read the question the real path would inline with ``-f``.
+    """
+    env = dict(os.environ if environ is None else environ)
+    timeout_sec = config.as_int("timeout_sec")
+    reviewer_cmd = env.get("OCRL_REVIEWER_CMD", "")
+
+    if reviewer_cmd:
+        env["OCRL_BUNDLE_DIR"] = str(bundle_dir)
+        env["OCRL_QUESTION_FILE"] = str(question_file)
+        command = [reviewer_cmd, str(bundle_dir), str(prompt_file)]
+    else:
+        message = _decode(prompt_file.read_bytes()).rstrip("\n")
+        env = _isolation_env(config, env)
+        env["OPENCODE_PERMISSION"] = permission(bundle_dir, cold=True)
+        command = ["opencode", "run", message, *clarify_argv(repo, attachments, question_file, title, config=config)]
+
+    status = _capture_to_file(command, env, out_path, timeout_sec)
+    if status in _TIMEOUT_STATUSES:
+        raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s")
+    if status != 0:
+        raise ReviewerFailed(f"the reviewer exited with status {status}")
+    return _decode(out_path.read_bytes())
 
 
 # --------------------------------------------------------------------------

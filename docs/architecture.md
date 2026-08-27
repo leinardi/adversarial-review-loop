@@ -102,6 +102,22 @@ escalate a phase that is demonstrably stuck. Every consumer treats `state.json` 
 untrusted: stored finding lines are re-validated before rendering, and any tree id from an
 entry is resolved through `gitsnap.checked_tree` before it reaches a git command line.
 
+### The clarify channel
+
+`ocrl.sh clarify --question "…"` asks the reviewer one prose question about the review it
+just gave, without attempting a commit or spending a new round. It is Claude-invocable —
+it parses no `VERDICT`, writes nothing that can approve anything, and reaches
+`hook.pass_()` under `ACTIVE` without any gate change. It runs **cold and session-less**,
+against `bundles/<seq>/` for the most recent `round_history` entry of the current phase —
+never the `reviewer_session` continuity pointer, which may name a session whose continued
+`APPROVED` was overridden by a cold `CHANGES_REQUIRED` the acting verdict came from. The
+question is written to `context/<n>-question.txt` (a sibling of `bundles/`, inlined with
+`-f`, never re-openable by path) wrapped in an evidence-not-instruction fence. Two counters
+bound and number it: `clarifications` (capped by `max_clarifications`, reset by `resume`)
+and `clarify_seq` (carried across a `resume` like `report_seq`, since it names files under
+the copied-forward `context/`). A clarify leaves every `hooks.Activation` field and
+`round_history` byte-identical.
+
 ## One commit, start to finish
 
 ```text
@@ -162,7 +178,9 @@ $XDG_STATE_HOME/opencode-review-loop/
         ├── phases.frozen            the split phase list
         ├── reports/NNN-*.md         every review, in full, never deleted
         ├── raw/NNN-<label>[-cold].out  the reviewer's own transcript for report NNN — never inside bundles/
-        ├── context/NNN-*.txt        model-/Claude-derived attachments for report NNN (prior-rounds) — a sibling of bundles/, passed with -f and never re-openable by path; omitted from a cold confirmation
+        ├── raw/NNN-clarify.out      a clarify exchange's transcript (NNN is clarify_seq, not report_seq)
+        ├── context/NNN-prior-rounds.txt  earlier rounds' verdicts+findings for report NNN — a sibling of bundles/, passed with -f and never re-openable by path; omitted from a cold confirmation
+        ├── context/NNN-question.txt  a Claude-composed clarify question (NNN is clarify_seq) — same sibling directory, same -f-only channel
         └── bundles/NNN/             gate-generated evidence shown to the reviewer for report NNN — no model output, ever
 ```
 
