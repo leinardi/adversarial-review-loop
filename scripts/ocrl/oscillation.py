@@ -23,8 +23,16 @@ suffix stripped, paired with its ``severity``. Two things count as oscillation:
 Neither signal changes a verdict on its own -- see ``reviewer.py``'s docstring for why a
 reversal still blocks exactly as its ``FINDING`` lines say. This module only says "here is
 where the history disagrees with itself"; :mod:`ocrl.reviewer` and :mod:`ocrl.report` decide
-what to show a reader, and a future phase 5 decides whether it is grounds to stop asking the
-reviewer at all.
+what to show a reader.
+
+Phase 5 adds a second, related question, answered by :func:`persisting`: not "did this anchor
+come back after being absent", but "has it simply never gone away" -- the same finding, raised
+in every one of the last ``stall_rounds`` consecutive rounds, with nothing about the diff
+changing between them. That and :func:`reversals` together are what ``reviewer._stall_review``
+asks before invoking the reviewer at all: either signal, and a phase escalates to
+``NEEDS_HUMAN`` instead of spending one more round on a disagreement that is not converging.
+See that function's docstring for why the check has to run inside the same lock that reserves
+the next round, not before it.
 
 ``round_history`` is read out of ``state.json``, which ``AGENTS.md`` is explicit is not a
 trust boundary. Every value taken out of an entry here is treated that way: a non-string, a
@@ -43,7 +51,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
-__all__ = ["Anchor", "OscillationPoint", "render", "reversals"]
+__all__ = ["Anchor", "OscillationPoint", "PersistingPoint", "persisting", "render", "render_persisting", "reversals"]
 
 #: POSIX ``[[:space:]]`` in the C locale, spelled out rather than left to ``\s`` -- the same
 #: reasoning and the same literal class as ``reviewer._SPACE``.
@@ -241,6 +249,80 @@ def reversals(history: Sequence[Mapping[str, object]], label: str) -> list[Oscil
     return points
 
 
+@dataclass(frozen=True)
+class PersistingPoint:
+    """An anchor raised in every one of the last ``stall_rounds`` consecutive rounds.
+
+    Distinct from :class:`OscillationPoint`: that one is about a position *changing* --
+    disappearing and coming back, or being reversed more than once. This one is about a
+    position that never changed at all, round after round -- the "genuinely stuck" signal
+    :func:`persisting` exists to answer.
+    """
+
+    anchor: Anchor
+    #: ``(seq, verbatim FINDING line)`` -- one pair per matching line, across exactly the last
+    #: ``stall_rounds`` rounds, oldest first. More than one pair can share a ``seq`` when a
+    #: single round raised the same anchor with more than one ``FINDING`` line.
+    lines: tuple[tuple[int, str], ...]
+
+
+def persisting(history: Sequence[Mapping[str, object]], label: str, stall_rounds: int) -> list[PersistingPoint]:
+    """Anchors raised in every one of the last ``stall_rounds`` consecutive rounds of
+    ``history`` for ``label`` -- the same finding, round after round, with no sign of
+    convergence.
+
+    Fewer than ``stall_rounds`` rounds recorded yet answers ``[]``: there is not enough
+    history for "every one of the last N" to mean anything. ``stall_rounds <= 0`` also
+    answers ``[]`` -- the caller's own config gate (``0`` disables the check entirely), kept
+    here too so a caller that forgets the gate still gets the safe answer rather than a
+    negative-slice surprise.
+
+    Scoping, ordering and the untrusted-input handling are exactly :func:`reversals`': entries
+    for another label or with no genuine int ``seq`` are dropped, and a finding line is an
+    anchor only once it fully re-validates against the grammar (see the module docstring --
+    state is not a trust boundary).
+    """
+    if stall_rounds <= 0:
+        return []
+    rounds: list[tuple[int, Mapping[str, object]]] = []
+    for entry in history:
+        if entry.get("label") != label:
+            continue
+        seq = _entry_seq(entry)
+        if seq is None:
+            continue
+        rounds.append((seq, entry))
+    rounds.sort(key=lambda pair: pair[0])
+    if len(rounds) < stall_rounds:
+        return []
+    recent = rounds[-stall_rounds:]
+
+    lines_by_round: list[dict[Anchor, list[str]]] = []
+    for _seq, entry in recent:
+        findings = entry.get("findings")
+        by_anchor: dict[Anchor, list[str]] = {}
+        for line in findings if isinstance(findings, list) else []:
+            anchor = _finding_anchor(line)
+            if anchor is not None:
+                by_anchor.setdefault(anchor, []).append(line)
+        lines_by_round.append(by_anchor)
+
+    common: set[Anchor] = set(lines_by_round[0])
+    for by_anchor in lines_by_round[1:]:
+        common &= set(by_anchor)
+
+    points: list[PersistingPoint] = []
+    for anchor in common:
+        pairs: list[tuple[int, str]] = []
+        for (seq, _entry), by_anchor in zip(recent, lines_by_round, strict=True):
+            pairs.extend((seq, line) for line in by_anchor[anchor])
+        points.append(PersistingPoint(anchor=anchor, lines=tuple(pairs)))
+
+    # Same reasoning as `reversals`' own sort: `common` is a `set`, not insertion-ordered.
+    points.sort(key=lambda point: (point.anchor.file, point.anchor.severity))
+    return points
+
+
 def _render_one(point: OscillationPoint) -> str:
     reasons: list[str] = []
     if point.reappeared:
@@ -297,3 +379,44 @@ def render(points: Sequence[OscillationPoint], *, max_points: int | None = None,
     if capped and (max_bytes is None or disclosure_size <= max_bytes):
         lines.append(disclosure)
     return "".join(lines)
+
+
+def _render_persisting_one(point: PersistingPoint) -> str:
+    seqs = sorted({seq for seq, _line in point.lines})
+    header = f"- `{point.anchor.file}` (severity {point.anchor.severity}), raised in every one of the last {len(seqs)} round(s) (seq {', '.join(str(seq) for seq in seqs)}):\n"
+    body = "".join(f"    - round seq {seq}: {line}\n" for seq, line in point.lines)
+    return header + body
+
+
+def render_persisting(points: Sequence[PersistingPoint], *, max_points: int | None = None, max_bytes: int | None = None) -> str:
+    """One block per point, in the order given -- the file, the severity, and every matching
+    round's verbatim ``FINDING`` line. ``""`` for an empty sequence.
+
+    Bounded exactly like :func:`render`, for the same reason: ``review.error`` (composed by
+    ``reviewer._stall_review``, this function's only caller) is appended, unbounded, straight
+    into a hook's JSON response. See :func:`render`'s own docstring for what ``max_points`` /
+    ``max_bytes`` mean and how the degenerate small-budget case is handled -- this mirrors it
+    exactly, capping whole *points* (one point can render several lines) rather than
+    individual lines.
+    """
+    disclosure = "(further persisting findings are past the max_findings / max_findings_bytes cap and are not shown)\n"
+    disclosure_size = len(disclosure.encode("utf-8", "surrogateescape"))
+    content_budget = max(max_bytes - disclosure_size, 0) if max_bytes is not None else None
+
+    blocks: list[str] = []
+    total = 0
+    capped = False
+    for index, point in enumerate(points):
+        if max_points is not None and index >= max_points:
+            capped = True
+            break
+        block = _render_persisting_one(point)
+        size = len(block.encode("utf-8", "surrogateescape"))
+        if content_budget is not None and total + size > content_budget:
+            capped = True
+            break
+        blocks.append(block)
+        total += size
+    if capped and (max_bytes is None or disclosure_size <= max_bytes):
+        blocks.append(disclosure)
+    return "".join(blocks)

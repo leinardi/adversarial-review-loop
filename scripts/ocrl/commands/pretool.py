@@ -73,7 +73,8 @@ The loop escalated to NEEDS_HUMAN and every mutation is denied until the user in
 
 Reason: {reason}
 
-Stop and tell the user. They can leave the mode with /opencode-review-loop:stop.
+Stop and tell the user. They can run /opencode-review-loop:accept to approve the current tree \
+without another review and continue, or leave the mode with /opencode-review-loop:stop.
 """
 
 STALE: Final = """\
@@ -203,7 +204,9 @@ This escalated to NEEDS_HUMAN and is not an approval.
 
 Full report: {report}
 
-Stop here and tell the user. The gate keeps denying until they run /opencode-review-loop:stop.
+Stop here and tell the user. /opencode-review-loop:accept approves the current tree without \
+another review and continues; /opencode-review-loop:stop leaves the mode. The gate keeps \
+denying until one of them runs.
 """
 
 FAILURES_EXHAUSTED: Final = """\

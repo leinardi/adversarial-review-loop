@@ -160,6 +160,36 @@ of `HEAD` — a rebase, a hard reset, a force-push someone pulled — `resume` r
 rather than resuming against a baseline that no longer describes the repository. The
 recovery is a fresh `implement`.
 
+## A phase that never converges
+
+There is no cap on how many rounds one phase may take. A phase escalates to `needs-human`
+only on evidence it is genuinely stuck: `stall_rounds` (default `2`) consecutive rounds
+raising the same finding, unchanged, or a finding that reappears after being absent, or is
+reversed (`SUPERSEDES`) more than once. Either signal, and the next commit attempt (or Stop
+gate sweep) does not call the reviewer at all — it escalates straight away, with the
+persisting or oscillating findings quoted verbatim.
+
+**Accepted consequence:** a reviewer that raises a genuinely new, non-repeating objection
+every round never trips this. Nothing here distinguishes real, ongoing progress from an
+unlucky sequence of distinct findings that never happens to repeat — both keep the loop
+running indefinitely. `/opencode-review-loop:accept` is the only bound in that case: it
+approves the current tree without another review and continues, regardless of how many
+rounds ran or what they disagreed about. If a phase is taking an unreasonable number of
+rounds, that is the exit, not a config knob to make the reviewer stop trying.
+
+The check applies to phase reviews only — a `final` cumulative review has no `round_history`
+label of its own to stall on. Set `stall_rounds` to `0` to disable the check entirely and
+fall back to no automatic bound at all beyond `accept`.
+
+**Two reviews of the same phase never run at the same time.** The commit gate and the Stop
+gate's own unreviewed-work sweep can genuinely overlap, and if both were allowed to invoke
+the reviewer concurrently, whichever finished first could act on a verdict decided blind to
+the other's still-running result — an approval that never saw a repeated finding land a
+moment later is not a timing quirk, it is the standing disagreement slipping through. A
+second, overlapping attempt is refused outright instead, before it ever builds a bundle or
+calls the reviewer — it denies as an ordinary operational failure and simply needs retrying
+once the first review has finished.
+
 ## The findings cap escalates, it never trims
 
 If a review comes back with more findings than `max_findings` (or their combined size

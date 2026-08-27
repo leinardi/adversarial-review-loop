@@ -30,6 +30,17 @@ case "$mode" in
         printf 'VERDICT CHANGES_REQUIRED\n'
         printf '<<<OCRL-END>>>\n'
         ;;
+    changes-file)
+        # Same shape as `changes`, but the finding's anchor (file) is named by
+        # OCRL_FAKE_FILE, so a test can drive a sequence of rounds that either repeat the
+        # same anchor (stall detection) or raise a fresh one every round (no cap).
+        f=${OCRL_FAKE_FILE:-a.txt}
+        printf 'A problem in %s.\n\n' "$f"
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'FINDING severity=high actionable=yes file=%s:1 | Problem in %s\n' "$f" "$f"
+        printf 'VERDICT CHANGES_REQUIRED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
     approve-with-critical)
         # A reviewer that contradicts itself: the gate must recompute and block.
         printf 'Looks fine overall.\n\n'

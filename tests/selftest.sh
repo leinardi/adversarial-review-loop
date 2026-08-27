@@ -735,6 +735,45 @@ if start 'prior rounds: round 2 is shown round 1 findings, and no bundle file ho
     fi
 fi
 
+if start 'stall detection: two rounds of the same finding escalate without invoking the reviewer'; then
+    new_case
+    arm_ok && phases_ok
+
+    printf 'r1\n' >"$REPO/a.txt"
+    with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+
+    printf 'r2\n' >"$REPO/a.txt"
+    with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+
+    before=$(sget report_seq)
+    assert_eq 'two ordinary rounds ran, each reaching the reviewer' "$before" '2'
+
+    # A reviewer command that does not exist is what proves the third attempt never calls it:
+    # the escalation is a static decision over round_history, not merely another denial.
+    printf 'r3\n' >"$REPO/a.txt"
+    d=$(with_env OCRL_REVIEWER_CMD=/nonexistent/reviewer-must-not-run pre Bash 'git add -A && git commit -m x')
+    assert_eq 'the third attempt still denies' "$d" 'deny'
+    assert_contains 'as an escalation to NEEDS_HUMAN' "$(pre_reason)" 'NEEDS_HUMAN'
+    assert_contains 'naming the persisting anchor' "$(pre_reason)" 'a.txt'
+    assert_eq 'status escalated' "$(sget status)" 'NEEDS_HUMAN'
+    assert_eq 'no report sequence was reserved for the stalled round' "$(sget report_seq)" "$before"
+fi
+
+if start 'stall detection: four rounds of distinct findings never escalate'; then
+    new_case
+    arm_ok && phases_ok
+
+    # Deliberately the design phase 5 does not cap: a genuinely fresh finding every round
+    # keeps the reviewer running with no round limit at all.
+    for f in a b c d; do
+        printf '%s\n' "$f" >"$REPO/$f.txt"
+        d=$(with_env OCRL_FAKE_MODE=changes-file OCRL_FAKE_FILE="$f.py" pre Bash 'git add -A && git commit -m x')
+        assert_eq "round for $f.py denies as an ordinary CHANGES_REQUIRED" "$d" 'deny'
+        assert_contains "round for $f.py actually reached the reviewer" "$(pre_reason)" "Problem in $f.py"
+    done
+    assert_eq 'every one of the four rounds actually invoked the reviewer' "$(sget report_seq)" '4'
+fi
+
 if start 'clarify: answers one question, touches nothing, and is bounded'; then
     new_case
     arm_ok && phases_ok

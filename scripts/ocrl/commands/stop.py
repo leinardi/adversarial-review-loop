@@ -74,7 +74,8 @@ Tell the user. They can re-arm with /opencode-review-loop:implement <plan.md>, o
 
 STILL_NEEDS_HUMAN: Final = (
     "opencode-review-loop: still in NEEDS_HUMAN ({reason}). The work was not reviewed to completion. "
-    "Run /opencode-review-loop:stop to leave the mode."
+    "Run /opencode-review-loop:accept to approve the current tree without another review and continue, "
+    "or /opencode-review-loop:stop to leave the mode."
 )
 
 ARM_FAILED: Final = """\
@@ -154,7 +155,11 @@ SWEEP_ACTIVATION_MOVED: Final = (
     "The tree stays unapproved; the next turn end will review it again, against the activation as it now stands."
 )
 
-SWEEP_ESCALATED: Final = "opencode-review-loop: escalated to NEEDS_HUMAN — {error}. This is NOT an approval."
+SWEEP_ESCALATED: Final = (
+    "opencode-review-loop: escalated to NEEDS_HUMAN — {error}. This is NOT an approval. "
+    "/opencode-review-loop:accept approves the current tree without another review and continues; "
+    "/opencode-review-loop:stop leaves the mode."
+)
 
 SWEEP_FAILED: Final = (
     "opencode-review-loop: the review of the uncommitted work failed ({error}), so the turn cannot end as reviewed. "

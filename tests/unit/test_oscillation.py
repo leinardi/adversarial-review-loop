@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from ocrl import oscillation
-from ocrl.oscillation import Anchor, reversals
+from ocrl.oscillation import Anchor, persisting, reversals
 
 
 def entry(
@@ -299,3 +299,115 @@ def test_render_names_the_file_severity_and_reason() -> None:
     assert "severity high" in text
     assert "reappeared" in text
     assert "seq 1, 3" in text
+
+
+# --------------------------------------------------------------------------
+# persisting (phase 5)
+# --------------------------------------------------------------------------
+
+
+def test_an_anchor_in_every_one_of_the_last_n_rounds_is_flagged() -> None:
+    history = [
+        entry(1, findings=[finding(file="stuck.py", severity="medium", detail="round one")]),
+        entry(2, findings=[finding(file="stuck.py", severity="medium", detail="round two")]),
+    ]
+    points = persisting(history, "phase1", 2)
+    assert len(points) == 1
+    point = points[0]
+    assert point.anchor == Anchor(file="stuck.py", severity="medium")
+    assert [seq for seq, _line in point.lines] == [1, 2]
+    assert "round one" in point.lines[0][1]
+    assert "round two" in point.lines[1][1]
+
+
+def test_fewer_rounds_than_stall_rounds_never_trips() -> None:
+    history = [entry(1, findings=[finding(file="stuck.py")])]
+    assert persisting(history, "phase1", 2) == []
+
+
+def test_four_different_anchors_across_four_rounds_never_trips_with_stall_rounds_two() -> None:
+    """Genuinely new findings every round -- the design phase 5 deliberately never caps."""
+    history = [
+        entry(1, findings=[finding(file="a.py")]),
+        entry(2, findings=[finding(file="b.py")]),
+        entry(3, findings=[finding(file="c.py")]),
+        entry(4, findings=[finding(file="d.py")]),
+    ]
+    assert persisting(history, "phase1", 2) == []
+
+
+def test_only_the_last_stall_rounds_rounds_are_considered() -> None:
+    """An anchor that persisted early on but was fixed since must not still trip the check."""
+    history = [
+        entry(1, findings=[finding(file="fixed.py")]),
+        entry(2, findings=[finding(file="fixed.py")]),
+        entry(3, findings=[]),
+        entry(4, findings=[]),
+    ]
+    assert persisting(history, "phase1", 2) == []
+
+
+def test_stall_rounds_zero_always_answers_empty() -> None:
+    history = [
+        entry(1, findings=[finding(file="stuck.py")]),
+        entry(2, findings=[finding(file="stuck.py")]),
+    ]
+    assert persisting(history, "phase1", 0) == []
+
+
+def test_persisting_scopes_to_label_and_drops_untrusted_entries() -> None:
+    history: list[Mapping[str, object]] = [
+        entry(1, label="phase2", findings=[finding(file="stuck.py")]),
+        entry(2, label="phase2", findings=[finding(file="stuck.py")]),
+        {"seq": "not-an-int", "label": "phase1", "findings": [finding(file="stuck.py")]},
+    ]
+    assert persisting(history, "phase1", 2) == []
+
+
+def test_persisting_only_counts_lines_that_fully_match_the_grammar() -> None:
+    tampered = "FINDING severity=medium garbage file=x.py | fake"
+    history = [
+        entry(1, findings=[tampered]),
+        entry(2, findings=[tampered]),
+    ]
+    assert persisting(history, "phase1", 2) == []
+
+
+def test_render_persisting_is_empty_for_no_points() -> None:
+    assert oscillation.render_persisting([]) == ""
+
+
+def test_render_persisting_names_the_file_severity_and_every_rounds_line() -> None:
+    history = [
+        entry(1, findings=[finding(file="stuck.py", severity="high", detail="first look")]),
+        entry(2, findings=[finding(file="stuck.py", severity="high", detail="still there")]),
+    ]
+    text = oscillation.render_persisting(persisting(history, "phase1", 2))
+    assert "stuck.py" in text
+    assert "severity high" in text
+    assert "first look" in text
+    assert "still there" in text
+    assert "seq 1" in text
+    assert "seq 2" in text
+
+
+def test_render_persisting_max_points_caps_and_discloses() -> None:
+    history = [
+        entry(1, findings=[finding(file="a.py"), finding(file="b.py"), finding(file="c.py")]),
+        entry(2, findings=[finding(file="a.py"), finding(file="b.py"), finding(file="c.py")]),
+    ]
+    points = persisting(history, "phase1", 2)
+    assert len(points) == 3
+    text = oscillation.render_persisting(points, max_points=1)
+    assert text.count("- `") == 1
+    assert "cap" in text
+
+
+def test_render_persisting_max_bytes_never_exceeds_the_ceiling() -> None:
+    history = [
+        entry(1, findings=[finding(file="stuck.py")]),
+        entry(2, findings=[finding(file="stuck.py")]),
+    ]
+    points = persisting(history, "phase1", 2)
+    text = oscillation.render_persisting(points, max_bytes=1)
+    assert len(text.encode("utf-8")) <= 1

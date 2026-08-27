@@ -120,6 +120,17 @@ def new_state_document() -> dict[str, Any]:
         #: trusted to authorize anything -- holding ``{"label", "id", "title", "created",
         #: "revisions", "generation", "round", "claimed_at", "claim_id"}`` once populated.
         "reviewer_session": {},
+        #: Phase 5's per-label mutual-exclusion claims: ``{label: {"generation", "claimed_at",
+        #: "claim_id"}}``, one entry per label that currently holds (or recently held) a
+        #: claim -- a *dict* of claims, not a single shared record, so an unrelated label's
+        #: claim (a concurrent "final" review while a "phase1" sweep is still running) cannot
+        #: silently overwrite another label's still-live entry. Unrelated to
+        #: ``reviewer_session`` (which is advisory and never authorizes anything): this one
+        #: genuinely prevents two reviews of the same ``(label, generation)`` from running at
+        #: the same time, which is what makes the stall check's evidence trustworthy -- see
+        #: ``ocrl.reviewer._claim_active_review``. Degrades safely like ``reviewer_session``
+        #: (a legacy document simply has none), so it needs no migration arm of its own.
+        "active_review": {},
     }
 
 

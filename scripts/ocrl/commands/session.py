@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 
-from ocrl import commands, gitsnap, planrev, report, reviewer
+from ocrl import commands, gitsnap, oscillation, planrev, report, reviewer
 from ocrl.commands import completion
 from ocrl.commands.completion import Completion
 from ocrl.config import Config
@@ -111,6 +111,19 @@ def status(argv: list[str]) -> int:
         active_plan_file = f"<corrupted: {exc}>"
     revision_count = len(plan_revisions) or 1
 
+    # Phase 5: how many rounds this phase's own label has run at the current generation, and
+    # whether any of its anchors have stopped moving. Mirrors exactly the scope
+    # `reviewer._stall_review` reads -- this label, this generation -- so what a human sees
+    # here is the same evidence the next commit attempt would escalate on.
+    phase_label = f"phase{state.get_int('phase')}"
+    generation = state.get_int("activation_generation")
+    phase_history = [
+        entry for entry in state.get_array_of_dicts("round_history") if entry.get("label") == phase_label and entry.get("generation") == generation
+    ]
+    stall_rounds = config.as_int("stall_rounds")
+    persisting_points = oscillation.persisting(phase_history, phase_label, stall_rounds) if stall_rounds > 0 else []
+    persisting_line = f"persisting findings:  {', '.join(point.anchor.file for point in persisting_points)}\n" if persisting_points else ""
+
     sys.stdout.write(
         f"""\
 opencode-review-loop status
@@ -134,7 +147,8 @@ defers used:         {state.get("defers")} / {config.as_int("max_defers")}
 manual accepts:      {accepts_line}
 model:               {config.as_str("model")} {config.as_str("variant")}
 block_severity:      {config.as_str("block_severity")}
-state directory:     {activation.act_dir}
+rounds this phase:   {len(phase_history)}
+{persisting_line}state directory:     {activation.act_dir}
 
 phases:
 {phases}

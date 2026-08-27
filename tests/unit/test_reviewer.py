@@ -1544,10 +1544,393 @@ def test_the_context_files_oscillating_section_only_ever_sees_rounds_before_the_
     _run_scripted(activation, git_repo, tmp_path, "round3", _ROUND_3)
     assert "Oscillating" not in (activation.act_dir / "context" / "003-prior-rounds.txt").read_text()
 
-    execute_fake(activation, git_repo, "approve")
+    # `warn.py` just reappeared (rounds 1 and 3), which is exactly what phase 5's stall check
+    # also watches for -- disabled here, because what this test is about is the *rendering*
+    # of round 4's own attachment, not whether round 4 gets to run at all (see
+    # test_an_oscillating_anchor_alone_also_trips_the_stall_check for that).
+    execute_fake(activation, git_repo, "approve", config=config_with(stall_rounds=0))
     text = (activation.act_dir / "context" / "004-prior-rounds.txt").read_text()
     assert "## Oscillating points" in text
     assert "warn.py" in text
+
+
+# --------------------------------------------------------------------------
+# Phase 5: stall detection
+# --------------------------------------------------------------------------
+
+_STUCK = "Same problem again.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=stuck.py:1 | still wrong\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n"
+
+
+def test_a_persisting_anchor_escalates_without_invoking_the_reviewer(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """Two consecutive rounds raising the same anchor (``stall_rounds`` default 2) trips the
+    check on the third attempt -- and the reviewer must never run for it: pointing
+    ``OCRL_REVIEWER_CMD`` at a nonexistent binary is what proves that, not merely a verdict."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _STUCK)
+    _run_scripted(activation, git_repo, tmp_path, "round2", _STUCK)
+    before_seq = activation.get_int("report_seq")
+    assert before_seq == 2
+
+    os.environ["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert review.verdict == "NEEDS_HUMAN"
+    assert "stuck.py" in review.error
+    assert "seq 1" in review.error
+    assert "seq 2" in review.error
+    assert activation.get_int("report_seq") == before_seq, "a stalled round reserves no report sequence"
+    assert len(activation.get_array_of_dicts("round_history")) == 2, "a stalled round appends nothing"
+    assert not (activation.act_dir / "bundles" / "003").exists(), "no bundle was ever built"
+
+
+def test_a_concurrently_completed_round_overrides_this_invocations_own_approval(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """The race `_reserve_round`'s pre-invoke check alone cannot close: two overlapping
+    reviews of the same label can both pass it -- before either has appended anything -- and
+    both invoke. This simulates the second one finishing after a concurrent process has
+    already recorded the stalling round: the stand-in reviewer injects that round_history
+    entry itself, mid-invocation (the same technique
+    ``test_a_generation_bump_during_the_sweep_discards_the_approval`` uses), then returns its
+    own APPROVED. The verdict this invocation is credited with must still be NEEDS_HUMAN, not
+    the APPROVED its own reviewer call produced -- a race is not a way to turn a stalled phase
+    into an approval."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _STUCK)
+    assert activation.get_int("report_seq") == 1
+
+    state_path = activation.state_file
+    script = tmp_path / "concurrent-stall.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "python3 - <<'PY'\n"
+        "import json, pathlib\n"
+        f"p = pathlib.Path({str(state_path)!r})\n"
+        "d = json.loads(p.read_text())\n"
+        "d['round_history'].append({\n"
+        "    'seq': 999, 'label': 'phase1', 'phase': 1, 'generation': d.get('activation_generation', 0),\n"
+        "    'round': 1, 'verdict': 'CHANGES_REQUIRED', 'tree': 'a' * 40, 'base': 'b' * 40, 'at': 0,\n"
+        "    'findings': ['FINDING severity=medium actionable=yes file=stuck.py:2 | still wrong, concurrently'],\n"
+        "    'supersedes': [],\n"
+        "})\n"
+        "p.write_text(json.dumps(d))\n"
+        "PY\n"
+        "printf 'Looks fine to me now.\\n\\n'\n"
+        "printf '<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf 'VERDICT APPROVED\\n'\n"
+        "printf '<<<OCRL-END>>>\\n'\n"
+    )
+    script.chmod(0o755)
+    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert review.verdict == "NEEDS_HUMAN", "the concurrent stall must override this invocation's own APPROVED"
+    assert "stuck.py" in review.error
+    assert review.raw, "the genuine invocation output is still kept, only the acted-on verdict changes"
+    # This invocation's own round is not recorded as an ordinary one: only round 1 and the
+    # concurrently injected round are on disk. `activation`'s in-memory copy was last reloaded
+    # by `_reserve_round`, before the script wrote the injected entry -- re-`load()` to see
+    # what execute() itself actually left on disk.
+    activation.load()
+    history = activation.get_array_of_dicts("round_history")
+    assert len(history) == 2
+    assert history[-1]["seq"] == 999
+
+    # The stored report itself, not only the returned `review`, must reflect the override --
+    # `report.store` runs *after* the authoritative recheck precisely so a durable report can
+    # never be found claiming APPROVED for a round the gate actually treated as NEEDS_HUMAN.
+    assert review.report, "a report was still stored"
+    assert Path(review.report).name.endswith("-needs_human.md")
+    report_text = Path(review.report).read_text()
+    assert "**NEEDS_HUMAN**" in report_text
+    assert "stuck.py" in report_text
+
+
+def test_the_stored_report_reflects_the_override_even_when_only_the_late_authoritative_check_catches_it(
+    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolates the *late* half of the concurrent-stall guard from the earlier, lock-free one:
+    with ``_concurrent_stall_check`` (the pre-``report.store`` peek) forced to a no-op, the
+    only thing left that can catch this round's concurrently-injected sibling is
+    ``_append_round_history``'s own in-lock recheck -- which runs *after* ``report.store`` used
+    to. Proves that reordering: even when only the late check fires, the report written to
+    disk still shows the corrected verdict, not the stale one this invocation's own reviewer
+    call produced."""
+    monkeypatch.setattr(reviewer, "_override_if_concurrently_stalled", lambda rr, review: None)
+
+    _run_scripted(activation, git_repo, tmp_path, "round1", _STUCK)
+    assert activation.get_int("report_seq") == 1
+
+    state_path = activation.state_file
+    script = tmp_path / "concurrent-stall-late.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "python3 - <<'PY'\n"
+        "import json, pathlib\n"
+        f"p = pathlib.Path({str(state_path)!r})\n"
+        "d = json.loads(p.read_text())\n"
+        "d['round_history'].append({\n"
+        "    'seq': 999, 'label': 'phase1', 'phase': 1, 'generation': d.get('activation_generation', 0),\n"
+        "    'round': 1, 'verdict': 'CHANGES_REQUIRED', 'tree': 'a' * 40, 'base': 'b' * 40, 'at': 0,\n"
+        "    'findings': ['FINDING severity=medium actionable=yes file=stuck.py:2 | still wrong, concurrently'],\n"
+        "    'supersedes': [],\n"
+        "})\n"
+        "p.write_text(json.dumps(d))\n"
+        "PY\n"
+        "printf 'Looks fine to me now.\\n\\n'\n"
+        "printf '<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf 'VERDICT APPROVED\\n'\n"
+        "printf '<<<OCRL-END>>>\\n'\n"
+    )
+    script.chmod(0o755)
+    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert review.verdict == "NEEDS_HUMAN", "the late, in-lock check still must have overridden the APPROVED"
+    assert review.report, "a report was still stored"
+    assert Path(review.report).name.endswith("-needs_human.md"), "the filename itself must not say approved"
+    report_text = Path(review.report).read_text()
+    assert "**NEEDS_HUMAN**" in report_text
+    assert "**APPROVED**" not in report_text
+
+
+# --------------------------------------------------------------------------
+# Phase 5: per-label mutual exclusion (active_review)
+# --------------------------------------------------------------------------
+
+
+def test_claiming_the_active_review_slot_twice_refuses_the_second(activation: state.State, git_repo: Path) -> None:
+    target = target_for(git_repo)
+    config = config_with()
+    with activation.transaction():
+        first = reviewer._claim_active_review(activation, target, config)
+    assert first is not None
+
+    with activation.transaction():
+        second = reviewer._claim_active_review(activation, target, config)
+    assert second is None, "a live claim for the same label must refuse a second one"
+
+
+def test_releasing_lets_a_fresh_claim_through(activation: state.State, git_repo: Path) -> None:
+    target = target_for(git_repo)
+    config = config_with()
+    expected = hooks.activation(activation, config)
+    with activation.transaction():
+        first = reviewer._claim_active_review(activation, target, config)
+    assert first is not None
+
+    reviewer._release_active_review(activation, claim_id=first, expected=expected, config=config)
+
+    with activation.transaction():
+        second = reviewer._claim_active_review(activation, target, config)
+    assert second is not None
+    assert second != first
+
+
+def test_an_expired_claim_is_reclaimable(activation: state.State, git_repo: Path) -> None:
+    target = target_for(git_repo)
+    config = config_with(timeout_sec=1)
+    activation.data["active_review"] = {target.label: {"generation": 0, "claimed_at": ocrl_now() - 100_000, "claim_id": "dead-token"}}
+    activation.save()
+
+    with activation.transaction():
+        claim_id = reviewer._claim_active_review(activation, target, config)
+    assert claim_id is not None
+    assert claim_id != "dead-token"
+
+
+def test_the_active_review_window_survives_a_cold_confirmations_own_timeout(activation: state.State, git_repo: Path) -> None:
+    """The claim's lifetime is not `_reclaim_after` -- that window covers only one
+    `timeout_sec`, sized for the session pointer's own shorter lifecycle (released right after
+    the primary invocation, before a cold confirmation ever runs). One `execute()` call can
+    spend a *second* full `timeout_sec` inside `_confirm_cold`, after the primary invocation
+    already returned -- a claim aged past the session pointer's own window, but still well
+    inside the active-review one, must still be treated as live, or a second, overlapping call
+    could reclaim the slot while the first is still legitimately inside its own cold
+    confirmation."""
+    target = target_for(git_repo)
+    config = config_with(timeout_sec=900)
+    old_window = reviewer._reclaim_after(config)
+    new_window = reviewer._active_review_reclaim_after(config)
+    assert new_window > old_window, "the active-review window must be strictly wider than the session pointer's"
+
+    aged = old_window + 60  # past the session pointer's own window
+    assert aged < new_window, "the test's own aging must still land inside the wider window"
+    activation.data["active_review"] = {target.label: {"generation": 0, "claimed_at": ocrl_now() - aged, "claim_id": "still-alive"}}
+    activation.save()
+
+    with activation.transaction():
+        claim_id = reviewer._claim_active_review(activation, target, config)
+    assert claim_id is None, "reusing the session pointer's narrower window would have reclaimed this slot too early"
+
+
+def test_different_labels_do_not_clobber_each_others_claims(activation: state.State, git_repo: Path) -> None:
+    """The bypass a single shared record (rather than a dict keyed by label) would allow:
+    claiming an unrelated label must not silently overwrite another label's still-live entry,
+    which would leave that other review genuinely in flight with no claim left recording it --
+    a third caller for the *same* label as the first would then see the second label's entry,
+    consider the slot free, and invoke straight past a review that never stopped running."""
+    config = config_with()
+    phase_target = target_for(git_repo, scope="phase")
+    final_target = target_for(git_repo, scope="final")
+
+    with activation.transaction():
+        phase_claim = reviewer._claim_active_review(activation, phase_target, config)
+    assert phase_claim is not None
+
+    with activation.transaction():
+        final_claim = reviewer._claim_active_review(activation, final_target, config)
+    assert final_claim is not None
+
+    with activation.transaction():
+        second_phase_claim = reviewer._claim_active_review(activation, phase_target, config)
+    assert second_phase_claim is None, "phase1's claim must still be live after an unrelated label claimed its own slot"
+
+
+def test_a_second_overlapping_execute_is_refused_without_invoking_and_a_retry_after_release_succeeds(activation: state.State, git_repo: Path) -> None:
+    """The structural fix for the race no post-hoc check can close: a second, genuinely
+    overlapping ``execute()`` call for the same label never gets to invoke the reviewer at all
+    -- it is refused at reservation time, before a bundle is built or any verdict is decided,
+    regardless of which one would have been the approval and which the repeated finding.
+    Simulates the overlap directly (hold the claim, then attempt a real ``execute()`` call)
+    rather than through real concurrency, for the reason ``test_commands_races.py`` already
+    establishes: the lock this reuses is what makes two processes doing exactly this
+    equivalent to this."""
+    target = target_for(git_repo)
+    config = config_with()
+    expected = hooks.activation(activation, config)
+    with activation.transaction():
+        held = reviewer._claim_active_review(activation, target, config)
+    assert held is not None
+
+    os.environ["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
+    review = reviewer.execute(target, state=activation, config=config)
+
+    assert review.verdict == "OP_FAILURE"
+    assert "already in progress" in review.error
+    assert activation.get_int("report_seq") == 0, "the refused attempt reserved nothing"
+
+    reviewer._release_active_review(activation, claim_id=held, expected=expected, config=config)
+    review2 = execute_fake(activation, git_repo, "changes")
+    assert review2.verdict == "CHANGES_REQUIRED", "once released, a real review of the same label proceeds normally"
+
+
+def test_two_reviews_that_both_finish_before_either_finalizes_do_not_both_authorize(activation: state.State, git_repo: Path) -> None:
+    """The scenario the lock-free ``_concurrent_stall_check`` peek cannot close on its own:
+    both invocations' reviewer calls have already completed -- their ``Review`` objects exist
+    -- while ``round_history`` still holds only round 1. Neither has finalized yet, so a check
+    with a gap before the append (rather than inside the same lock as it) would let both pass.
+
+    This does not need real threads to prove: :func:`reviewer._append_round_history` is where
+    the authoritative check now lives, under ``state.transaction()``'s own lock --
+    ``tests/unit/test_commands_races.py`` already establishes that lock genuinely serialises
+    concurrent *processes*, so two calls into this same function, back to back, exercise
+    exactly the ordering two racing processes would be forced into: whichever call reaches the
+    lock second is guaranteed to see what the first one just committed. Calling the finalizer
+    for round A and then round B -- both prepared independently, as if both had already
+    finished invoking before either called this -- is the faithful, deterministic
+    reproduction of that race."""
+    execute_fake(activation, git_repo, "changes")  # seeds round 1: anchor a.txt, CHANGES_REQUIRED
+    assert activation.get_int("report_seq") == 1
+
+    target = target_for(git_repo)
+    config = config_with()
+    expected = hooks.activation(activation, config)
+
+    def review_run(label: str) -> reviewer._ReviewRun:
+        return reviewer._ReviewRun(
+            target=target,
+            state=activation,
+            config=config,
+            label=label,
+            title="t",
+            bundle_dir=activation.act_dir / "bundles" / label,
+            raw_dir=activation.act_dir / "raw",
+            prompt_file=Path("/dev/null"),
+            expected=expected,
+        )
+
+    # Both already "finished invoking": round A repeats round 1's exact anchor (a.txt, high);
+    # round B is a plain APPROVED with no findings of its own. Neither has been told about the
+    # other -- exactly what two genuinely concurrent invocations would look like.
+    review_a = Review(
+        verdict="CHANGES_REQUIRED",
+        all_findings="FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n",
+    )
+    review_b = Review(verdict="APPROVED")
+
+    appended_a = reviewer._append_round_history(review_run("002"), review_a, round_number=1)
+    appended_b = reviewer._append_round_history(review_run("003"), review_b, round_number=1)
+
+    assert appended_a is True
+    assert review_a.verdict == "CHANGES_REQUIRED", "round A's own denial is unaffected -- it is the first to land"
+
+    assert appended_b is False, "round B must not be recorded as an ordinary APPROVED"
+    assert review_b.verdict == "NEEDS_HUMAN", "round B's own APPROVED is overridden once round 1 + A already persist the anchor"
+    assert "a.txt" in review_b.error
+
+    history = activation.get_array_of_dicts("round_history")
+    assert [entry["verdict"] for entry in history] == ["CHANGES_REQUIRED", "CHANGES_REQUIRED"], "round B was never appended"
+
+
+def test_an_oscillating_anchor_alone_also_trips_the_stall_check(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """``warn.py`` reappears across rounds 1-3 (the reversal sequence phase 4 covers) without
+    ever persisting across two *consecutive* rounds -- round 2 raises a different anchor. Only
+    the oscillation signal, not the persisting one, can catch this."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    _run_scripted(activation, git_repo, tmp_path, "round2", _ROUND_2)
+    _run_scripted(activation, git_repo, tmp_path, "round3", _ROUND_3)
+    before_seq = activation.get_int("report_seq")
+    assert before_seq == 3
+
+    os.environ["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert review.verdict == "NEEDS_HUMAN"
+    assert "warn.py" in review.error
+    assert activation.get_int("report_seq") == before_seq
+
+
+def test_four_distinct_anchors_never_stall_and_the_reviewer_runs_every_round(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """The deliberate design choice: a genuinely non-repeating sequence of findings has no
+    cap. A future change that quietly adds one must fail here."""
+    scripts = [
+        "Problem A.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=a.py:1 | problem a\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n",
+        "Problem B.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=b.py:1 | problem b\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n",
+        "Problem C.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=c.py:1 | problem c\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n",
+        "Problem D.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=d.py:1 | problem d\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n",
+    ]
+    for index, contract in enumerate(scripts, start=1):
+        review = _run_scripted(activation, git_repo, tmp_path, f"round{index}", contract)
+        assert review.verdict == "CHANGES_REQUIRED", f"round {index} must have actually invoked the reviewer"
+    assert activation.get_int("report_seq") == 4
+
+
+def test_stall_rounds_zero_disables_the_check(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    _run_scripted(activation, git_repo, tmp_path, "round1", _STUCK)
+    _run_scripted(activation, git_repo, tmp_path, "round2", _STUCK)
+
+    review = execute_fake(activation, git_repo, "changes", config=config_with(stall_rounds=0))
+
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert activation.get_int("report_seq") == 3
+
+
+def test_a_final_scope_review_is_never_stalled(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """``final`` is cumulative and reached once -- it has no phase-scoped ``round_history``
+    label of its own to stall on, so the check must not apply to it at all."""
+
+    def run(name: str, contract: str) -> Review:
+        script = tmp_path / f"{name}.sh"
+        script.write_text(f"#!/usr/bin/env bash\nprintf '%b' '{contract}'\n")
+        script.chmod(0o755)
+        os.environ["OCRL_REVIEWER_CMD"] = str(script)
+        return reviewer.execute(target_for(git_repo, scope="final"), state=activation, config=config_with())
+
+    run("f1", _STUCK)
+    run("f2", _STUCK)
+    review = run("f3", _STUCK)
+
+    assert review.verdict == "CHANGES_REQUIRED", "final scope has no round cap to stall on"
+    assert activation.get_int("report_seq") == 3
 
 
 def test_review_argv_attaches_prior_rounds_after_the_plan_revisions(tmp_path: Path) -> None:

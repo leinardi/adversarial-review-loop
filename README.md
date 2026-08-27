@@ -67,6 +67,8 @@ The variable is read at process start, so restart Claude Code after setting it. 
 
 Some phases will not converge — OpenCode keeps raising a fresh finding every round instead of closing the earlier ones. `/opencode-review-loop:stop` gets you out, but it turns enforcement off for the rest of the session; `/opencode-review-loop:finish` runs a review that is just as likely to keep finding things. `/opencode-review-loop:accept [reason]` is the middle option: it puts the current working tree — exactly as it stands — into the set of approved trees, the same record a passing review would have written. Nothing else changes: the phase does not advance, the activation does not complete, and any further edit changes the tree hash and puts the commit right back under review. It also clears a `NEEDS_HUMAN` escalation, which is otherwise something only a human can do — `/opencode-review-loop:resume` deliberately refuses to.
 
+**When a finding actually repeats, the loop notices on its own.** `stall_rounds` (default `2`) consecutive rounds raising the same finding unchanged, or one that reappears after being absent, or is reversed (`SUPERSEDES`) more than once, escalates straight to `NEEDS_HUMAN` — the reviewer is not called again for it, and `/opencode-review-loop:status` shows the persisting finding. That does not cover every stuck phase: a reviewer that raises a genuinely new, non-repeating objection every round never trips it, and `accept` is still the only bound for that case — see [edge-cases.md](docs/edge-cases.md#a-phase-that-never-converges).
+
 Every acceptance is recorded: in `/opencode-review-loop:status`, as its own numbered report visible through `/opencode-review-loop:report`, and in a `## Manually accepted phases` section shown to every later review of that activation — including the final cumulative one — so nothing downstream mistakes an accepted phase for one that actually passed a gate.
 
 Before accepting, though: when a finding is just *unclear* — or two rounds seem to contradict each other — Claude can run `ocrl.sh clarify --question "…"` to get one prose answer about the review that already ran, with no new commit attempt and no new round. It is not a slash command (Claude invokes it directly), it changes nothing, and it is capped at `max_clarifications` per run. A genuine standing disagreement still ends at `accept`.
@@ -173,6 +175,7 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 | `max_findings` | `200` | above this → `needs-human`, never a trimmed list |
 | `max_findings_bytes` | `65536` | same, by size |
 | `max_clarifications` | `2` | `clarify` questions per run before it points at `accept` |
+| `stall_rounds` | `2` | consecutive rounds a finding must persist before `needs-human`; `0` disables |
 | `allow_dirty` | `false` | alternative to passing `--allow-dirty` |
 | `ttl_hours` | `24` | after this, gates block and ask for a re-arm — `resume` is usually the fix, not `implement`; see "Running a long plan across sessions" |
 | `ignore_globs` | `[]` | paths whose sole change skips a review |

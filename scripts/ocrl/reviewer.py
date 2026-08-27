@@ -1485,18 +1485,27 @@ def _reclaim_after(config: Config) -> int:
     return config.as_int("timeout_sec") + VERIFY_TIMEOUT_SEC + 60
 
 
-def _claim_is_live(pointer: dict[str, Any], config: Config) -> bool:
+def _claim_is_live(pointer: dict[str, Any], reclaim_after: int) -> bool:
     """Is ``pointer`` held by an owner who has not yet had time to finish?
 
     A pointer carrying one of ``claimed_at``/``claim_id`` without the other is unusable --
     they are written together and cleared together, so a half-true pair means something else
     is already wrong with it. Not live, not trusted.
+
+    ``reclaim_after`` is a caller-computed window, not derived here, because it is not the
+    same window for every claim this shape is reused for: :func:`_reclaim_after` sizes it for
+    the session-continuity pointer's own, shorter lifetime (released right after the primary
+    invocation, well before a cold confirmation ever runs -- see ``_settle_pointer``), while
+    :func:`_active_review_reclaim_after` sizes it for the active-review slot, which is held for
+    the *whole* ``execute()`` call, cold confirmation included. Passing the wrong one in either
+    direction would either reclaim a still-legitimate owner's slot early or hold a genuinely
+    abandoned one far longer than it needs to be honoured.
     """
     claimed_at = pointer.get("claimed_at")
     claim_id = pointer.get("claim_id")
     if not (claimed_at and claim_id):
         return False
-    return (now() - _as_int(claimed_at)) <= _reclaim_after(config)
+    return (now() - _as_int(claimed_at)) <= reclaim_after
 
 
 def _unique_title(state: State, target: Target, label: str) -> str:
@@ -1620,7 +1629,7 @@ def _try_claim(state: State, *, target: Target, session_id: str, config: Config)
             if current.get("id") != session_id or not _pointer_structurally_usable(current, state, target):
                 claimed = None
                 raise _TransactionAborted
-            if _claim_is_live(current, config):
+            if _claim_is_live(current, _reclaim_after(config)):
                 claimed = ""
                 raise _TransactionAborted
             claimed = secrets.token_hex(8)
@@ -1813,7 +1822,7 @@ def _store_captured_session(state: State, ctx: _CaptureContext, captured: _Captu
                 raise _TransactionAborted
             existing = state.data.get("reviewer_session")
             existing = existing if isinstance(existing, dict) else {}
-            if _claim_is_live(existing, config):
+            if _claim_is_live(existing, _reclaim_after(config)):
                 log("session capture: another review is actively using the pointer; not overwriting")
                 raise _TransactionAborted
             state.data["reviewer_session"] = {
@@ -1873,6 +1882,106 @@ def _release_claim(state: State, *, claim_id: str, round_number: int | None, exp
             pointer["claimed_at"] = ""
             pointer["claim_id"] = ""
             state.data["reviewer_session"] = pointer
+    except _TransactionAborted:
+        pass
+
+
+def _active_review_reclaim_after(config: Config) -> int:
+    """How long the active-review slot is honoured before it is considered abandoned.
+
+    **Not** :func:`_reclaim_after` -- that window is sized for the session-continuity
+    pointer's own, shorter lifetime: it is released (``_settle_pointer``) right after the
+    primary invocation, well before a cold confirmation ever runs. This slot is held for the
+    *whole* :func:`execute` call instead, and the cold-approval invariant means that call can
+    include a **second** full invocation: when a continued session returns ``APPROVED``,
+    :func:`_confirm_cold` runs one more, ``timeout_sec``-bounded review of the same bundle
+    before ``execute`` ever returns. Reusing :func:`_reclaim_after`'s narrower window here
+    would let a second, overlapping call reclaim this slot *while the first is still
+    legitimately inside its own cold confirmation* -- reopening the exact race this slot
+    exists to close, through the one path built to be safe by design. The worst case this
+    covers: :data:`SESSION_LIST_TIMEOUT_SEC` (``session_ref``'s listing verify) +
+    :data:`VERIFY_TIMEOUT_SEC` (``verify_cmd``, inside ``build_bundle``) + **two** full
+    ``timeout_sec`` windows (the primary invocation and the cold confirmation), plus the same
+    flat slack :func:`_reclaim_after` carries for everything neither of those bounds.
+    """
+    return SESSION_LIST_TIMEOUT_SEC + VERIFY_TIMEOUT_SEC + 2 * config.as_int("timeout_sec") + 60
+
+
+def _claim_active_review(state: State, target: Target, config: Config) -> str | None:
+    """Claim the per-``(label, generation)`` "a review of this label is in flight" slot, or
+    answer ``None`` when another invocation already holds a live one.
+
+    Unrelated to ``reviewer_session`` above -- that pointer is advisory and never authorises
+    anything (module docstring); this claim exists for the opposite reason, to genuinely
+    *prevent* two reviews of the same label from running at the same time. No post-hoc check
+    can substitute for that: two invocations that both read ``round_history`` before either
+    has appended anything can otherwise both invoke and both act on a verdict decided blind to
+    the other's outcome -- **whichever order they happen to finish in**, an approving one
+    included. An approving review that never saw a concurrently-completing repeated finding is
+    not "unlucky timing" the way a second denial would be; it is exactly the failure-into-
+    approval Rule 1 forbids, and no amount of rechecking *after* the fact closes a decision
+    already acted on. See :func:`execute`'s docstring for the full walkthrough.
+
+    **Keyed by label, not a single record.** ``state.json["active_review"]`` is a ``dict`` of
+    ``label -> {"generation", "claimed_at", "claim_id"}``, one entry per label that currently
+    holds (or recently held) a claim. A single shared record would let an unrelated label's
+    claim -- a concurrent ``final`` review, say, while a ``phase1`` sweep is still running --
+    silently overwrite ``phase1``'s entry the moment it claims: ``phase1``'s own review would
+    still be genuinely in flight, but with no claim left recording that, and a third caller for
+    ``phase1`` would see the ``final`` entry (a different label), consider the slot free, and
+    invoke straight past a review that never stopped running. Reuses :func:`_claim_is_live`,
+    but with :func:`_active_review_reclaim_after`'s window, not the session pointer's own.
+
+    Called only from inside :func:`_reserve_round`'s own ``state.transaction()`` -- claiming
+    the slot must be atomic with the stall pre-check and the report-sequence reservation,
+    exactly as those two already are with each other, or two callers could both observe an
+    unclaimed slot before either writes it.
+    """
+    claims = state.data.get("active_review")
+    claims = dict(claims) if isinstance(claims, dict) else {}
+    current = claims.get(target.label)
+    current = current if isinstance(current, dict) else {}
+    generation = state.get_int("activation_generation")
+    if current.get("generation") == generation and _claim_is_live(current, _active_review_reclaim_after(config)):
+        return None
+    claim_id = secrets.token_hex(8)
+    claims[target.label] = {"generation": generation, "claimed_at": now(), "claim_id": claim_id}
+    state.data["active_review"] = claims
+    return claim_id
+
+
+def _release_active_review(state: State, *, claim_id: str, expected: hooks.Activation, config: Config) -> None:
+    """Release the active-review slot. Mirrors :func:`_release_claim`'s shape and reasoning.
+
+    Called on every path out of :func:`execute` once a claim was actually taken -- a bundle
+    build failure before the reviewer ever ran, an invocation that failed to complete, or an
+    ordinary finished round -- so the slot is never held a moment longer than this review's own
+    lifetime, and the *next* legitimate review of this label is never left waiting on one that
+    has already ended.
+
+    Takes no ``label`` -- ``claim_id`` is a random token unique across every label's entry, so
+    the matching one is found by searching the ``active_review`` dict rather than threading the
+    label through every caller. Fingerprint-guarded the same way every other post-slow-work
+    write here is: a cross-session ``resume`` that retired this activation while the review ran
+    must not have this land in the retired directory (:class:`_TransactionAborted`).
+    ``claim_id`` itself, not merely "is something claimed", guards the same ABA sequence
+    :func:`_release_claim` documents for the session pointer: this claim expiring, a different
+    invocation reclaiming *this same label's* slot, and this release arriving after that must
+    be a no-op, never an overwrite of the new owner's still-live claim.
+    """
+    from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
+
+    try:
+        with state.transaction():
+            if hooks.activation(state, config) != expected:
+                raise _TransactionAborted
+            claims = state.data.get("active_review")
+            claims = claims if isinstance(claims, dict) else {}
+            label = next((key for key, value in claims.items() if isinstance(value, dict) and value.get("claim_id") == claim_id), None)
+            if label is None:
+                raise _TransactionAborted
+            remaining = {key: value for key, value in claims.items() if key != label}
+            state.data["active_review"] = remaining
     except _TransactionAborted:
         pass
 
@@ -1980,8 +2089,9 @@ def _activation_still_current(rr: _ReviewRun) -> bool:
     return probe.load() and hooks.activation(probe, rr.config) == rr.expected
 
 
-def _append_round_history(rr: _ReviewRun, review: Review, *, round_number: int) -> None:
-    """Append one ``round_history`` entry for a review that produced a parsed verdict.
+def _append_round_history(rr: _ReviewRun, review: Review, *, round_number: int) -> bool:
+    """Append one ``round_history`` entry for a review that produced a parsed verdict, or
+    answer ``False`` and override ``review`` instead. Returns whether the entry was appended.
 
     Called only for ``APPROVED`` / ``CHANGES_REQUIRED``. ``OP_FAILURE`` and ``NEEDS_HUMAN``
     are not rounds -- recording them would double-count against phase 5's stall detection
@@ -1999,6 +2109,22 @@ def _append_round_history(rr: _ReviewRun, review: Review, *, round_number: int) 
     clean exit, and a retired activation's ``state.json`` must not be rewritten at all, not
     even a content-identical resave (AGENTS.md).
 
+    **The authoritative half of phase 5's concurrent-stall guard lives here, not before this
+    call.** :func:`execute`'s own pre-store call to :func:`_concurrent_stall_check` is a
+    lock-free, best-effort peek -- it narrows the window but cannot close it: two invocations
+    whose own reviewer calls both finish before *either* has appended anything will both pass
+    that peek, because neither's append has landed yet for the other to see. Re-running
+    :func:`_stall_review` here, on ``state`` as *this* call's own ``state.transaction()`` just
+    reloaded it, is airtight regardless of timing: ``state.transaction()`` takes the same
+    ``fcntl.flock`` two genuinely concurrent processes contend for
+    (``tests/unit/test_commands_races.py`` establishes that this lock really does serialise
+    them), so whichever of two racing calls reaches this transaction *second* is guaranteed to
+    see whatever the first one committed, however close together the two calls are timed. When
+    that fresh check finds this label already stalled, this round is not appended as an
+    ordinary one -- ``review`` is mutated in place to the fresh ``NEEDS_HUMAN`` verdict instead
+    (its ``raw``/``findings``/``session``/``round`` are left alone; only the two fields a
+    caller acts on change), and this function answers ``False``.
+
     Every stored value is either gate-derived (``rr.target``) or the gate's own recomputed
     verdict and finding lines. Finding lines are split with :func:`_records` -- ``\\n`` only,
     never ``str.splitlines`` -- so a ``FINDING`` detail carrying a stray ``\\r`` or a Unicode
@@ -2012,6 +2138,12 @@ def _append_round_history(rr: _ReviewRun, review: Review, *, round_number: int) 
         with state.transaction():
             if hooks.activation(state, config) != rr.expected:
                 raise _TransactionAborted
+            if target.is_phase:
+                stall = _stall_review(state, target, config)
+                if stall is not None:
+                    review.verdict = stall.verdict
+                    review.error = stall.error
+                    return False
             stored = state.data.get("round_history")
             history = list(stored) if isinstance(stored, list) else []
             history.append(
@@ -2032,6 +2164,205 @@ def _append_round_history(rr: _ReviewRun, review: Review, *, round_number: int) 
             state.data["round_history"] = history
     except _TransactionAborted:
         log("round history: the activation moved while the review ran; not recording this round")
+        return False
+    return True
+
+
+def _stall_summary(  # noqa: PLR0913 - one independently meaningful piece of evidence per param; bundling them would be an artificial object
+    *,
+    target: Target,
+    round_count: int,
+    stall_rounds: int,
+    persisting_points: list[oscillation.PersistingPoint],
+    oscillating_points: list[oscillation.OscillationPoint],
+    config: Config,
+) -> str:
+    """The standing-disagreement text a stalled phase escalates with.
+
+    Names why (a persisting anchor, an oscillating one, or both), then the evidence: every
+    persisting anchor's verbatim finding line per round, and the oscillating list -- both
+    gate-computed, bounded by the same ``max_findings`` / ``max_findings_bytes`` config every
+    other rendered-from-``round_history`` text is bounded by (``_oscillating_chunk``,
+    ``_prior_rounds_section``), for the identical reason: this text is appended, unbounded,
+    straight into a hook's JSON response.
+    """
+    max_points = config.as_int("max_findings")
+    max_bytes = config.as_int("max_findings_bytes")
+
+    reasons: list[str] = []
+    if persisting_points:
+        reasons.append(f"{len(persisting_points)} finding(s) raised in every one of the last {stall_rounds} consecutive rounds")
+    if oscillating_points:
+        reasons.append(f"{len(oscillating_points)} anchor(s) reappeared or were reversed more than once")
+
+    out = [
+        f"{target.label} looks stalled after {round_count} round(s), so no new review was run: "
+        f"{' and '.join(reasons)}. Genuinely new findings every round would keep iterating -- "
+        "this phase did not raise one.\n"
+    ]
+    if persisting_points:
+        out.append("\nPersisting findings (verbatim, one line per round):\n\n")
+        out.append(oscillation.render_persisting(persisting_points, max_points=max_points, max_bytes=max_bytes))
+    if oscillating_points:
+        out.append("\nOscillating points (reappeared after being absent, or reversed via SUPERSEDES more than once):\n\n")
+        out.append(oscillation.render(oscillating_points, max_points=max_points, max_bytes=max_bytes))
+    out.append(
+        "\nThis is a standing disagreement, not an operational failure. "
+        "/opencode-review-loop:accept approves the current tree without another round and continues the loop; "
+        "/opencode-review-loop:stop leaves review mode.\n"
+    )
+    return "".join(out)
+
+
+def _stall_review(state: State, target: Target, config: Config) -> Review | None:
+    """``None`` unless ``target``'s label is stalled at the current ``activation_generation``.
+
+    Asks :mod:`ocrl.oscillation` two questions over this label's ``round_history``: is there a
+    finding anchor present in every one of the last ``stall_rounds`` consecutive rounds
+    (:func:`oscillation.persisting`), or an anchor that reappeared or was reversed more than
+    once (:func:`oscillation.reversals`, phase 4)? Either one, and this answers a ``Review``
+    with ``verdict="NEEDS_HUMAN"`` instead of ``None`` -- :func:`execute` never builds a
+    bundle or invokes the reviewer for it.
+
+    ``stall_rounds <= 0`` (the config default is ``2``) disables the check entirely: every
+    call answers ``None``, whatever ``round_history`` holds. Called only for
+    ``target.is_phase`` -- ``final`` is cumulative and reached once, with no phase of its own
+    to stall on -- and only from inside the same ``state.transaction()`` that reserves the
+    next report sequence; see that call site for why the two must share one lock.
+    """
+    stall_rounds = config.as_int("stall_rounds")
+    if stall_rounds <= 0:
+        return None
+    generation = state.get_int("activation_generation")
+    history = [
+        entry for entry in state.get_array_of_dicts("round_history") if entry.get("label") == target.label and entry.get("generation") == generation
+    ]
+    persisting_points = oscillation.persisting(history, target.label, stall_rounds)
+    oscillating_points = oscillation.reversals(history, target.label)
+    if not persisting_points and not oscillating_points:
+        return None
+
+    review = Review()
+    review.verdict = "NEEDS_HUMAN"
+    review.error = _stall_summary(
+        target=target,
+        round_count=len(history),
+        stall_rounds=stall_rounds,
+        persisting_points=persisting_points,
+        oscillating_points=oscillating_points,
+        config=config,
+    )
+    return review
+
+
+def _concurrent_stall_check(rr: _ReviewRun) -> Review | None:
+    """A fresh, lock-free read, mirroring :func:`_activation_still_current`: has a
+    *different*, concurrently completed review of this same label already recorded a stalling
+    round while this invocation's own ``invoke`` -- which can run for minutes -- was in
+    flight?
+
+    :func:`_reserve_round`'s pre-invoke check reads ``round_history`` as it stood *before*
+    ``invoke`` ran, and it is the only guard :func:`execute` had until this one: two
+    overlapping reviews of the same label -- the commit gate and the Stop gate's sweep, which
+    genuinely do overlap -- can both read ``round_history`` before either has appended
+    anything, both pass that check, and both invoke. Whichever finishes first can leave
+    ``round_history`` stalled before the second's own reservation ever saw it; without this
+    second check the second invocation's own verdict -- possibly ``APPROVED`` -- would be
+    returned and acted on as if nothing had changed, silently overriding the standing
+    disagreement the first invocation had just recorded (Rule 1: a race is not a way to turn
+    a stalled phase into an approval).
+
+    Called only for ``target.is_phase`` and only once this invocation's own verdict parsed as
+    ``APPROVED``/``CHANGES_REQUIRED`` -- there is nothing here to override an operational
+    failure or an already-``NEEDS_HUMAN`` verdict with.
+    """
+    probe = State(rr.state.worktree, rr.state.session)
+    if not probe.load():
+        return None
+    return _stall_review(probe, rr.target, rr.config)
+
+
+def _override_if_concurrently_stalled(rr: _ReviewRun, review: Review) -> None:
+    """Mutate ``review`` in place if :func:`_concurrent_stall_check` finds this label already
+    stalled. Split out of :func:`execute` only to keep it under ruff's statement-count limit;
+    see that check's own docstring for what it guards against and why.
+    """
+    if not rr.target.is_phase or review.verdict not in ("APPROVED", "CHANGES_REQUIRED"):
+        return
+    concurrent_stall = _concurrent_stall_check(rr)
+    if concurrent_stall is not None:
+        review.verdict = concurrent_stall.verdict
+        review.error = concurrent_stall.error
+
+
+#: What a busy active-review slot denies with -- an operational failure, not evidence of
+#: anything wrong with the code. It reaches the caller through the same fallback path an
+#: unrecognised verdict or a raw ``OP_FAILURE`` already does (``pretool._review_failed``,
+#: ``stop.SWEEP_FAILED``), so no new branch is needed in either -- just like phase 5's
+#: ``NEEDS_HUMAN`` short-circuit needed none. Counting against ``max_failures`` for this is a
+#: known, accepted rough edge until phase 6 gives transient conditions their own budget.
+_ACTIVE_REVIEW_BUSY: Final = "another review of {label} is already in progress; wait for it to finish and try again"
+
+
+def _render_oscillating(state: State, target: Target, config: Config) -> str:
+    """This label's ``## Oscillating points`` text, read *after* this round's own append.
+
+    Unlike ``_prior_rounds_section``'s own copy (built before this round ran, from rounds
+    strictly before it), this covers this round too -- the denial text it feeds
+    (``report.reason``) is about the round that just happened. Split out of :func:`execute`
+    only to keep it under ruff's statement-count limit.
+    """
+    generation = state.get_int("activation_generation")
+    history = [
+        entry for entry in state.get_array_of_dicts("round_history") if entry.get("label") == target.label and entry.get("generation") == generation
+    ]
+    return oscillation.render(
+        oscillation.reversals(history, target.label),
+        max_points=config.as_int("max_findings"),
+        max_bytes=config.as_int("max_findings_bytes"),
+    )
+
+
+def _release_reservations(state: State, ref: SessionRef, *, claim_id: str, expected: hooks.Activation, config: Config) -> None:
+    """Release both claims :func:`execute` may hold before a bundle build ever ran the
+    reviewer: the session-continuity pointer (a no-op when ``ref`` never claimed one) and the
+    active-review slot. Split out only to keep :func:`execute` under ruff's statement-count
+    limit; the two are independent resources, released together only because every early-exit
+    path in :func:`execute` needs both.
+    """
+    _release_if_claimed(state, ref, expected=expected, config=config, round_number=None)
+    _release_active_review(state, claim_id=claim_id, expected=expected, config=config)
+
+
+def _reserve_round(state: State, target: Target, config: Config) -> tuple[Review | None, int, str]:
+    """Reserve the next ``report_seq`` and the active-review slot together, atomically -- or
+    answer a short-circuiting ``Review`` instead of reserving anything: ``NEEDS_HUMAN`` when
+    ``target`` is already stalled, ``OP_FAILURE`` when another invocation already holds the
+    slot. The claim id is "" whenever the ``Review`` is not ``None``.
+
+    Runs inside its own ``state.transaction()``, the same lock ``_append_round_history`` and
+    ``_store_captured_session`` take: the stall check therefore reads the freshest possible
+    ``round_history`` under it, and a not-stalled phase's sequence number and active-review
+    claim are reserved atomically with that same read -- see :func:`execute`'s docstring for
+    why the stall check and the report-sequence reservation must share one lock rather than the
+    check running ahead of it, and :func:`_claim_active_review`'s for why the claim has to be
+    part of the same atomic step: two callers that both observed an unclaimed slot before
+    either wrote it would both proceed to invoke, exactly the race the claim exists to close.
+
+    The stall check runs first: a phase already stalled by evidence that exists needs no
+    contention with anything else to be refused. The claim check runs second, and only when
+    not stalled -- there is nothing to claim a slot for otherwise.
+    """
+    with state.transaction():
+        stall = _stall_review(state, target, config) if target.is_phase else None
+        if stall is not None:
+            return stall, 0, ""
+        claim_id = _claim_active_review(state, target, config)
+        if claim_id is None:
+            return Review(verdict="OP_FAILURE", error=_ACTIVE_REVIEW_BUSY.format(label=target.label)), 0, ""
+        seq = state.get_int("report_seq") + 1
+        state.update(report_seq=seq)
+    return None, seq, claim_id
 
 
 def execute(target: Target, *, state: State, config: Config, warnings: str = "") -> Review:
@@ -2047,12 +2378,51 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     returns ``APPROVED`` and it *was* continuing a session, that verdict is never acted on
     directly: :func:`_confirm_cold` runs one more, cold review of the same bundle, and its
     verdict is what this function returns. See the module docstring for why.
+
+    **Phase 5's stall check also lives here, ahead of everything else.** :func:`_stall_review`
+    runs first, inside the same lock that reserves the report sequence -- both callers of this
+    function (the commit gate and the Stop gate's unreviewed-work sweep) reach it, so a phase
+    the other one already found stalled is never invoked a second time by whichever runs next.
+    A stalled phase never builds a bundle, never calls the reviewer, and never reserves a
+    sequence number; it returns a ``NEEDS_HUMAN`` review straight out of the transaction.
+
+    **That is still not the whole guard.** A pre-invoke check alone -- reading
+    ``round_history`` once, before ``invoke`` runs -- cannot itself close the race: two
+    overlapping calls for the same label (the commit gate and the sweep genuinely do overlap)
+    would both read it before either had appended anything, both pass, and both invoke. No
+    amount of *re-checking after the fact* fixes that once it has happened: whichever of the
+    two finishes first can be the approving one, act on a verdict decided blind to the other's
+    still-running, repeat-finding evidence, and mark the tree approved before that evidence
+    ever exists to check against -- a race a later re-check has nothing left to catch, because
+    the approval already happened. So :func:`_reserve_round` does not just check; it also
+    claims the per-``(label, generation)`` slot :func:`_claim_active_review` guards, in the
+    same locked step as the stall check and the report-sequence reservation. A second,
+    overlapping call for the same label finds the slot held and is refused outright --
+    ``OP_FAILURE``, never invoked -- rather than being allowed to invoke and race the first to
+    a verdict. The slot is released, on every exit path, by :func:`_release_active_review`.
+
+    Two further checks stay as defence in depth for the one case the claim itself cannot cover
+    -- its own expiry (:func:`_reclaim_after`) letting a second invocation start while the
+    first, unusually slow, is still legitimately running:
+
+    - :func:`_concurrent_stall_check` runs right after ``invoke`` and the cold-approval
+      override, on a fresh but **lock-free** read -- best-effort, and it is what makes the
+      *stored report* reflect the correct verdict when it fires.
+    - :func:`_append_round_history` re-runs the same check itself, **inside its own
+      ``state.transaction()``**, right before it would append this round -- authoritative,
+      because the lock underneath ``state.transaction()`` still serialises two calls racing to
+      finalize, however close together they are timed.
+
+    Either check that fires overrides ``review.verdict``/``review.error`` in place; the
+    genuine invocation output (raw transcript, findings, session) is kept, only the verdict a
+    caller acts on changes. ``report.store`` runs *after* the append, deliberately, so a stored
+    report always reflects whichever verdict ends up being the one acted on.
     """
     from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
 
-    with state.transaction():
-        seq = state.get_int("report_seq") + 1
-        state.update(report_seq=seq)
+    stall, seq, claim_id = _reserve_round(state, target, config)
+    if stall is not None:
+        return stall
 
     label = f"{seq:03d}"
     bundle_dir = state.act_dir / "bundles" / label
@@ -2084,12 +2454,12 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     except (BundleTooLarge, PlanEvidenceCorrupted) as exc:
         review.verdict = "NEEDS_HUMAN"
         review.error = str(exc)
-        _release_if_claimed(state, ref, expected=expected, config=config, round_number=None)
+        _release_reservations(state, ref, claim_id=claim_id, expected=expected, config=config)
         return review
     except BundleError as exc:
         review.verdict = "OP_FAILURE"
         review.error = str(exc)
-        _release_if_claimed(state, ref, expected=expected, config=config, round_number=None)
+        _release_reservations(state, ref, claim_id=claim_id, expected=expected, config=config)
         return review
 
     if not _reconfirm_claim(state, ref, config=config):
@@ -2126,6 +2496,8 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     if review.verdict == "APPROVED" and ref.session_id:
         review = _confirm_cold(rr, review)
 
+    _override_if_concurrently_stalled(rr, review)
+
     # `build_bundle` and `invoke` already wrote `bundles/<seq>/` and `raw/<seq>-*` into
     # `state.act_dir`; a cross-session `resume` that retired this activation while `invoke`
     # ran cannot have those unwound (a review holds no lock across its minutes-long run --
@@ -2135,32 +2507,29 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     # lock as the authoritative guard, this probe keeps the retired directory clean in the
     # ordinary case and orders the two writes.
     if _activation_still_current(rr):
-        # Report first, then history: if `report.store` fails, no `round_history` entry is
-        # left pointing at a round with no durable report.
-        report.store(review, target, seq=label, act_dir=state.act_dir, config=config)
         if review.verdict in ("APPROVED", "CHANGES_REQUIRED"):
             # A round is a *parsed verdict*. Everything else -- a build failure, a contract
             # error, an evidence ceiling -- appends nothing, which keeps phase 5's stall
             # check and phase 6's retry budget from counting the same stuck phase twice.
-            _append_round_history(rr, review, round_number=ref.round)
-            if target.is_phase:
-                # Unlike `_prior_rounds_section`'s own "## Oscillating points" (built before
-                # this round ran, from rounds strictly before it), this reads the history
-                # back out *after* the append above, so it covers this round too -- the
-                # denial text this feeds (`report.reason`) is about the round that just
-                # happened. `final` has no `round_history` label of its own to oscillate on
+            # `appended` is False both when the activation moved and when the authoritative,
+            # in-lock recheck inside `_append_round_history` just overrode `review` to
+            # NEEDS_HUMAN -- either way there is no fresh round of *this* label's history to
+            # render an oscillating section from.
+            appended = _append_round_history(rr, review, round_number=ref.round)
+            if appended and target.is_phase:
+                # `final` has no `round_history` label of its own to oscillate on
                 # (`_prior_rounds_section` excludes it the same way).
-                generation = state.get_int("activation_generation")
-                history = [
-                    entry
-                    for entry in state.get_array_of_dicts("round_history")
-                    if entry.get("label") == target.label and entry.get("generation") == generation
-                ]
-                review.oscillating = oscillation.render(
-                    oscillation.reversals(history, target.label),
-                    max_points=config.as_int("max_findings"),
-                    max_bytes=config.as_int("max_findings_bytes"),
-                )
+                review.oscillating = _render_oscillating(state, target, config)
+        # History *then* report, deliberately reversed from the shell's own order: by the time
+        # `report.store` runs, `review` already reflects whatever `_append_round_history`'s
+        # authoritative recheck may just have overridden it to, so the stored report never
+        # shows a verdict that is not the one actually acted on. The trade-off this accepts --
+        # a `report.store` failure here could in principle leave a `round_history` entry with
+        # no durable report -- is unlikely given `write_private_atomic`'s all-or-nothing
+        # rename, and a stored report that lied about the verdict was the worse failure to
+        # guard against.
+        report.store(review, target, seq=label, act_dir=state.act_dir, config=config)
     else:
         log(f"review for {target.label}: the activation moved after the review ran; not storing its report or recording the round")
+    _release_active_review(state, claim_id=claim_id, expected=expected, config=config)
     return review

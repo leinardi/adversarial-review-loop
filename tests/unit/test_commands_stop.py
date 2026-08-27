@@ -210,6 +210,37 @@ def test_a_failed_sweep_review_is_never_an_approval(git_repo: Path, tmp_path: Pa
     assert "the review of the uncommitted work failed" in reason
 
 
+def test_a_stalled_phase_escalates_through_the_sweep_without_invoking_the_reviewer(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Phase 5's stall check lives in ``reviewer.execute``, not ``pretool._gate_commit`` --
+    the correctness argument is that both callers share it. A check written into the commit
+    gate alone would leave the Stop gate's unreviewed-work sweep free to keep invoking a
+    reviewer a phase has already been found stalled on. This is the bypass regression test:
+    it must fail on any implementation that puts the check in ``pretool`` instead."""
+    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env)
+
+    (git_repo / "unreviewed.txt").write_text("round 1\n")
+    blocked(stop(git_repo, env))
+    (git_repo / "unreviewed.txt").write_text("round 2\n")
+    blocked(stop(git_repo, env))
+
+    before_seq = read_state(env, git_repo, SESSION)["report_seq"]
+    assert before_seq == 2, "two ordinary sweep rounds ran"
+
+    env["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
+    (git_repo / "unreviewed.txt").write_text("round 3\n")
+    response = stop(git_repo, env)
+
+    assert "decision" not in response, response
+    message = str(response.get("systemMessage", ""))
+    assert "escalated to NEEDS_HUMAN" in message
+    assert "a.txt" in message
+
+    document = read_state(env, git_repo, SESSION)
+    assert document["status"] == "NEEDS_HUMAN"
+    assert document["report_seq"] == before_seq, "a stalled round reserves no report sequence"
+
+
 def test_a_generation_bump_during_the_sweep_discards_the_approval(
     git_repo: Path,
     tmp_path: Path,
