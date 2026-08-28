@@ -106,6 +106,7 @@ __all__ = [
     "capture_session",
     "clarify_argv",
     "context_attachments",
+    "continuity_summary",
     "execute",
     "invoke",
     "parse",
@@ -123,6 +124,12 @@ __all__ = [
 #: How long a `session list` call is given. Metadata, not a model call -- bounded well below
 #: the review timeout.
 SESSION_LIST_TIMEOUT_SEC: Final = 60
+
+#: How many sessions ``session list`` is asked for. The continuity pointer must appear inside
+#: this window or continuity silently drops, so :func:`session_ref` logs the row count whenever
+#: a listing fails to match -- a count equal to this cap is what distinguishes "the session is
+#: gone" from "it fell off the end of the list", which are the same silent fresh review today.
+SESSION_LIST_MAX: Final = 50
 
 #: The largest ``timeout_sec`` the reviewer will honour. Configuration is unbounded, but a
 #: reviewer deadline past this is not a deadline -- the hook that launched it, and the session
@@ -149,8 +156,18 @@ GIT_DIFF_TIMEOUT_SEC: Final = 300
 BUNDLE_GIT_BUDGET_SEC: Final = 600
 
 #: A canonical OpenCode session id. Matched before a stored or listed id is ever compared,
-#: joined, or shown to a reviewer -- see `_pointer_structurally_usable` and `capture_session`.
-_SESSION_ID_RE: Final = re.compile(r"^ses_[A-Za-z0-9]{8,64}$")
+#: joined, or shown to a reviewer -- see `_pointer_structurally_usable`, `capture_session` and
+#: `continuity_summary`.
+#:
+#: **Anchored with ``\Z``, not ``$``, and that is the whole point of the anchor.** Python's ``$``
+#: also matches immediately before a single trailing newline, so ``"ses_abcdefgh\n"`` satisfied
+#: ``^ses_[A-Za-z0-9]{8,64}$`` -- an id read out of ``state.json``, which is not a trust boundary.
+#: Nothing could be smuggled *after* the break (a second newline, or any trailing text, already
+#: failed), but a stored id ending in one still rendered a line break into `continuity_summary`'s
+#: status line and travelled as a session id everywhere else. ``\Z`` matches only at the true end
+#: of the string, so every one of the three call sites tightens together -- which is what keeps
+#: the summary exactly as strict as the gate rather than more so.
+_SESSION_ID_RE: Final = re.compile(r"^ses_[A-Za-z0-9]{8,64}\Z")
 
 #: The contract the reviewer prompts demand. Both must be present or the output is refused.
 FINDINGS_MARKER: Final = "<<<OCRL-FINDINGS>>>"
@@ -2196,7 +2213,7 @@ def _list_sessions(target: Target, *, config: Config, act_dir: Path, seq: str) -
         argv = [session_list_cmd]
         env = dict(os.environ)
     else:
-        argv = ["opencode", *_isolation_argv(config), "session", "list", "--format", "json", "-n", "50"]
+        argv = ["opencode", *_isolation_argv(config), "session", "list", "--format", "json", "-n", str(SESSION_LIST_MAX)]
         env = _isolation_env(config, dict(os.environ))
 
     listing_path = act_dir / "tmp" / f"session-list-{seq}.json"
@@ -2317,25 +2334,93 @@ def session_ref(state: State, target: Target, *, config: Config) -> SessionRef:
     safe, and that has to stay true reading this function in isolation: the safety comes from
     the cold-approval invariant in :func:`execute`, not from anything here. Anything
     unverifiable falls back to a fresh session, never to an error (Rule 1).
+
+    **Every fall-back logs a distinguishable reason, and that is the only thing the logging is
+    for.** Continuity dropping is invisible from the outside -- a fresh review looks identical
+    whether it was correct (a new phase) or a silent loss (a listing that failed, a claim
+    someone else holds), and the difference is worth real tokens per round. The messages are
+    advisory only: nothing here reads them back, and no branch below may change because of one.
     """
     pointer = state.data.get("reviewer_session")
     pointer = pointer if isinstance(pointer, dict) else {}
     if not _pointer_structurally_usable(pointer, state, target):
+        # Only when the pointer actually names *this* label: no pointer at all (round 1 of a
+        # phase) and a pointer left behind by an earlier phase are the ordinary, correct way to
+        # start fresh, and logging those would bury the one case worth seeing -- a generation or
+        # revisions bump, i.e. a resume or a replan having dropped continuity mid-phase.
+        if pointer.get("label") == target.label:
+            log(
+                f"session continuity: the pointer for {target.label} is no longer usable "
+                f"(generation {pointer.get('generation')!r} vs {state.get_int('activation_generation')!r}, "
+                f"revisions {pointer.get('revisions')!r} vs {len(state.data.get('plan_revisions') or [])!r}); starting fresh"
+            )
         return SessionRef(session_id="", claim_id="", capturable=True, round=1)
 
     session_id = str(pointer["id"])
     rows = _list_sessions(target, config=config, act_dir=state.act_dir, seq=f"verify-{secrets.token_hex(4)}")
-    if rows is None or not _exactly_one_match(
-        rows, session_id=session_id, title=pointer.get("title"), created=pointer.get("created"), repo=target.repo
-    ):
+    if rows is None:
+        # `_list_sessions` already logged *why* the call failed; this adds the consequence,
+        # which is the half an operator actually needs -- this round pays full token price.
+        log(f"session continuity: could not verify {session_id} for {target.label}; starting fresh")
+        return SessionRef(session_id="", claim_id="", capturable=True, round=1)
+    if not _exactly_one_match(rows, session_id=session_id, title=pointer.get("title"), created=pointer.get("created"), repo=target.repo):
+        # The row count, and whether it saturated the cap, is what separates the two failure
+        # modes this branch merges: a session that is genuinely gone, and one that is merely
+        # past `SESSION_LIST_MAX` in a busy project. Only the second is worth raising the cap
+        # for, and without this line neither is distinguishable from the other.
+        saturated = " -- the listing is saturated, so the session may simply be past the cap" if len(rows) >= SESSION_LIST_MAX else ""
+        log(
+            f"session continuity: {session_id} did not match exactly one listed session for {target.label} "
+            f"({len(rows)} rows returned, cap {SESSION_LIST_MAX}{saturated}); starting fresh"
+        )
         return SessionRef(session_id="", claim_id="", capturable=True, round=1)
 
     claim_id, round_number = _try_claim(state, target=target, session_id=session_id, config=config)
     if claim_id is None:
+        log(f"session continuity: the pointer for {target.label} changed under the claim; starting fresh")
         return SessionRef(session_id="", claim_id="", capturable=True, round=1)
     if claim_id == "":
+        log(f"session continuity: another review holds the pointer for {target.label}; starting fresh, and this round will not capture")
         return SessionRef(session_id="", claim_id="", capturable=False, round=1)
     return SessionRef(session_id=session_id, claim_id=claim_id, capturable=False, round=round_number)
+
+
+#: What :func:`continuity_summary` prints for a field that is not what it should be. The value
+#: is still shown as absent-or-broken rather than passed through: ``state.json`` is not a trust
+#: boundary and this string is rendered straight into a human-facing report.
+_UNREADABLE: Final = "<unreadable>"
+
+
+def continuity_summary(state: State, config: Config) -> str:
+    """The stored continuity pointer, rendered for ``ocrl status``. Never raises.
+
+    Purely descriptive: it reports what the pointer *says*, and deliberately does not re-derive
+    :func:`_pointer_structurally_usable` to declare whether the next review will actually
+    continue it. That predicate is security-relevant and belongs to one place; duplicating it
+    for a status line is how the two drift into disagreeing, and a status line that disagrees
+    with the gate is worse than one that only reports. ``status`` already prints the current
+    phase directly above this, which is what a reader compares the stored label against.
+
+    Every field is untrusted (``state.json``), so each is validated with the same helpers the
+    review path uses -- :data:`_SESSION_ID_RE`, :func:`_is_single_stored_line`, :func:`_as_int`
+    -- and a field that fails falls back to :data:`_UNREADABLE` rather than reaching the output.
+    """
+    pointer = state.data.get("reviewer_session")
+    if not isinstance(pointer, dict) or not pointer:
+        return "none (the next review starts a fresh session)"
+
+    session_id = pointer.get("id")
+    # Printed in full, never abbreviated: this is the id a human pastes into
+    # `opencode session delete`, and a truncated one cannot be used for anything.
+    shown = session_id if isinstance(session_id, str) and _SESSION_ID_RE.match(session_id) else _UNREADABLE
+
+    label = pointer.get("label")
+    label_text = label if _is_single_stored_line(label) else _UNREADABLE
+
+    # The claim is what says a review is running against this pointer *right now* -- the one
+    # piece of live information `status` cannot get anywhere else.
+    in_use = ", in use" if _claim_is_live(pointer, _reclaim_after(config)) else ""
+    return f"{shown} ({label_text}, round {_as_int(pointer.get('round'))}{in_use})"
 
 
 def _reconfirm_claim(state: State, ref: SessionRef, *, config: Config) -> bool:

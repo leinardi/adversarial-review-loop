@@ -196,6 +196,8 @@ def test_status_reports_the_activation(git_repo: Path, tmp_path: Path, clean_env
     assert "phase:               1 of 2\n" in proc.stdout
     assert "operational failures:0 / 2\n" in proc.stdout
     assert "transient failures:  0 / 5\n" in proc.stdout
+    # Deliberately not the `session:` row above, which holds the *Claude* session id.
+    assert "reviewer session:    none (the next review starts a fresh session)\n" in proc.stdout
     assert "phases:\n  1. first thing\n  2. second thing\n\nreports:\n\n" in proc.stdout
 
 
@@ -217,6 +219,25 @@ def test_status_shows_an_active_retry_backoff(git_repo: Path, tmp_path: Path, cl
     assert proc.returncode == 0
     assert "retry backoff:       " in proc.stdout
     assert "s remaining\n" in proc.stdout
+
+
+def test_status_shows_the_stored_reviewer_session(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Continuity is otherwise invisible: a fresh review looks the same whether it was correct
+    (a new phase) or a silent loss, and the difference is worth real tokens per round. The id is
+    shown in full because it is what a human pastes into `opencode session delete`."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing")
+
+    path = state_dir(env, git_repo, "s1") / "state.json"
+    document = json.loads(path.read_text())
+    document["reviewer_session"] = {"id": "ses_fb7592bccffeVl5WXE354RQsD9", "label": "phase1", "round": 3}
+    path.write_text(json.dumps(document))
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "reviewer session:    ses_fb7592bccffeVl5WXE354RQsD9 (phase1, round 3)\n" in proc.stdout
 
 
 def test_status_shows_the_effective_status_alongside_the_stored_one(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

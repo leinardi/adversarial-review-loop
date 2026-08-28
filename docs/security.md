@@ -179,7 +179,10 @@ it is there:
   invariant above. Rounds 2..n-1 of a phase that is still turning up findings are unaffected;
   a phase that approves on its *first* round costs exactly what it cost before continuity
   existed, because a first round has neither a session to continue nor a prior round to be
-  shown. Any later approving round pays it, whether or not continuity held.
+  shown. Any later approving round pays it, whether or not continuity held. It is a *full*
+  call, not a cheap one: the confirmation is session-less by construction, so it shares no
+  prefix with anything and reads nothing from the provider's prompt cache — measured against
+  a 20k-token bundle, 20124 input tokens with 0 cached.
 - **Injection persistence, bounded to one phase.** A poisoned diff used to influence exactly
   one review; with continuity it can influence every remaining round of that phase, since the
   reviewer's session may hold it in context across rounds. The label-keyed reset (a new phase,
@@ -188,6 +191,21 @@ it is there:
   an approval it should not have gotten. A review loop that will not converge — whether from
   injected content or an ordinary disagreement — is exactly what
   `/opencode-review-loop:accept` exists to break out of.
+
+And one thing continuity is *not*, so nobody spends the safety budget above chasing it: **it is
+not a large token saving.** Measured against the same 20k-token bundle, a continued round reads
+19968 tokens from the provider's prompt cache and pays 17128 uncached, against 20124 uncached for
+the equivalent cold round — single digits, not an order of magnitude. The reason is that the
+cached part is the conversation *history*, while the dominant cost is the diff, and the diff is
+re-attached as a **new message** every round, where no prompt cache can reach it. That
+re-attachment is deliberate and load-bearing, not an oversight to optimise away: `prompts/reviewer-phase.md`
+tells the reviewer that `incremental.diff` "does not replace `changes.NN.diff`, which is still the
+complete diff and still what your verdict is judged against", and to re-derive its findings "not
+from memory of an earlier round's diff". Attaching only the incremental diff would move the
+verdict's evidence into session memory, which OpenCode may compact into a lossy summary — trading
+a few percent of tokens for exactly the kind of unverifiable, model-held context this whole
+section exists to keep out of an approval. Continuity earns its place by keeping the reviewer
+*oriented* across rounds, not by being cheap.
 
 ### What is attached to a reviewer call, and the window that cannot be closed
 

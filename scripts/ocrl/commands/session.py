@@ -155,6 +155,7 @@ manual accepts:      {accepts_line}
 model:               {config.as_str("model")} {config.as_str("variant")}
 block_severity:      {config.as_str("block_severity")}
 rounds this phase:   {len(phase_history)}
+reviewer session:    {reviewer.continuity_summary(state, config)}
 {persisting_line}state directory:     {activation.act_dir}
 
 phases:
