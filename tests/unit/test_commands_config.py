@@ -68,7 +68,7 @@ def test_set_writes_the_user_config_and_reports_old_to_new(git_repo: Path, clean
     proc = run_bootstrap(["config", "block_severity", "high"], cwd=git_repo, env=clean_env)
 
     assert proc.returncode == 0, proc.stderr
-    assert "low -> high" in proc.stdout
+    assert "medium -> high" in proc.stdout
     assert json.loads(user_config_file(clean_env).read_text()) == {"block_severity": "high"}
     assert not repo_config_file(git_repo).exists()
 

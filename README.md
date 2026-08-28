@@ -110,7 +110,7 @@ tree=$(GIT_INDEX_FILE=$tmp git write-tree)
 
 ### What blocks
 
-One rule: **`actionable=yes` AND `severity >= block_severity`**. The default `block_severity` is `low`, so every actionable finding blocks; raising it is a deliberate relaxation.
+One rule: **`actionable=yes` AND `severity >= block_severity`**. The default `block_severity` is `medium`, so an actionable `low` finding is recorded but does not block; lowering it to `low` restores the stricter behaviour, raising it further is a deliberate relaxation.
 
 The reviewer's own `VERDICT` line is advisory. The gate recomputes the verdict from the `FINDING` lines and the stricter of the two wins — an `APPROVE` alongside an actionable critical finding still blocks.
 
@@ -162,7 +162,7 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 | --- | --- | --- |
 | `model` | `openai/gpt-5.6-sol` | probed for reachability at arm time |
 | `variant` | unset | reasoning effort (`high`, `max`, …) |
-| `block_severity` | `low` | blocks when `actionable=yes AND severity >= this` |
+| `block_severity` | `medium` | blocks when `actionable=yes AND severity >= this` |
 | `timeout_sec` | `900` | per review run |
 | `max_failures` | `2` | op failures since the last approval before `needs-human` (transient failures excluded — see `max_transient_failures`) |
 | `max_transient_failures` | `5` | timeouts/rate-limits/busy-review-slot failures since the last approval before `needs-human`; paced with backoff |

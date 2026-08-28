@@ -707,13 +707,16 @@ def _prior_rounds_section(state: State, target: Target, config: Config) -> str:
     return "".join(out)
 
 
-def _range_text(target: Target, *, state: State, warnings: str, revisions: list[tuple[dict[str, Any], bytes]], round_number: int = 0) -> str:
+def _range_text(  # noqa: PLR0913 - one independently meaningful piece of evidence per param; bundling them would be an artificial object
+    target: Target, *, state: State, config: Config, warnings: str, revisions: list[tuple[dict[str, Any], bytes]], round_number: int = 0
+) -> str:
     """The bundle's ``range.txt``: what is under review, and what is *not* represented."""
     repo, base, head = target.repo, target.base, target.head
     out: list[str] = ["# Review range\n\n"]
     out.append(f"scope: {target.scope}\n")
     if round_number:
         out.append(f"round: {round_number}\n")
+    out.append(f"block_severity: {config.as_str('block_severity')}\n")
     out.append(f"base_tree: {base}\n")
     out.append(f"head_tree: {head}\n")
     out.append(f"repository: {repo}\n")
@@ -926,7 +929,7 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
     except planrev.EvidenceCorrupted as exc:
         raise PlanEvidenceCorrupted(str(exc)) from exc
 
-    range_text = _range_text(target, state=state, warnings=warnings, revisions=revisions, round_number=round_number)
+    range_text = _range_text(target, state=state, config=config, warnings=warnings, revisions=revisions, round_number=round_number)
     _write_private(dest / "range.txt", _encode(range_text))
 
     # `context/<seq>-prior-rounds.txt` -- a sibling of `bundles/`, never inside it. Written

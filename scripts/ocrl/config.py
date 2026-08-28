@@ -40,7 +40,7 @@ __all__ = [
 DEFAULTS: Final[dict[str, Any]] = {
     "model": "openai/gpt-5.6-sol",
     "variant": "",
-    "block_severity": "low",
+    "block_severity": "medium",
     "timeout_sec": 900,
     "max_failures": 2,
     "max_transient_failures": 5,

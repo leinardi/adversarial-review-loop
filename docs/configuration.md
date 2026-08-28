@@ -32,7 +32,7 @@ guessing.
 | --- | --- | --- |
 | `model` | `openai/gpt-5.6-sol` | probed for reachability at arm time |
 | `variant` | unset | reasoning effort (`high`, `max`, …) |
-| `block_severity` | `low` | blocks when `actionable=yes AND severity >= this` |
+| `block_severity` | `medium` | blocks when `actionable=yes AND severity >= this` |
 | `timeout_sec` | `900` | per review run |
 | `max_failures` | `2` | op failures since the last approval before `needs-human` (transient failures excluded — see `max_transient_failures`) |
 | `max_transient_failures` | `5` | timeouts/rate-limits/busy-review-slot failures since the last approval before `needs-human`; paced with backoff, no provider call spent while it waits |
@@ -68,7 +68,7 @@ this — their values are already the right type.
 $ /opencode-review-loop:config
 model                    openai/gpt-5.6-sol   (default)
 variant                                       (default)
-block_severity           low                  (default)
+block_severity           medium               (default)
 ...
 ttl_hours                72                   (user)
 ```

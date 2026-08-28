@@ -104,7 +104,7 @@ def test_the_report_records_what_decided_it(act_dir: Path) -> None:
     assert "- base tree: `basetree`\n" in text
     assert "- head tree: `headtree`\n" in text
     assert "- model: `openai/gpt-5.6-sol` (variant `thinking`)\n" in text
-    assert "- block_severity: `low`\n" in text
+    assert "- block_severity: `medium`\n" in text
     assert "- gate note: the reviewer timed out after 900s\n" in text
     assert "Returns success on a failed lookup" in text
 
@@ -221,7 +221,7 @@ def test_the_reason_leads_with_the_headline_and_ends_with_the_instruction() -> N
 def test_every_blocking_finding_is_quoted_inline() -> None:
     text = report.reason(a_review(), "h", config=config_with())
 
-    assert "Blocking findings (actionable, severity >= low) -- every one must be resolved:" in text
+    assert "Blocking findings (actionable, severity >= medium) -- every one must be resolved:" in text
     assert "Returns success on a failed lookup" in text
     assert "All findings reported (non-blocking ones included, for context):" in text
     assert "Could be named better" in text

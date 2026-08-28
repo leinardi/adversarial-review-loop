@@ -48,8 +48,12 @@ VERDICT CHANGES_REQUIRED
 Rules for the block:
 
 - One `FINDING` line per finding, on a single line. `severity` is one of `info`, `low`, `medium`, `high`, `critical`. `file` is `path:line`, or the path alone, or `-` when there is no single location.
-- `actionable=yes` means a specific, concrete change would fix it **and you can name the impact**. If you cannot name the impact, it is `actionable=no`.
-- `actionable=yes` findings block completion. Do not use severity to soften an actionable finding.
-- `VERDICT` is `APPROVED` or `CHANGES_REQUIRED`, and must be `CHANGES_REQUIRED` whenever any finding is `actionable=yes`. The gate recomputes the verdict from the `FINDING` lines and the stricter of the two wins.
+- Severity rubric — pick the label the finding actually earns, not the one that feels safe:
+    - `critical` / `high` — a wrong result, a crash, or a security issue on a reachable path.
+    - `medium` — a contract break, lost test coverage, or a bug on plausible input.
+    - `low` — a local quality issue with no impact you can name.
+    - `info` — an observation, nothing more.
+- `actionable=yes` means a specific, concrete change would fix it. If no concrete change would fix it, it is `actionable=no`.
+- `VERDICT` is `APPROVED` or `CHANGES_REQUIRED`, and must be `CHANGES_REQUIRED` whenever any finding is `actionable=yes` **and at or above the `block_severity` named in `range.txt`**; otherwise `APPROVED`, with the sub-threshold findings still listed. The gate recomputes the verdict from the `FINDING` lines and the threshold, and the stricter of the two wins.
 - Emit the block even when you found nothing: no `FINDING` lines, then `VERDICT APPROVED`.
 - Missing markers, a missing `VERDICT`, or an empty response is treated as a failed review, which blocks completion.

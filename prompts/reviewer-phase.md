@@ -48,10 +48,14 @@ VERDICT CHANGES_REQUIRED
 Rules for the block:
 
 - One `FINDING` line per finding, on a single line. `severity` is one of `info`, `low`, `medium`, `high`, `critical`. `file` is `path:line` where you can name one, or the path alone, or `-` when there is no single location.
-- `actionable=yes` means a specific, concrete change to this diff would fix it, **and you can name the impact**. If you cannot name the impact, it is `actionable=no`.
-- `actionable=yes` findings block the commit. Mark a finding `actionable=yes` when it should block, and `actionable=no` when it should not — do not use severity to soften an actionable finding.
+- Severity rubric — pick the label the finding actually earns, not the one that feels safe:
+    - `critical` / `high` — a wrong result, a crash, or a security issue on a reachable path.
+    - `medium` — a contract break, lost test coverage, or a bug on plausible input.
+    - `low` — a local quality issue with no impact you can name.
+    - `info` — an observation, nothing more.
+- `actionable=yes` means a specific, concrete change to this diff would fix it. If no concrete change would fix it, it is `actionable=no`.
 - `SUPERSEDES round=<n> file=<path[:line]|-> | <why>` — one line per reversal, on a single line. Emit one whenever this round contradicts a finding or a conclusion from round `<n>` as recorded in `prior-rounds.txt`: `file` is the earlier finding's location, or `-` when there is no single one, and `<why>` says what changed your mind. It is **required** when you reverse, not optional. It is recorded only — it does not change the verdict, and it never substitutes for the `FINDING` lines this round stands behind.
-- `VERDICT` is `APPROVED` or `CHANGES_REQUIRED`. It must be `CHANGES_REQUIRED` whenever any finding is `actionable=yes`. Your verdict is advisory: the gate recomputes it from the `FINDING` lines and the stricter of the two wins, so an `APPROVED` alongside an actionable finding will still block and will only make your review look inconsistent.
+- `VERDICT` is `APPROVED` or `CHANGES_REQUIRED`. It must be `CHANGES_REQUIRED` whenever any finding is `actionable=yes` **and at or above the `block_severity` named in `range.txt`**; otherwise `APPROVED`, with the sub-threshold findings still listed. Your verdict is advisory: the gate recomputes it from the `FINDING` lines and the threshold, and the stricter of the two wins, so an `APPROVED` alongside a finding that clears the threshold will still block and will only make your review look inconsistent.
 - Emit the block even when you found nothing: no `FINDING` lines, then `VERDICT APPROVED`.
 - Never omit the markers. Missing markers, a missing `VERDICT`, or an empty response is treated as a failed review, which blocks the commit.
 

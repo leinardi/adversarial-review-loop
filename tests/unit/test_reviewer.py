@@ -1271,6 +1271,48 @@ def test_an_unrecognised_block_severity_blocks_everything_rather_than_nothing(tm
     assert "severity=low" in parsed.findings
 
 
+def test_an_actionable_low_finding_is_recorded_but_does_not_block_at_the_default_threshold(tmp_path: Path) -> None:
+    """``block_severity`` defaults to ``medium``: an actionable ``low`` finding is real
+    evidence, kept in ``all_findings``, but it no longer meets the threshold on its own."""
+    text = contract(
+        "FINDING severity=low actionable=yes file=a | trivial-looking",
+        "VERDICT APPROVED",
+    )
+
+    parsed = parse_text(tmp_path, text)
+
+    assert parsed.verdict == "APPROVED"
+    assert parsed.findings == ""
+    assert "severity=low" in parsed.all_findings
+
+
+def test_an_actionable_low_finding_still_blocks_when_the_threshold_is_lowered(tmp_path: Path) -> None:
+    text = contract(
+        "FINDING severity=low actionable=yes file=a | trivial-looking",
+        "VERDICT APPROVED",
+    )
+
+    parsed = parse_text(tmp_path, text, config_with(block_severity="low"))
+
+    assert parsed.verdict == "CHANGES_REQUIRED"
+    assert "severity=low" in parsed.findings
+
+
+def test_the_gate_actually_approves_an_actionable_low_finding_at_the_default_threshold(tmp_path: Path) -> None:
+    """The regression this rubric change targets: a reviewer that emits an actionable ``low``
+    finding alongside its own ``VERDICT APPROVED`` must have that verdict stand at the default
+    threshold -- not merely have ``review.findings`` come back empty while some other path
+    still forces ``CHANGES_REQUIRED``."""
+    text = contract(
+        "FINDING severity=low actionable=yes file=a.txt:1 | Could be named better",
+        "VERDICT APPROVED",
+    )
+
+    parsed = parse_text(tmp_path, text)
+
+    assert parsed.verdict == "APPROVED"
+
+
 def test_an_unrecognised_verdict_is_a_failure(tmp_path: Path) -> None:
     parsed = parse_text(tmp_path, contract("VERDICT MAYBE"))
     assert parsed.verdict == "OP_FAILURE"
@@ -2681,6 +2723,24 @@ def test_the_range_text_discloses_the_round(activation: state.State, git_repo: P
     reviewer.execute(target_for(git_repo), state=activation, config=config_with())
     second_bundle_dir = activation.act_dir / "bundles" / "002"
     assert "round: 2\n" in (second_bundle_dir / "range.txt").read_text()
+
+
+def test_the_range_text_discloses_the_active_block_severity(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """`range.txt` must carry the threshold the reviewer's VERDICT is judged against -- see
+    `prompts/reviewer-phase.md`'s VERDICT rule, which reads this line rather than a number
+    the reviewer has no other way to know."""
+    target = target_for(git_repo)
+    label = f"{activation.get_int('report_seq') + 1:03d}"
+    title = reviewer._unique_title(activation, target, label)
+    row = {"id": "ses_round0003", "title": title, "created": _future_ms(), "directory": str(git_repo)}
+
+    os.environ["OCRL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
+    os.environ["OCRL_FAKE_MODE"] = "changes"
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+
+    reviewer.execute(target, state=activation, config=config_with(block_severity="critical"))
+    bundle_dir = activation.act_dir / "bundles" / "001"
+    assert "block_severity: critical\n" in (bundle_dir / "range.txt").read_text()
 
 
 def test_the_permission_scope_allows_the_bundles_root_for_a_continued_reviewer(activation: state.State, git_repo: Path) -> None:
