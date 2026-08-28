@@ -609,6 +609,68 @@ def test_an_oversized_diff_escalates_rather_than_being_trimmed(activation: state
     assert "Approving on a partial view is not an option" in str(caught.value)
 
 
+def test_the_incremental_diff_is_omitted_not_truncated_past_the_ceiling(activation: state.State, git_repo: Path) -> None:
+    """Mirrors ``_DIFF_OMITTED``'s handling: an oversized incremental diff is disclosed as
+    omitted rather than silently truncated into a diff that lies about its own extent. Base
+    and head are kept identical so only the incremental diff, not the main one, trips the
+    ceiling."""
+    seed_tree = git(git_repo, "rev-parse", "HEAD^{tree}")
+    (git_repo / "a.txt").write_text("x\n" * 5000)
+    head = gitsnap.snapshot(str(git_repo)).tree
+
+    activation.update(
+        round_history=[
+            {
+                "seq": 1,
+                "label": "phase1",
+                "phase": 1,
+                "generation": activation.get_int("activation_generation"),
+                "round": 1,
+                "verdict": "CHANGES_REQUIRED",
+                "tree": seed_tree,
+                "base": seed_tree,
+                "at": ocrl_now(),
+                "findings": [],
+                "supersedes": [],
+            }
+        ]
+    )
+    activation.save()
+
+    target = Target(repo=str(git_repo), base=head, head=head, scope="phase", phase=1)
+    dest = activation.act_dir / "bundles" / "002"
+    reviewer.build_bundle(target, dest, state=activation, config=config_with(hard_diff_ceiling=1024), round_number=2)
+
+    incremental = (dest / "incremental.diff").read_text()
+    assert "incremental diff content omitted" in incremental
+    assert "hard_diff_ceiling (1024" in incremental
+
+    range_text = (dest / "range.txt").read_text()
+    assert "## Changed since round 1\n" in range_text
+    assert "a.txt" in range_text, "the changed-path list must survive even when the diff content is omitted"
+    assert "incremental diff content omitted" in range_text
+
+
+def test_a_failed_path_enumeration_does_not_claim_no_change(activation: state.State, git_repo: Path) -> None:
+    """``git diff --name-only`` failing is not "nothing changed": reading it that way would
+    turn an operational failure into false certainty, byte-identical claim included -- that
+    claim depends on actually having obtained the path list."""
+    target = target_for(git_repo)
+    bogus_tree = "f" * 40  # well-formed, but not an object this repo has
+    text = reviewer._range_text(
+        target,
+        state=activation,
+        config=config_with(),
+        warnings="",
+        revisions=[({}, b"plan\n")],
+        previous_tree=bogus_tree,
+        previous_round_number=1,
+    )
+    assert "changed-path list unavailable" in text
+    assert "no path changed" not in text
+    assert "byte-identical" not in text
+
+
 def test_an_unresolvable_range_is_an_error_not_an_empty_diff(activation: state.State, git_repo: Path) -> None:
     dest = activation.act_dir / "bundles" / "001"
     with pytest.raises(BundleError) as caught:
@@ -1625,6 +1687,17 @@ def test_round_two_is_shown_round_ones_findings_as_a_context_sibling(activation:
     text = context.read_text()
     assert "round 1 -- CHANGES_REQUIRED" in text
     assert "Returns success on a failed lookup" in text
+
+
+def test_round_two_attaches_an_incremental_diff_round_one_does_not(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")
+    assert not (activation.act_dir / "bundles" / "001" / "incremental.diff").exists()
+
+    execute_fake(activation, git_repo, "changes")
+    bundle_dir = activation.act_dir / "bundles" / "002"
+    incremental = bundle_dir / "incremental.diff"
+    assert incremental.is_file(), "round 2's bundle build wrote the incremental diff attachment"
+    assert "## Changed since round 1\n" in (bundle_dir / "range.txt").read_text()
 
 
 def test_the_prior_rounds_attachment_is_a_sibling_of_bundles_never_inside_it(activation: state.State, git_repo: Path) -> None:

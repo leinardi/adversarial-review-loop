@@ -780,6 +780,28 @@ if start 'prior rounds: round 2 is shown round 1 findings, and no bundle file ho
     fi
 fi
 
+if start 'incremental diff: round 2 attaches it, round 1 does not'; then
+    new_case
+    arm_ok && phases_ok
+
+    printf 'phase one\n' >"$REPO/a.txt"
+    with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+
+    printf 'phase one, revised\n' >"$REPO/a.txt"
+    d=$(with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x')
+    assert_eq 'round 2 still denies' "$d" 'deny'
+
+    act=$(dirname "$(state_file)")
+    assert_eq 'round 1 wrote no incremental.diff' "$(ls "$act/bundles/001/incremental.diff" 2>/dev/null)" ''
+    if [ -f "$act/bundles/002/incremental.diff" ]; then
+        ok 'round 2 wrote bundles/002/incremental.diff'
+    else
+        bad 'round 2 wrote bundles/002/incremental.diff'
+    fi
+    assert_contains 'range.txt discloses the changed paths' "$(cat "$act/bundles/002/range.txt" 2>/dev/null)" 'Changed since round 1'
+    assert_contains 'and names the changed file' "$(cat "$act/bundles/002/incremental.diff" 2>/dev/null)" 'a.txt'
+fi
+
 if start 'stall detection: two rounds of the same finding escalate without invoking the reviewer'; then
     new_case
     arm_ok && phases_ok

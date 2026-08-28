@@ -708,7 +708,16 @@ def _prior_rounds_section(state: State, target: Target, config: Config) -> str:
 
 
 def _range_text(  # noqa: PLR0913 - one independently meaningful piece of evidence per param; bundling them would be an artificial object
-    target: Target, *, state: State, config: Config, warnings: str, revisions: list[tuple[dict[str, Any], bytes]], round_number: int = 0
+    target: Target,
+    *,
+    state: State,
+    config: Config,
+    warnings: str,
+    revisions: list[tuple[dict[str, Any], bytes]],
+    round_number: int = 0,
+    previous_tree: str = "",
+    previous_round_number: int = 0,
+    incremental_omitted: bool = False,
 ) -> str:
     """The bundle's ``range.txt``: what is under review, and what is *not* represented."""
     repo, base, head = target.repo, target.base, target.head
@@ -749,6 +758,25 @@ def _range_text(  # noqa: PLR0913 - one independently meaningful piece of eviden
     out.append("\n## Diffstat\n\n")
     stat_proc = git_run(repo, ["diff", "--stat", "-M", base, head, "--"])
     out.append("".join(_byte_records(stat_proc.stdout)[-DIFFSTAT_LINES:]))
+
+    if previous_tree:
+        # `incremental.diff` -- built by `build_bundle` -- holds the diff content; this
+        # section discloses which paths changed regardless, so the orientation signal
+        # survives even when the diff content itself was omitted for size.
+        heading = f"round {previous_round_number}" if previous_round_number else "the previous round"
+        out.append(f"\n## Changed since {heading}\n\n")
+        name_proc = git_run(repo, ["diff", "--name-only", "-M", previous_tree, head, "--"])
+        if name_proc.returncode != 0:
+            # A failed enumeration is not "nothing changed" -- degrade to an explicit
+            # disclosure rather than asserting a path list (and the byte-identical claim
+            # that depends on it) the gate never actually obtained.
+            out.append(f"(changed-path list unavailable: git diff --name-only failed: {_decode(name_proc.stderr[:DIFF_ERROR_BYTES])})\n")
+        else:
+            names = "".join(_byte_records(name_proc.stdout))
+            out.append(names if names else "(no path changed since the previous round)\n")
+            out.append("Everything else is byte-identical to what the previous round saw.\n")
+        if incremental_omitted:
+            out.append(_INCREMENTAL_DIFF_OMITTED_FMT.format(ceiling=config.as_int("hard_diff_ceiling")))
 
     out.append("\n## Snapshot warnings\n\n")
     out.append(f"{warnings}\n" if warnings else "(none)\n")
@@ -866,6 +894,63 @@ def _write_diff(target: Target, path: Path) -> int:
     return path.stat().st_size
 
 
+def _previous_round(state: State, target: Target) -> tuple[str, int]:
+    """The most recently recorded ``round_history`` tree for this label at the current
+    generation, and its 1-based position among this label's rounds -- ``("", 0)`` when there
+    is none.
+
+    The position is *how many rounds of this label have already run*, not the reviewer
+    session's own round counter (``ref.round`` in :func:`execute`) -- that one resets to 1
+    whenever session continuity does not hold (no ``OCRL_SESSION_LIST_CMD`` match), while
+    this is a plain count over ``round_history`` and is what "round N-1" in ``range.txt``
+    must mean for the count to be honest regardless of session continuity.
+
+    The tree is **untrusted.** Read straight out of ``state.json`` and not yet checked
+    against :func:`ocrl.gitsnap.checked_tree` -- a caller must run it through that before it
+    reaches a git argv. This is the second call site phase 1 added ``checked_tree`` for: a
+    tampered ``tree: "--output=../../repo/x"`` would otherwise have ``git diff`` write inside
+    the repository under review (Rule 3).
+    """
+    generation = state.get_int("activation_generation")
+    rounds = [
+        entry for entry in state.get_array_of_dicts("round_history") if entry.get("label") == target.label and entry.get("generation") == generation
+    ]
+    if not rounds:
+        return "", 0
+    tree = rounds[-1].get("tree")
+    return (tree if isinstance(tree, str) else ""), len(rounds)
+
+
+#: Mirrors ``_DIFF_OMITTED``'s handling: an oversized incremental diff is disclosed as
+#: omitted rather than truncated, which would print a diff that lies about its own extent.
+#: The full diff (``changes.NN.diff``) still contains everything -- this attachment is
+#: orientation, never the only copy of anything.
+_INCREMENTAL_DIFF_OMITTED_FMT: Final = (
+    "(incremental diff content omitted: past hard_diff_ceiling ({ceiling} bytes); the changed paths are still listed above)\n"
+)
+
+
+def _write_incremental_diff(repo: str, prev_tree: str, head: str, path: Path) -> int:
+    """Write ``git diff -M prev_tree head`` to ``path`` and answer its size in bytes.
+
+    Mirrors :func:`_write_diff` for the diff between the previous round's tree and this
+    round's head. ``prev_tree`` must already have been resolved through
+    :func:`ocrl.gitsnap.checked_tree` by the caller; the argument list is still terminated
+    with ``--`` so neither tree id can be read as an option.
+    """
+    range_name = f"{prev_tree}..{head}"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, FILE_MODE)
+    try:
+        with os.fdopen(fd, "wb") as sink:
+            command = ["git", "-C", repo, "diff", "-M", prev_tree, head, "--"]
+            proc = subprocess.run(command, stdout=sink, stderr=subprocess.PIPE, check=False)
+    except OSError as exc:
+        raise BundleError(f"git diff {range_name} could not be run: {exc}") from exc
+    if proc.returncode != 0:
+        raise BundleError(f"git diff {range_name} failed: {_decode(proc.stderr[:DIFF_ERROR_BYTES])}")
+    return path.stat().st_size
+
+
 def _run_verify(repo: str, command: str, dest: Path) -> None:
     """Run ``verify_cmd`` in the repository and attach its tail plus its exit status.
 
@@ -929,7 +1014,37 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
     except planrev.EvidenceCorrupted as exc:
         raise PlanEvidenceCorrupted(str(exc)) from exc
 
-    range_text = _range_text(target, state=state, config=config, warnings=warnings, revisions=revisions, round_number=round_number)
+    # `incremental.diff` -- only when an earlier round of this label already ran.
+    # `round_history[*].tree` is untrusted (state.json is not a trust boundary), so it is
+    # resolved through `checked_tree` before it ever reaches a git argv, exactly like
+    # `target.base` in `_write_diff`. A tree that fails to resolve degrades to "no previous
+    # round" rather than failing the bundle -- disclosure only, same reasoning `_range_text`
+    # already applies to `activation_commit`.
+    previous_tree_raw, previous_round_number = _previous_round(state, target)
+    previous_tree = checked_tree(target.repo, previous_tree_raw)
+    incremental_omitted = False
+    if previous_tree:
+        incremental_path = dest / "incremental.diff"
+        incremental_size = _write_incremental_diff(target.repo, previous_tree, target.head, incremental_path)
+        if incremental_size > ceiling:
+            # Omitted, not truncated -- mirrors `_DIFF_OMITTED`. The full diff above still
+            # contains everything; this attachment is orientation, not the only copy.
+            incremental_omitted = True
+            _write_private(incremental_path, _encode(_INCREMENTAL_DIFF_OMITTED_FMT.format(ceiling=ceiling)))
+        elif incremental_size == 0:
+            _write_private(incremental_path, b"(no change since the previous round)\n")
+
+    range_text = _range_text(
+        target,
+        state=state,
+        config=config,
+        warnings=warnings,
+        revisions=revisions,
+        round_number=round_number,
+        previous_tree=previous_tree,
+        previous_round_number=previous_round_number,
+        incremental_omitted=incremental_omitted,
+    )
     _write_private(dest / "range.txt", _encode(range_text))
 
     # `context/<seq>-prior-rounds.txt` -- a sibling of `bundles/`, never inside it. Written
@@ -1044,6 +1159,9 @@ def review_argv(  # noqa: PLR0913 - each arg is an independent knob of the invoc
     argv += ["-f", str(bundle_dir / "range.txt")]
     for chunk in sorted(bundle_dir.glob("changes.*.diff")):
         argv += ["-f", str(chunk)]
+    incremental_diff = bundle_dir / "incremental.diff"
+    if incremental_diff.is_file():
+        argv += ["-f", str(incremental_diff)]
     for revision_file in sorted(bundle_dir.glob("plan.rev*.md"), key=_revision_sort_key):
         argv += ["-f", str(revision_file)]
     if attach_context:
