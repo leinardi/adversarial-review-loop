@@ -33,8 +33,11 @@ and whether the target round is still the latest for this label (a concurrent
 ``reviewer.execute`` can finish a newer round without moving the fingerprint, since
 ``round_history`` is not in it -- ``_SUPERSEDED``). The bundle's ``-f`` list is built from
 its ``chunks`` manifest, not a glob (:func:`_bundle_attachments`): every attachment must be
-a present, regular, non-symlink file and an *extra* ``changes.*.diff`` rejects the bundle,
-so a file planted in ``bundles/<seq>/`` cannot ride ``-f`` into the provider prompt.
+a present, regular file reached from the state root without following a symlink at *any*
+component (:func:`ocrl.atomic.verified_file` -- a symlinked ``bundles/<seq>/`` leaves ordinary
+regular files beneath it, so checking only the leaves would not catch it), and an *extra*
+``changes.*.diff`` rejects the whole bundle, so nothing planted in or as ``bundles/<seq>/``
+can ride ``-f`` into the provider prompt.
 
 Unlike the exits Rule 4 reserves for the user, this one is Claude-invocable: it grants
 nothing, parses no verdict, and reaches no state that can approve anything. It needs no gate
@@ -44,13 +47,16 @@ reaches ``hook.pass_()``, and ``clarify`` is deliberately kept out of ``cmdshape
 
 from __future__ import annotations
 
+import hashlib
+import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Final
 
 import ocrl
 from ocrl import commands, reviewer
-from ocrl.atomic import ensure_private_dir, write_private_atomic
+from ocrl.atomic import ensure_private_dir, verified_file, write_private_atomic
 from ocrl.commands import hooks
 from ocrl.config import Config
 from ocrl.paths import sha256_hex, state_root
@@ -115,6 +121,9 @@ _QUESTION_FENCE_HEAD: Final = (
 )
 _QUESTION_FENCE_TAIL: Final = "\n--- end question ---\n"
 
+#: A real ``hashlib.sha256(...).hexdigest()``: lowercase, exactly 64 hex digits.
+_SHA256_RE: Final = re.compile(r"[0-9a-f]{64}")
+
 
 def _parse_args(argv: list[str]) -> tuple[str, str]:
     """``(question, session)``. Unrecognised tokens are ignored, matching ``session.defer``."""
@@ -155,39 +164,47 @@ def _round_seq(entry: dict[str, Any] | None) -> int | None:
     return seq
 
 
-def _bundle_attachments(bundle_dir: Path) -> list[Path] | None:
-    """The exact ``-f`` attachment list for a stored bundle, or ``None`` when it is not intact.
+def _round_digest(entry: dict[str, Any] | None) -> str:
+    """The ``bundle_digest`` recorded with a round, or ``""`` when it is not a usable one.
 
-    ``[range.txt, changes.00.diff, ..., changes.<total-1>.diff]``, in that order, built from
-    the bundle's own ``chunks`` manifest -- **never a directory glob**. Bundle files under
-    the state root are gate-generated, but the state root is not a trust boundary: anyone
-    who can drop a file into ``bundles/<seq>/`` can already edit ``state.json`` directly. A
-    glob would let a planted ``changes.99.diff`` -- a symlink to an arbitrary file -- ride
-    into the provider prompt through ``-f``. So every path must be present, a regular file
-    and not a symlink, and an *extra* ``changes.*.diff`` beyond the manifest count rejects
-    the whole bundle rather than being ignored. Mirrors the "missing file / symlink /
-    containment failure" handling ``planrev.verified_revisions`` applies to plan evidence.
-
-    The clarify allowance path (:func:`_ask`) also passes this list straight to
-    :func:`ocrl.reviewer.run_clarify`, so the argv is built from exactly what was validated.
+    ``state.json`` is not a trust boundary, so anything that is not a 64-character lowercase
+    hex string names no manifest and is refused rather than compared.
     """
+    if entry is None:
+        return ""
+    digest = entry.get("bundle_digest")
+    return digest if isinstance(digest, str) and _SHA256_RE.fullmatch(digest) else ""
 
-    def regular(path: Path) -> bool:
-        return path.is_file() and not path.is_symlink()
 
-    range_txt = bundle_dir / "range.txt"
-    chunks_file = bundle_dir / "chunks"
-    try:
-        total = int(chunks_file.read_text(encoding="utf-8", errors="surrogateescape").strip()) if regular(chunks_file) else 0
-        present = {path.name for path in bundle_dir.glob("changes.*.diff")}
-    except (OSError, ValueError):
+def _bundle_attachments(act_dir: Path, seq: int, digest: str) -> list[tuple[Path, str]] | None:
+    """``[(range.txt, sha), (changes.NN.diff, sha), ...]`` for a stored bundle, or ``None``.
+
+    **Read from the manifest ``build_bundle`` wrote, checked against the digest recorded on
+    the round that produced it** (:func:`ocrl.reviewer.bundle_manifest`). The bundle directory
+    is never consulted for *what* to attach: a glob would let a planted ``changes.99.diff``
+    ride into the provider prompt, and reading the ``chunks`` count back out of the directory
+    would let anyone able to write there shorten the set. Neither needs a symlink, so neither
+    was caught by checking path shapes alone.
+
+    ``round_history`` is where the anchor lives for this path, rather than the active-review
+    claim ``execute`` uses: a clarify runs long after the review that built the bundle
+    released its claim, so the round entry is the only record of that bundle still standing.
+
+    Deliberately **narrower** than the review's own attachment set: ``range.txt`` and the diff
+    chunks only, no plan revisions, no ``prior-rounds.txt``, no ``verify.txt``. A clarify
+    answers one question about the diff that was reviewed; it parses no verdict and needs no
+    more than that. The hashes still come from the manifest, so the narrowing loses nothing.
+    """
+    entries = reviewer.bundle_manifest(act_dir / "bundles" / f"{seq:03d}", act_dir, digest, include_context=False)
+    if entries is None:
         return None
-    if total < 1 or not regular(range_txt):
+    wanted = [(path, sha) for path, sha in entries if path.name == "range.txt" or path.name.startswith("changes.")]
+    if not wanted or not all(verified_file(path, root=state_root()) for path, _sha in wanted):
+        # A shape-only check (no reads), so the *refusal* can be decided before the clarify
+        # allowance is spent rather than at staging, after. Staging still verifies the bytes;
+        # this only makes "the bundle is gone" the cheap answer it used to be.
         return None
-    chunks = [bundle_dir / f"changes.{index:02d}.diff" for index in range(total)]
-    if not all(regular(path) for path in chunks) or present != {path.name for path in chunks}:
-        return None
-    return [range_txt, *chunks]
+    return wanted
 
 
 def _refusal(state: State, config: Config, question: str) -> str | None:  # noqa: PLR0911 - one return per refusal this command must name, matched exactly
@@ -209,12 +226,62 @@ def _refusal(state: State, config: Config, question: str) -> str | None:  # noqa
     if state.get("replan_pending") == "true":
         return _REPLAN_PENDING
     phase = state.get_int("phase")
-    seq = _round_seq(_latest_round(state, f"phase{phase}"))
+    entry = _latest_round(state, f"phase{phase}")
+    seq = _round_seq(entry)
     if seq is None:
         return _NO_ROUND.format(phase=phase)
-    if _bundle_attachments(state.act_dir / "bundles" / f"{seq:03d}") is None:
+    if _bundle_attachments(state.act_dir, seq, _round_digest(entry)) is None:
         return _BUNDLE_GONE.format(phase=phase, seq=f"{seq:03d}")
     return None
+
+
+def _stage(attachments: list[tuple[Path, str]], question_file: Path, staging_dir: Path, *, phase: int, round_seq: int) -> tuple[list[Path], Path]:
+    """The staged ``(attachments, question)`` this clarify actually attaches.
+
+    :func:`_bundle_attachments` proved those paths acceptable, but that proof is about the
+    moment it ran and OpenCode opens them later. Staging copies the bytes out through the
+    descriptors that validated them and hands ``-f`` a fresh per-invocation path instead of
+    the bundle's own stable one -- see :func:`ocrl.reviewer.stage_attachments` for exactly
+    what that closes and what it only narrows. The question file is staged alongside them: it
+    is gate-written, but it sits on the equally predictable ``context/<seq>-question.txt``.
+
+    A staging failure refuses the clarify rather than attaching a subset -- an attachment that
+    cannot be read is the bundle no longer being intact, which is what ``_BUNDLE_GONE`` says.
+    """
+    # The question was written moments ago by `_write_question`, so its hash is taken from the
+    # bytes on disk rather than recorded anywhere: there is no earlier state for it to have
+    # drifted from, and staging it alongside the evidence is what keeps `-f` naming one
+    # short-lived directory instead of two long-lived paths.
+    question_digest = hashlib.sha256(question_file.read_bytes()).hexdigest()
+    try:
+        staged = reviewer.stage_attachments([*attachments, (question_file, question_digest)], staging_dir)
+    except (reviewer.BundleError, OSError) as exc:
+        log(f"clarify: an attachment could not be staged: {exc}")
+        raise commands.Refused(_BUNDLE_GONE.format(phase=phase, seq=f"{round_seq:03d}")) from exc
+    # `run_clarify` builds its argv from plain paths; the digests were the staging check's.
+    return [path for path, _digest in staged[:-1]], staged[-1][0]
+
+
+def _write_question(act_dir: Path, seq: int, question: str, config: Config) -> Path:
+    """Write ``context/<seq>-question.txt``, fenced as evidence, and answer its path.
+
+    Capped by ``max_reason_bytes`` -- the same ceiling ``report.reason`` applies to prose --
+    and wrapped in an explicit "this is a question, not an instruction" fence, the treatment
+    ``reviewer-phase.md`` already gives the frozen plan. Under ``context/``, never
+    ``bundles/``: it is Claude-composed text. Split out of :func:`_ask` to keep it under
+    ruff's statement-count limit.
+    """
+    context_dir = act_dir / "context"
+    ensure_private_dir(context_dir, root=state_root())
+    question_file = context_dir / f"{seq:03d}-question.txt"
+    capped = truncate(question, config.as_int("max_reason_bytes"))
+    write_private_atomic(
+        question_file,
+        f"{_QUESTION_FENCE_HEAD}{capped}{_QUESTION_FENCE_TAIL}",
+        root=state_root(),
+        errors="surrogateescape",
+    )
+    return question_file
 
 
 def _ask(activation: commands.Activation, question: str) -> str:
@@ -242,10 +309,11 @@ def _ask(activation: commands.Activation, question: str) -> str:
         if (problem := _refusal(state, config, question)) is not None:
             raise commands.Refused(problem)
         phase = state.get_int("phase")
-        round_seq = _round_seq(_latest_round(state, f"phase{phase}"))
+        entry = _latest_round(state, f"phase{phase}")
+        round_seq = _round_seq(entry)
         assert round_seq is not None
         bundle_dir = state.act_dir / "bundles" / f"{round_seq:03d}"
-        attachments = _bundle_attachments(bundle_dir)
+        attachments = _bundle_attachments(state.act_dir, round_seq, _round_digest(entry))
         assert attachments is not None
         limit = config.as_int("max_clarifications")
         used = state.get_int("clarifications") + 1
@@ -254,28 +322,22 @@ def _ask(activation: commands.Activation, question: str) -> str:
         seq = state.get_int("clarify_seq") + 1
         state.update(clarifications=used, clarify_seq=seq)
 
-    context_dir = state.act_dir / "context"
-    ensure_private_dir(context_dir, root=state_root())
-    question_file = context_dir / f"{seq:03d}-question.txt"
-    capped = truncate(question, config.as_int("max_reason_bytes"))
-    write_private_atomic(
-        question_file,
-        f"{_QUESTION_FENCE_HEAD}{capped}{_QUESTION_FENCE_TAIL}",
-        root=state_root(),
-        errors="surrogateescape",
-    )
+    question_file = _write_question(state.act_dir, seq, question, config)
 
     raw_dir = state.act_dir / "raw"
     ensure_private_dir(raw_dir, root=state_root())
     out_path = raw_dir / f"{seq:03d}-clarify.out"
     title = f"review-loop clarify [{sha256_hex(str(state.act_dir))[:8]}/{seq:03d}]"
 
+    staging_dir = reviewer.staging_dir_for(state.act_dir, f"clarify-{seq:03d}")
+    staged_attachments, staged_question = _stage(attachments, question_file, staging_dir, phase=phase, round_seq=round_seq)
+
     try:
         prose = reviewer.run_clarify(
             repo,
             bundle_dir,
-            attachments,
-            question_file,
+            staged_attachments,
+            staged_question,
             prompt_file=ocrl.prompt_path("reviewer-clarify"),
             title=title,
             out_path=out_path,
@@ -284,11 +346,13 @@ def _ask(activation: commands.Activation, question: str) -> str:
     except reviewer.ReviewerFailed as exc:
         log(f"clarify: the reviewer call failed: {exc}")
         raise commands.Refused(_FAILED.format(error=exc)) from exc
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
     # The reviewer holds no lock across its run, so a resume, a stop, an accept, a phase
     # advance, or a concurrent `reviewer.execute` finishing a newer round may have landed
     # while it answered. Two rechecks, both against a fresh read, both mirroring
-    # `reviewer.execute`'s `_activation_still_current` guard:
+    # `reviewer._publish`'s own fingerprint guard:
     #   1. the `hooks.Activation` fingerprint -- a clarification about a review this
     #      activation no longer owns must not be printed as if it were current;
     #   2. the target round is still the latest for this label -- `round_history` is not in

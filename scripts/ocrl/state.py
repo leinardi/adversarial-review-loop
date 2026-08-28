@@ -131,6 +131,18 @@ def new_state_document() -> dict[str, Any]:
         #: ``ocrl.reviewer._claim_active_review``. Degrades safely like ``reviewer_session``
         #: (a legacy document simply has none), so it needs no migration arm of its own.
         "active_review": {},
+        #: ``label -> {"generation", "seq"}``: the newest ``report_seq`` any review *attempt*
+        #: of that label reserved, whatever became of it. Distinct from ``round_history``,
+        #: which records only attempts that produced a parsed verdict: an attempt that timed
+        #: out, hit a rate limit, failed its contract or escalated appears **here and nowhere
+        #: else**. That is exactly why it exists -- ``reviewer.approval_is_current`` requires
+        #: an approving review to still be the newest attempt, and a check that consulted only
+        #: recorded rounds would let a review whose successor merely *failed* approve on
+        #: evidence that is no longer the latest word on the label. Written under the same
+        #: lock, and in the same step, as the ``report_seq`` reservation it mirrors
+        #: (``reviewer._reserve_round``). Degrades safely like ``active_review`` (a legacy
+        #: document simply has none), so it needs no migration arm of its own.
+        "review_attempts": {},
     }
 
 

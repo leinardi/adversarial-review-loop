@@ -39,6 +39,7 @@ import stat
 from collections.abc import Iterator
 from pathlib import Path
 
+from ocrl import paths
 from ocrl.errors import UnsafePathError
 
 __all__ = [
@@ -47,6 +48,8 @@ __all__ = [
     "ensure_private_dir",
     "locked",
     "private_dir_fd",
+    "read_verified_file",
+    "verified_file",
     "write_atomic",
     "write_private_atomic",
 ]
@@ -138,6 +141,147 @@ def ensure_private_dir(path: Path, *, root: Path) -> None:
     """Create ``path`` and every component between it and ``root``, all mode ``0700``."""
     with private_dir_fd(path, root=root):
         pass
+
+
+def _walk_to_parent(parts: tuple[str, ...], root: Path) -> int:
+    """A descriptor for the directory holding ``parts[-1]``, opened without following symlinks.
+
+    Raises ``OSError`` if any component below ``root`` is missing, is not a directory, or is a
+    symlink. The caller owns the returned descriptor.
+    """
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in parts[:-1]:
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_verified_file(path: Path, *, root: Path) -> bytes | None:
+    """The bytes of ``path``, read through the very descriptors that validated it.
+
+    :func:`verified_file` answers a *question*, and by the time a caller acts on the answer
+    the path can mean something else -- it validates, closes its descriptors, and hands back a
+    pathname somebody else opens later. For a check whose whole purpose is to decide what gets
+    uploaded to a third party, that gap matters: the file or any directory above it can become
+    a symlink in between, and the bytes that leave are then not the bytes that were checked.
+
+    This closes that half completely. The leaf is opened ``O_NOFOLLOW`` under the same
+    descriptor walk that verified its parents, ``fstat``-ed through the open descriptor rather
+    than by name, and read from it. There is no window between the check and the read, because
+    they are the same operation on the same inode.
+
+    It does **not**, on its own, make what a *different process* later opens by pathname safe;
+    see :func:`ocrl.reviewer.stage_attachments` for what is done about that and what remains.
+
+    Answers ``None`` for anything it cannot establish, exactly as :func:`verified_file` does.
+    """
+    fd = _open_verified(path, root)
+    if fd is None:
+        return None
+    # `os.fdopen` takes ownership of `fd` and closes it on the way out of the `with`.
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _open_verified(path: Path, root: Path) -> int | None:
+    """A read-only descriptor for ``path``, or ``None``. Caller owns the descriptor.
+
+    The whole containment argument lives here: components checked against
+    :func:`ocrl.paths.is_safe_component` (so no ``..`` walks out lexically), parents opened
+    ``O_NOFOLLOW`` one level at a time, the leaf opened ``O_NOFOLLOW`` too, and its type
+    settled by ``fstat`` on the open descriptor rather than by name.
+    """
+    try:
+        parts = _relative_parts(path, root)
+    except UnsafePathError:
+        return None
+    if not parts or not all(paths.is_safe_component(part) for part in parts):
+        return None
+    try:
+        parent_fd = _walk_to_parent(parts, root)
+    except OSError:
+        return None
+    try:
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError:
+        return None
+    finally:
+        os.close(parent_fd)
+    try:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            return fd
+    except OSError:
+        pass
+    os.close(fd)
+    return None
+
+
+def verified_file(path: Path, *, root: Path) -> bool:
+    """``True`` iff ``path`` is a regular file reached from ``root`` without following a symlink.
+
+    The read-side counterpart to :func:`private_dir_fd`, and it creates and modifies nothing.
+    It exists because ``Path.is_file()`` is not a safe test for any path that will be handed to
+    *another process*: ``is_file`` resolves symlinks, so a planted ``bundles/<seq>`` directory
+    link, or a ``context/<seq>-prior-rounds.txt`` link, passes it happily and the file on the
+    far side is what rides into the reviewer's ``-f`` argv -- an arbitrary local file uploaded
+    to the provider. Checking ``not path.is_symlink()`` on the final component alone does not
+    close it either: it says nothing about the directories above, and it is the *directory*
+    link that is the easier plant.
+
+    So every component below ``root`` is opened with ``O_NOFOLLOW``, one level at a time, and
+    the last is ``lstat``-ed rather than ``stat``-ed. Containment under ``root`` and every
+    intermediate link are both decided here, rather than by whatever the path happens to
+    resolve to at the moment some other process opens it.
+
+    ``root`` itself is opened normally, for the same reason :func:`private_dir_fd` does it: the
+    state root's own location is the user's configuration (``OCRL_STATE_DIR``,
+    ``XDG_STATE_HOME``) and symlinking it is legitimate. The boundary starts at the components
+    the gate creates for itself.
+
+    Answers ``False`` for everything it cannot establish -- outside ``root``, missing, a
+    symlink, a directory, a special file -- and never raises for an ordinary filesystem
+    failure: every caller's correct response to any of them is the same, to leave the
+    attachment out.
+
+    **Every component is checked with :func:`ocrl.paths.is_safe_component` first, and a ``..``
+    is why.** :func:`_relative_parts` is lexical, and ``root/../outside`` is lexically *under*
+    ``root``: it relativises to ``("..", "outside")``, and the walk below would then open
+    ``..`` happily, because ``..`` is a directory and not a symlink. Refusing symlinks is not
+    on its own a containment proof; refusing ``..`` alongside it is what makes it one.
+    """
+    try:
+        parts = _relative_parts(path, root)
+    except UnsafePathError:
+        return False
+    if not parts or not all(paths.is_safe_component(part) for part in parts):
+        return False
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return False
+    try:
+        for name in parts[:-1]:
+            try:
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError:
+                return False
+            os.close(fd)
+            fd = child
+        try:
+            info = os.lstat(parts[-1], dir_fd=fd)
+        except OSError:
+            return False
+        return stat.S_ISREG(info.st_mode)
+    finally:
+        os.close(fd)
 
 
 def write_private_atomic(path: Path, text: str, *, root: Path, errors: str = "strict") -> None:

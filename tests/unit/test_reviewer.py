@@ -14,6 +14,7 @@ import os
 import random
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -188,74 +189,105 @@ def test_the_broad_external_deny_is_written_before_the_bundle_allow(tmp_path: Pa
 # --------------------------------------------------------------------------
 
 
-def test_argv_carries_the_bundle_as_attachments(tmp_path: Path) -> None:
-    (tmp_path / "range.txt").write_text("r")
-    (tmp_path / "changes.00.diff").write_text("a")
-    (tmp_path / "changes.01.diff").write_text("b")
+def _intact_bundle(root: Path, *, chunks: int = 1, revisions: int = 0, context: bool = False, verify: bool = False) -> tuple[Path, str]:
+    """A bundle shaped exactly as ``build_bundle`` writes one, plus its manifest digest.
 
-    argv = reviewer.review_argv("/repo", tmp_path, "a title", config=config_with())
+    ``root`` doubles as the state root and the activation directory, which is all the manifest
+    needs to resolve its ``bundle``/``context`` rows.
+    """
+    seq = "002"
+    bundle = root / "bundles" / seq
+    bundle.mkdir(parents=True)
+    (bundle / "range.txt").write_text("r")
+    for index in range(chunks):
+        (bundle / f"changes.{index:02d}.diff").write_text(f"chunk {index}")
+    (bundle / "chunks").write_text(str(chunks))
+    for index in range(revisions):
+        (bundle / f"plan.rev{index}.md").write_text(f"revision {index}")
+    if context:
+        (root / "context").mkdir(exist_ok=True)
+        (root / "context" / f"{seq}-prior-rounds.txt").write_text("history")
+    digest = _seal(bundle, root, total=chunks, revisions=revisions, verify=verify)
+    return bundle, digest
+
+
+def _seal(bundle: Path, root: Path, *, total: int, revisions: int, verify: bool = False) -> str:
+    """Hash and write a manifest the way ``build_bundle`` does: canonical evidence first, then
+    ``verify.txt``'s own row appended after (it is ``verify_cmd``'s output, so it can only be
+    hashed once that has run)."""
+    rows = reviewer._hashed_rows(reviewer._manifest_rows(bundle, root, total=total, revisions=revisions))
+    if verify:
+        (bundle / "verify.txt").write_text("v")
+        rows.append(reviewer._hashed_row(("bundle", "verify.txt", bundle / "verify.txt")))
+    return reviewer._write_manifest(bundle, rows)
+
+
+def test_argv_carries_exactly_the_attachments_it_is_given(tmp_path: Path) -> None:
+    """``review_argv`` selects nothing itself -- see `bundle_manifest`, which does."""
+    given = [tmp_path / "range.txt", tmp_path / "changes.00.diff", tmp_path / "changes.01.diff"]
+
+    argv = reviewer.review_argv("/repo", "a title", config=config_with(), attachments=given)
 
     assert argv[:2] == ["--pure", "--dir"]
     assert argv[2] == "/repo"
     assert "--title" in argv
-    attachments = [argv[i + 1] for i, item in enumerate(argv) if item == "-f"]
-    assert attachments == [
-        str(tmp_path / "range.txt"),
-        str(tmp_path / "changes.00.diff"),
-        str(tmp_path / "changes.01.diff"),
-    ]
+    assert [argv[i + 1] for i, item in enumerate(argv) if item == "-f"] == [str(path) for path in given]
 
 
 def test_argv_never_contains_the_prompt(tmp_path: Path) -> None:
     """``-f`` is a yargs array option: a trailing prompt would be read as an attachment."""
-    argv = reviewer.review_argv("/repo", tmp_path, "review-loop phase 1", config=config_with())
+    argv = reviewer.review_argv("/repo", "review-loop phase 1", config=config_with(), attachments=[tmp_path / "range.txt"])
     assert argv[-2] == "-f"
 
 
 def test_argv_honours_pure_and_variant(tmp_path: Path) -> None:
-    plain = reviewer.review_argv("/repo", tmp_path, "t", config=config_with(pure=False))
+    plain = reviewer.review_argv("/repo", "t", config=config_with(pure=False))
     assert "--pure" not in plain
 
-    varied = reviewer.review_argv("/repo", tmp_path, "t", config=config_with(variant="thinking"))
+    varied = reviewer.review_argv("/repo", "t", config=config_with(variant="thinking"))
     assert varied[varied.index("--variant") + 1] == "thinking"
     assert "--variant" not in plain
 
 
-def test_verify_output_is_attached_last(tmp_path: Path) -> None:
-    (tmp_path / "range.txt").write_text("r")
-    (tmp_path / "changes.00.diff").write_text("a")
-    (tmp_path / "verify.txt").write_text("v")
+def test_verify_output_is_attached_last(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`verify.txt` is kept out of `bundle_manifest` precisely so it can stay last, after the
+    `context/` files -- `stage_invocation` is what puts it there."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=1, context=True, verify=True)
 
-    argv = reviewer.review_argv("/repo", tmp_path, "t", config=config_with())
-    assert argv[-1] == str(tmp_path / "verify.txt")
+    staged, context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "staged", include_context=True)
+
+    assert staged[-1][0].name == "verify.txt"
+    assert context and staged[-2][0] == context[0], "context sits between the evidence and verify.txt"
 
 
-def test_plan_revisions_are_attached_in_ascending_order(tmp_path: Path) -> None:
-    (tmp_path / "range.txt").write_text("r")
-    (tmp_path / "plan.rev1.md").write_text("one")
-    (tmp_path / "plan.rev0.md").write_text("zero")
-    (tmp_path / "plan.rev2.md").write_text("two")
+def test_plan_revisions_are_attached_in_ascending_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=3)
 
-    argv = reviewer.review_argv("/repo", tmp_path, "t", config=config_with())
-    attachments = [argv[i + 1] for i, item in enumerate(argv) if item == "-f"]
-    assert attachments == [
-        str(tmp_path / "range.txt"),
-        str(tmp_path / "plan.rev0.md"),
-        str(tmp_path / "plan.rev1.md"),
-        str(tmp_path / "plan.rev2.md"),
+    entries = reviewer.bundle_manifest(bundle, tmp_path, digest, include_context=True)
+
+    assert entries is not None
+    assert [path for path, _ in entries] == [
+        bundle / "range.txt",
+        bundle / "changes.00.diff",
+        bundle / "plan.rev0.md",
+        bundle / "plan.rev1.md",
+        bundle / "plan.rev2.md",
     ]
 
 
-def test_plan_revisions_sort_numerically_not_lexically(tmp_path: Path) -> None:
-    """``rev10`` must not precede ``rev2`` -- a plain lexical sort would put it there."""
-    (tmp_path / "range.txt").write_text("r")
-    for index in range(11):
-        (tmp_path / f"plan.rev{index}.md").write_text(str(index))
+def test_plan_revisions_sort_numerically_not_lexically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``rev10`` must not precede ``rev2`` -- a plain lexical sort would put it there. Counting
+    contiguously from zero cannot make that mistake, which is why it replaced the sorted glob."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=11)
 
-    argv = reviewer.review_argv("/repo", tmp_path, "t", config=config_with())
-    revision_attachments = [argv[i + 1] for i, item in enumerate(argv) if item == "-f" and "plan.rev" in argv[i + 1]]
-    assert len(revision_attachments) == 11
-    assert revision_attachments == [str(tmp_path / f"plan.rev{index}.md") for index in range(11)]
+    entries = reviewer.bundle_manifest(bundle, tmp_path, digest, include_context=True)
+    assert entries is not None
+    revisions = [path for path, _ in entries if "plan.rev" in path.name]
+
+    assert revisions == [bundle / f"plan.rev{index}.md" for index in range(11)]
 
 
 # --------------------------------------------------------------------------
@@ -1784,6 +1816,7 @@ def _run_scripted(activation: state.State, repo: Path, tmp_path: Path, name: str
 _ROUND_1 = "Looks off.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=warn.py:1 | needs warn-before\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n"
 _ROUND_2 = "Different concern.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=other.py:1 | needs something else\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n"
 _ROUND_3 = "Back to the first concern.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=warn.py:9 | needs warn-before after all\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n"
+_APPROVES = "All good.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<OCRL-END>>>\\n"
 
 
 def test_review_oscillating_is_set_once_a_finding_reappears(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
@@ -1879,12 +1912,18 @@ def test_a_concurrently_completed_round_overrides_this_invocations_own_approval(
         "import json, pathlib\n"
         f"p = pathlib.Path({str(state_path)!r})\n"
         "d = json.loads(p.read_text())\n"
-        "d['round_history'].append({\n"
+        # Injected once, however many times this stand-in runs. It runs twice here: round 1
+        # left a `round_history` entry, so this round was attached `prior-rounds.txt`, and an
+        # approval that saw model-authored context is cold-confirmed. One concurrent round is
+        # what this test is about; two would be a fixture artifact.
+        "entry = {\n"
         "    'seq': 999, 'label': 'phase1', 'phase': 1, 'generation': d.get('activation_generation', 0),\n"
         "    'round': 1, 'verdict': 'CHANGES_REQUIRED', 'tree': 'a' * 40, 'base': 'b' * 40, 'at': 0,\n"
         "    'findings': ['FINDING severity=medium actionable=yes file=stuck.py:2 | still wrong, concurrently'],\n"
         "    'supersedes': [],\n"
-        "})\n"
+        "}\n"
+        "if not any(e.get('seq') == 999 for e in d['round_history']):\n"
+        "    d['round_history'].append(entry)\n"
         "p.write_text(json.dumps(d))\n"
         "PY\n"
         "printf 'Looks fine to me now.\\n\\n'\n"
@@ -1923,12 +1962,12 @@ def test_the_stored_report_reflects_the_override_even_when_only_the_late_authori
     activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Isolates the *late* half of the concurrent-stall guard from the earlier, lock-free one:
-    with ``_concurrent_stall_check`` (the pre-``report.store`` peek) forced to a no-op, the
-    only thing left that can catch this round's concurrently-injected sibling is
-    ``_append_round_history``'s own in-lock recheck -- which runs *after* ``report.store`` used
-    to. Proves that reordering: even when only the late check fires, the report written to
-    disk still shows the corrected verdict, not the stale one this invocation's own reviewer
-    call produced."""
+    with ``_concurrent_stall_check`` (the lock-free peek) forced to a no-op, the only thing
+    left that can catch this round's concurrently-injected sibling is ``_publish``'s own
+    in-lock recheck -- which runs in the same transaction as ``report.store``, ahead of it.
+    Proves that ordering: even when only the late check fires, the report written to disk
+    still shows the corrected verdict as the one acted on, not the stale one this
+    invocation's own reviewer call produced."""
     monkeypatch.setattr(reviewer, "_override_if_concurrently_stalled", lambda rr, review: None)
 
     _run_scripted(activation, git_repo, tmp_path, "round1", _STUCK)
@@ -1942,12 +1981,18 @@ def test_the_stored_report_reflects_the_override_even_when_only_the_late_authori
         "import json, pathlib\n"
         f"p = pathlib.Path({str(state_path)!r})\n"
         "d = json.loads(p.read_text())\n"
-        "d['round_history'].append({\n"
+        # Injected once, however many times this stand-in runs. It runs twice here: round 1
+        # left a `round_history` entry, so this round was attached `prior-rounds.txt`, and an
+        # approval that saw model-authored context is cold-confirmed. One concurrent round is
+        # what this test is about; two would be a fixture artifact.
+        "entry = {\n"
         "    'seq': 999, 'label': 'phase1', 'phase': 1, 'generation': d.get('activation_generation', 0),\n"
         "    'round': 1, 'verdict': 'CHANGES_REQUIRED', 'tree': 'a' * 40, 'base': 'b' * 40, 'at': 0,\n"
         "    'findings': ['FINDING severity=medium actionable=yes file=stuck.py:2 | still wrong, concurrently'],\n"
         "    'supersedes': [],\n"
-        "})\n"
+        "}\n"
+        "if not any(e.get('seq') == 999 for e in d['round_history']):\n"
+        "    d['round_history'].append(entry)\n"
         "p.write_text(json.dumps(d))\n"
         "PY\n"
         "printf 'Looks fine to me now.\\n\\n'\n"
@@ -1964,8 +2009,12 @@ def test_the_stored_report_reflects_the_override_even_when_only_the_late_authori
     assert review.report, "a report was still stored"
     assert Path(review.report).name.endswith("-needs_human.md"), "the filename itself must not say approved"
     report_text = Path(review.report).read_text()
-    assert "**NEEDS_HUMAN**" in report_text
-    assert "**APPROVED**" not in report_text
+    # The headline verdict is the one the gate acted on. An `**APPROVED**` may legitimately
+    # appear further down: round 1 left a `round_history` entry, so round 2 was attached
+    # `prior-rounds.txt` and its own approval was cold-confirmed -- and a cold confirmation's
+    # report renders the round that triggered it alongside the verdict acted on.
+    assert "- verdict (recomputed by the gate): **NEEDS_HUMAN**" in report_text
+    assert "- verdict (recomputed by the gate): **APPROVED**" not in report_text
 
 
 # --------------------------------------------------------------------------
@@ -2099,8 +2148,8 @@ def test_two_reviews_that_both_finish_before_either_finalizes_do_not_both_author
     -- while ``round_history`` still holds only round 1. Neither has finalized yet, so a check
     with a gap before the append (rather than inside the same lock as it) would let both pass.
 
-    This does not need real threads to prove: :func:`reviewer._append_round_history` is where
-    the authoritative check now lives, under ``state.transaction()``'s own lock --
+    This does not need real threads to prove: :func:`reviewer._publish` is where the
+    authoritative check now lives, under ``state.transaction()``'s own lock --
     ``tests/unit/test_commands_races.py`` already establishes that lock genuinely serialises
     concurrent *processes*, so two calls into this same function, back to back, exercise
     exactly the ordering two racing processes would be forced into: whichever call reaches the
@@ -2116,6 +2165,14 @@ def test_two_reviews_that_both_finish_before_either_finalizes_do_not_both_author
     expected = hooks.activation(activation, config)
 
     def review_run(label: str) -> reviewer._ReviewRun:
+        # Each stands in for a review that really did hold the slot when it ran: `_publish`
+        # refuses to record for a run whose claim has since moved on, and what is under test
+        # here is the *stall* recheck, not that guard.
+        claim_id = f"claim{label}"
+        with activation.transaction():
+            activation.data["active_review"] = {
+                "phase1": {"generation": activation.get_int("activation_generation"), "claimed_at": ocrl_now(), "claim_id": claim_id}
+            }
         return reviewer._ReviewRun(
             target=target,
             state=activation,
@@ -2126,6 +2183,7 @@ def test_two_reviews_that_both_finish_before_either_finalizes_do_not_both_author
             raw_dir=activation.act_dir / "raw",
             prompt_file=Path("/dev/null"),
             expected=expected,
+            claim_id=claim_id,
         )
 
     # Both already "finished invoking": round A repeats round 1's exact anchor (a.txt, high);
@@ -2137,8 +2195,8 @@ def test_two_reviews_that_both_finish_before_either_finalizes_do_not_both_author
     )
     review_b = Review(verdict="APPROVED")
 
-    appended_a = reviewer._append_round_history(review_run("002"), review_a, round_number=1)
-    appended_b = reviewer._append_round_history(review_run("003"), review_b, round_number=1)
+    appended_a = reviewer._publish(review_run("002"), review_a, round_number=1)
+    appended_b = reviewer._publish(review_run("003"), review_b, round_number=1)
 
     assert appended_a is True
     assert review_a.verdict == "CHANGES_REQUIRED", "round A's own denial is unaffected -- it is the first to land"
@@ -2213,29 +2271,31 @@ def test_a_final_scope_review_is_never_stalled(activation: state.State, git_repo
     assert activation.get_int("report_seq") == 3
 
 
-def test_review_argv_attaches_prior_rounds_after_the_plan_revisions(tmp_path: Path) -> None:
-    bundle = tmp_path / "bundles" / "002"
-    bundle.mkdir(parents=True)
-    (bundle / "range.txt").write_text("r")
-    (bundle / "plan.rev0.md").write_text("p")
-    (tmp_path / "context").mkdir()
-    prior = tmp_path / "context" / "002-prior-rounds.txt"
-    prior.write_text("history")
+def test_review_argv_attaches_prior_rounds_after_the_plan_revisions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Under the state root, because `context_attachments` proves containment there before it
+    # will hand a path to `-f` -- see `test_a_context_attachment_below_a_symlink_is_refused`.
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=1, context=True)
 
-    argv = reviewer.review_argv("/repo", bundle, "t", config=config_with())
-    assert str(prior) in argv
-    assert argv.index(str(prior)) > argv.index(str(bundle / "plan.rev0.md"))
+    staged, context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "staged", include_context=True)
+    argv = reviewer.review_argv("/repo", "t", config=config_with(), attachments=[path for path, _ in staged])
+
+    assert context, "the earlier round is attached"
+    assert argv.index(str(context[0])) > argv.index(str(staged[-2][0])), "context follows the plan revisions"
+    assert staged[-2][0].name == "plan.rev0.md"
 
 
-def test_a_cold_confirmation_argv_carries_no_context_path(tmp_path: Path) -> None:
-    bundle = tmp_path / "bundles" / "002"
-    bundle.mkdir(parents=True)
-    (bundle / "range.txt").write_text("r")
-    (tmp_path / "context").mkdir()
-    (tmp_path / "context" / "002-prior-rounds.txt").write_text("history")
+def test_a_cold_confirmation_stages_no_context_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=1, context=True)
 
-    argv = reviewer.review_argv("/repo", bundle, "t", config=config_with(), attach_context=False)
-    assert not any("prior-rounds" in part for part in argv)
+    warm, warm_context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "warm", include_context=True)
+    cold, cold_context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "cold", include_context=False)
+
+    assert warm_context, "an ordinary run is shown the earlier round"
+    assert cold_context == ()
+    assert any("prior-rounds" in path.name for path, _ in warm)
+    assert not any("prior-rounds" in path.name for path, _ in cold)
 
 
 def test_confirm_cold_runs_a_context_free_bundle_scoped_invocation(
@@ -2263,7 +2323,516 @@ def test_confirm_cold_runs_a_context_free_bundle_scoped_invocation(
 
     cold = [run for run in seen if run.cold]
     assert cold, "the continued APPROVED was cold-confirmed"
-    assert all(not run.attach_context for run in cold)
+    assert all(run.context_files == () for run in cold)
+
+
+def test_a_fresh_approval_shown_prior_rounds_is_still_cold_confirmed(
+    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cold-approval invariant is about *context*, not about ``-s``.
+
+    Session continuity is best-effort and drops silently, but ``prior-rounds.txt`` is written
+    from ``round_history`` regardless -- so a **fresh**, session-less round can still be shown
+    an earlier round's ``FINDING`` detail, which is unconstrained model prose. Gating the cold
+    confirmation on ``ref.session_id`` alone let exactly those rounds approve on it: a
+    prompt-injected prior round could approve unreviewed code in one hop.
+
+    No ``OCRL_SESSION_LIST_CMD`` here, so continuity genuinely does not hold. Fails on the old
+    code, which found no cold invocation at all."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    context_dir = activation.act_dir / "context"
+    assert list(context_dir.glob("*-prior-rounds.txt")) == [], "round 1 saw no earlier round"
+
+    seen: list[Invocation] = []
+    real = reviewer._run_invocation
+
+    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+        seen.append(run)
+        return real(tgt, run, config=config)
+
+    monkeypatch.setattr(reviewer, "_run_invocation", spy)
+    review = _run_scripted(activation, git_repo, tmp_path, "round2", _APPROVES)
+
+    assert "OCRL_SESSION_LIST_CMD" not in os.environ, "this round had no continuity to lose"
+    assert [run for run in seen if run.session_id] == [], "round 2 ran fresh, with no -s"
+    assert list(context_dir.glob("002-prior-rounds.txt")), "round 2 was shown round 1's findings"
+    cold = [run for run in seen if run.cold]
+    assert cold, "an approval that saw model-authored context must be cold-confirmed even without a session"
+    assert all(run.context_files == () for run in cold), "and the confirmation itself sees none of it"
+    assert review.confirmed is not None, "the report must be able to show both verdicts"
+
+
+def test_context_vanishing_mid_review_does_not_skip_the_cold_confirmation(
+    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What was attached is a property of the invocation, not a question the filesystem is
+    asked twice.
+
+    ``context/<seq>-prior-rounds.txt`` is written before ``invoke`` and the cold-confirmation
+    decision is taken after it -- minutes later. Re-listing ``context/`` at the second moment
+    let a file unlinked in between turn "this round was shown model-authored prose" into "it
+    was not", skipping the confirmation that prose is the entire reason for. The reviewer
+    stand-in unlinks it mid-run, which is exactly the window.
+
+    Fails on the old code, which took no cold confirmation at all."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    context_dir = activation.act_dir / "context"
+
+    seen: list[Invocation] = []
+    real = reviewer._run_invocation
+
+    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+        seen.append(run)
+        return real(tgt, run, config=config)
+
+    monkeypatch.setattr(reviewer, "_run_invocation", spy)
+
+    script = tmp_path / "vanishing-context.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f"rm -f {str(context_dir)!r}/*-prior-rounds.txt\n"
+        "printf 'All good.\\n\\n'\n"
+        "printf '<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf 'VERDICT APPROVED\\n'\n"
+        "printf '<<<OCRL-END>>>\\n'\n"
+    )
+    script.chmod(0o755)
+    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert list(context_dir.glob("*-prior-rounds.txt")) == [], "the stand-in really did unlink it"
+    assert seen[0].context_files, "the primary invocation was built with the context attached"
+    assert [run for run in seen if run.cold], "and the approval must still be cold-confirmed"
+    assert review.confirmed is not None
+
+
+def test_an_approval_with_no_context_at_all_is_not_cold_confirmed(
+    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the rule, so the fix above is a *condition* and not a blanket second
+    invocation: round 1 has no session and no ``prior-rounds.txt``, so there is no
+    model-influenced context for a cold run to check, and paying for a second provider call on
+    every approval would be waste."""
+    seen: list[Invocation] = []
+    real = reviewer._run_invocation
+
+    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+        seen.append(run)
+        return real(tgt, run, config=config)
+
+    monkeypatch.setattr(reviewer, "_run_invocation", spy)
+    review = _run_scripted(activation, git_repo, tmp_path, "round1", _APPROVES)
+
+    assert review.verdict == "APPROVED"
+    assert review.confirmed is None
+    assert [run for run in seen if run.cold] == [], "nothing to confirm against"
+
+
+def test_a_context_attachment_below_a_symlinked_directory_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``-f`` uploads what the path *resolves to*, so containment has to be proved before the
+    path reaches the argv.
+
+    ``is_file()`` follows symlinks and a per-file ``is_symlink()`` check says nothing about the
+    directories above it, so a ``context/`` planted as a link to somewhere else entirely leaves
+    an ordinary regular file at the end of the path -- and the reviewer provider receives it.
+    Fails on the old code, which attached the planted path."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path / "state"))
+    secrets_dir = tmp_path / "elsewhere"
+    secrets_dir.mkdir()
+    (secrets_dir / "002-prior-rounds.txt").write_text("id_rsa")
+
+    root = tmp_path / "state"
+    bundle = root / "bundles" / "002"
+    bundle.mkdir(parents=True)
+    (root / "context").symlink_to(secrets_dir, target_is_directory=True)
+
+    assert (root / "context" / "002-prior-rounds.txt").is_file(), "the naive check passes -- that is the point"
+    assert reviewer.context_attachments(bundle) == []
+
+
+def test_a_context_attachment_that_is_itself_a_symlink_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path / "state"))
+    secret = tmp_path / "id_rsa"
+    secret.write_text("PRIVATE KEY")
+
+    root = tmp_path / "state"
+    bundle = root / "bundles" / "002"
+    bundle.mkdir(parents=True)
+    (root / "context").mkdir()
+    (root / "context" / "002-prior-rounds.txt").symlink_to(secret)
+
+    assert reviewer.context_attachments(bundle) == []
+
+
+def test_the_attached_path_is_a_staged_copy_not_the_stable_source(
+    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``-f`` takes a pathname OpenCode opens minutes later, so what is attached must not be
+    the long-lived, guessable ``context/<seq>-prior-rounds.txt`` the gate wrote earlier.
+
+    Fails on the old code, which attached the source path itself."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    source = activation.act_dir / "context" / "002-prior-rounds.txt"
+
+    seen: list[Invocation] = []
+    real = reviewer._run_invocation
+
+    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+        seen.append(run)
+        for path in run.context_files:
+            # Read inside the invocation: the staged copy exists only for its duration.
+            assert path.read_bytes() == source.read_bytes(), "the staged copy carries the validated bytes"
+        return real(tgt, run, config=config)
+
+    monkeypatch.setattr(reviewer, "_run_invocation", spy)
+    _run_scripted(activation, git_repo, tmp_path, "round2", _ROUND_2)
+
+    attached = seen[0].context_files
+    assert attached, "round 2 was shown round 1's findings"
+    assert source not in attached, "the stable source path must not be what -f names"
+    assert all(".staged-" in str(path.parent.name) for path in attached)
+    assert source.is_file(), "the source itself is left alone"
+
+
+def test_staged_attachments_are_removed_after_the_invocation(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """The staged directory lives for one call. Left behind, it would accumulate a copy of
+    every round's context for the life of the activation."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    _run_scripted(activation, git_repo, tmp_path, "round2", _ROUND_2)
+
+    assert list((activation.act_dir / "context").glob(".staged-*")) == []
+
+
+def test_an_unreadable_context_attachment_fails_the_review_rather_than_dropping_it(
+    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping an attachment that cannot be read would also shorten ``context_files`` -- and
+    an empty ``context_files`` is what tells ``execute`` no cold confirmation is needed. A
+    silent drop is therefore a route back to the very hole the cold confirmation closes, so
+    it must be a hard failure instead."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    monkeypatch.setattr(reviewer, "read_verified_file", lambda path, *, root: None)
+
+    review = _run_scripted(activation, git_repo, tmp_path, "round2", _APPROVES)
+
+    assert review.verdict == "OP_FAILURE", "never APPROVED with the context silently dropped"
+    assert review.kind == "bundle"
+    # Which integrity check fires first is not the point -- that the review refuses rather
+    # than approving with the context quietly absent is. (Patching `read_verified_file`
+    # globally now also breaks the seal in `build_bundle`, which is the earliest of them.)
+    assert review.error
+
+
+def test_a_planted_diff_chunk_never_reaches_the_main_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hole that lived on the *main* review path for as long as `clarify` was hardened.
+
+    ``clarify._bundle_attachments`` was written to build its list from the ``chunks`` manifest
+    because a glob attaches whatever is sitting in the directory. The main review -- the one
+    whose verdict approves commits -- kept globbing, so a ``changes.99.diff`` symlinked at an
+    arbitrary local file rode straight into the provider prompt.
+
+    Fails on the old code, which attached the plant."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=1)
+    secret = tmp_path / "id_rsa"
+    secret.write_text("PRIVATE KEY")
+    (bundle / "changes.99.diff").symlink_to(secret)
+
+    entries = reviewer.bundle_manifest(bundle, tmp_path, digest, include_context=True)
+    assert entries is not None, "the manifest is still intact"
+    assert not any("changes.99" in path.name for path, _ in entries), "the plant is simply not in the manifest"
+    staged, _context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "staged", include_context=True)
+    assert not any("changes.99" in path.name for path, _ in staged)
+
+
+def test_a_planted_plan_revision_never_reaches_the_main_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same shape, the other glob: ``plan.rev*.md`` was globbed too."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=1)
+    (bundle / "plan.rev7.md").write_text("not written by build_bundle")
+
+    entries = reviewer.bundle_manifest(bundle, tmp_path, digest, include_context=True)
+    assert entries is not None
+    assert not any("plan.rev7" in path.name for path, _ in entries)
+
+
+def test_a_bundle_missing_a_manifested_chunk_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`range.txt` alone is not a bundle: a verdict formed on less evidence than was written
+    is not the verdict the gate reserved a sequence for."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=2)
+    (bundle / "changes.01.diff").unlink()
+
+    with pytest.raises(reviewer.BundleError, match="could not be read"):
+        reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "staged", include_context=True)
+
+
+def test_a_symlinked_bundle_directory_is_refused_on_the_main_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every file *below* a symlinked ``bundles/<seq>/`` is an ordinary regular file, so only
+    walking the components catches it -- and the main review must catch it, not just clarify."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    (planted / "range.txt").write_text("someone else's range")
+    (planted / "changes.00.diff").write_text("someone else's secrets")
+    (planted / "chunks").write_text("1")
+
+    (tmp_path / "bundles").mkdir()
+    bundle = tmp_path / "bundles" / "002"
+    bundle.symlink_to(planted, target_is_directory=True)
+    assert (bundle / "range.txt").is_file(), "the naive check passes -- that is the point"
+
+    assert reviewer.bundle_manifest(bundle, tmp_path, "0" * 64, include_context=True) is None
+
+
+def test_the_whole_evidence_set_is_staged_not_only_the_context(
+    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging the small model-derived channel while leaving the diffs on stable bundle paths
+    would harden the lesser half and leave the evidence the verdict is actually judged against
+    exposed. Every attachment is staged.
+
+    Fails on the old code, which staged only ``context/``."""
+    seen: list[Invocation] = []
+    real = reviewer._run_invocation
+
+    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+        seen.append(run)
+        return real(tgt, run, config=config)
+
+    monkeypatch.setattr(reviewer, "_run_invocation", spy)
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+
+    attached = [path for path, _ in seen[0].attachments]
+    assert attached, "the review attaches its evidence"
+    assert any(path.name == "range.txt" for path in attached)
+    assert any(path.name.startswith("changes.") for path in attached)
+    bundle_dir = activation.act_dir / "bundles" / "001"
+    assert not any(path.parent == bundle_dir for path in attached), "no attachment names the bundle's own stable path"
+    assert all(".staged-" in path.parent.name for path in attached)
+
+
+def test_substituted_diff_content_is_refused_even_though_it_is_a_plain_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The attack every path-shape check missed: no symlink, no extra file, no traversal --
+    just different bytes in a file that is still an ordinary regular file at the right name.
+
+    Nothing about the path is wrong, so containment walks, ``O_NOFOLLOW`` opens and safe-
+    component checks all pass it. Only the hash recorded when the bundle was built says the
+    reviewer would be judging something other than what was generated.
+
+    Fails on the old code, which staged the substituted bytes and sent them."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=1)
+
+    (bundle / "changes.00.diff").write_text("a completely different diff")
+
+    with pytest.raises(reviewer.BundleError, match="no longer matches the hash"):
+        reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "staged", include_context=True)
+
+
+def test_a_rewritten_manifest_is_refused_against_the_recorded_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hashes inside the bundle alone would not be enough: anyone who can change a file there
+    can change the manifest beside it. The digest recorded outside the directory -- on the
+    active-review claim, or on the round -- is what makes a *consistent* rewrite fail too.
+
+    Here the attacker shortens the evidence and reissues a matching manifest, which is exactly
+    the "valid shorter manifest" case."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=2)
+
+    (bundle / "changes.01.diff").unlink()
+    (bundle / "chunks").write_text("1")
+    reissued = _seal(bundle, tmp_path, total=1, revisions=0)
+
+    assert reissued != digest, "the shortened bundle really does hash differently"
+    assert reviewer.bundle_manifest(bundle, tmp_path, digest, include_context=True) is None
+    with pytest.raises(reviewer.BundleError, match="no longer matches the manifest"):
+        reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "staged", include_context=True)
+
+
+def test_dropping_the_trailing_context_and_verify_attachments_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deleting trailing attachments used to leave a well-formed, shorter set. The manifest
+    names them, so their absence is now a failure rather than a quietly smaller review."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=1, context=True, verify=True)
+
+    (bundle / "verify.txt").unlink()
+
+    with pytest.raises(reviewer.BundleError, match="could not be read"):
+        reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "staged", include_context=True)
+
+
+def test_the_round_records_the_bundle_digest_it_was_judged_from(activation: state.State, git_repo: Path) -> None:
+    """`clarify` reads a bundle long after the claim that held it was released, so the round
+    entry has to carry the anchor or there is nothing left to check that bundle against."""
+    execute_fake(activation, git_repo, "changes")
+
+    activation.load()
+    entry = activation.get_array_of_dicts("round_history")[-1]
+    digest = entry["bundle_digest"]
+
+    assert isinstance(digest, str) and len(digest) == 64
+    assert reviewer.bundle_manifest(activation.act_dir / "bundles" / "001", activation.act_dir, digest, include_context=True) is not None
+
+
+def test_correcting_the_round_line_reissues_the_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_downgrade_bundle_round` is the one place the gate edits a bundle after hashing it.
+    Leaving the manifest alone would make its own correction look exactly like tampering."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, digest = _intact_bundle(tmp_path, chunks=1)
+    (bundle / "range.txt").write_text("round: 2\n")
+    digest = _seal(bundle, tmp_path, total=1, revisions=0)
+
+    updated = reviewer._downgrade_bundle_round(bundle, tmp_path, digest)
+
+    assert updated != digest, "the correction changed range.txt, so the manifest had to be reissued"
+    assert "round: 1" in (bundle / "range.txt").read_text()
+    assert reviewer.bundle_manifest(bundle, tmp_path, updated, include_context=True) is not None
+    assert reviewer.bundle_manifest(bundle, tmp_path, digest, include_context=True) is None
+
+
+def test_a_verify_cmd_that_rewrites_the_evidence_fails_the_review(activation: state.State, git_repo: Path) -> None:
+    """``verify_cmd`` is repository-controlled configuration run through a login shell, which
+    makes it the one piece of attacker-authored code executing inside the gate's own process
+    tree -- with the gate's privileges, and so with write access to the state root that
+    ``pretool`` denies every *tool* call.
+
+    A `verify_cmd` that overwrites `changes.00.diff` with benign bytes gets a reviewer that
+    approves the benign version while the tree being approved still holds the real change.
+    That is a complete bypass of the gate, and hashing the evidence *after* `verify_cmd` ran
+    would have the manifest certify it.
+
+    Fails on the old code, which approved."""
+    (git_repo / "a.txt").write_text("the real, malicious change\n")
+    # Reaches the bundle exactly as a hostile repo config would: from the environment the gate
+    # itself runs under. Nothing here changes how `state_root()` resolves.
+    hostile = 'printf \'benign\\n\' > "$(ls -d "$XDG_STATE_HOME"/opencode-review-loop/worktrees/*/*/bundles/001)"/changes.00.diff'
+
+    review = execute_fake(activation, git_repo, "approve", config=config_with(verify_cmd=hostile))
+
+    assert review.verdict != "APPROVED", "a repository must not be able to edit what the reviewer judges"
+    assert review.verdict == "OP_FAILURE"
+    assert review.kind == "bundle"
+    assert "changed while verify_cmd ran" in review.error
+
+
+def test_a_wellbehaved_verify_cmd_still_attaches_its_output(activation: state.State, git_repo: Path) -> None:
+    """The seal must not break the ordinary case: `verify.txt` is `verify_cmd`'s own output, so
+    it is hashed after it runs and appended last, exactly where the reviewer expects it."""
+    review = execute_fake(activation, git_repo, "approve", config=config_with(verify_cmd="printf 'all tests pass\\n'"))
+
+    assert review.verdict == "APPROVED"
+    bundle = activation.act_dir / "bundles" / "001"
+    assert (bundle / "verify.txt").is_file()
+    manifest = (bundle / "manifest").read_text().splitlines()
+    assert manifest[-1].endswith("  bundle  verify.txt"), "verify.txt is last, after the evidence and any context"
+
+
+def test_correcting_the_round_line_does_not_rebless_other_attachments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rehashing the whole manifest on the gate's own `range.txt` correction would launder
+    anything else that had changed since the bundle was sealed -- the same "hash after the
+    untrusted step" mistake, in a second place. Only the corrected row may move."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, _digest = _intact_bundle(tmp_path, chunks=1)
+    (bundle / "range.txt").write_text("round: 2\n")
+    digest = _seal(bundle, tmp_path, total=1, revisions=0)
+
+    # Something else mutates the bundle, then the gate corrects the round line.
+    (bundle / "changes.00.diff").write_text("substituted after the seal")
+    updated = reviewer._downgrade_bundle_round(bundle, tmp_path, digest)
+
+    assert reviewer.bundle_manifest(bundle, tmp_path, updated, include_context=True) is not None, "the manifest itself is intact"
+    with pytest.raises(reviewer.BundleError, match="no longer matches the hash"):
+        reviewer.stage_invocation(bundle, tmp_path, updated, tmp_path / "staged", include_context=True)
+
+
+def test_a_detached_verify_cmd_child_is_reaped_rather_than_left_running(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """``verify_cmd`` runs with the gate's privileges, so anything it leaves running keeps
+    write access to the state root that ``pretool`` denies every tool call -- and the evidence
+    it could reach is the evidence a verdict is formed on.
+
+    A deadline that binds descendants only when the deadline is *hit* leaves the ordinary path
+    open: ``cmd &`` returns promptly with a child still alive. Non-interactive bash runs
+    without job control, so that child stays in the group and is reaped on the way out.
+
+    Fails on the old code, where the marker appeared."""
+    marker = tmp_path / "outlived.txt"
+    background = f"(sleep 3; printf x > {marker}) &"
+
+    review = execute_fake(activation, git_repo, "approve", config=config_with(verify_cmd=background))
+
+    assert review.verdict == "APPROVED", "a well-behaved-looking verify_cmd still completes"
+    time.sleep(4.0)
+    assert not marker.exists(), "a backgrounded verify_cmd child must not outlive the call that ran it"
+
+
+def test_a_staged_attachment_swapped_after_staging_is_refused_at_launch(
+    activation: state.State, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``-f`` hands OpenCode a pathname it opens for itself, so a same-user process can
+    overwrite a staged copy after staging verified it. Re-checking immediately before the
+    launch is the latest point still inside this process.
+
+    Simulated by overwriting a staged file between staging and invocation. Fails on the old
+    code, which sent the substituted bytes."""
+    real = reviewer._run_invocation
+
+    def swap_then_run(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+        for path, _digest in run.attachments:
+            if path.name.startswith("changes."):
+                path.write_text("substituted after staging")
+                break
+        return real(tgt, run, config=config)
+
+    monkeypatch.setattr(reviewer, "_run_invocation", swap_then_run)
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert review.verdict == "OP_FAILURE", "never a review of bytes that changed after they were checked"
+    assert "changed after it was staged" in review.error
+
+
+def test_the_round_line_correction_refuses_a_bundle_that_no_longer_matches_its_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_downgrade_bundle_round` is the one place a *new* trusted digest is minted, which makes
+    it the one place a corrupted bundle could be laundered into a blessed one.
+
+    Here the whole bundle is replaced and re-sealed, as a detached `verify_cmd` descendant
+    could. Re-signing that would hand the replacement back as current, so the correction must
+    verify the manifest against the digest this review was issued and decline.
+
+    Fails on the old code, which returned a fresh digest over the attacker's manifest."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, _built = _intact_bundle(tmp_path, chunks=1)
+    (bundle / "range.txt").write_text("round: 2\n")
+    issued = _seal(bundle, tmp_path, total=1, revisions=0)
+
+    # A wholesale replacement, consistently re-sealed.
+    (bundle / "changes.00.diff").write_text("someone else's diff")
+    (bundle / "range.txt").write_text("round: 2\n")
+    _seal(bundle, tmp_path, total=1, revisions=0)
+
+    returned = reviewer._downgrade_bundle_round(bundle, tmp_path, issued)
+
+    assert returned == issued, "no new digest may be minted over a manifest we did not issue"
+    assert "round: 2" in (bundle / "range.txt").read_text(), "and nothing may be corrected in it either"
+    assert reviewer.bundle_manifest(bundle, tmp_path, issued, include_context=True) is None, "so staging refuses it"
+
+
+def test_the_round_line_correction_refuses_a_tampered_range_txt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half: content injected into ``range.txt`` must not survive the round-line
+    substitution and be rehashed as legitimate."""
+    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    bundle, _built = _intact_bundle(tmp_path, chunks=1)
+    (bundle / "range.txt").write_text("round: 2\n")
+    issued = _seal(bundle, tmp_path, total=1, revisions=0)
+
+    (bundle / "range.txt").write_text("round: 2\ninjected instructions\n")
+
+    returned = reviewer._downgrade_bundle_round(bundle, tmp_path, issued)
+
+    assert returned == issued, "a range.txt that does not match its recorded row is not corrected"
+    assert "round: 2" in (bundle / "range.txt").read_text()
 
 
 def test_a_cold_permission_narrows_to_the_single_bundle(tmp_path: Path) -> None:
@@ -2392,9 +2961,9 @@ def test_isolation_argv_and_env_cannot_drift_between_invoke_and_session_list(git
     assert "OPENCODE_DISABLE_PROJECT_CONFIG" not in reviewer._isolation_env(pure_off, {})
 
     # `review_argv` (invoke's real path) is built from exactly this helper's output.
-    invoke_argv = reviewer.review_argv("/repo", Path("/bundle"), "t", config=pure_on)
+    invoke_argv = reviewer.review_argv("/repo", "t", config=pure_on)
     assert invoke_argv[: len(reviewer._isolation_argv(pure_on))] == reviewer._isolation_argv(pure_on)
-    plain_argv = reviewer.review_argv("/repo", Path("/bundle"), "t", config=pure_off)
+    plain_argv = reviewer.review_argv("/repo", "t", config=pure_off)
     assert "--pure" not in plain_argv
 
 
@@ -2402,12 +2971,11 @@ def test_isolation_argv_and_env_cannot_drift_between_invoke_and_session_list(git
 
 
 def test_argv_carries_s_when_continuing_and_title_when_fresh(tmp_path: Path) -> None:
-    (tmp_path / "range.txt").write_text("r")
-    fresh = reviewer.review_argv("/repo", tmp_path, "a title", config=config_with())
+    fresh = reviewer.review_argv("/repo", "a title", config=config_with())
     assert "--title" in fresh
     assert "-s" not in fresh
 
-    continued = reviewer.review_argv("/repo", tmp_path, "a title", config=config_with(), session_id="ses_abc12345")
+    continued = reviewer.review_argv("/repo", "a title", config=config_with(), session_id="ses_abc12345")
     assert "-s" in continued
     assert continued[continued.index("-s") + 1] == "ses_abc12345"
     assert "--title" not in continued
@@ -2727,8 +3295,9 @@ def test_no_reviewer_transaction_rewrites_a_state_json_retired_mid_review(activa
     """A cross-session ``resume`` can retire this activation into ``RESUMED`` while the review
     runs. Everything ``execute`` still controls at that point must stay out of the retired
     directory: every no-write ``state.transaction()`` branch (`_store_captured_session`,
-    `_release_claim`, `_append_round_history`) aborts rather than resaves, and the stored
-    report is withheld too (`_activation_still_current`).
+    `_release_claim`, `_publish`) aborts rather than resaves, and the stored report is
+    withheld too -- `_publish` writes it inside that same guarded transaction, so it cannot
+    land in a directory the guard just refused.
 
     ``bundles/<seq>/`` and ``raw/<seq>-*`` were written by ``build_bundle`` / ``invoke``
     *before* retirement and cannot be unwound -- a review holds no lock across its run by
@@ -2767,6 +3336,352 @@ def test_no_reviewer_transaction_rewrites_a_state_json_retired_mid_review(activa
     assert review.report == "", "the review returns no stored-report path when the activation moved"
 
 
+def _lock_is_held(lock_file: Path) -> bool:
+    """Can a *separate process* take this activation's flock right now?
+
+    A separate process is the only honest way to ask: ``flock`` is per open-file-description,
+    so this process re-locking its own lock file would succeed whether or not the transaction
+    holds it, and would prove nothing.
+    """
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl,os,sys\n"
+            "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+            "try:\n"
+            "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "except BlockingIOError:\n"
+            "    sys.exit(1)\n"
+            "sys.exit(0)\n",
+            str(lock_file),
+        ],
+        check=False,
+    )
+    return probe.returncode == 1
+
+
+def test_the_report_is_stored_under_the_same_lock_that_records_the_round(
+    activation: state.State, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The round entry and the report are one publication, not two writes with a seam.
+
+    A cross-session ``resume`` retires an activation under this same ``fcntl.flock``. With the
+    two writes separated by an unlocked gap, retirement landing in that gap had the report
+    written into the retired directory after the append had already been refused -- and,
+    landing the other way, gave the successor a ``round_history`` it inherited without the
+    report explaining it. Neither is reachable once both happen inside one transaction.
+
+    Fails on the old code, where ``report.store`` ran after the transaction had closed."""
+    held: list[bool] = []
+    real_store = report.store
+
+    def spy(review: Review, target: Target, *, seq: str, act_dir: Path, config: Config) -> Path:
+        held.append(_lock_is_held(activation.lock_file))
+        return real_store(review, target, seq=seq, act_dir=act_dir, config=config)
+
+    monkeypatch.setattr(report, "store", spy)
+    review = execute_fake(activation, git_repo, "changes")
+
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert held == [True], "report.store must run inside the transaction that appends the round"
+    activation.load()
+    assert len(activation.get_array_of_dicts("round_history")) == 1
+
+
+def test_a_failure_report_is_still_stored_without_recording_a_round(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """The other side of one publication: an ``OP_FAILURE`` is not a round, but its report is
+    still what a denial points the user at, so it must be stored -- and the transaction must
+    abort rather than resave ``state.json`` for a round it did not add."""
+    script = tmp_path / "contract-break.sh"
+    script.write_text("#!/usr/bin/env bash\nprintf 'no markers here at all\\n'\n")
+    script.chmod(0o755)
+    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert review.verdict == "OP_FAILURE"
+    assert Path(review.report).is_file(), "a failure's report is still stored"
+    activation.load()
+    assert activation.get_array_of_dicts("round_history") == [], "an OP_FAILURE is not a round"
+
+
+def test_a_review_that_lost_its_active_review_claim_while_building_never_invokes(
+    activation: state.State, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The active-review claim is a lease, and ``build_bundle`` runs under it.
+
+    Every step in there is separately bounded now, but a slow one can still outlast a lease
+    sized for the model calls -- so ``execute`` renews the claim between building and
+    invoking. When the renewal finds the slot has already been taken by someone else, this
+    call has lost its turn: it must report the busy condition and **not** invoke, because two
+    reviews of one label racing to a verdict is exactly what the claim exists to prevent. It
+    must also release nothing -- releasing a claim id another review now holds is an ABA
+    overwrite of a live claim."""
+    monkeypatch.setattr(reviewer, "_renew_active_review", lambda *a, **k: False)
+    seen: list[Invocation] = []
+
+    def never(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+        seen.append(run)
+        return Review(), False
+
+    monkeypatch.setattr(reviewer, "_run_invocation", never)
+
+    review = execute_fake(activation, git_repo, "approve")
+
+    assert review.verdict == "OP_FAILURE"
+    assert review.kind == "transient", "contention paces with backoff; it does not spend the operational budget"
+    assert seen == [], "no provider call may be made after the turn was lost"
+    activation.load()
+    assert activation.data.get("active_review", {}), "the winner's claim is left exactly as it was"
+
+
+def test_an_approval_is_refused_once_a_newer_attempt_has_been_reserved(activation: state.State, git_repo: Path) -> None:
+    """Checking recorded rounds alone looks only at attempts that produced a **verdict**.
+
+    A review still in flight has published nothing: it has reserved a newer sequence, and that
+    is all there is to find. Approving into that window is a decision taken blind to a
+    concurrently running review of the very same label -- what the claim exists to prevent.
+
+    ``_reserve_round`` is exactly what a second review does first, so calling it is the
+    faithful reproduction. Fails on the old code, which compared `round_history` alone."""
+    review = execute_fake(activation, git_repo, "approve")
+    assert review.verdict == "APPROVED"
+    assert review.seq == 1
+
+    activation.load()
+    assert reviewer.approval_is_current(activation, "phase1", review), "no other attempt yet"
+
+    stall, seq, _claim = reviewer._reserve_round(activation, target_for(git_repo), config_with())
+    assert stall is None
+    assert seq == 2
+
+    activation.load()
+    assert not reviewer.approval_is_current(activation, "phase1", review)
+
+
+def test_an_approval_is_refused_after_a_newer_attempt_failed_without_recording_a_round(activation: state.State, git_repo: Path) -> None:
+    """The case a "no newer round" check structurally cannot see.
+
+    A newer attempt that times out, hits a rate limit, breaks its contract or escalates writes
+    **nothing** to ``round_history`` -- the failure erases it from that evidence entirely. So a
+    check that consulted only recorded rounds let the earlier review approve as though the
+    newer attempt had never happened: an operational failure clearing the way for an approval,
+    which is the direction Rule 1 forbids.
+
+    Here the second attempt reserves its sequence, then releases everything and records no
+    round -- exactly what `execute` does on an ``OP_FAILURE``. Fails on the old code."""
+    review = execute_fake(activation, git_repo, "approve")
+    config = config_with()
+    target = target_for(git_repo)
+    expected = hooks.activation(activation, config)
+
+    stall, seq, claim_id = reviewer._reserve_round(activation, target, config)
+    assert stall is None and seq == 2
+    # The failure path: claims released, nothing published.
+    reviewer._release_active_review(activation, claim_id=claim_id, expected=expected, config=config)
+
+    activation.load()
+    assert activation.get_array_of_dicts("round_history") == [
+        entry for entry in activation.get_array_of_dicts("round_history") if entry.get("seq") == 1
+    ], "the failed attempt recorded no round, which is the whole point"
+    assert not reviewer.approval_is_current(activation, "phase1", review)
+
+
+def test_a_missing_attempt_record_refuses_rather_than_assuming_currency(activation: state.State, git_repo: Path) -> None:
+    """Fail-closed. An approval that cannot show it is the newest attempt is refused, so a
+    ``review_attempts`` entry that was lost or tampered away cannot read as permission."""
+    review = execute_fake(activation, git_repo, "approve")
+
+    with activation.transaction():
+        activation.data["review_attempts"] = {}
+
+    assert not reviewer.approval_is_current(activation, "phase1", review)
+
+
+def test_a_tampered_attempt_sequence_cannot_manufacture_currency(activation: state.State, git_repo: Path) -> None:
+    """``state.json`` is not a trust boundary: a ``seq`` that is not a plain positive int names
+    no attempt and is refused rather than compared."""
+    review = execute_fake(activation, git_repo, "approve")
+    generation = activation.get_int("activation_generation")
+
+    for bogus in (True, "1", -1, 0, None):
+        with activation.transaction():
+            activation.data["review_attempts"] = {"phase1": {"generation": generation, "seq": bogus}}
+        assert not reviewer.approval_is_current(activation, "phase1", review), bogus
+
+
+def test_a_claims_lease_is_the_owners_to_set_not_the_observers_to_recompute(activation: state.State, git_repo: Path) -> None:
+    """A claim's window is computed from ``timeout_sec``, which is ordinary configuration a
+    user or a repo file can change at any moment -- including while the claim is held.
+
+    Recomputing it at each *observation* lets one process reinterpret another's lease: shrink
+    ``timeout_sec`` and a second review reclaims a slot whose owner is still legitimately
+    inside the call the window was sized for. So the owner records the lease it is relying on,
+    and every later reader honours that number.
+
+    Fails on the old code, which recomputed from the observer's config and reclaimed."""
+    target = target_for(git_repo)
+    generous = config_with(timeout_sec=3000)
+    stingy = config_with(timeout_sec=1)
+
+    with activation.transaction():
+        claim_id = reviewer._claim_active_review(activation, target, generous)
+    assert claim_id
+
+    entry = dict(activation.data["active_review"]["phase1"])
+    assert entry["lease_sec"] == reviewer._active_review_reclaim_after(generous)
+
+    # Age the claim into the gap: past what the observer's shrunken config would allow, but
+    # still well inside the window its owner is actually relying on.
+    stingy_window = reviewer._active_review_reclaim_after(stingy)
+    assert stingy_window < entry["lease_sec"], "the two configs really do disagree"
+    elapsed = (stingy_window + entry["lease_sec"]) // 2
+    entry["claimed_at"] = ocrl_now() - elapsed
+
+    assert reviewer._claim_is_live(entry, stingy_window), "the owner's recorded lease decides, not the observer's config"
+
+    # And a second review must therefore still find the slot held rather than reclaiming it.
+    with activation.transaction():
+        activation.data["active_review"] = {"phase1": entry}
+    with activation.transaction():
+        assert reviewer._claim_active_review(activation, target, stingy) is None
+
+
+def test_a_short_lease_is_not_stretched_by_a_later_observers_larger_config(activation: state.State, git_repo: Path) -> None:
+    """The other direction: an owner that claimed a *small* window must not have an abandoned
+    claim honoured far past it because someone later reads a bigger ``timeout_sec``."""
+    target = target_for(git_repo)
+    stingy = config_with(timeout_sec=1)
+
+    with activation.transaction():
+        assert reviewer._claim_active_review(activation, target, stingy)
+
+    entry = dict(activation.data["active_review"]["phase1"])
+    entry["claimed_at"] = ocrl_now() - entry["lease_sec"] - 1
+
+    assert not reviewer._claim_is_live(entry, reviewer._active_review_reclaim_after(config_with(timeout_sec=3000)))
+
+
+def test_a_large_configured_timeout_still_produces_an_in_range_lease(activation: state.State, git_repo: Path) -> None:
+    """The ceiling must never reject a lease the gate itself produced.
+
+    ``timeout_sec`` is unbounded configuration, so a large enough value used to compute a
+    *legitimate* lease above the ceiling -- which `_claim_is_live` then read as tampered and
+    replaced with the observer's own window. The claim was observer-relative again, which is
+    precisely what recording the lease was meant to stop. Clamping ``timeout_sec`` and deriving
+    the ceiling from the same formula is what makes that unreachable.
+
+    Fails on the old code, whose ceiling was a hand-picked constant."""
+    absurd = config_with(timeout_sec=100_000)
+
+    assert reviewer._timeout_sec(absurd) == reviewer.MAX_TIMEOUT_SEC
+    lease = reviewer._active_review_reclaim_after(absurd)
+    assert lease <= reviewer._MAX_LEASE_SEC, "a lease the gate computes is never above its own ceiling"
+
+    with activation.transaction():
+        assert reviewer._claim_active_review(activation, target_for(git_repo), absurd)
+
+    entry = dict(activation.data["active_review"]["phase1"])
+    assert entry["lease_sec"] == lease
+
+    # Aged past a small observer's window but inside the owner's: the stored lease must win,
+    # which it only can if the ceiling accepts it.
+    small = reviewer._active_review_reclaim_after(config_with(timeout_sec=1))
+    entry["claimed_at"] = ocrl_now() - (small + lease) // 2
+    assert reviewer._claim_is_live(entry, small)
+
+
+def test_a_tampered_lease_cannot_pin_a_label_forever(activation: state.State, git_repo: Path) -> None:
+    """The lease travels through ``state.json``, which is not a trust boundary. An enormous
+    stored value would otherwise hold a label against every future review indefinitely, so a
+    lease past the ceiling falls back to the reader's own computed window."""
+    target = target_for(git_repo)
+    config = config_with()
+
+    with activation.transaction():
+        assert reviewer._claim_active_review(activation, target, config)
+
+    entry = dict(activation.data["active_review"]["phase1"])
+    entry["lease_sec"] = 10**12
+    entry["claimed_at"] = ocrl_now() - reviewer._active_review_reclaim_after(config) - 1
+
+    assert not reviewer._claim_is_live(entry, reviewer._active_review_reclaim_after(config))
+
+
+def _slot_stealing_reviewer(tmp_path: Path, state_path: Path, verdict: str, name: str) -> Path:
+    """A stand-in that takes the active-review slot mid-run, then returns ``verdict``.
+
+    Stands in for the lease genuinely expiring under a slow review and a second one claiming
+    the label -- deterministically, without waiting out a real window.
+    """
+    script = tmp_path / f"{name}.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "python3 - <<'PY'\n"
+        "import json, pathlib\n"
+        f"p = pathlib.Path({str(state_path)!r})\n"
+        "d = json.loads(p.read_text())\n"
+        "d['active_review'] = {'phase1': {'generation': d.get('activation_generation', 0),\n"
+        "                                 'claimed_at': 9999999999, 'claim_id': 'someone-else'}}\n"
+        "p.write_text(json.dumps(d))\n"
+        "PY\n"
+        f"printf 'Done.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT {verdict}\\n<<<OCRL-END>>>\\n'\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_a_review_whose_slot_was_stolen_mid_run_publishes_nothing(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """The lease is a bound, not a guarantee. Renewing narrows the window; only asking at the
+    moment of the write closes it.
+
+    If the slot moved to another review while this one ran, the two genuinely overlapped --
+    the state the claim exists to make impossible -- so this verdict was reached blind to the
+    other's and must not be recorded, stored or acted on.
+
+    Fails on the old code, which published the round and returned its verdict."""
+    os.environ["OCRL_REVIEWER_CMD"] = str(_slot_stealing_reviewer(tmp_path, activation.state_file, "CHANGES_REQUIRED", "thief"))
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert review.verdict == "OP_FAILURE", "a lost race is not a verdict to act on"
+    assert review.kind == "transient"
+    activation.load()
+    assert activation.get_array_of_dicts("round_history") == [], "no round may be recorded for a review that lost its slot"
+    reports = activation.act_dir / "reports"
+    assert not reports.exists() or list(reports.iterdir()) == [], "and no report either"
+
+
+def test_the_cold_confirmation_is_not_run_once_the_slot_is_lost(
+    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second renewal, and why losing there cannot mean "keep the APPROVED".
+
+    The cold confirmation is a *second* full model call; between it and the primary sit the
+    SIGTERM grace a timed-out invocation pays and the session-list call. That sequence can
+    outlast a lease sized from the first renewal, so the clock is restarted before it -- and if
+    the slot has gone, the confirmation that would have checked this approval cannot be run
+    under this review's own claim. The approval must not survive that."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+
+    seen: list[Invocation] = []
+    real = reviewer._run_invocation
+
+    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+        seen.append(run)
+        return real(tgt, run, config=config)
+
+    monkeypatch.setattr(reviewer, "_run_invocation", spy)
+    os.environ["OCRL_REVIEWER_CMD"] = str(_slot_stealing_reviewer(tmp_path, activation.state_file, "APPROVED", "thief-approve"))
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+
+    assert seen and seen[0].context_files, "round 2 was shown round 1's findings, so it needed confirming"
+    assert [run for run in seen if run.cold] == [], "the confirmation must not run under a claim we no longer hold"
+    assert review.verdict == "OP_FAILURE", "and the unconfirmed APPROVED must not be returned"
+
+
 def test_bundles_directory_holds_only_gate_generated_evidence(activation: state.State, git_repo: Path) -> None:
     """The invariant the cold-approval design rests on: a continued reviewer's
     ``external_directory`` reach is the bundles root, so nothing in here may be model output."""
@@ -2774,7 +3689,7 @@ def test_bundles_directory_holds_only_gate_generated_evidence(activation: state.
     bundle_dir = activation.act_dir / "bundles" / "001"
     names = {p.name for p in bundle_dir.iterdir()}
     for name in names:
-        assert name in {"range.txt", "chunks"} or name.startswith(("changes.", "plan.rev")), name
+        assert name in {"range.txt", "chunks", "manifest"} or name.startswith(("changes.", "plan.rev")), name
     assert "reviewer.out" not in names
     assert not any(name.startswith("session-list") for name in names)
 
@@ -3014,12 +3929,12 @@ def test_execute_falls_back_to_fresh_when_the_claim_is_lost_before_invoking(
 
     real_build_bundle = reviewer.build_bundle
 
-    def stealing_build_bundle(*args: object, **kwargs: object) -> None:
+    def stealing_build_bundle(*args: object, **kwargs: object) -> str:
         stored = activation.data["reviewer_session"]
         stored["claim_id"] = "thief"
         activation.data["reviewer_session"] = stored
         activation.save()
-        real_build_bundle(*args, **kwargs)  # type: ignore[arg-type]
+        return real_build_bundle(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(reviewer, "build_bundle", stealing_build_bundle)
 

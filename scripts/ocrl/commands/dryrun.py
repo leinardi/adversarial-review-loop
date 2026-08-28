@@ -82,14 +82,26 @@ def run(argv: list[str]) -> int:
     dest = state.act_dir / "bundles" / "dry-run"
     target = reviewer.Target(repo=repo, base=base, head=snap.tree, scope="phase", phase=state.get_int("phase"))
     try:
-        reviewer.build_bundle(target, dest, state=state, config=config, warnings=snap.warnings)
+        digest = reviewer.build_bundle(target, dest, state=state, config=config, warnings=snap.warnings)
     except reviewer.BundleError as exc:
+        sys.stderr.write(f"bundle build failed: {exc}\n")
+        return 1
+
+    # The real path attaches *staged copies*, so the dry run stages too -- otherwise it would
+    # print an argv that differs from the one a review actually builds, which is the single
+    # thing this command exists to show. The staging directory is left in place deliberately:
+    # a developer inspecting the dry run wants the files the printed argv names to exist.
+    staging_dir = reviewer.staging_dir_for(state.act_dir, "dry-run")
+    try:
+        attachments, _context = reviewer.stage_invocation(dest, state.act_dir, digest, staging_dir, include_context=True)
+    except (reviewer.BundleError, OSError) as exc:
         sys.stderr.write(f"bundle build failed: {exc}\n")
         return 1
 
     out = [f"# OPENCODE_PERMISSION\n{reviewer.permission(dest)}\n\n# argv (one element per line)\n"]
     out.append("opencode\nrun\n<the prompt printed below, as a single argument>\n")
-    out += [f"{element}\n" for element in reviewer.review_argv(repo, dest, "review-loop dry run", config=config)]
+    paths_only = [path for path, _digest in attachments]
+    out += [f"{element}\n" for element in reviewer.review_argv(repo, "review-loop dry run", config=config, attachments=paths_only)]
     out.append("\n# the prompt argument\n")
     out.append(_prompt_text())
     out.append(f"\n# bundle: {dest}\n")

@@ -25,13 +25,23 @@ blocks regardless of what the reviewer concluded.
 can be found and safely claimed (``session_ref``); a resume or a new phase starts fresh. The
 session id travels through ``state.json``, which ``AGENTS.md`` is explicit is not a trust
 boundary -- so it must never be able to *authorize* anything. It cannot: **an approving
-verdict must come from a session whose entire content the gate created.** When a continued
-review returns ``APPROVED``, ``execute`` does not act on it. It runs one more review of the
-same bundle in a cold session -- no ``-s``, evidence built from git -- and that cold review's
-verdict is the one every caller acts on. The stricter of the two always wins. A tampered
-session pointer can therefore make the reviewer hold extra context and produce a verdict that
-cannot be an approval; at worst it denies, which the user answers with
-``/opencode-review-loop:accept``. See ``docs/security.md`` for the full argument.
+verdict must come from an invocation whose entire content the gate created.** When a review
+that held *any* model-influenced context returns ``APPROVED``, ``execute`` does not act on
+it. It runs one more review of the same bundle cold -- no ``-s``, no ``context/``
+attachments, evidence built from git -- and that cold review's verdict is the one every
+caller acts on. The stricter of the two always wins. A tampered session pointer can therefore
+make the reviewer hold extra context and produce a verdict that cannot be an approval; at
+worst it denies, which the user answers with ``/opencode-review-loop:accept``. See
+``docs/security.md`` for the full argument.
+
+**Two things count as model-influenced context, not one.** A continued session (``-s``) is
+the obvious one. The other is a ``context/`` attachment: ``NNN-prior-rounds.txt`` carries
+earlier rounds' ``FINDING`` detail, which is unconstrained model prose, and it is attached to
+a *fresh* invocation just as readily as to a continued one -- session continuity is
+best-effort and drops silently (a listing failure, a generation bump, a held claim), while
+the prior-rounds attachment does not. Gating the cold confirmation on ``-s`` alone would
+therefore let exactly the runs that lost continuity approve on prose an earlier round wrote.
+:func:`execute` gates on either.
 
 **The evidence boundary.** ``bundles/`` holds gate-generated evidence only -- no model
 output, ever (``docs/architecture.md``): a cold confirmation reuses an earlier round's
@@ -48,8 +58,10 @@ confirmation is passed none of them (``_confirm_cold``, ``Invocation.attach_cont
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -58,13 +70,14 @@ import shutil
 import signal
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Final
 
 import ocrl
-from ocrl import oscillation, planrev, report
-from ocrl.atomic import FILE_MODE, ensure_private_dir
+from ocrl import oscillation, paths, planrev, report
+from ocrl.atomic import FILE_MODE, ensure_private_dir, read_verified_file, verified_file
 from ocrl.config import Config, severity_rank, threshold_rank
 from ocrl.errors import OcrlError
 from ocrl.gitsnap import checked_tree, git_run, looks_like_object_id
@@ -86,7 +99,9 @@ __all__ = [
     "ReviewerFailed",
     "SessionRef",
     "Target",
+    "approval_is_current",
     "build_bundle",
+    "bundle_manifest",
     "byte_lines",
     "capture_session",
     "clarify_argv",
@@ -100,11 +115,38 @@ __all__ = [
     "run_clarify",
     "session_ref",
     "split_lines_by_size",
+    "stage_attachments",
+    "stage_invocation",
+    "staging_dir_for",
 ]
 
 #: How long a `session list` call is given. Metadata, not a model call -- bounded well below
 #: the review timeout.
 SESSION_LIST_TIMEOUT_SEC: Final = 60
+
+#: The largest ``timeout_sec`` the reviewer will honour. Configuration is unbounded, but a
+#: reviewer deadline past this is not a deadline -- the hook that launched it, and the session
+#: around it, are long gone. Clamping here is what keeps :data:`_MAX_LEASE_SEC` derivable: an
+#: unbounded ``timeout_sec`` makes the largest *legitimate* lease unbounded too, and then no
+#: honest ceiling on a stored lease exists at all (see :func:`_timeout_sec`).
+MAX_TIMEOUT_SEC: Final = 6 * 60 * 60
+
+#: How long one bundle ``git diff`` is given. Much larger than `gitsnap.GIT_TIMEOUT_SEC`,
+#: because this one genuinely does work proportional to the tree, and unlike the metadata
+#: calls it is the attachment itself -- but still finite: it runs inside the active-review
+#: lease (`_active_review_reclaim_after`), and an unbounded step there is a lease that can
+#: expire while its owner is still legitimately running. It is also the step a repository can
+#: most easily make slow on purpose, through a `diff.external` or textconv driver its own
+#: config names.
+GIT_DIFF_TIMEOUT_SEC: Final = 300
+
+#: The allowance `_active_review_reclaim_after` sets aside for `build_bundle`'s own metadata
+#: git calls -- the `log`, the `--stat`, the `--name-only` and the `checked_tree`
+#: `rev-parse`s. Deliberately a flat budget rather than an exact count times
+#: `gitsnap.GIT_TIMEOUT_SEC`: the claim is *renewed* once the bundle is built
+#: (`_renew_active_review`), so this number only has to be generous, never precise, and a
+#: future call added to the bundle path does not silently invalidate the lease.
+BUNDLE_GIT_BUDGET_SEC: Final = 600
 
 #: A canonical OpenCode session id. Matched before a stored or listed id is ever compared,
 #: joined, or shown to a reviewer -- see `_pointer_structurally_usable` and `capture_session`.
@@ -133,6 +175,50 @@ PLAN_REVISION_DIFF_INPUT_CEILING: Final = PLAN_REVISION_DIFF_BYTES * 2
 
 #: ``verify_cmd`` runs under its own fixed ceiling, unrelated to the review timeout.
 VERIFY_TIMEOUT_SEC: Final = 600
+
+#: Flat slack the lease carries for everything neither of its two stretches bounds -- staging,
+#: the transactions either side, the SIGTERM-to-SIGKILL grace each invocation may pay
+#: (:data:`KILL_GRACE_SEC`), and the session-list call `_settle_pointer` can make *between*
+#: the primary invocation and the cold confirmation. That last one is why this is not simply
+#: 60: the two model calls are not back to back, and a window sized as though they were
+#: expires while its owner is still legitimately between them.
+_LEASE_SLACK_SEC: Final = SESSION_LIST_TIMEOUT_SEC + 120
+
+#: The "building" stretch of the lease: everything `build_bundle` and `session_ref` do before
+#: the first model call. Each step separately bounded -- see `_active_review_reclaim_after`.
+_BUILDING_BUDGET_SEC: Final = SESSION_LIST_TIMEOUT_SEC + VERIFY_TIMEOUT_SEC + 2 * GIT_DIFF_TIMEOUT_SEC + BUNDLE_GIT_BUDGET_SEC
+
+
+def _invoking_budget(timeout_sec: int) -> int:
+    """The "invoking" stretch: the primary invocation and the cold confirmation, back to back."""
+    return 2 * timeout_sec
+
+
+def _timeout_sec(config: Config) -> int:
+    """``timeout_sec``, clamped to :data:`MAX_TIMEOUT_SEC`.
+
+    Every reader of ``timeout_sec`` goes through here, so the value the reviewer is actually
+    bounded by and the value the lease is sized from can never disagree. The clamp is what
+    makes :data:`_MAX_LEASE_SEC` an honest ceiling: without it a large enough configured
+    timeout produces a *legitimate* lease above any fixed ceiling, `_claim_is_live` reads that
+    lease as tampered, falls back to the observer's own window -- and the claim is
+    observer-relative again, which is the whole thing recording it was meant to stop.
+    """
+    configured = config.as_int("timeout_sec")
+    if configured > MAX_TIMEOUT_SEC:
+        log(f"timeout_sec {configured} is above the {MAX_TIMEOUT_SEC}s ceiling; using {MAX_TIMEOUT_SEC}")
+        return MAX_TIMEOUT_SEC
+    return configured
+
+
+#: Ceiling on a claim's own recorded ``lease_sec`` -- **derived from the formula it bounds**,
+#: not chosen. The lease is written by its owner so no later observer can reinterpret it
+#: (`_claim_is_live`), but it travels through ``state.json``, which is not a trust boundary, so
+#: an unbounded stored lease would let a tampered claim pin a label against every future review
+#: indefinitely. Being exactly the largest lease `_active_review_reclaim_after` can legitimately
+#: produce, this rejects tampered values without ever rejecting a real one -- the failure mode a
+#: hand-picked constant had, where a big-but-legal `timeout_sec` fell through to the fallback.
+_MAX_LEASE_SEC: Final = max(_BUILDING_BUDGET_SEC, _invoking_budget(MAX_TIMEOUT_SEC)) + _LEASE_SLACK_SEC
 VERIFY_TAIL_BYTES: Final = 200000
 
 #: How long a timed-out process group gets to honour SIGTERM before SIGKILL follows.
@@ -315,12 +401,27 @@ class Invocation:
     a cold confirmation is always ``capture=False``, and so is a fresh run reached because the
     real pointer was claimed by a live owner elsewhere. See ``session_ref``.
 
-    ``attach_context`` is true for every ordinary run and false for a cold confirmation: the
-    ``context/`` attachments (``NNN-prior-rounds.txt``) are model-derived text, and the cold
-    invocation -- the one whose whole purpose is to judge gate-generated evidence with no
-    model-influenced context -- receives none of it, inline or by path. ``cold`` narrows the
-    permission document to this one bundle rather than the whole bundles root (defence in
-    depth behind the same point). See ``permission`` and the module docstring.
+    ``attachments`` is the complete, ordered ``-f`` list this invocation was launched with --
+    staged copies, not the bundle's own stable paths (:func:`stage_attachments`) -- and
+    ``context_files`` is the subset of it that is model-derived. They answer two different
+    questions and both are stored: the first is what the argv is built from, the second is
+    what ``execute`` gates its cold confirmation on.
+
+    ``context_files`` is **the** record of which model-derived ``context/`` attachments this
+    invocation was given (``NNN-prior-rounds.txt``), and it is deliberately a stored tuple
+    rather than something re-derived from the filesystem when a caller needs to know. Two
+    things read it -- the argv built here, and ``execute``'s decision to cold-confirm an
+    approval -- and they must not be able to disagree. Re-listing ``context/`` at the second
+    of those was a real hole: the file is written before ``invoke`` and read again after it,
+    so a ``context/`` entry unlinked while the reviewer ran made the second listing empty, and
+    an approval that genuinely *had* been shown model-authored prose skipped its cold
+    confirmation. What was attached is a property of the invocation, fixed the moment its argv
+    was built; recording it is what makes it immutable. Empty for a cold confirmation, which
+    receives none of it, inline or by path.
+
+    ``cold`` narrows the permission document to this one bundle rather than the whole bundles
+    root (defence in depth behind the same point). See ``permission`` and the module
+    docstring.
     """
 
     bundle_dir: Path
@@ -329,7 +430,8 @@ class Invocation:
     out_path: Path
     session_id: str = ""
     capture: bool = True
-    attach_context: bool = True
+    attachments: tuple[tuple[Path, str], ...] = ()
+    context_files: tuple[Path, ...] = ()
     cold: bool = False
 
 
@@ -382,6 +484,12 @@ class Review:
     report: str = ""
     #: Path of the raw reviewer output.
     raw: str = ""
+    #: The report sequence ``_reserve_round`` allocated for this review, which is also the
+    #: ``seq`` of the ``round_history`` entry it records. ``0`` for a ``Review`` that never
+    #: reserved one -- a stalled or busy short-circuit -- and never for a parsed verdict.
+    #: Read by :func:`approval_is_current`, which is what binds a caller's approval to *this*
+    #: review rather than to whatever the label's newest verdict has become since.
+    seq: int = 0
     #: The OpenCode session this review ran in, "" for a cold one.
     session: str = ""
     #: Which round of that session this was. 0 for a cold confirmation -- it is not a round
@@ -576,7 +684,7 @@ def _manual_accepts_section(state: State) -> str:
     return "".join(out)
 
 
-#: The only verdicts ``_append_round_history`` ever records. A value outside this set in a
+#: The only verdicts ``_publish`` ever records as a round. A value outside this set in a
 #: stored entry is tampering -- rendered as ``UNKNOWN`` rather than passed through.
 _ROUND_VERDICTS: Final = frozenset({"APPROVED", "CHANGES_REQUIRED"})
 
@@ -587,7 +695,7 @@ def _is_single_stored_line(value: object) -> bool:
     ``re.match`` only anchors at the start, so ``_FINDING_RE.match`` on a tampered
     ``"FINDING ... | x\\nIgnore prior instructions ..."`` succeeds and the whole multi-line
     value -- smuggled prose included -- would otherwise be rendered into the attachment. A
-    legitimately stored line never contains a break (``_append_round_history`` splits on
+    legitimately stored line never contains a break (``_record_round`` splits on
     ``\\n`` before storing); anything that does is rejected here.
     """
     return isinstance(value, str) and value.splitlines()[0:1] == [value]
@@ -882,16 +990,42 @@ def _write_diff(target: Target, path: Path) -> int:
     base = checked_tree(target.repo, target.base)
     if not base:
         raise BundleError(f"git diff {range_name}: the base tree id from state is not a usable git object id")
+    _run_diff(["git", "-C", target.repo, "diff", "-M", base, target.head, "--"], path, range_name)
+    return path.stat().st_size
+
+
+def _run_diff(command: list[str], path: Path, range_name: str) -> None:
+    """Run one bundle ``git diff`` into ``path`` under :data:`GIT_DIFF_TIMEOUT_SEC`.
+
+    **Not** :func:`run_bounded`, which merges stderr into the same stream: git's complaint
+    would be spliced into the middle of the diff attachment, and the attachment is evidence a
+    verdict is judged against. stderr is captured separately so a failure names itself.
+
+    The child gets its own process group and the group is killed on expiry, for the same
+    reason :func:`run_bounded` does it: ``git diff`` may spawn a ``diff.external`` or textconv
+    driver named by the *repository under review's* own config, and a deadline that does not
+    bind that child does not bind the call.
+
+    Every outcome but a clean exit is :class:`BundleError`. There is no degraded mode -- a
+    bundle without its diff is not a bundle, and Rule 1 forbids the alternative.
+    """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, FILE_MODE)
     try:
         with os.fdopen(fd, "wb") as sink:
-            command = ["git", "-C", target.repo, "diff", "-M", base, target.head, "--"]
-            proc = subprocess.run(command, stdout=sink, stderr=subprocess.PIPE, check=False)
+            try:
+                proc = subprocess.Popen(command, stdout=sink, stderr=subprocess.PIPE, start_new_session=True)
+            except OSError as exc:
+                raise BundleError(f"git diff {range_name} could not be run: {exc}") from exc
+            try:
+                _stdout, stderr = proc.communicate(timeout=GIT_DIFF_TIMEOUT_SEC)
+            except subprocess.TimeoutExpired as exc:
+                _kill_group(proc)
+                proc.communicate()
+                raise BundleError(f"git diff {range_name} timed out after {GIT_DIFF_TIMEOUT_SEC}s") from exc
     except OSError as exc:
         raise BundleError(f"git diff {range_name} could not be run: {exc}") from exc
     if proc.returncode != 0:
-        raise BundleError(f"git diff {range_name} failed: {_decode(proc.stderr[:DIFF_ERROR_BYTES])}")
-    return path.stat().st_size
+        raise BundleError(f"git diff {range_name} failed: {_decode(stderr[:DIFF_ERROR_BYTES])}")
 
 
 def _previous_round(state: State, target: Target) -> tuple[str, int]:
@@ -939,15 +1073,7 @@ def _write_incremental_diff(repo: str, prev_tree: str, head: str, path: Path) ->
     with ``--`` so neither tree id can be read as an option.
     """
     range_name = f"{prev_tree}..{head}"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, FILE_MODE)
-    try:
-        with os.fdopen(fd, "wb") as sink:
-            command = ["git", "-C", repo, "diff", "-M", prev_tree, head, "--"]
-            proc = subprocess.run(command, stdout=sink, stderr=subprocess.PIPE, check=False)
-    except OSError as exc:
-        raise BundleError(f"git diff {range_name} could not be run: {exc}") from exc
-    if proc.returncode != 0:
-        raise BundleError(f"git diff {range_name} failed: {_decode(proc.stderr[:DIFF_ERROR_BYTES])}")
+    _run_diff(["git", "-C", repo, "diff", "-M", prev_tree, head, "--"], path, range_name)
     return path.stat().st_size
 
 
@@ -958,6 +1084,13 @@ def _run_verify(repo: str, command: str, dest: Path) -> None:
     repository under review -- and it is run through a login shell, as the shell original
     did. It is evidence for the reviewer, not a gate: nothing here can approve anything, and
     the code it runs is code the user already agreed to have in their worktree.
+
+    **``reap_group=True``, because this is the one command the gate runs on someone else's
+    behalf.** It executes with the gate's privileges, so anything it leaves running keeps write
+    access to the state root that ``pretool`` denies every tool call -- and the evidence it
+    could reach is the evidence a verdict is formed on. Killing the group on the way out closes
+    the ordinary backgrounding case; ``build_bundle`` brackets the call with hashes for what it
+    does while it runs. See ``docs/security.md`` for what remains after both.
     """
     raw_path = dest / "verify.raw"
     # One file for both streams, as the shell's `>raw 2>&1` did: a build's errors are only
@@ -966,7 +1099,7 @@ def _run_verify(repo: str, command: str, dest: Path) -> None:
     fd = os.open(raw_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, FILE_MODE)
     try:
         with os.fdopen(fd, "wb") as sink:
-            status = run_bounded(["bash", "-lc", command], stdout=sink, timeout_sec=VERIFY_TIMEOUT_SEC, cwd=repo)
+            status = run_bounded(["bash", "-lc", command], stdout=sink, timeout_sec=VERIFY_TIMEOUT_SEC, cwd=repo, reap_group=True)
         with raw_path.open("rb") as handle:
             handle.seek(max(0, raw_path.stat().st_size - VERIFY_TAIL_BYTES))
             tail = handle.read()
@@ -977,7 +1110,7 @@ def _run_verify(repo: str, command: str, dest: Path) -> None:
 
 def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evidence per param; bundling them would be an artificial object
     target: Target, dest: Path, *, state: State, config: Config, warnings: str = "", round_number: int = 0
-) -> None:
+) -> str:
     """Assemble everything the reviewer is shown, under ``dest``.
 
     Raises :class:`BundleTooLarge` past ``hard_diff_ceiling``, :class:`PlanEvidenceCorrupted`
@@ -989,6 +1122,10 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
     bundle says nothing about rounds, since it is not part of any session). Bundle content is
     otherwise identical for a continued and a cold call, which is what lets the cold
     confirmation reuse this same bundle rather than building a second one.
+
+    Answers the SHA-256 of the ``manifest`` it writes last (:func:`_write_manifest`) -- the
+    caller records that digest outside this directory, and every later read of the bundle is
+    checked against it.
     """
     shutil.rmtree(dest, ignore_errors=True)
     ensure_private_dir(dest, root=state_root())
@@ -1071,26 +1208,187 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
     total = _write_chunks(dest, diff, config.as_int("chunk_diff_bytes"))
     diff_file.unlink(missing_ok=True)
 
+    _write_private(dest / "chunks", _encode(str(total)))
+
+    # **Sealed before `verify_cmd` runs, and re-checked after.** `verify_cmd` is
+    # repository-controlled configuration executed through a login shell (`_run_verify`), so it
+    # is the one piece of attacker-authored code that runs inside the gate's own process tree
+    # -- with the gate's privileges, and therefore with write access to the state root that
+    # `pretool` denies every *tool* call. Hashing the evidence after it had run would have the
+    # manifest bless whatever it left behind: a `verify_cmd` that overwrites `changes.00.diff`
+    # with benign bytes gets a reviewer that approves the benign version while the tree it is
+    # approving still holds the real change. Hashing first turns that from a silent substitution
+    # into a hard failure.
+    rows = _hashed_rows(_manifest_rows(dest, state.act_dir, total=total, revisions=len(revisions)))
+
     verify_cmd = config.as_str("verify_cmd")
     if verify_cmd:
         _run_verify(target.repo, verify_cmd, dest)
+        _confirm_evidence_unchanged(rows)
+        # `verify.txt` is `verify_cmd`'s *own output*, so it can only be hashed now -- and it is
+        # disclosed to the reviewer as exactly that. Appended without re-reading anything above
+        # it: rehashing the sealed rows here would hand back the window that was just closed.
+        rows.append(_hashed_row(("bundle", "verify.txt", dest / "verify.txt")))
 
-    _write_private(dest / "chunks", _encode(str(total)))
+    return _write_manifest(dest, rows)
+
+
+#: One manifest row: ``<sha256>  <kind>  <name>``. ``kind`` is ``bundle`` or ``context``, which
+#: is what decides the directory -- ``name`` is always a single safe component, never a path,
+#: so a manifest cannot name anything outside the two directories the gate writes.
+_MANIFEST_ROW_RE: Final = re.compile(r"^([0-9a-f]{64})  (bundle|context)  ([^\s/]+)$")
+
+
+#: One attachment as the manifest records it: ``(kind, name, path, sha256)``. ``kind`` is
+#: ``bundle`` or ``context`` and decides the directory; ``name`` is always a single safe
+#: component.
+type _Row = tuple[str, str, Path, str]
+
+
+def _manifest_rows(dest: Path, act_dir: Path, *, total: int, revisions: int) -> list[tuple[str, str, Path]]:
+    """``(kind, name, path)`` for the canonical evidence, in the order the reviewer sees it.
+
+    The single place attachment *order* is decided. **``verify.txt`` is deliberately absent**:
+    it does not exist yet when these rows are hashed, because it is ``verify_cmd``'s own
+    output and ``verify_cmd`` is exactly the untrusted step the sealing exists to bracket.
+    :func:`build_bundle` appends its row afterwards, which is also what keeps it last -- after
+    the ``context/`` files, the order the reviewer has always been shown them in.
+    """
+    rows: list[tuple[str, str, Path]] = [("bundle", "range.txt", dest / "range.txt")]
+    rows += [("bundle", f"changes.{index:02d}.diff", dest / f"changes.{index:02d}.diff") for index in range(total)]
+    incremental = dest / "incremental.diff"
+    if incremental.is_file():
+        rows.append(("bundle", "incremental.diff", incremental))
+    rows += [("bundle", f"plan.rev{index}.md", dest / f"plan.rev{index}.md") for index in range(revisions)]
+    context = act_dir / "context" / f"{dest.name}-prior-rounds.txt"
+    if context.is_file():
+        rows.append(("context", context.name, context))
+    return rows
+
+
+def _hashed_row(row: tuple[str, str, Path]) -> _Row:
+    """One row with the SHA-256 of the bytes currently at its path.
+
+    Read through :func:`ocrl.atomic.read_verified_file`, not ``read_bytes``: the point of
+    hashing is to pin what is *there*, and a path that has become a symlink since it was
+    written is not a file whose hash means anything.
+    """
+    kind, name, path = row
+    data = read_verified_file(path, root=state_root())
+    if data is None:
+        raise BundleError(f"the bundle attachment {path} could not be read back as a regular file inside the state root")
+    return (kind, name, path, hashlib.sha256(data).hexdigest())
+
+
+def _hashed_rows(rows: list[tuple[str, str, Path]]) -> list[_Row]:
+    return [_hashed_row(row) for row in rows]
+
+
+def _confirm_evidence_unchanged(rows: list[_Row]) -> None:
+    """Re-read every sealed row and refuse if any byte moved. Raises :class:`BundleError`.
+
+    The second half of the bracket around ``verify_cmd``. A ``verify_cmd`` that rewrites the
+    evidence is not something to record faithfully and review -- it is a repository editing
+    what the reviewer is about to judge, from inside the gate's own process. There is no
+    degraded mode: the review does not run (Rule 1).
+    """
+    for _kind, _name, path, digest in rows:
+        data = read_verified_file(path, root=state_root())
+        if data is None or hashlib.sha256(data).hexdigest() != digest:
+            raise BundleError(
+                f"the bundle attachment {path} changed while verify_cmd ran. verify_cmd comes from repository "
+                "configuration and must not be able to edit the evidence the reviewer is shown; nothing was reviewed."
+            )
+
+
+def _parse_manifest(raw: bytes) -> list[tuple[str, str, str]]:
+    """``(sha256, kind, name)`` per row, or ``[]`` if any row is not a manifest row.
+
+    All-or-nothing on purpose: a manifest with one unparseable line is not a manifest with one
+    fewer attachment, and every caller's correct response to it is to refuse the bundle.
+    """
+    rows: list[tuple[str, str, str]] = []
+    for line in _decode(raw).split("\n"):
+        if not line:
+            continue
+        match = _MANIFEST_ROW_RE.match(line)
+        if match is None:
+            return []
+        if not paths.is_safe_component(match.group(3)):
+            return []
+        rows.append((match.group(1), match.group(2), match.group(3)))
+    return rows
+
+
+def _rehash_manifest_entry(dest: Path, act_dir: Path, target_name: str, *, expected_digest: str) -> str:
+    """Update exactly one manifest row's hash, answering the manifest's new digest.
+
+    **Only for the gate's own post-build correction** (:func:`_downgrade_bundle_round`), which
+    is the single legitimate edit to a bundle after it is sealed. Rehashing *every* row -- the
+    obvious implementation -- would re-bless whatever else had changed in the meantime, which
+    is precisely the "hash after the untrusted step" mistake in a second place: a ``verify_cmd``
+    that mutated an attachment, or anything else that did, would have its work laundered by a
+    correction to an unrelated file. So every other row is carried through byte for byte and
+    only ``target_name`` is re-read.
+
+    ``expected_digest`` is re-checked here as well as by the caller, deliberately: this is the
+    function that *mints* a trusted digest, so it refuses to do so over a manifest it cannot
+    first confirm is the one this review was issued. Anything else would let a wholesale
+    replacement of the evidence and the manifest be re-signed and handed back as current.
+    """
+    raw = read_verified_file(dest / "manifest", root=state_root())
+    if raw is None or hashlib.sha256(raw).hexdigest() != expected_digest:
+        raise OSError(f"the manifest at {dest} is missing or is not the one this review was issued")
+    rows = _parse_manifest(raw)
+    if not rows:
+        raise OSError(f"the manifest at {dest} has a row that is not a manifest row")
+    lines: list[str] = []
+    seen = False
+    for digest, kind, name in rows:
+        updated = digest
+        if name == target_name:
+            path = (act_dir / "context" / name) if kind == "context" else (dest / name)
+            data = read_verified_file(path, root=state_root())
+            if data is None:
+                raise OSError(f"{path} could not be read back to update its manifest hash")
+            updated = hashlib.sha256(data).hexdigest()
+            seen = True
+        lines.append(f"{updated}  {kind}  {name}")
+    if not seen:
+        raise OSError(f"the manifest at {dest} has no row for {target_name}")
+    content = "".join(f"{line}\n" for line in lines)
+    _write_private(dest / "manifest", _encode(content))
+    return hashlib.sha256(_encode(content)).hexdigest()
+
+
+def _write_manifest(dest: Path, rows: list[_Row]) -> str:
+    """Write ``manifest`` from already-hashed rows and answer its own SHA-256.
+
+    **This is what makes the attachment set evidence rather than a directory listing.** Before
+    it existed the reviewer's attachments were whatever the bundle directory happened to
+    contain at staging time, so anyone able to write there could rewrite ``chunks`` to a
+    smaller number and delete the rest, swap a diff's *content* for benign regular bytes, or
+    drop the trailing revisions -- and every one of those produced a perfectly well-formed,
+    shorter attachment list that the reviewer then judged. No symlink required; the checks in
+    place caught only the shapes, never the content.
+
+    The rows are hashed by the caller, not here, and that split is load-bearing: the canonical
+    evidence is sealed *before* ``verify_cmd`` runs and re-checked afterwards, so this function
+    never re-reads a file whose bytes might have moved in between. See :func:`build_bundle`.
+
+    The returned digest is the manifest's own, and ``execute`` records it on the active-review
+    claim -- under the activation lock, in ``state.json`` -- so verifying a bundle later means
+    checking the manifest against a digest held *outside* the directory the manifest describes.
+    Rewriting the files and the manifest together is no longer enough.
+    """
+    content = "".join(f"{digest}  {kind}  {name}\n" for kind, name, _path, digest in rows)
+    _write_private(dest / "manifest", _encode(content))
+    return hashlib.sha256(_encode(content)).hexdigest()
 
 
 # --------------------------------------------------------------------------
 # Invocation
 # --------------------------------------------------------------------------
-
-
-#: ``plan.rev<n>.md``, matched to sort attachments numerically -- lexical order would put
-#: ``plan.rev10.md`` before ``plan.rev2.md``.
-_REVISION_FILE_RE: Final = re.compile(r"plan\.rev(\d+)\.md$")
-
-
-def _revision_sort_key(path: Path) -> int:
-    match = _REVISION_FILE_RE.match(path.name)
-    return int(match.group(1)) if match else -1
 
 
 def _isolation_argv(config: Config) -> list[str]:
@@ -1122,15 +1420,137 @@ def context_attachments(bundle_dir: Path) -> list[Path]:
     (``NNN-prior-rounds.txt``); they reach OpenCode through ``-f``, which inlines the file, so
     no read permission is needed or granted and no invocation can re-open one by path. A cold
     confirmation omits them entirely -- see :class:`Invocation`.
+
+    Validated with :func:`ocrl.atomic.verified_file`, not ``Path.is_file()``. ``-f`` uploads
+    whatever the path resolves to, and the state root is not a trust boundary, so a
+    ``context/`` or ``bundles/`` component planted as a symlink would have ``is_file()`` return
+    true for an arbitrary local file and send *that* to the provider. ``verified_file`` walks
+    every component below the state root under ``O_NOFOLLOW`` and ``lstat``s the last, so
+    containment and every intermediate link are decided before the path reaches the argv.
     """
     context_dir = bundle_dir.parent.parent / "context"
     candidates = (context_dir / f"{bundle_dir.name}-prior-rounds.txt",)
-    return [path for path in candidates if path.is_file()]
+    return [path for path in candidates if verified_file(path, root=state_root())]
 
 
-def review_argv(  # noqa: PLR0913 - each arg is an independent knob of the invocation; folding them into an object would only move the count
-    repo: str, bundle_dir: Path, title: str, *, config: Config, session_id: str = "", attach_context: bool = True
-) -> list[str]:
+def bundle_manifest(bundle_dir: Path, act_dir: Path, expected_digest: str, *, include_context: bool) -> list[tuple[Path, str]] | None:
+    """The exact ``(path, sha256)`` attachments this bundle was built with, or ``None``.
+
+    **Read from the manifest ``build_bundle`` wrote, checked against a digest held outside the
+    bundle.** The directory is not consulted for *what* to attach at all -- not by glob, not by
+    existence check, not by a ``chunks`` count read back from inside it. Every one of those
+    described the directory as it stands now rather than the evidence that was generated, and
+    anyone able to write there could therefore shorten or substitute the set and have the
+    reviewer judge it: rewrite ``chunks`` and delete the surplus diffs, drop the trailing plan
+    revisions, or replace a diff's bytes outright. None of that needs a symlink, so none of it
+    was caught by checking path shapes.
+
+    ``expected_digest`` is the manifest's own SHA-256, recorded on the active-review claim in
+    ``state.json`` when the bundle was built. Checking it here is what stops a consistent
+    rewrite of both the files and the manifest: an attacker must now also reach a value held
+    under the activation lock, in the document the whole gate is already anchored to.
+
+    ``include_context=False`` drops the ``context/`` rows, which is how a cold confirmation
+    attaches the same evidence and none of the model-derived text.
+
+    Answers ``None`` on any failure -- a missing manifest, a digest mismatch, a malformed row,
+    a row naming something that is not a single safe component. The caller turns that into a
+    refusal to review; there is no degraded mode for evidence that cannot be shown to be what
+    was generated.
+    """
+    root = state_root()
+    raw = read_verified_file(bundle_dir / "manifest", root=root)
+    if raw is None or hashlib.sha256(raw).hexdigest() != expected_digest:
+        return None
+
+    rows = _parse_manifest(raw)
+    if not rows:
+        return None
+    entries: list[tuple[Path, str]] = []
+    for digest, kind, name in rows:
+        if kind == "context":
+            if not include_context:
+                continue
+            entries.append((act_dir / "context" / name, digest))
+        else:
+            entries.append((bundle_dir / name, digest))
+    return entries or None
+
+
+def stage_attachments(sources: Sequence[tuple[Path, str]], staging_dir: Path) -> list[tuple[Path, str]]:
+    """Copy each validated source into ``staging_dir``, answering ``(staged path, sha256)`` each.
+
+    The digest travels with the staged path so the launch itself can re-check it -- see
+    :func:`_confirm_staged_unchanged`.
+
+    **What this fixes, and what it does not.** ``-f`` takes a *pathname*, and OpenCode opens
+    it itself, minutes after the gate decided the path was acceptable. Two different exposures
+    live in that gap and only one of them is closable here:
+
+    - *Reading the wrong bytes.* Closed, completely. :func:`ocrl.atomic.read_verified_file`
+      reads through the same descriptor walk that validated the path, so the bytes copied out
+      are the bytes of the inode that was checked -- there is no window between the check and
+      the read. Those bytes are then checked against the SHA-256 the manifest recorded when the
+      bundle was built, so a content substitution -- which needs no symlink and passes every
+      path-shape check there is -- is caught too. A source that cannot be read, or that no
+      longer hashes to what was recorded, is a hard failure (:class:`BundleError`), never a
+      silently dropped attachment: dropping one would also shorten
+      ``Invocation.context_files`` and could talk ``execute`` out of the cold confirmation an
+      attached context requires.
+    - *Handing over a pathname that later means something else.* **Narrowed, not closed.** The
+      staged copy is written into a directory created fresh for this one invocation, with an
+      unpredictable name, immediately before the reviewer is launched. That replaces a stable,
+      long-lived, guessable path (``context/<seq>-prior-rounds.txt`` persists across the whole
+      round) with one that exists for the length of a single call. Anyone who can still write
+      into the 0700 state root can unlink the staged file and leave a symlink at its name
+      before OpenCode opens it; a random name does not stop them, since they can list the
+      directory. Genuinely closing this needs a descriptor passed to the child, which ``-f``
+      has no way to accept.
+
+    The residual is therefore the same class AGENTS.md already records under "Known
+    environment hazards": something running as the user that does not go through the gate.
+    The repository under review is *not* in that class -- ``pretool`` denies tool writes into
+    the state root outright.
+
+    A third, quieter gain: the staged bytes are the ones the gate already bounded
+    (``max_findings_bytes``), so a swap cannot turn a capped attachment into an unbounded one.
+    """
+    ensure_private_dir(staging_dir, root=state_root())
+    staged: list[tuple[Path, str]] = []
+    for source, expected_digest in sources:
+        data = read_verified_file(source, root=state_root())
+        if data is None:
+            raise BundleError(f"the attachment {source} could not be read as a regular file inside the state root; nothing was sent to the reviewer")
+        if hashlib.sha256(data).hexdigest() != expected_digest:
+            # The bytes are not the bytes `build_bundle` wrote. A content swap needs no symlink
+            # and passes every path-shape check there is, so the recorded hash is the only
+            # thing that catches it -- and a reviewer judging substituted evidence produces a
+            # verdict about something nobody asked it to review.
+            raise BundleError(
+                f"the attachment {source} no longer matches the hash recorded when the bundle was built; nothing was sent to the reviewer"
+            )
+        dest = staging_dir / source.name
+        # O_EXCL so a name already sitting there -- a leftover, or something planted in the
+        # instant since the directory was created -- is refused rather than written through.
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, FILE_MODE)
+        with os.fdopen(fd, "wb") as sink:
+            sink.write(data)
+        staged.append((dest, expected_digest))
+    return staged
+
+
+def staging_dir_for(act_dir: Path, label: str) -> Path:
+    """A fresh, unpredictable staging directory under ``context/`` for one invocation.
+
+    Under ``context/`` rather than ``bundles/``: what is staged here includes model-derived
+    text, and ``bundles/`` holds gate-generated evidence only (module docstring). The random
+    suffix is what makes the attached path short-lived and unguessable rather than stable --
+    see :func:`stage_attachments` for exactly how much that buys.
+    """
+    return act_dir / "context" / f".staged-{label}-{secrets.token_hex(8)}"
+
+
+def review_argv(repo: str, title: str, *, config: Config, session_id: str = "", attachments: Sequence[Path] = ()) -> list[str]:
     """The flags that follow the prompt.
 
     The prompt is **not** routed through here. ``-f`` is a yargs *array* option, so it keeps
@@ -1142,9 +1562,19 @@ def review_argv(  # noqa: PLR0913 - each arg is an independent knob of the invoc
     -- re-passing a newer-sequence title on a continuation would rename the row the stored id
     was matched against. See ``session_ref``.
 
-    ``attach_context`` is false for a cold confirmation only (``_confirm_cold`` builds its own
-    argv), so the invocation with no read access to model-authored text also receives none
-    inline.
+    ``attachments`` is the complete, ordered ``-f`` list, passed in and **never derived here**
+    -- not by glob, not by existence check. Two separate reasons, and both were live bugs:
+
+    - a glob attaches whatever happens to be sitting in the directory, so a planted
+      ``changes.99.diff`` symlink rode into the provider prompt. The list now comes from
+      :func:`bundle_manifest`, which is driven by the bundle's own ``chunks`` count and
+      rejects extras;
+    - "what was attached" must be **one** value, decided once. ``execute`` gates its cold
+      confirmation on whether model-derived context was among these, and a second, later
+      derivation from the filesystem could disagree with the first.
+
+    See :class:`Invocation`, which carries both this list and the subset of it that is
+    model-derived.
     """
     argv: list[str] = [*_isolation_argv(config)]
     argv += ["--dir", repo]
@@ -1156,19 +1586,8 @@ def review_argv(  # noqa: PLR0913 - each arg is an independent knob of the invoc
         argv += ["-s", session_id]
     else:
         argv += ["--title", title]
-    argv += ["-f", str(bundle_dir / "range.txt")]
-    for chunk in sorted(bundle_dir.glob("changes.*.diff")):
-        argv += ["-f", str(chunk)]
-    incremental_diff = bundle_dir / "incremental.diff"
-    if incremental_diff.is_file():
-        argv += ["-f", str(incremental_diff)]
-    for revision_file in sorted(bundle_dir.glob("plan.rev*.md"), key=_revision_sort_key):
-        argv += ["-f", str(revision_file)]
-    if attach_context:
-        for context_file in context_attachments(bundle_dir):
-            argv += ["-f", str(context_file)]
-    if (bundle_dir / "verify.txt").is_file():
-        argv += ["-f", str(bundle_dir / "verify.txt")]
+    for attachment in attachments:
+        argv += ["-f", str(attachment)]
     return argv
 
 
@@ -1249,12 +1668,26 @@ def _kill_group(proc: subprocess.Popen[bytes]) -> None:
     proc.wait()
 
 
-def run_bounded(command: list[str], *, stdout: IO[bytes], timeout_sec: int, env: dict[str, str] | None = None, cwd: str | None = None) -> int:
+def run_bounded(  # noqa: PLR0913 - each arg is an independent knob of the run; folding them into an object would only move the count
+    command: list[str], *, stdout: IO[bytes], timeout_sec: int, env: dict[str, str] | None = None, cwd: str | None = None, reap_group: bool = False
+) -> int:
     """Run ``command`` under a deadline, both streams to ``stdout``, answering its status.
 
     ``124`` on expiry and ``127`` when it cannot be started, which is what ``timeout`` and
     the shell reported. The child gets its own process group so the deadline binds its
     descendants too -- see :func:`_kill_group`.
+
+    ``reap_group`` also kills the group after a **normal** exit, and it exists for
+    ``verify_cmd`` (:func:`_run_verify`). A deadline that only binds descendants when the
+    deadline is *hit* leaves the ordinary path wide open: ``verify_cmd`` is
+    repository-controlled, so ``some-command &`` returns promptly with a child still running,
+    and that child holds the gate's own privileges -- including write access to the state root
+    -- for as long as it likes. Non-interactive ``bash`` runs without job control, so a
+    backgrounded child stays in this group and this reaps it.
+
+    **It does not reach a descendant that calls ``setsid`` for itself**, which leaves its
+    session entirely; :func:`_kill_group` documents the same limit for the timeout path. That
+    residual is real and is recorded in ``docs/security.md`` rather than papered over here.
     """
     try:
         proc = subprocess.Popen(command, stdout=stdout, stderr=subprocess.STDOUT, env=env, cwd=cwd, start_new_session=True)
@@ -1262,10 +1695,19 @@ def run_bounded(command: list[str], *, stdout: IO[bytes], timeout_sec: int, env:
         log(f"{command[0]} could not be started: {exc}")
         return 127
     try:
-        return proc.wait(timeout=timeout_sec)
+        status = proc.wait(timeout=timeout_sec)
     except subprocess.TimeoutExpired:
         _kill_group(proc)
         return 124
+    if reap_group:
+        # `start_new_session=True` makes the child a session and group leader, so its pid is
+        # the pgid. Sent immediately after the leader is reaped: the theoretical hazard is pid
+        # reuse in that window naming an unrelated group, which needs a full pid wraparound
+        # between two adjacent statements. `_kill_group`'s own caution is about a two-second
+        # grace window, which is a different order of exposure.
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    return status
 
 
 def _capture_to_file(command: list[str], env: dict[str, str], out_path: Path, timeout_sec: int) -> int:
@@ -1290,6 +1732,18 @@ def _strip_ansi(path: Path) -> None:
         _write_private(path, cleaned)
 
 
+def _confirm_staged_unchanged(attachments: Sequence[tuple[Path, str]]) -> None:
+    """Refuse if a staged attachment no longer holds the bytes it was staged with.
+
+    Raises :class:`BundleError`, which reaches the caller as an ``OP_FAILURE`` -- never a
+    review of substituted evidence.
+    """
+    for path, digest in attachments:
+        data = read_verified_file(path, root=state_root())
+        if data is None or hashlib.sha256(data).hexdigest() != digest:
+            raise BundleError(f"the staged attachment {path} changed after it was staged; nothing was sent to the reviewer")
+
+
 def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str, str] | None = None) -> None:
     """Run the reviewer, leaving its output at ``out_path``.
 
@@ -1298,19 +1752,26 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
     contract to stdout, so the loop can be exercised without spending a model call.
     """
     env = dict(os.environ if environ is None else environ)
-    timeout_sec = config.as_int("timeout_sec")
+    timeout_sec = _timeout_sec(config)
     reviewer_cmd = env.get("OCRL_REVIEWER_CMD", "")
+
+    # Re-checked here, at the latest point still inside the gate. Staging verified these bytes
+    # when it copied them, but `-f` hands OpenCode a *pathname* it opens for itself, so
+    # anything running as this user can overwrite a staged file in between -- a `verify_cmd`
+    # descendant that outlived `_run_verify` being the case that motivates it. This does not
+    # close the window (nothing that ends in a pathname can), it moves the check as close to
+    # the open as this process can get. See `stage_attachments`.
+    _confirm_staged_unchanged(run.attachments)
 
     if reviewer_cmd:
         env["OCRL_BUNDLE_DIR"] = str(run.bundle_dir)
         if run.session_id:
             env["OCRL_SESSION_ID"] = run.session_id
-        if run.attach_context:
-            context_files = context_attachments(run.bundle_dir)
-            if context_files:
-                # The stub reviewer never builds an argv, so the `-f context/…` channel the
-                # real path uses is surfaced as an env var for the selftest to read.
-                env["OCRL_CONTEXT_FILES"] = "\n".join(str(path) for path in context_files)
+        if run.context_files:
+            # The stub reviewer never builds an argv, so the `-f context/…` channel the real
+            # path uses is surfaced as an env var for the selftest to read. Read off the
+            # invocation, not re-listed from disk -- same reason `review_argv` takes it.
+            env["OCRL_CONTEXT_FILES"] = "\n".join(str(path) for path in run.context_files)
         command = [reviewer_cmd, str(run.bundle_dir), str(run.prompt_file)]
     else:
         # `$(cat …)` strips trailing newlines; the prompt is a fixed file in the plugin.
@@ -1321,7 +1782,7 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
             "opencode",
             "run",
             message,
-            *review_argv(target.repo, run.bundle_dir, run.title, config=config, session_id=run.session_id, attach_context=run.attach_context),
+            *review_argv(target.repo, run.title, config=config, session_id=run.session_id, attachments=[path for path, _digest in run.attachments]),
         ]
 
     status = _capture_to_file(command, env, run.out_path, timeout_sec)
@@ -1386,7 +1847,7 @@ def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invoc
     ``OCRL_QUESTION_FILE`` so it can read the question the real path would inline with ``-f``.
     """
     env = dict(os.environ if environ is None else environ)
-    timeout_sec = config.as_int("timeout_sec")
+    timeout_sec = _timeout_sec(config)
     reviewer_cmd = env.get("OCRL_REVIEWER_CMD", "")
 
     if reviewer_cmd:
@@ -1657,7 +2118,7 @@ def _reclaim_after(config: Config) -> int:
     the first is still talking to -- the exact interleaving the claim exists to prevent,
     arriving through a window the grace period did not account for.
     """
-    return config.as_int("timeout_sec") + VERIFY_TIMEOUT_SEC + 60
+    return _timeout_sec(config) + VERIFY_TIMEOUT_SEC + 60
 
 
 def _claim_is_live(pointer: dict[str, Any], reclaim_after: int) -> bool:
@@ -1667,7 +2128,7 @@ def _claim_is_live(pointer: dict[str, Any], reclaim_after: int) -> bool:
     they are written together and cleared together, so a half-true pair means something else
     is already wrong with it. Not live, not trusted.
 
-    ``reclaim_after`` is a caller-computed window, not derived here, because it is not the
+    ``reclaim_after`` is a caller-computed *fallback*, not derived here, because it is not the
     same window for every claim this shape is reused for: :func:`_reclaim_after` sizes it for
     the session-continuity pointer's own, shorter lifetime (released right after the primary
     invocation, well before a cold confirmation ever runs -- see ``_settle_pointer``), while
@@ -1675,12 +2136,29 @@ def _claim_is_live(pointer: dict[str, Any], reclaim_after: int) -> bool:
     the *whole* ``execute()`` call, cold confirmation included. Passing the wrong one in either
     direction would either reclaim a still-legitimate owner's slot early or hold a genuinely
     abandoned one far longer than it needs to be honoured.
+
+    **A stored ``lease_sec`` wins over that fallback, and the reason is that the window is not
+    the observer's to decide.** Both sizings are computed from ``timeout_sec``, which is
+    ordinary configuration a user or a repo file can change at any moment -- including while a
+    claim is held. Recomputing the window at each *observation* therefore lets one process
+    reinterpret another's lease: shrink ``timeout_sec`` and a second review reclaims a slot
+    whose owner is still legitimately inside the call it was sized for; grow it and an
+    abandoned claim is honoured far past anything real. Neither is a judgement an observer is
+    entitled to make. So the owner records the window it is actually relying on when it claims
+    (and again when it renews), and every later reader honours *that* number.
+
+    The fallback applies only to a claim written before this field existed; it is the old
+    behaviour, for entries that carry nothing better.
     """
     claimed_at = pointer.get("claimed_at")
     claim_id = pointer.get("claim_id")
     if not (claimed_at and claim_id):
         return False
-    return (now() - _as_int(claimed_at)) <= reclaim_after
+    stored = pointer.get("lease_sec")
+    # A tampered or absent lease falls back rather than being trusted: `state.json` is not a
+    # trust boundary, and an enormous `lease_sec` would otherwise pin a label forever.
+    window = int(stored) if isinstance(stored, int) and not isinstance(stored, bool) and 0 < stored <= _MAX_LEASE_SEC else reclaim_after
+    return (now() - _as_int(claimed_at)) <= window
 
 
 def _unique_title(state: State, target: Target, label: str) -> str:
@@ -1811,6 +2289,8 @@ def _try_claim(state: State, *, target: Target, session_id: str, config: Config)
             round_number = _as_int(current.get("round")) + 1
             current["claimed_at"] = now()
             current["claim_id"] = claimed
+            # Recorded by the owner, honoured by every later reader -- see `_claim_is_live`.
+            current["lease_sec"] = _reclaim_after(config)
             state.data["reviewer_session"] = current
     except _TransactionAborted:
         pass
@@ -1883,14 +2363,16 @@ def _reconfirm_claim(state: State, ref: SessionRef, *, config: Config) -> bool:
                 raise _TransactionAborted
             held = True
             pointer["claimed_at"] = now()
+            pointer["lease_sec"] = _reclaim_after(config)
             state.data["reviewer_session"] = pointer
     except _TransactionAborted:
         pass
     return held
 
 
-def _downgrade_bundle_round(bundle_dir: Path) -> None:
-    """Correct ``range.txt``'s ``round:`` line after a post-build fallback to a fresh review.
+def _downgrade_bundle_round(bundle_dir: Path, act_dir: Path, digest: str) -> str:
+    """Correct ``range.txt``'s ``round:`` line after a post-build fallback to a fresh review,
+    answering the bundle's manifest digest afterwards (unchanged if nothing was rewritten).
 
     Reached only when :func:`_reconfirm_claim` finds the claim already lost -- rare, and
     never a reason to fail the review over it: this is orientation text, not evidence the
@@ -1899,20 +2381,52 @@ def _downgrade_bundle_round(bundle_dir: Path) -> None:
     continuing session while the invocation that follows is cold and carries no such
     history, which is exactly the confusion the continuation paragraph in the prompt exists
     to prevent.
+
+    **The manifest has to be updated with it, but only this one row.** This is the one place
+    the gate itself edits a file after ``build_bundle`` sealed it, so leaving the manifest alone
+    would make the bundle fail its own integrity check at staging -- the correction would look
+    exactly like the tampering the hashes exist to catch. Rehashing the *whole* manifest would
+    be worse than either: a correction to ``range.txt`` would silently re-bless every other
+    attachment as it now stands, laundering anything that had changed since the seal. So
+    :func:`_rehash_manifest_entry` re-reads ``range.txt`` alone and carries every other row
+    through byte for byte.
+
+    **This function mints a new trusted digest, so it verifies before it does.** That makes it
+    the one place a corrupted bundle could be laundered into a blessed one, and both halves have
+    to be checked or it is: the manifest against the digest this review was issued, and
+    ``range.txt`` against its own recorded row. Without the first, a wholesale replacement of
+    the evidence *and* the manifest would simply be re-signed here and handed back as current.
+    Without the second, content injected into ``range.txt`` would survive the round-line
+    substitution and be rehashed as legitimate.
+
+    On any mismatch nothing is written and the **original** digest is returned unchanged, which
+    is fail-closed rather than merely cautious: the bundle no longer matches that digest, so
+    staging refuses it and the review never runs. Reporting the tampering from here would mean
+    inventing an error path for a function whose contract is "best effort, orientation only";
+    declining to bless it reaches the same refusal through the check that already exists.
     """
+    manifest_path = bundle_dir / "manifest"
+    raw = read_verified_file(manifest_path, root=state_root())
+    if raw is None or hashlib.sha256(raw).hexdigest() != digest:
+        log("range.txt: the bundle manifest does not match the digest this review was issued; not correcting or reissuing anything")
+        return digest
+
+    recorded = next((row[0] for row in _parse_manifest(raw) if row[2] == "range.txt"), "")
     path = bundle_dir / "range.txt"
-    try:
-        text = _decode(path.read_bytes())
-    except OSError as exc:
-        log(f"could not read range.txt to correct its round line: {exc}")
-        return
-    corrected = re.sub(r"(?m)^round: \d+\n", "round: 1\n", text, count=1)
-    if corrected == text:
-        return
+    data = read_verified_file(path, root=state_root())
+    if not recorded or data is None or hashlib.sha256(data).hexdigest() != recorded:
+        log("range.txt: does not match the hash recorded when the bundle was sealed; not correcting or reissuing anything")
+        return digest
+
+    corrected = re.sub(r"(?m)^round: \d+\n", "round: 1\n", _decode(data), count=1)
+    if corrected == _decode(data):
+        return digest
     try:
         _write_private(path, _encode(corrected))
+        return _rehash_manifest_entry(bundle_dir, act_dir, "range.txt", expected_digest=digest)
     except OSError as exc:
-        log(f"could not rewrite range.txt's round line: {exc}")
+        log(f"could not correct range.txt's round line and update the manifest: {exc}")
+        return digest
 
 
 @dataclass(frozen=True)
@@ -2073,13 +2587,30 @@ def _active_review_reclaim_after(config: Config) -> int:
     before ``execute`` ever returns. Reusing :func:`_reclaim_after`'s narrower window here
     would let a second, overlapping call reclaim this slot *while the first is still
     legitimately inside its own cold confirmation* -- reopening the exact race this slot
-    exists to close, through the one path built to be safe by design. The worst case this
-    covers: :data:`SESSION_LIST_TIMEOUT_SEC` (``session_ref``'s listing verify) +
-    :data:`VERIFY_TIMEOUT_SEC` (``verify_cmd``, inside ``build_bundle``) + **two** full
-    ``timeout_sec`` windows (the primary invocation and the cold confirmation), plus the same
-    flat slack :func:`_reclaim_after` carries for everything neither of those bounds.
+    exists to close, through the one path built to be safe by design.
+
+    **The window is a max, not a sum, because the claim is renewed once.** ``execute`` splits
+    into two stretches with :func:`_renew_active_review` between them, so the lease only ever
+    has to outlast the longer one, not both end to end:
+
+    - *building* -- ``session_ref``'s listing verify (:data:`SESSION_LIST_TIMEOUT_SEC`),
+      ``verify_cmd`` (:data:`VERIFY_TIMEOUT_SEC`), the two bundle diffs
+      (:data:`GIT_DIFF_TIMEOUT_SEC` each) and the bundle's metadata git calls
+      (:data:`BUNDLE_GIT_BUDGET_SEC`);
+    - *invoking* -- **two** full ``timeout_sec`` windows, the primary invocation and the cold
+      confirmation.
+
+    Summing them instead would make the lease grow without bound as either side is configured
+    up, and a lease nobody can ever reclaim is as bad as one that expires early: a crashed
+    review would hold the label hostage for the sum rather than the max.
+
+    Every step inside both stretches is separately bounded, and that is what makes this a
+    computed window rather than a guess -- an unbounded step anywhere under the lease would
+    let it expire while its owner is still legitimately running, which is precisely the race
+    the slot exists to close, arrived at from the other direction. Plus the same flat slack
+    :func:`_reclaim_after` carries for everything neither stretch bounds.
     """
-    return SESSION_LIST_TIMEOUT_SEC + VERIFY_TIMEOUT_SEC + 2 * config.as_int("timeout_sec") + 60
+    return max(_BUILDING_BUDGET_SEC, _invoking_budget(_timeout_sec(config))) + _LEASE_SLACK_SEC
 
 
 def _claim_active_review(state: State, target: Target, config: Config) -> str | None:
@@ -2120,7 +2651,13 @@ def _claim_active_review(state: State, target: Target, config: Config) -> str | 
     if current.get("generation") == generation and _claim_is_live(current, _active_review_reclaim_after(config)):
         return None
     claim_id = secrets.token_hex(8)
-    claims[target.label] = {"generation": generation, "claimed_at": now(), "claim_id": claim_id}
+    # The lease is recorded, not recomputed by whoever looks next -- see `_claim_is_live`.
+    claims[target.label] = {
+        "generation": generation,
+        "claimed_at": now(),
+        "claim_id": claim_id,
+        "lease_sec": _active_review_reclaim_after(config),
+    }
     state.data["active_review"] = claims
     return claim_id
 
@@ -2161,6 +2698,79 @@ def _release_active_review(state: State, *, claim_id: str, expected: hooks.Activ
         pass
 
 
+class _SlotLost(Exception):
+    """Raised by :func:`_require_slot` when the active-review claim is no longer ours.
+
+    A control-flow signal, not an error condition to report: every point in :func:`execute`
+    that discovers it does the same two things -- release the session pointer (which *is* still
+    ours) and hand back a transient ``OP_FAILURE`` -- so they share one handler rather than
+    repeating the pair at each check.
+    """
+
+
+def _require_slot(state: State, *, claim_id: str, expected: hooks.Activation, config: Config) -> None:
+    """Renew the active-review claim, or raise :class:`_SlotLost`.
+
+    Called at each point where the lease's clock must restart: once before the primary
+    invocation, and again before the cold confirmation. The second is not redundant -- see
+    :func:`execute`, where the reasoning about what sits between the two model calls lives.
+    """
+    if not _renew_active_review(state, claim_id=claim_id, expected=expected, config=config):
+        raise _SlotLost
+
+
+def _renew_active_review(state: State, *, claim_id: str, expected: hooks.Activation, config: Config) -> bool:
+    """Refresh this claim's ``claimed_at``, answering whether we still own the slot.
+
+    Called once, between :func:`build_bundle` and the first invocation, and it is what turns
+    :func:`_active_review_reclaim_after`'s window from a *sum* of everything ``execute`` does
+    into the *max* of its two stretches. Without it the lease would have to outlast the bundle
+    build and both model calls end to end, which either makes it enormous (a crashed review
+    holds the label hostage for the sum) or -- if it is sized for the model calls alone, as it
+    was -- lets it expire during a slow build: a second review then reclaims the slot, both
+    invoke, and both act on a verdict decided blind to the other's. That is the failure-into-
+    approval direction Rule 1 forbids, reached from the one direction the claim was supposed
+    to have closed.
+
+    **A lost slot is not recoverable here and must not be papered over.** ``False`` means
+    another review of this label genuinely holds the claim now, so this call has no business
+    invoking: :func:`execute` turns it into a ``transient`` ``OP_FAILURE`` -- the same
+    treatment :func:`_reserve_round` gives a busy slot -- and, crucially, releases *nothing*,
+    because releasing on a claim id that is no longer ours is exactly the ABA overwrite
+    :func:`_release_active_review` refuses. Renewing is deliberately not the same as
+    reclaiming; a review that has lost its turn does not get to take it back.
+
+    Fingerprint-guarded like every other write here, and matched on ``claim_id`` rather than
+    on the label alone, for the reasons :func:`_release_active_review` documents.
+    """
+    from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
+
+    held = False
+    try:
+        with state.transaction():
+            if hooks.activation(state, config) != expected:
+                # The activation moved, so this review is about to be discarded anyway. Report
+                # the slot as still ours rather than as lost: the caller's own release path,
+                # which is fingerprint-guarded too, is the one that should decide what happens
+                # next, and reporting "lost" here would suppress it.
+                held = True
+                raise _TransactionAborted
+            claims = state.data.get("active_review")
+            claims = dict(claims) if isinstance(claims, dict) else {}
+            mine = next(((key, value) for key, value in claims.items() if isinstance(value, dict) and value.get("claim_id") == claim_id), None)
+            if mine is None:
+                raise _TransactionAborted
+            label, entry = mine
+            # Renewing restates the lease as well as the clock: the owner is the authority on
+            # the window it is relying on, and this is the owner.
+            claims[label] = {**entry, "claimed_at": now(), "lease_sec": _active_review_reclaim_after(config)}
+            state.data["active_review"] = claims
+            held = True
+    except _TransactionAborted:
+        pass
+    return held
+
+
 # --------------------------------------------------------------------------
 # One full review
 # --------------------------------------------------------------------------
@@ -2193,6 +2803,14 @@ def _run_invocation(target: Target, run: Invocation, *, config: Config) -> tuple
     review.raw = str(run.out_path)
     try:
         invoke(target, run, config=config)
+    except BundleError as exc:
+        # The launch-time re-check of the staged attachments (`_confirm_staged_unchanged`)
+        # found bytes that moved after staging verified them. Nothing ran, so there is no
+        # transcript to parse and nothing to release a session claim for.
+        review.verdict = "OP_FAILURE"
+        review.error = str(exc)
+        review.kind = "bundle"
+        return review, False
     except ReviewerFailed as exc:
         review.verdict = "OP_FAILURE"
         review.error = str(exc)
@@ -2219,6 +2837,12 @@ class _ReviewRun:
     prompt_file: Path
     #: Captured once, before any slow work -- see ``execute``'s own comment on why.
     expected: hooks.Activation
+    #: The active-review claim this run holds. `_publish` proves it still owns the slot before
+    #: recording anything -- see its docstring.
+    claim_id: str = ""
+    #: SHA-256 of the ``manifest`` `build_bundle` wrote. Every read of this bundle is checked
+    #: against it, so the attachment set cannot be shortened or substituted after the fact.
+    bundle_digest: str = ""
 
 
 def _settle_pointer(rr: _ReviewRun, ref: SessionRef, *, started_ms: int, invoked: bool) -> str:
@@ -2246,15 +2870,55 @@ def _settle_pointer(rr: _ReviewRun, ref: SessionRef, *, started_ms: int, invoked
     return captured.session_id
 
 
+def stage_invocation(
+    bundle_dir: Path, act_dir: Path, expected_digest: str, staging_dir: Path, *, include_context: bool
+) -> tuple[tuple[tuple[Path, str], ...], tuple[Path, ...]]:
+    """Everything one invocation attaches, staged: ``(all attachments, the model-derived subset)``.
+
+    Composes the ordered list -- :func:`bundle_manifest`'s gate-generated evidence, then the
+    ``context/`` attachments, then ``verify.txt`` -- and copies every one of them through
+    :func:`stage_attachments`. The order is the order the reviewer has always seen them in;
+    ``verify.txt`` staying last is why :func:`bundle_manifest` does not include it.
+
+    ``include_context=False`` is the cold confirmation: it stages the same evidence and none
+    of the model-derived text, so the run whose whole purpose is to judge with no
+    model-influenced context receives none of it, inline or by path.
+
+    A bundle that does not answer :func:`bundle_manifest` is a :class:`BundleError` -- the
+    evidence a verdict would be judged against is not intact, and there is no degraded mode
+    for that (Rule 1).
+    """
+    entries = bundle_manifest(bundle_dir, act_dir, expected_digest, include_context=include_context)
+    if entries is None:
+        raise BundleError(f"the bundle at {bundle_dir} no longer matches the manifest recorded when it was built; nothing was sent to the reviewer")
+    context_dir = act_dir / "context"
+    staged = stage_attachments(entries, staging_dir)
+    context_staged = [staged[index][0] for index, (source, _digest) in enumerate(entries) if source.parent == context_dir]
+    return tuple(staged), tuple(context_staged)
+
+
 def _confirm_cold(rr: _ReviewRun, continued: Review) -> Review:
     """The cold-approval invariant: one more, session-less review of the same bundle, in
     place of ``continued`` -- with ``continued`` attached via ``.confirmed`` so the report can
     show both. See ``execute``'s own docstring.
 
-    ``attach_context=False`` and ``cold=True``: the invocation whose whole purpose is to
-    judge gate-generated evidence with no model-influenced context receives none of the
-    ``context/`` attachments (inline or by path) and gets the bundle-scoped permission.
+    ``include_context=False`` and ``cold=True``: the invocation whose whole purpose is to judge
+    gate-generated evidence with no model-influenced context receives none of the ``context/``
+    attachments (inline or by path) and gets the bundle-scoped permission.
+
+    **It stages its own copies rather than reusing the primary invocation's.** The primary's
+    staging directory is removed the moment that call returns, and re-validating the bundle
+    here is the point anyway: this is a second, independent read of the same evidence, and it
+    should be as unwilling to attach a bundle that has stopped being intact as the first was.
+    A staging failure makes the confirmation an ``OP_FAILURE``, which is not an approval --
+    the only direction Rule 1 allows when the cold check cannot be carried out.
     """
+    cold_staging = staging_dir_for(rr.state.act_dir, f"{rr.label}-cold")
+    try:
+        attachments, _context = stage_invocation(rr.bundle_dir, rr.state.act_dir, rr.bundle_digest, cold_staging, include_context=False)
+    except (BundleError, OSError) as exc:
+        return Review(verdict="OP_FAILURE", kind="bundle", error=str(exc), confirmed=continued)
+
     cold_run = Invocation(
         bundle_dir=rr.bundle_dir,
         prompt_file=rr.prompt_file,
@@ -2262,64 +2926,135 @@ def _confirm_cold(rr: _ReviewRun, continued: Review) -> Review:
         out_path=rr.raw_dir / f"{rr.label}-{rr.target.label}-cold.out",
         session_id="",
         capture=False,
-        attach_context=False,
+        attachments=attachments,
+        context_files=(),
         cold=True,
     )
-    cold, _invoked = _run_invocation(rr.target, cold_run, config=rr.config)
+    try:
+        cold, _invoked = _run_invocation(rr.target, cold_run, config=rr.config)
+    finally:
+        shutil.rmtree(cold_staging, ignore_errors=True)
     cold.confirmed = continued
     return cold
 
 
-def _activation_still_current(rr: _ReviewRun) -> bool:
-    """A fresh, lock-free read: does the activation still match ``rr.expected``?
+def _publish(rr: _ReviewRun, review: Review, *, round_number: int) -> bool:
+    """Publish everything this review still controls -- the ``round_history`` entry and the
+    stored report -- in **one** locked, fingerprint-guarded step. Answers whether a round was
+    recorded.
 
-    Best-effort. Used to skip the post-review writes into ``state.act_dir`` (the stored
-    report, and -- via :func:`_append_round_history`, which re-checks authoritatively under
-    the lock -- the ``round_history`` entry) when a cross-session ``resume`` has retired this
-    activation while the review ran. ``build_bundle`` and ``invoke`` wrote earlier and cannot
-    be unwound; this keeps everything still in the gate's hands out of the retired directory.
-    """
-    from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
+    **Why one step and not two.** These were previously a lock-free "has the activation
+    moved?" probe, then an append under the lock, then a report store outside it again, and
+    every seam between them was a window a cross-session ``resume`` could retire the
+    activation through:
 
-    probe = State(rr.state.worktree, rr.state.session)
-    return probe.load() and hooks.activation(probe, rr.config) == rr.expected
+    - retirement landing between the probe and the append aborted the append but left the
+      report being written into the retired directory anyway;
+    - retirement landing between the append and the store gave the successor a
+      ``round_history`` it inherited without the report that explains it, while the store
+      mutated the predecessor.
 
+    Both are gone by construction here: the guard, the append and the store are inside the
+    same ``state.transaction()``, which takes the same ``fcntl.flock`` a retirement takes, so
+    a retirement is either entirely before this (the fingerprint check catches it and nothing
+    is written) or entirely after it (it copies a directory holding both, or neither).
 
-def _append_round_history(rr: _ReviewRun, review: Review, *, round_number: int) -> bool:
-    """Append one ``round_history`` entry for a review that produced a parsed verdict, or
-    answer ``False`` and override ``review`` instead. Returns whether the entry was appended.
+    ``build_bundle`` and ``invoke`` wrote ``bundles/<seq>/`` and ``raw/<seq>-*`` earlier and
+    cannot be unwound -- a review holds no lock across its minutes-long run, by design
+    (AGENTS.md). This is about everything still in the gate's hands when it ends.
 
-    Called only for ``APPROVED`` / ``CHANGES_REQUIRED``. ``OP_FAILURE`` and ``NEEDS_HUMAN``
-    are not rounds -- recording them would double-count against phase 5's stall detection
-    and phase 6's retry budget. When the cold-approval invariant has already replaced a
-    continued ``APPROVED`` with a cold ``CHANGES_REQUIRED``, ``review`` is the cold one by
-    the time this runs, so the acted-on (cold) verdict is what is recorded.
+    **A round is a parsed verdict**, so only ``APPROVED`` / ``CHANGES_REQUIRED`` is recorded;
+    ``OP_FAILURE`` and ``NEEDS_HUMAN`` are not rounds, and recording them would double-count
+    against phase 5's stall detection and phase 6's retry budget. The report is stored either
+    way -- a failure's report is what a denial points the user at. When there is no round to
+    record the transaction is *aborted* rather than allowed to exit cleanly, because
+    ``State.transaction`` saves on a clean exit and there is nothing here worth rewriting
+    ``state.json`` for; the report has already been written by then, and it is a file, not
+    state. When the cold-approval invariant has already replaced an ``APPROVED`` with a cold
+    ``CHANGES_REQUIRED``, ``review`` is the cold one by the time this runs, so the acted-on
+    verdict is what is recorded *and* what the report shows.
 
-    Fingerprint-guarded like :func:`_store_captured_session`: ``rr.expected`` was captured
-    before the slow work, so a concurrent same-session ``resume --replan`` bumping
-    ``activation_generation``, or a cross-session ``resume`` retiring this activation into
-    ``RESUMED`` mid-review, must not have this entry land in a scope that has moved on. The
-    check runs inside the transaction, against the freshly reloaded document and under the
-    activation lock, so it serialises with a concurrent retirement. On a mismatch it raises
-    :class:`_TransactionAborted` rather than returning: ``State.transaction`` saves on a
-    clean exit, and a retired activation's ``state.json`` must not be rewritten at all, not
-    even a content-identical resave (AGENTS.md).
-
-    **The authoritative half of phase 5's concurrent-stall guard lives here, not before this
-    call.** :func:`execute`'s own pre-store call to :func:`_concurrent_stall_check` is a
-    lock-free, best-effort peek -- it narrows the window but cannot close it: two invocations
-    whose own reviewer calls both finish before *either* has appended anything will both pass
-    that peek, because neither's append has landed yet for the other to see. Re-running
-    :func:`_stall_review` here, on ``state`` as *this* call's own ``state.transaction()`` just
+    **The authoritative half of phase 5's concurrent-stall guard lives here.**
+    :func:`execute`'s earlier call to :func:`_concurrent_stall_check` is a lock-free,
+    best-effort peek -- it narrows the window but cannot close it: two invocations whose own
+    reviewer calls both finish before *either* has appended anything will both pass that peek,
+    because neither's append has landed yet for the other to see. Re-running
+    :func:`_stall_review` here, on ``state`` as this call's own ``state.transaction()`` just
     reloaded it, is airtight regardless of timing: ``state.transaction()`` takes the same
     ``fcntl.flock`` two genuinely concurrent processes contend for
     (``tests/unit/test_commands_races.py`` establishes that this lock really does serialise
     them), so whichever of two racing calls reaches this transaction *second* is guaranteed to
     see whatever the first one committed, however close together the two calls are timed. When
-    that fresh check finds this label already stalled, this round is not appended as an
-    ordinary one -- ``review`` is mutated in place to the fresh ``NEEDS_HUMAN`` verdict instead
-    (its ``raw``/``findings``/``session``/``round`` are left alone; only the two fields a
-    caller acts on change), and this function answers ``False``.
+    that fresh check finds this label already stalled, this round is not appended -- ``review``
+    is mutated in place to the fresh ``NEEDS_HUMAN`` verdict instead (its
+    ``raw``/``findings``/``session``/``round`` are left alone; only the two fields a caller
+    acts on change), and the report stored below shows *that* verdict.
+
+    The accepted trade-off, stated rather than left implicit: a ``report.store`` failure now
+    loses the ``round_history`` entry too, because it aborts the transaction. That is the
+    point -- the two are one publication -- and it fails in the safe direction: no round
+    recorded, so the next attempt re-reviews rather than counting a round nobody can read.
+    """
+    from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
+
+    state, target, config = rr.state, rr.target, rr.config
+    recorded = False
+    try:
+        with state.transaction():
+            if hooks.activation(state, config) != rr.expected:
+                raise _TransactionAborted
+            if not _still_owns_claim(state, rr.claim_id):
+                # The lease expired while this review ran and another one took the slot. Two
+                # reviews of this label genuinely overlapped, which is the state the claim
+                # exists to make impossible -- so this one's verdict was reached blind to the
+                # other's and must not be recorded or acted on. `OP_FAILURE`, never the
+                # verdict it happens to be holding (Rule 1: a lost race is not an approval).
+                log(f"review for {target.label}: the active-review slot moved to another review; not recording this round")
+                review.verdict = "OP_FAILURE"
+                review.kind = "transient"
+                review.error = _ACTIVE_REVIEW_LOST.format(label=target.label)
+                raise _TransactionAborted
+            record = review.verdict in _ROUND_VERDICTS
+            if record and target.is_phase:
+                stall = _stall_review(state, target, config)
+                if stall is not None:
+                    review.verdict = stall.verdict
+                    review.error = stall.error
+                    record = False
+            if record:
+                _record_round(state, rr, review, round_number=round_number)
+                recorded = True
+                if target.is_phase:
+                    # `final` has no `round_history` label of its own to oscillate on
+                    # (`_prior_rounds_section` excludes it the same way). Read here, inside the
+                    # transaction, so it sees this round's own entry -- and before the store, so
+                    # the report carries it.
+                    review.oscillating = _render_oscillating(state, target, config)
+            report.store(review, target, seq=rr.label, act_dir=state.act_dir, config=config)
+            if not record:
+                raise _TransactionAborted
+    except _TransactionAborted:
+        if not recorded:
+            log(f"review for {target.label}: no round recorded (the activation moved, this label is stalled, or this verdict is not a round)")
+    return recorded
+
+
+def _still_owns_claim(state: State, claim_id: str) -> bool:
+    """Does ``claim_id`` still hold an ``active_review`` slot? Caller holds the lock.
+
+    The lease is a *bound*, not a guarantee: every step under it is bounded, but a review that
+    is genuinely slower than the sum can still have its slot reclaimed underneath it. Renewing
+    narrows that; only asking, at the moment of the write, closes it. Matched on the id rather
+    than on "is something claimed", so the ABA sequence -- this claim expires, another review
+    takes the label, this one finally finishes -- reads as lost rather than as still-held.
+    """
+    claims = state.data.get("active_review")
+    claims = claims if isinstance(claims, dict) else {}
+    return any(isinstance(value, dict) and value.get("claim_id") == claim_id for value in claims.values())
+
+
+def _record_round(state: State, rr: _ReviewRun, review: Review, *, round_number: int) -> None:
+    """Append this round's ``round_history`` entry to ``state``. Caller holds the lock.
 
     Every stored value is either gate-derived (``rr.target``) or the gate's own recomputed
     verdict and finding lines. Finding lines are split with :func:`_records` -- ``\\n`` only,
@@ -2327,41 +3062,100 @@ def _append_round_history(rr: _ReviewRun, review: Review, *, round_number: int) 
     line separator stays the one validated record it was, not two fragments a later
     re-validation would drop.
     """
-    from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
+    target = rr.target
+    stored = state.data.get("round_history")
+    history = list(stored) if isinstance(stored, list) else []
+    history.append(
+        {
+            "seq": int(rr.label),
+            "label": target.label,
+            "phase": target.phase,
+            "generation": state.get_int("activation_generation"),
+            "round": round_number,
+            "verdict": review.verdict,
+            "tree": target.head,
+            "base": target.base,
+            "at": now(),
+            # The bundle's manifest digest travels with the round, so a *later* reader of this
+            # bundle -- `clarify`, which runs long after the claim that held it was released --
+            # has an anchor outside the directory to check it against, exactly as `execute`
+            # does while the review is live.
+            "bundle_digest": rr.bundle_digest,
+            "findings": [line for line in _records(review.all_findings) if line],
+            "supersedes": [line for line in _records(str(getattr(review, "supersedes", ""))) if line],
+        }
+    )
+    state.data["round_history"] = history
 
-    state, target, config = rr.state, rr.target, rr.config
-    try:
-        with state.transaction():
-            if hooks.activation(state, config) != rr.expected:
-                raise _TransactionAborted
-            if target.is_phase:
-                stall = _stall_review(state, target, config)
-                if stall is not None:
-                    review.verdict = stall.verdict
-                    review.error = stall.error
-                    return False
-            stored = state.data.get("round_history")
-            history = list(stored) if isinstance(stored, list) else []
-            history.append(
-                {
-                    "seq": int(rr.label),
-                    "label": target.label,
-                    "phase": target.phase,
-                    "generation": state.get_int("activation_generation"),
-                    "round": round_number,
-                    "verdict": review.verdict,
-                    "tree": target.head,
-                    "base": target.base,
-                    "at": now(),
-                    "findings": [line for line in _records(review.all_findings) if line],
-                    "supersedes": [line for line in _records(str(getattr(review, "supersedes", ""))) if line],
-                }
-            )
-            state.data["round_history"] = history
-    except _TransactionAborted:
-        log("round history: the activation moved while the review ran; not recording this round")
+
+def approval_is_current(state: State, label: str, review: Review) -> bool:
+    """Is ``review`` still the newest attempt at ``label``? Caller holds the lock.
+
+    **The active-review claim cannot answer this, because it is already released by the time a
+    caller decides.** :func:`_claim_active_review` genuinely prevents two reviews of one label
+    from *running* at once, and :func:`execute` releases it on the way out -- but the caller's
+    approval is written afterwards, in its own transaction. A review that returns ``APPROVED``
+    and is then descheduled leaves a window in which a second review of the same label claims
+    the freed slot, runs, and finishes; the first then wakes and writes its approval as though
+    nothing had happened. ``hooks.Activation`` does not catch it: neither ``round_history`` nor
+    ``review_attempts`` is one of its fields.
+
+    **The test is equality against ``review_attempts``, not "no newer round".** Recorded rounds
+    are only the attempts that produced a *parsed verdict*; an attempt that timed out, hit a
+    rate limit, broke its contract or escalated records nothing there. Comparing against
+    ``round_history`` alone therefore let a review approve whose successor had merely
+    **failed** -- the failure erased the successor from the evidence entirely, and an approval
+    landed on a label whose latest word was something else. ``review_attempts`` is written for
+    every reservation, so requiring ``review.seq`` to *equal* the label's newest attempt covers
+    all three cases at once: a newer attempt still running, a newer attempt that finished with
+    a verdict, and a newer attempt that finished with nothing to record.
+
+    That is deliberately strict: a transient failure in an overlapping review costs the
+    approving one a retry. It is the right trade. Overlapping reviews of one label are
+    supposed to be rare -- the claim exists to prevent them -- so the ordinary single-review
+    case never pays it, and the alternative is approving while the gate cannot say what the
+    newest attempt concluded. Rule 1 settles which way to be wrong.
+
+    Read under the same ``fcntl.flock`` :func:`_reserve_round` writes attempts under, so any
+    attempt reserved before this transaction opened is guaranteed to be visible here.
+
+    ``round_history`` is still consulted as **independent** evidence: ``state.json`` is not a
+    trust boundary, and a ``review_attempts`` entry that was tampered with or lost should not
+    be the only thing standing between a stale approval and the tree. Both must agree.
+
+    **Fail-closed on anything it cannot establish**, including a missing attempt record: an
+    approval that cannot show it is the newest attempt is refused. The one cost is a single
+    spurious denial for a review already in flight across an upgrade that introduced this
+    field, and the retry re-reviews and records properly.
+    """
+    if review.seq <= 0:
         return False
+    generation = state.get_int("activation_generation")
+
+    attempts = state.data.get("review_attempts")
+    attempts = attempts if isinstance(attempts, dict) else {}
+    latest = attempts.get(label)
+    if not isinstance(latest, dict) or latest.get("generation") != generation:
+        return False
+    if not _is_seq(latest.get("seq")) or latest.get("seq") != review.seq:
+        return False
+
+    for entry in state.get_array_of_dicts("round_history"):
+        if entry.get("label") != label or entry.get("generation") != generation:
+            continue
+        seq = entry.get("seq")
+        if _is_seq(seq) and int(str(seq)) > review.seq:
+            return False
     return True
+
+
+def _is_seq(value: Any) -> bool:
+    """A plain positive ``int``, the only shape a stored sequence may take.
+
+    ``state.json`` is not a trust boundary: a ``bool`` (which ``isinstance(x, int)`` accepts),
+    a string or a negative number names no attempt, and is refused rather than compared.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def _stall_summary(  # noqa: PLR0913 - one independently meaningful piece of evidence per param; bundling them would be an artificial object
@@ -2452,13 +3246,17 @@ def _stall_review(state: State, target: Target, config: Config) -> Review | None
 
 
 def _concurrent_stall_check(rr: _ReviewRun) -> Review | None:
-    """A fresh, lock-free read, mirroring :func:`_activation_still_current`: has a
-    *different*, concurrently completed review of this same label already recorded a stalling
-    round while this invocation's own ``invoke`` -- which can run for minutes -- was in
-    flight?
+    """A fresh, lock-free read: has a *different*, concurrently completed review of this same
+    label already recorded a stalling round while this invocation's own ``invoke`` -- which
+    can run for minutes -- was in flight?
+
+    Best-effort and deliberately *ahead* of the authoritative one. :func:`_publish` re-runs
+    :func:`_stall_review` under the lock and is what actually closes the race; this peek only
+    narrows the window, and it costs one unlocked read rather than contending for the
+    activation lock a concurrent review may be holding for its own publication.
 
     :func:`_reserve_round`'s pre-invoke check reads ``round_history`` as it stood *before*
-    ``invoke`` ran, and it is the only guard :func:`execute` had until this one: two
+    ``invoke`` ran, and it was the only guard :func:`execute` had until this one: two
     overlapping reviews of the same label -- the commit gate and the Stop gate's sweep, which
     genuinely do overlap -- can both read ``round_history`` before either has appended
     anything, both pass that check, and both invoke. Whichever finishes first can leave
@@ -2499,6 +3297,14 @@ def _override_if_concurrently_stalled(rr: _ReviewRun, review: Review) -> None:
 #: known, accepted rough edge until phase 6 gives transient conditions their own budget.
 _ACTIVE_REVIEW_BUSY: Final = "another review of {label} is already in progress; wait for it to finish and try again"
 
+#: The same condition arrived at from the other side: this review held the slot, took longer
+#: over its bundle than the lease allows, and another review has since taken it. Reported
+#: rather than fought over -- see `_renew_active_review`.
+_ACTIVE_REVIEW_LOST: Final = (
+    "this review of {label} took longer to build its evidence than its active-review claim lasts, "
+    "and another review has since taken the slot; nothing was invoked. Try again once that one finishes."
+)
+
 
 def _render_oscillating(state: State, target: Target, config: Config) -> str:
     """This label's ``## Oscillating points`` text, read *after* this round's own append.
@@ -2536,7 +3342,7 @@ def _reserve_round(state: State, target: Target, config: Config) -> tuple[Review
     ``target`` is already stalled, ``OP_FAILURE`` when another invocation already holds the
     slot. The claim id is "" whenever the ``Review`` is not ``None``.
 
-    Runs inside its own ``state.transaction()``, the same lock ``_append_round_history`` and
+    Runs inside its own ``state.transaction()``, the same lock ``_publish`` and
     ``_store_captured_session`` take: the stall check therefore reads the freshest possible
     ``round_history`` under it, and a not-stalled phase's sequence number and active-review
     claim are reserved atomically with that same read -- see :func:`execute`'s docstring for
@@ -2565,6 +3371,13 @@ def _reserve_round(state: State, target: Target, config: Config) -> tuple[Review
             busy.kind = "transient"
             return busy, 0, ""
         seq = state.get_int("report_seq") + 1
+        # Recorded in the same locked step as the reservation itself, for *every* attempt --
+        # this is the only place a review that goes on to fail, time out or escalate leaves a
+        # trace, and `approval_is_current` needs one. See `state.new_state_document`.
+        attempts = state.data.get("review_attempts")
+        attempts = dict(attempts) if isinstance(attempts, dict) else {}
+        attempts[target.label] = {"generation": state.get_int("activation_generation"), "seq": seq}
+        state.data["review_attempts"] = attempts
         state.update(report_seq=seq)
     return None, seq, claim_id
 
@@ -2578,10 +3391,17 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     concurrent reviews from claiming the same sequence number and overwriting each other's
     report.
 
-    **The cold-approval invariant lives here.** When the (possibly continued) round below
-    returns ``APPROVED`` and it *was* continuing a session, that verdict is never acted on
-    directly: :func:`_confirm_cold` runs one more, cold review of the same bundle, and its
-    verdict is what this function returns. See the module docstring for why.
+    **The cold-approval invariant lives here.** When the round below returns ``APPROVED`` and
+    it held any model-influenced context, that verdict is never acted on directly:
+    :func:`_confirm_cold` runs one more, cold review of the same bundle, and its verdict is
+    what this function returns. **Two things count as such context** -- a continued session
+    (``ref.session_id``) *and* a ``context/`` attachment
+    (:func:`context_attachments`, ``NNN-prior-rounds.txt``, whose finding detail is
+    unconstrained model prose). The second is not implied by the first: continuity is
+    best-effort and drops silently, while the prior-rounds attachment is written from
+    ``round_history`` regardless, so a run with ``ref.session_id == ""`` can still have been
+    shown an earlier round's prose. Gating on the session alone would let precisely those
+    runs approve on it. See the module docstring for the full argument.
 
     **Phase 5's stall check also lives here, ahead of everything else.** :func:`_stall_review`
     runs first, inside the same lock that reserves the report sequence -- both callers of this
@@ -2610,17 +3430,25 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     first, unusually slow, is still legitimately running:
 
     - :func:`_concurrent_stall_check` runs right after ``invoke`` and the cold-approval
-      override, on a fresh but **lock-free** read -- best-effort, and it is what makes the
-      *stored report* reflect the correct verdict when it fires.
-    - :func:`_append_round_history` re-runs the same check itself, **inside its own
+      override, on a fresh but **lock-free** read -- best-effort, and it only narrows the
+      window;
+    - :func:`_publish` re-runs the same check itself, **inside its own
       ``state.transaction()``**, right before it would append this round -- authoritative,
       because the lock underneath ``state.transaction()`` still serialises two calls racing to
       finalize, however close together they are timed.
 
     Either check that fires overrides ``review.verdict``/``review.error`` in place; the
     genuine invocation output (raw transcript, findings, session) is kept, only the verdict a
-    caller acts on changes. ``report.store`` runs *after* the append, deliberately, so a stored
-    report always reflects whichever verdict ends up being the one acted on.
+    caller acts on changes. ``report.store`` runs inside that same transaction, after the
+    override and after the append, so a stored report always reflects whichever verdict ends
+    up being the one acted on -- and a retirement can never land between the two writes.
+
+    **One thing this still cannot cover, and its guard lives in the callers.** The
+    active-review claim is released when this function returns, but a caller acts on the
+    verdict *after* that -- so a second review of the label can claim the freed slot, run, and
+    record a blocking round before the first caller writes its approval. ``hooks.Activation``
+    does not see that (``round_history`` is not one of its fields), so both approval paths ask
+    :func:`approval_is_current` inside their own transaction as well.
     """
     from ocrl.commands import hooks  # noqa: PLC0415 - avoids a top-level import into a hook-only module
 
@@ -2640,6 +3468,18 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     expected = hooks.activation(state, config)
     ref = session_ref(state, target, config=config)
     title = _unique_title(state, target, label)
+
+    # Built before the run record, because the run carries the bundle's manifest digest and
+    # that does not exist until the bundle does.
+    try:
+        digest = build_bundle(target, bundle_dir, state=state, config=config, warnings=warnings, round_number=ref.round)
+    except (BundleTooLarge, PlanEvidenceCorrupted) as exc:
+        _release_reservations(state, ref, claim_id=claim_id, expected=expected, config=config)
+        return Review(verdict="NEEDS_HUMAN", error=str(exc))
+    except BundleError as exc:
+        _release_reservations(state, ref, claim_id=claim_id, expected=expected, config=config)
+        return Review(verdict="OP_FAILURE", kind="bundle", error=str(exc))
+
     rr = _ReviewRun(
         target=target,
         state=state,
@@ -2650,22 +3490,36 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
         raw_dir=raw_dir,
         prompt_file=ocrl.prompt_path("reviewer-phase" if target.is_phase else "reviewer-final"),
         expected=expected,
+        claim_id=claim_id,
+        bundle_digest=digest,
     )
 
-    review = Review()
     try:
-        build_bundle(target, bundle_dir, state=state, config=config, warnings=warnings, round_number=ref.round)
-    except (BundleTooLarge, PlanEvidenceCorrupted) as exc:
-        review.verdict = "NEEDS_HUMAN"
-        review.error = str(exc)
-        _release_reservations(state, ref, claim_id=claim_id, expected=expected, config=config)
-        return review
-    except BundleError as exc:
-        review.verdict = "OP_FAILURE"
-        review.kind = "bundle"
-        review.error = str(exc)
-        _release_reservations(state, ref, claim_id=claim_id, expected=expected, config=config)
-        return review
+        return _invoke_and_confirm(rr, ref, claim_id=claim_id, expected=expected, seq=seq)
+    except _SlotLost:
+        # The session pointer is still ours to release; the active-review slot is not, and
+        # releasing a claim id someone else now holds is the ABA overwrite
+        # `_release_active_review` exists to refuse. So only the first half of
+        # `_release_reservations` runs here.
+        _release_if_claimed(state, ref, expected=expected, config=config, round_number=None)
+        return Review(verdict="OP_FAILURE", kind="transient", error=_ACTIVE_REVIEW_LOST.format(label=target.label))
+
+
+def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expected: hooks.Activation, seq: int) -> Review:
+    """Stage, invoke, settle the pointer, cold-confirm if required, and publish.
+
+    Split out of :func:`execute` so both points that can lose the active-review slot share one
+    handler there (:class:`_SlotLost`) rather than repeating the release-and-fail pair.
+    """
+    state, target, config = rr.state, rr.target, rr.config
+    bundle_dir, raw_dir, label, title = rr.bundle_dir, rr.raw_dir, rr.label, rr.title
+
+    # The active-review claim is a *lease*, and the bundle build above -- the listing verify,
+    # `verify_cmd`, two `git diff`s, the metadata git calls -- ran under it. Each of those is
+    # separately bounded, but their sum is not what the lease is sized for: it is sized for the
+    # longer of "building" and "invoking" (`_active_review_reclaim_after`), which only works if
+    # the clock is restarted here.
+    _require_slot(state, claim_id=claim_id, expected=expected, config=config)
 
     if not _reconfirm_claim(state, ref, config=config):
         # Lost between the claim and here -- building the bundle has no fixed upper bound, so
@@ -2675,8 +3529,23 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
         # round -- corrected here so the reviewer is not told it is round N of a session this
         # cold invocation carries no history of.
         log(f"session claim: lost ownership before invoking; falling back to a fresh review for {target.label}")
-        _downgrade_bundle_round(bundle_dir)
+        rr = dataclasses.replace(rr, bundle_digest=_downgrade_bundle_round(bundle_dir, state.act_dir, rr.bundle_digest))
         ref = SessionRef(session_id="", claim_id="", capturable=False, round=1)
+
+    # Listed exactly once, here, and carried on the invocation from this point on. Both the
+    # argv and the cold-confirmation decision below read `run.context_files` rather than
+    # asking the filesystem again: re-listing `context/` after `invoke` returned would let a
+    # `context/` entry unlinked mid-review turn "this round was shown model-authored prose"
+    # into "it was not", and skip the confirmation that prose is the whole reason for.
+    # Staged, not attached in place, so what `-f` names is a fresh per-invocation copy of
+    # bytes read through the descriptors that validated them -- see `stage_attachments` for
+    # what that closes and what it only narrows.
+    staging_dir = staging_dir_for(state.act_dir, label)
+    try:
+        attachments, context_files = stage_invocation(bundle_dir, state.act_dir, rr.bundle_digest, staging_dir, include_context=True)
+    except (BundleError, OSError) as exc:
+        _release_reservations(state, ref, claim_id=claim_id, expected=expected, config=config)
+        return Review(verdict="OP_FAILURE", kind="bundle", error=str(exc))
 
     run = Invocation(
         bundle_dir=bundle_dir,
@@ -2685,10 +3554,18 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
         out_path=raw_dir / f"{label}-{target.label}.out",
         session_id=ref.session_id,
         capture=(not ref.session_id) and ref.capturable,
+        attachments=attachments,
+        context_files=context_files,
     )
 
     started_ms = int(time.time() * 1000)
-    review, invoked = _run_invocation(target, run, config=config)
+    try:
+        review, invoked = _run_invocation(target, run, config=config)
+    finally:
+        # The staged copies exist only for the length of this call. `run.context_files` keeps
+        # the record of what was attached, so removing the files cannot affect the
+        # cold-confirmation decision below -- that reads the tuple, never the filesystem.
+        shutil.rmtree(staging_dir, ignore_errors=True)
     review.session = ref.session_id
     review.round = ref.round
 
@@ -2698,7 +3575,18 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
         # this round's report can name the session it just created.
         review.session = captured_id
 
-    if review.verdict == "APPROVED" and ref.session_id:
+    if review.verdict == "APPROVED" and (ref.session_id or run.context_files):
+        # A second renewal, and it is not belt-and-braces. The lease is sized for the longer of
+        # "building" and "invoking", restarted once before the primary call -- but the cold
+        # confirmation is a *second* full model call, and between the two sit the SIGTERM grace
+        # a timed-out invocation pays and `_settle_pointer`'s session-list call. Sized from the
+        # renewal before the primary invocation, that sequence can outlast its own lease, and
+        # the slot is then reclaimed while this review is still legitimately working. Restart
+        # the clock here so the confirmation runs inside a window that covers it.
+        # Losing the slot here is emphatically not "keep the APPROVED": that verdict came from
+        # an invocation shown model-influenced context, and the confirmation that would have
+        # checked it cannot be run under a claim this review no longer holds.
+        _require_slot(state, claim_id=claim_id, expected=expected, config=config)
         review = _confirm_cold(rr, review)
 
     _override_if_concurrently_stalled(rr, review)
@@ -2707,34 +3595,10 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     # `state.act_dir`; a cross-session `resume` that retired this activation while `invoke`
     # ran cannot have those unwound (a review holds no lock across its minutes-long run --
     # see AGENTS.md). What *can* still be withheld from the retired directory is everything
-    # decided here: the stored report and the `round_history` entry. Both are skipped when a
-    # fresh read shows the activation has moved -- `_append_round_history` re-checks under the
-    # lock as the authoritative guard, this probe keeps the retired directory clean in the
-    # ordinary case and orders the two writes.
-    if _activation_still_current(rr):
-        if review.verdict in ("APPROVED", "CHANGES_REQUIRED"):
-            # A round is a *parsed verdict*. Everything else -- a build failure, a contract
-            # error, an evidence ceiling -- appends nothing, which keeps phase 5's stall
-            # check and phase 6's retry budget from counting the same stuck phase twice.
-            # `appended` is False both when the activation moved and when the authoritative,
-            # in-lock recheck inside `_append_round_history` just overrode `review` to
-            # NEEDS_HUMAN -- either way there is no fresh round of *this* label's history to
-            # render an oscillating section from.
-            appended = _append_round_history(rr, review, round_number=ref.round)
-            if appended and target.is_phase:
-                # `final` has no `round_history` label of its own to oscillate on
-                # (`_prior_rounds_section` excludes it the same way).
-                review.oscillating = _render_oscillating(state, target, config)
-        # History *then* report, deliberately reversed from the shell's own order: by the time
-        # `report.store` runs, `review` already reflects whatever `_append_round_history`'s
-        # authoritative recheck may just have overridden it to, so the stored report never
-        # shows a verdict that is not the one actually acted on. The trade-off this accepts --
-        # a `report.store` failure here could in principle leave a `round_history` entry with
-        # no durable report -- is unlikely given `write_private_atomic`'s all-or-nothing
-        # rename, and a stored report that lied about the verdict was the worse failure to
-        # guard against.
-        report.store(review, target, seq=label, act_dir=state.act_dir, config=config)
-    else:
-        log(f"review for {target.label}: the activation moved after the review ran; not storing its report or recording the round")
+    # decided here: the `round_history` entry and the stored report. `_publish` writes both
+    # inside one locked, fingerprint-guarded step, so a retirement lands wholly before it
+    # (nothing is written) or wholly after it (both are there to copy) -- never between.
+    review.seq = seq
+    _publish(rr, review, round_number=ref.round)
     _release_active_review(state, claim_id=claim_id, expected=expected, config=config)
     return review

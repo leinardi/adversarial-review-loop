@@ -230,6 +230,51 @@ case "$mode" in
         fi
         printf 'Clarification, but the activation moved underneath it.\n'
         ;;
+    approve-superseded)
+        # Simulates a concurrent review of the same label finishing a *newer*, blocking round
+        # while this one is still deciding, then returns APPROVED anyway. Touches no
+        # hooks.Activation field, so the caller's fingerprint check cannot see it -- only the
+        # "is this still the newest verdict?" check inside the approval transaction can.
+        # seq 999 so it is unambiguously newer than anything this activation allocates.
+        root="${OCRL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-review-loop}"
+        sf=$(find "$root" -name state.json 2>/dev/null | head -n1)
+        if [ -n "$sf" ]; then
+            tmp=$(mktemp)
+            jq '.round_history += [{
+                "seq": 999,
+                "label": ("phase" + (.phase | tostring)),
+                "phase": .phase, "generation": .activation_generation,
+                "round": ((.round_history | length) + 1),
+                "verdict": "CHANGES_REQUIRED", "tree": "x", "base": "y",
+                "at": 0, "findings": [], "supersedes": []
+            }]' "$sf" >"$tmp" && mv "$tmp" "$sf"
+        fi
+        printf 'Nothing blocking, from where I sat.\n\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
+    approve-superseded-final)
+        # As approve-superseded, but for the `final` label -- the completion path writes
+        # COMPLETE, which disarms the gate permanently, so a stale approval landing over a
+        # newer final verdict there cannot be corrected by a later round.
+        root="${OCRL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-review-loop}"
+        sf=$(find "$root" -name state.json 2>/dev/null | head -n1)
+        if [ -n "$sf" ]; then
+            tmp=$(mktemp)
+            jq '.round_history += [{
+                "seq": 999, "label": "final",
+                "phase": .phase, "generation": .activation_generation,
+                "round": ((.round_history | length) + 1),
+                "verdict": "CHANGES_REQUIRED", "tree": "x", "base": "y",
+                "at": 0, "findings": [], "supersedes": []
+            }]' "$sf" >"$tmp" && mv "$tmp" "$sf"
+        fi
+        printf 'Nothing blocking, from where I sat.\n\n'
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
     clarify-supersede)
         # Simulates a concurrent reviewer.execute finishing a newer round while this clarify
         # runs: appends a round_history entry with the next seq, without touching any

@@ -641,6 +641,31 @@ def test_a_stale_backoff_never_blocks_a_tree_already_approved(git_repo: Path, tm
     assert "already approved" in reason
 
 
+def test_an_approval_superseded_by_a_newer_round_is_refused(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The window the active-review claim cannot cover, because it is already released.
+
+    ``reviewer.execute`` releases the claim on the way out; the approval is written afterwards,
+    in the caller's own transaction. A second review of the same label can claim the freed slot
+    and record a ``CHANGES_REQUIRED`` in that window -- and because ``round_history`` is not one
+    of ``hooks.Activation``'s fields, the fingerprint check still matches, so the stale
+    ``APPROVED`` was written straight over the newer, blocking verdict.
+
+    The stand-in reviewer plays the concurrent review's part: it appends the newer round and
+    then returns ``APPROVED``. Fails on the old code, which allowed the commit."""
+    env = armed_env(clean_env, OCRL_FAKE_MODE="approve-superseded")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    before = read_state(env, git_repo, SESSION)["approved_trees"]
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "no longer the current one" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["pending_approved_tree"] == "", "nothing may be left pending"
+    assert document["approved_trees"] == before, "and this tree must not have been marked approved either"
+
+
 def test_a_transient_failure_whose_activation_moved_first_is_not_counted(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Phase 6's fingerprint guard in ``_review_failed``. A genuinely concurrent, winning
 

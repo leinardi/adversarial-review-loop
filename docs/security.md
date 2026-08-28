@@ -149,15 +149,25 @@ OpenCode session where one can be safely found and claimed, rather than starting
 round — the `reviewer_session` pointer that makes this possible is itself a value read out of
 `state.json`, which the previous section already establishes is not a trust boundary. So the
 pointer is held to the same standard: it is never trusted to *authorize* anything. Concretely,
-**an approving verdict must come from a session whose entire content the gate created.** When
-a continued review returns `APPROVED`, the gate does not act on it — it runs one more review
-of the same bundle in a cold session (no `-s`, evidence built from git, no memory of anything
-the continued session said), and that cold review's verdict is the one that counts. The
-stricter of the two always wins.
+**an approving verdict must come from an invocation whose entire content the gate created.**
+When a review that held any model-influenced context returns `APPROVED`, the gate does not act
+on it — it runs one more review of the same bundle cold (no `-s`, no `context/` attachments,
+evidence built from git, no memory of anything the earlier round said), and that cold review's
+verdict is the one that counts. The stricter of the two always wins.
 
-What that buys: a tampered `reviewer_session.id` can make the reviewer hold extra, possibly
-misleading context and produce a verdict — but that verdict can never be an approval by
-itself. At worst it denies, which is a stronger failure mode than most of this document's
+**Two things count as model-influenced context, and gating on the session alone was a real
+hole.** A continued session (`-s`) is the obvious one. The other is a `context/` attachment:
+`NNN-prior-rounds.txt` carries earlier rounds' `FINDING` detail, which is unconstrained model
+prose, and it is attached to a *fresh* invocation just as readily as to a continued one —
+session continuity is best-effort and drops silently (a listing failure, a generation bump, a
+held claim), while the prior-rounds attachment does not. Gating the cold confirmation on `-s`
+alone therefore let exactly the rounds that *lost* continuity approve on prose an earlier round
+wrote, which is a one-hop path from a prompt-injected prior round to an approval of unreviewed
+code. `reviewer.execute` gates on either.
+
+What that buys: a tampered `reviewer_session.id`, or a tampered `round_history` rendered into
+`prior-rounds.txt`, can make the reviewer hold extra, possibly misleading context and produce a
+verdict — but that verdict can never be an approval by itself. At worst it denies, which is a stronger failure mode than most of this document's
 findings (a denial-of-service, not a wrong grant), and the user's answer to it is
 `/opencode-review-loop:accept`. Every approval in the system remains exactly as trustworthy as
 it was before continuity existed.
@@ -167,8 +177,9 @@ it is there:
 
 - **One extra model call per phase**, on the approving round only — the price of the
   invariant above. Rounds 2..n-1 of a phase that is still turning up findings are unaffected;
-  a phase that approves on its first, cold review costs exactly what it cost before continuity
-  existed.
+  a phase that approves on its *first* round costs exactly what it cost before continuity
+  existed, because a first round has neither a session to continue nor a prior round to be
+  shown. Any later approving round pays it, whether or not continuity held.
 - **Injection persistence, bounded to one phase.** A poisoned diff used to influence exactly
   one review; with continuity it can influence every remaining round of that phase, since the
   reviewer's session may hold it in context across rounds. The label-keyed reset (a new phase,
@@ -177,6 +188,112 @@ it is there:
   an approval it should not have gotten. A review loop that will not converge — whether from
   injected content or an ordinary disagreement — is exactly what
   `/opencode-review-loop:accept` exists to break out of.
+
+### What is attached to a reviewer call, and the window that cannot be closed
+
+Every path the gate hands OpenCode through `-f` is validated for containment before it reaches
+the argv: components checked, parents opened `O_NOFOLLOW` one level at a time, the leaf
+`lstat`-ed rather than `stat`-ed (`atomic.verified_file`). That refuses a planted symlink at
+any component, including the directory plant a per-file check cannot see — a symlinked
+`bundles/<seq>/` leaves ordinary regular files beneath it.
+
+**The attachment set is evidence, not a directory listing.** `build_bundle` writes a
+`manifest` last: one row per attachment, in attachment order, each carrying the SHA-256 of the
+bytes just written. Staging reads *that*, and the bundle directory is never consulted for what
+to attach — not by glob, not by existence check, not by reading a `chunks` count back out of
+it. Every one of those described the directory as it stands rather than the evidence that was
+generated, so anyone able to write there could shorten or substitute the set and have the
+reviewer judge it: rewrite `chunks` and delete the surplus diffs, drop the trailing plan
+revisions, or replace a diff's bytes outright. **None of that needs a symlink**, so none of it
+was caught by checking path shapes — which is what every earlier round of hardening here did.
+
+The manifest alone would not be enough either, since anyone who can change a file can change
+the manifest beside it. So its own SHA-256 is recorded **outside the directory it describes**:
+on the active-review claim in `state.json` while the review is live, and on the `round_history`
+entry afterwards, which is what `clarify` checks a long-since-finished bundle against. A
+consistent rewrite of files *and* manifest now also has to reach a value held under the
+activation lock.
+
+**When the hashing happens is as load-bearing as the hashing.** `verify_cmd` is
+repository-controlled configuration executed through a login shell, which makes it the one
+piece of attacker-authored code that runs inside the gate's own process tree — with the gate's
+privileges, and therefore with write access to the state root that `pretool` denies every
+*tool* call. Hashing the evidence after it had run would have the manifest certify whatever it
+left behind: a `verify_cmd` that overwrites `changes.00.diff` with benign bytes produces a
+reviewer that approves the benign version while the tree being approved still holds the real
+change. That is a complete bypass of the gate, and the hashes would have made it look verified.
+
+So the canonical evidence is sealed *before* `verify_cmd` runs and re-checked afterwards; any
+byte that moved is a hard failure, not something to record faithfully and review. Only
+`verify.txt` — `verify_cmd`'s own output, disclosed to the reviewer as exactly that — is hashed
+afterwards and appended, without re-reading anything already sealed.
+
+One legitimate edit exists — `_downgrade_bundle_round` correcting `range.txt`'s round line
+after a fallback to a fresh review — and it updates **only that row's** hash, carrying every
+other row through byte for byte. Rehashing the whole manifest there would re-bless whatever
+else had changed since the seal, which is the same "hash after the untrusted step" mistake in a
+second place. It is also the only place a *new* trusted digest is minted, so it verifies before
+minting one: the manifest against the digest this review was issued, and `range.txt` against
+its own recorded row. Without the first, a wholesale replacement of the evidence and the
+manifest would simply be re-signed and handed back as current; without the second, content
+injected into `range.txt` would survive the substitution and be rehashed as legitimate. Either
+mismatch declines to touch anything, and staging then refuses the bundle.
+
+### What `verify_cmd` can still do, and what it cannot
+
+`verify_cmd` runs with the gate's privileges, so what it leaves behind matters as much as what
+it does while running. Three layers, and the third is a genuine limit rather than a mitigation:
+
+- **While it runs**: the evidence is sealed before and re-checked after, so anything it edits
+  fails the review rather than being certified (above).
+- **On the way out**: the process group is killed after a normal exit, not only on timeout
+  (`run_bounded(reap_group=True)`). Without that, `some-command &` returns promptly with a
+  child still holding state-root write access; non-interactive bash runs without job control,
+  so a backgrounded child stays in the group and is reaped.
+- **A descendant that calls `setsid` for itself is not reached**, by that kill or by the
+  timeout path — `_kill_group` documents the same limit. Such a process can overwrite a
+  *staged* attachment after staging verified it, because `-f` hands OpenCode a pathname it
+  opens for itself. The gate re-checks every staged attachment immediately before launching
+  (`_confirm_staged_unchanged`), which moves the check as close to the open as this process can
+  get and makes a swap an `OP_FAILURE` rather than a review of substituted bytes — but it does
+  **not** close the window. An unpredictable staging path does not help either: the attacker is
+  the same user and can list the directory.
+
+Closing that last one needs the child to receive a descriptor rather than a pathname, which
+`-f` has no way to accept, or `verify_cmd` to run somewhere it cannot reach the state root at
+all — a sandbox, which this gate has no portable way to build. Until then it is a known limit
+of setting `verify_cmd` in repository config, and it sits alongside the larger one already
+recorded here: `{"ignore_globs": ["**"]}` skips the reviewer outright.
+
+Validation alone is not sufficient, because `-f` takes a *pathname* and OpenCode opens it
+itself, minutes later. Two exposures live in that gap, and only one of them is closable:
+
+- **Reading the wrong bytes — closed.** `atomic.read_verified_file` reads through the same
+  descriptor walk that validated the path, so the bytes that leave are the bytes of the inode
+  that was checked. There is no window, because the check and the read are one operation on
+  one descriptor. A source that cannot be read that way fails the review; it is never a
+  silently dropped attachment, because dropping one could also talk the gate out of the cold
+  confirmation an attached context requires.
+- **Handing over a pathname that later means something else — narrowed, not closed.** What
+  `-f` names is a staged copy in a directory created fresh for that one invocation, with an
+  unpredictable name, removed when the call returns (`reviewer.stage_attachments`). **Every**
+  attachment is staged, not only the model-derived ones: staging the smaller channel while
+  leaving the diffs the verdict is judged against on stable bundle paths would have hardened
+  the lesser half and left the evidence exposed. That
+  replaces a stable, long-lived, guessable path — `context/<seq>-prior-rounds.txt` persists
+  for the whole round — with one that exists for the length of a single call. It does not make
+  the swap impossible: anyone who can still write into the `0700` state root can unlink the
+  staged file and leave a symlink at its name, and a random name does not stop them, since
+  they can list the directory. Closing it entirely needs a descriptor passed to the child,
+  which `-f` has no way to accept.
+
+**Who is in that residual class matters, and the repository under review is not in it.**
+`pretool` denies tool writes into the state root outright, so nothing Claude does on behalf of
+the reviewed repository can reach these files. What remains is something running as the user
+that does not go through the gate — a build script, a test, an MCP server — which is the same
+class AGENTS.md already records under "Known environment hazards". A third, quieter gain from
+staging: the staged bytes are the ones the gate already bounded by `max_findings_bytes`, so a
+swap cannot turn a capped attachment into an unbounded one.
 
 ## Repo config is attacker-controlled input, full stop
 

@@ -378,6 +378,7 @@ def _build_successor_document(
         # for the same hygiene the counters above get -- carrying forward evidence of a
         # process that no longer exists is not what "carried forward like the reports" means.
         active_review={},
+        review_attempts={},
         resumed_from=identity.prev_session,
         resumed_into="",
         resume_count=int(data.get("resume_count") or 0) + 1,
@@ -671,7 +672,7 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
             # `round_history` is evidence and is left untouched. `active_review` is reset for
             # the same hygiene, even though the generation bump above already makes
             # `_claim_active_review`'s own generation check ignore any stale claim on its own.
-            state.update(transient_failures=0, retry_not_before=0, clarifications=0, active_review={})
+            state.update(transient_failures=0, retry_not_before=0, clarifications=0, active_review={}, review_attempts={})
 
             # Verified with the *checked* read, inside the transaction, so a genuine git
             # failure aborts the whole resume rather than silently skipping the warning: the

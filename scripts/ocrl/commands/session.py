@@ -304,7 +304,7 @@ def finish(argv: list[str]) -> int:
         return 1
 
     try:
-        pending.commit(reviewed=snap.tree, reason="final cumulative review approved (user-invoked finish)")
+        pending.commit(reviewed=snap.tree, reason="final cumulative review approved (user-invoked finish)", review=review)
     except commands.Refused as exc:
         sys.stdout.write(str(exc))
         return 1

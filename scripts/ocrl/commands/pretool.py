@@ -198,6 +198,14 @@ ACTIVATION_MOVED: Final = """\
 The activation is now {now}. Commit again: the gate reviews the current working state against the current activation.
 """
 
+REVIEW_SUPERSEDED: Final = """\
+opencode-review-loop: a newer review of phase {phase} finished while this approval was being \
+written, so the approving verdict this commit rests on is no longer the current one. Nothing \
+was approved and the commit is denied.
+
+Commit again: the gate acts on the newest verdict, which may require changes first.
+"""
+
 ESCALATED: Final = """\
 This escalated to NEEDS_HUMAN and is not an approval.
 
@@ -597,6 +605,35 @@ def _check_retry_backoff(hook: Hook, state: State) -> None:
         hooks.deny(hook, RETRY_BACKOFF.format(remaining=remaining))
 
 
+def _refuse_if_stale(state: State, config: Config, *, expected: hooks.Activation, phase: int, review: reviewer.Review | None) -> None:
+    """Both "is this decision still valid?" questions, asked inside ``approve()``'s own
+    transaction against the document it reloaded. Raises :class:`commands.Refused` on either.
+
+    They are separate questions and neither subsumes the other:
+
+    - the ``hooks.Activation`` fingerprint catches the activation *itself* moving -- escalated,
+      expired, stopped, re-armed, entered ``RECONCILE`` -- while the reviewer ran. Reloading
+      alone would not be enough: the write would still land, over the top of whatever the
+      activation became. That is the failure-into-approval direction Rule 1 forbids;
+    - ``reviewer.approval_is_current`` catches a *newer review of the same phase* landing in
+      the window between ``reviewer.execute`` releasing its active-review claim and this
+      transaction opening. ``round_history`` is not one of the fingerprint's fields and a
+      ``CHANGES_REQUIRED`` moves nothing else it compares, so the first check passes and a
+      stale ``APPROVED`` would be written straight over the newer, blocking verdict.
+
+    ``review is None`` on the four shortcut approvals: none of them rests on a verdict at all
+    (a byte-identical tree, an already-approved tree, an empty diff, an all-ignored diff), so
+    there is no verdict for a later one to supersede and only the first question applies.
+    """
+    from ocrl import reviewer  # noqa: PLC0415 - reached only by a commit, like `_gate_commit`'s own import
+
+    current = hooks.activation(state, config)
+    if current != expected:
+        raise commands.Refused(ACTIVATION_MOVED.format(change=hooks.describe_move(expected, current), now=current.summary))
+    if review is not None and not reviewer.approval_is_current(state, f"phase{phase}", review):
+        raise commands.Refused(REVIEW_SUPERSEDED.format(phase=phase))
+
+
 def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command: str) -> None:
     """Decide on the Bash call that would create a commit, running the review if needed."""
     from ocrl import gitsnap, report, reviewer  # noqa: PLC0415 - reached only by a commit
@@ -621,24 +658,20 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
     # an approval of something nobody asked for. See `hooks.Activation`.
     expected = hooks.activation(state, config)
 
-    def approve(message: str) -> NoReturn:
+    def approve(message: str, *, review: reviewer.Review | None = None) -> NoReturn:
         """Record the pending approval and allow the commit.
 
         ``pending_command`` is stored alongside the tree because ``confirm-commit`` will only
         let the very command that was approved consume the approval.
 
-        The activation is re-checked **inside** the transaction, against the document it
-        reloads. Reloading alone is not enough: the write would still land, so an activation
-        that escalated to ``NEEDS_HUMAN``, expired, entered ``RECONCILE``, was stopped or was
-        re-armed while the reviewer ran would have this approval written over the top of it
-        -- and the tool call allowed. That is the failure-into-approval direction Rule 1
-        forbids, so a mismatch denies instead.
+        Both staleness checks are re-run **inside** the transaction, against the document it
+        reloads -- see :func:`_refuse_if_stale` for what each one catches and why neither
+        replaces the other. ``review`` is passed on the one path where an approval rests on a
+        *verdict* rather than on evidence this function can see for itself.
         """
         try:
             with state.transaction():
-                current = hooks.activation(state, config)
-                if current != expected:
-                    raise commands.Refused(ACTIVATION_MOVED.format(change=hooks.describe_move(expected, current), now=current.summary))
+                _refuse_if_stale(state, config, expected=expected, phase=phase, review=review)
                 state.mark_tree_approved(tree)
                 state.update(
                     pending_approved_tree=tree,
@@ -681,7 +714,7 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
 
     if review.verdict == "APPROVED":
         extra = f"\nNon-blocking findings (recorded, not required):\n{review.all_findings}" if review.all_findings else ""
-        approve(f"opencode-review-loop: OpenCode approved phase {phase}.\n{extra}\nFull report: {review.report}".rstrip("\n"))
+        approve(f"opencode-review-loop: OpenCode approved phase {phase}.\n{extra}\nFull report: {review.report}".rstrip("\n"), review=review)
     if review.verdict == "CHANGES_REQUIRED":
         # No preamble: the report's own headline already says what this is, as it did in the
         # shell -- `ocrl_deny "$(ocrl_report_reason …)"`, with no `ocrl_deny_preamble`.

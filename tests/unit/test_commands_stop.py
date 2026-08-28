@@ -285,6 +285,33 @@ def test_a_generation_bump_during_the_sweep_discards_the_approval(
     assert document["approved_trees"] == approved_before, "the tree with unreviewed.txt must not have been added"
 
 
+def test_a_sweep_approval_superseded_by_a_newer_round_is_discarded(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """The sweep is the second caller that acts on a verdict after ``reviewer.execute`` has
+    already released its active-review claim, and the sweep and the commit gate genuinely do
+    overlap. ``completion.fingerprint`` no more covers ``round_history`` than
+    ``hooks.Activation`` does, so a newer review of the same phase finishing
+    ``CHANGES_REQUIRED`` in that window moves nothing either check compares -- and this
+    approval would land on top of it, marking the tree approved so a later turn skips
+    reviewing it at all.
+
+    A check written only into ``pretool`` would be bypassed here, which is what this test
+    pins. Fails on the old code, which marked the tree approved."""
+    env = armed_env(clean_env, OCRL_FAKE_MODE="approve-superseded")
+    active(git_repo, tmp_path, env)
+    approved_before = read_state(env, git_repo, SESSION)["approved_trees"]
+    (git_repo / "unreviewed.txt").write_text("never gated\n")
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "no longer the current one" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["approved_trees"] == approved_before, "the tree with unreviewed.txt must not have been added"
+
+
 def test_a_sweep_finding_the_activation_resumed_mid_review_does_not_mutate_it(
     git_repo: Path,
     tmp_path: Path,
@@ -409,6 +436,29 @@ def test_an_approving_final_review_completes_the_activation(git_repo: Path, tmp_
     document = read_state(env, git_repo, SESSION)
     assert document["status"] == "COMPLETE"
     assert document["final_done_tree"] == git(git_repo, "rev-parse", "HEAD^{tree}")
+
+
+def test_a_superseded_final_review_does_not_complete_the_activation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``COMPLETE`` is the one write that disarms the gate, and it is permanent.
+
+    ``completion.fingerprint`` covers activation identity and status transitions, not review
+    history, so a *second* final review recording ``CHANGES_REQUIRED`` while the first was
+    still deciding moves nothing it compares. Without a supersession check the first review's
+    ``APPROVED`` is written straight over the newer, blocking one -- and unlike the per-commit
+    path, there is no later round to correct it: the gate is off.
+
+    Fails on the old code, which completed and disarmed."""
+    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true", OCRL_FAKE_MODE="approve-superseded-final")
+    active(git_repo, tmp_path, env)
+    committed_phase(git_repo, env)
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "no longer the one that decides" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["status"] != "COMPLETE", "the gate must not disarm on a superseded verdict"
+    assert document["status"] == "ACTIVE"
+    assert document["final_done_tree"] == ""
 
 
 # --------------------------------------------------------------------------

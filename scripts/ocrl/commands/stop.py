@@ -27,6 +27,7 @@ from ocrl.hookio import Hook, read_hook_input
 from ocrl.state import State, pointer_read
 
 if TYPE_CHECKING:  # pragma: no cover
+    from ocrl import reviewer
     from ocrl.config import Config
     from ocrl.gitsnap import Snapshot
 
@@ -153,6 +154,12 @@ SWEEP_ACTIVATION_MOVED: Final = (
     "opencode-review-loop: the activation changed while the unreviewed-work sweep was running (a same-session resume "
     "may have changed the model, the plan or the phase list), so its approval is discarded rather than trusted. "
     "The tree stays unapproved; the next turn end will review it again, against the activation as it now stands."
+)
+
+SWEEP_SUPERSEDED: Final = (
+    "opencode-review-loop: a newer review of this phase finished while the unreviewed-work sweep's approval was "
+    "being written, so the approving verdict it rests on is no longer the current one. The tree stays unapproved; "
+    "the next turn end will act on the newest verdict, which may require changes first."
 )
 
 SWEEP_ESCALATED: Final = (
@@ -623,6 +630,7 @@ def _sweep(gate: _Gate, *, snap: Snapshot, phase: int) -> None:
             _ended(gate, peeked)
 
         moved = False
+        superseded = False
         try:
             with state.transaction():
                 status = state.effective_status(gate.config)
@@ -631,12 +639,23 @@ def _sweep(gate: _Gate, *, snap: Snapshot, phase: int) -> None:
                 now = completion.fingerprint(state, config_module.load(gate.worktree, overrides=state.data.get("overrides")))
                 if now != before:
                     moved = True
+                # The sweep and the commit gate genuinely overlap, and `reviewer.execute` has
+                # already released its active-review claim by the time this transaction opens.
+                # `completion.fingerprint` no more covers `round_history` than
+                # `hooks.Activation` does, so a newer review of this same phase finishing
+                # CHANGES_REQUIRED in that window moves nothing either check compares -- and
+                # this approval would land on top of it. Same question, same lock, as
+                # `pretool._gate_commit`'s own approval.
+                elif not reviewer.approval_is_current(state, target.label, review):
+                    superseded = True
                 else:
                     state.mark_tree_approved(snap.tree)
         except _Terminal as exc:
             _ended(gate, exc.status)
         if moved:
             _block_counted(gate, SWEEP_ACTIVATION_MOVED)
+        if superseded:
+            _block_counted(gate, SWEEP_SUPERSEDED)
         return
     if review.verdict == "CHANGES_REQUIRED":
         _block_counted(gate, report.reason(review, SWEEP_CHANGES, config=config).rstrip("\n"))
@@ -646,8 +665,14 @@ def _sweep(gate: _Gate, *, snap: Snapshot, phase: int) -> None:
     _block_counted(gate, SWEEP_FAILED.format(error=review.error))
 
 
-def _commit_or_yield_to_terminal(
-    gate: _Gate, pending: completion.Completion, *, reviewed: str, reason: str, refuse_if_review_now_required: bool = False
+def _commit_or_yield_to_terminal(  # noqa: PLR0913 - each arg is an independent knob of the completion, matching `Completion.commit`
+    gate: _Gate,
+    pending: completion.Completion,
+    *,
+    reviewed: str,
+    reason: str,
+    refuse_if_review_now_required: bool = False,
+    review: reviewer.Review | None = None,
 ) -> None:
     """Commit the pending completion, or count a block if it was refused.
 
@@ -662,7 +687,7 @@ def _commit_or_yield_to_terminal(
     placed here instead would only move the race, not close it.
     """
     try:
-        pending.commit(reviewed=reviewed, reason=reason, refuse_if_review_now_required=refuse_if_review_now_required)
+        pending.commit(reviewed=reviewed, reason=reason, refuse_if_review_now_required=refuse_if_review_now_required, review=review)
     except commands.Refused as exc:
         _block_counted(gate, str(exc).rstrip("\n"), after_completion_refusal=True)
 
@@ -698,7 +723,7 @@ def _final(gate: _Gate, pending: completion.Completion, *, snap: Snapshot, total
     review = reviewer.execute(target, state=state, config=config, warnings=snap.warnings)
 
     if review.verdict == "APPROVED":
-        _commit_or_yield_to_terminal(gate, pending, reviewed=snap.tree, reason="final cumulative review approved")
+        _commit_or_yield_to_terminal(gate, pending, reviewed=snap.tree, reason="final cumulative review approved", review=review)
         gate.hook.stop_ok(COMPLETE.format(base=base, head=snap.tree, total=total, report=review.report).rstrip("\n"))
     if review.verdict == "CHANGES_REQUIRED":
         _block_counted(gate, report.reason(review, FINAL_CHANGES, config=config).rstrip("\n"))

@@ -162,7 +162,11 @@ def test_a_cold_review_shows_no_session_line(act_dir: Path) -> None:
 
 def test_both_verdicts_are_rendered_when_a_continued_approval_was_cold_confirmed(act_dir: Path, tmp_path: Path) -> None:
     """The cold-approval invariant's report side: a reader must be able to tell the acted-on
-    verdict apart from the continued round that triggered it."""
+    verdict apart from the round that triggered it.
+
+    The heading is deliberately not "continued round": the invariant covers every round shown
+    model-influenced context, and a *fresh* round attached ``prior-rounds.txt`` is cold-confirmed
+    on exactly the same footing as a continued one (``reviewer.execute``)."""
     continued_raw = tmp_path / "continued.out"
     continued_raw.write_text("the continued round's own transcript\n")
     cold_raw = tmp_path / "cold.out"
@@ -187,7 +191,7 @@ def test_both_verdicts_are_rendered_when_a_continued_approval_was_cold_confirmed
     text = report.store(cold, a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
 
     assert "- verdict (recomputed by the gate): **CHANGES_REQUIRED**\n" in text
-    assert "## Continued round" in text
+    assert "## Round with context (not the verdict acted on)" in text
     assert "## Cold confirmation (the verdict acted on)" in text
     assert "ses_abc12345" in text
     assert "(round 3, continued)" in text
@@ -196,7 +200,7 @@ def test_both_verdicts_are_rendered_when_a_continued_approval_was_cold_confirmed
     assert "the verdict acted on" in text
     # The top-level session line is only for a single-invocation report -- the two-invocation
     # case tells the session story inside the labelled sections instead.
-    assert text.split("## Continued round")[0].count("opencode session") == 0
+    assert text.split("## Round with context (not the verdict acted on)")[0].count("opencode session") == 0
 
 
 def test_the_report_is_private(act_dir: Path) -> None:

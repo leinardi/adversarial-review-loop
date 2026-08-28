@@ -32,6 +32,7 @@ from ocrl.errors import OcrlError
 from ocrl.util import log
 
 __all__ = [
+    "GIT_TIMEOUT_SEC",
     "GitUnavailable",
     "Snapshot",
     "SnapshotError",
@@ -55,6 +56,12 @@ __all__ = [
     "submodule_warnings",
     "worktree_clean",
 ]
+
+#: How long any one ``git`` metadata call is given. Generous by design -- it is a ceiling on
+#: a hang, not a performance budget -- but finite, because several of these run inside the
+#: reviewer's active-review lease and an unbounded step there is a lease that can expire while
+#: its owner is still working. See :func:`git_run`.
+GIT_TIMEOUT_SEC: Final = 120
 
 #: Lines of ``git status --porcelain`` kept for a denial message, as ``head -n 40`` did.
 DIRTY_SUMMARY_LINES: Final = 40
@@ -119,9 +126,28 @@ def git_run(repo: str, args: Sequence[str], *, env: Mapping[str, str] | None = N
     An interpreter-level failure -- git missing entirely -- is reported as a non-zero
     result rather than raised, because that is what the shell's ``|| true`` produced and
     every caller here already treats "no output" as failure.
+
+    **Bounded by :data:`GIT_TIMEOUT_SEC`.** A git command in the gate is metadata: a
+    ``rev-parse``, a ``log``, a ``--name-only``. None of them has a legitimate reason to take
+    minutes, and some of them run *inside* a lease -- ``reviewer._claim_active_review``'s
+    active-review slot is honoured for a computed window, and an unbounded step inside that
+    window lets the lease expire while the call is still legitimately running, a second review
+    reclaim the slot, and the two race to a verdict. An expiry is reported as status ``124``,
+    the same status :func:`ocrl.reviewer.run_bounded` reports it as, and reaches callers
+    through the non-zero path they already handle -- which for every one of them means
+    denying, never approving (Rule 1).
     """
     try:
-        return subprocess.run(["git", "-C", repo, *args], capture_output=True, check=False, env=dict(env) if env is not None else None)
+        return subprocess.run(
+            ["git", "-C", repo, *args],
+            capture_output=True,
+            check=False,
+            env=dict(env) if env is not None else None,
+            timeout=GIT_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        log(f"git {' '.join(args)} timed out after {GIT_TIMEOUT_SEC}s")
+        return subprocess.CompletedProcess(args=["git", *args], returncode=124, stdout=b"", stderr=b"")
     except OSError as exc:
         log(f"git {' '.join(args)} could not be run: {exc}")
         return subprocess.CompletedProcess(args=["git", *args], returncode=127, stdout=b"", stderr=b"")

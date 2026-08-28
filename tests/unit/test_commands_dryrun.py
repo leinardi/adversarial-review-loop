@@ -34,7 +34,13 @@ def test_dry_run_prints_the_whole_invocation(git_repo: Path, tmp_path: Path, cle
     assert "--dir" in argv
     assert str(git_repo) in argv
     bundle = state_dir(env, git_repo, "s1") / "bundles" / "dry-run"
-    assert f"{bundle}/range.txt" in argv
+    # The real path attaches *staged copies*, never the bundle's own stable paths, and the
+    # whole point of this command is to print the argv a review actually builds -- so what
+    # appears here is a staged `range.txt`, not `<bundle>/range.txt`.
+    attachments = [argv[i + 1] for i, item in enumerate(argv) if item == "-f"]
+    assert any(path.endswith("/range.txt") for path in attachments)
+    assert not any(path.startswith(f"{bundle}/") for path in attachments), "the stable bundle path is not what -f names"
+    assert all("/.staged-" in path for path in attachments)
 
     prompt = ocrl.prompt_path("reviewer-phase").read_text()
     assert prompt in proc.stdout

@@ -38,7 +38,7 @@ from __future__ import annotations
 import itertools
 import re
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Any, Final
 
 from ocrl import commands, gitsnap
 from ocrl import config as config_module
@@ -46,11 +46,32 @@ from ocrl.config import Config
 from ocrl.gitsnap import SnapshotError
 from ocrl.state import State
 
+if TYPE_CHECKING:  # pragma: no cover - the Stop gate must not import the reviewer to type-check
+    from ocrl.reviewer import Review
+
 __all__ = ["Completion", "Fingerprint", "describe_change", "fingerprint", "start"]
 
 #: ``armed_at``, ``baseline_tree``, ``session_id``, stored status, effective status,
 #: ``activation_generation``.
 type Fingerprint = tuple[str, str, str, str, str, int]
+
+SUPERSEDED: Final = (
+    "opencode-review-loop: a newer final review of this activation completed, or is still running, so the approving "
+    "verdict this completion rests on is no longer the one that decides. Nothing was completed and the mode stays "
+    "armed. Let the newer review finish and act on its verdict.\n"
+)
+
+
+def _reviewer() -> Any:
+    """The reviewer module, imported on use only.
+
+    ``completion`` is reached from the Stop gate, which runs on every turn end; the reviewer
+    stack is heavy and only the two review-backed completion paths need it. Same
+    one-import-per-job rule ``pretool`` states.
+    """
+    from ocrl import reviewer  # noqa: PLC0415 - only the review-backed completion paths need it
+
+    return reviewer
 
 
 def fingerprint(state: State, config: Config) -> Fingerprint:
@@ -231,7 +252,7 @@ class Completion:
     repo: str
     before: Fingerprint
 
-    def commit(self, *, reviewed: str, reason: str, refuse_if_review_now_required: bool = False) -> None:
+    def commit(self, *, reviewed: str, reason: str, refuse_if_review_now_required: bool = False, review: Review | None = None) -> None:
         """Record ``COMPLETE``, but only if nothing invalidated the completion while it was pending.
 
         ``reviewed`` names the tree being completed, whatever put it there -- an approving
@@ -278,6 +299,20 @@ class Completion:
 
         ``_final`` never passes it -- a review it already ran satisfies whatever asking for one
         demanded, regardless of when the request landed, and it has no "skip" to re-validate.
+
+        ``review`` is the approving **final** review this completion rests on, and the two
+        callers that have one must pass it. It gets the question the fingerprint structurally
+        cannot answer: ``fingerprint`` covers activation identity and status transitions, not
+        review history, so a *second* final review of the same activation recording
+        ``CHANGES_REQUIRED`` -- or merely still running -- moves nothing it compares. Without
+        this check the first review's ``APPROVED`` is written straight over the newer,
+        blocking one, and because the write is ``COMPLETE`` the mistake is **permanent**: that
+        status disarms the gate, so there is no later round to correct it. That makes it
+        strictly worse here than on the per-commit path, where a wrong approval costs one
+        commit and the loop keeps enforcing. ``reviewer.approval_is_current`` is the same check
+        ``pretool``'s approval and the Stop sweep's already ask, against the ``final`` label.
+        ``_complete_without_review`` passes nothing, correctly: it rests on no verdict at all,
+        and ``refuse_if_review_now_required`` is what guards *that* path instead.
 
         **Every check runs with the activation lock held**, and the lock is not released
         until ``COMPLETE`` is on disk. Verifying the worktree before taking the lock leaves a
@@ -331,6 +366,11 @@ class Completion:
             now = fingerprint(state, config_module.load(repo, overrides=state.data.get("overrides")))
             if now != self.before:
                 raise commands.Refused(describe_change(self.before, now, state.get("reason")))
+
+            # Asked under this same lock, so a final round `reviewer._publish` committed -- or
+            # a claim `_reserve_round` took -- before this transaction opened is visible here.
+            if review is not None and not _reviewer().approval_is_current(state, "final", review):
+                raise commands.Refused(SUPERSEDED)
 
             try:
                 after = gitsnap.snapshot(repo)
