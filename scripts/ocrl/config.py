@@ -39,8 +39,15 @@ __all__ = [
 ]
 
 #: Every supported key, with its default.
+#:
+#: ``model`` defaults to the empty string rather than to a name, because a provider-qualified
+#: id that is meaningful to one reviewer CLI is meaningless to another: the real default is
+#: per-harness (``ocrl.harness.Harness.default_model``) and is resolved through
+#: ``ocrl.harness.model``, the one reader every command shares. An empty ``model`` therefore
+#: means "whatever this harness calls its default", never "no model".
 DEFAULTS: Final[dict[str, Any]] = {
-    "model": "openai/gpt-5.6-sol",
+    "harness": "opencode",
+    "model": "",
     "variant": "",
     "block_severity": "medium",
     "late_block_severity": "high",

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 
-from ocrl import commands, gitsnap, oscillation, planrev, report, reviewer
+from ocrl import commands, gitsnap, harness, oscillation, planrev, report, reviewer
 from ocrl.commands import completion
 from ocrl.commands.completion import Completion
 from ocrl.config import Config
@@ -152,7 +152,8 @@ transient failures:  {state.get("transient_failures")} / {config.as_int("max_tra
 {backoff_line}no-progress blocks:  {state.get("stop_blocks")} / {config.as_int("max_stop_blocks")}
 defers used:         {state.get("defers")} / {config.as_int("max_defers")}
 manual accepts:      {accepts_line}
-model:               {config.as_str("model")} {config.as_str("variant")}
+harness:             {config.as_str("harness")}
+model:               {harness.display_model(config)} {config.as_str("variant")}
 block_severity:      {config.as_str("block_severity")}
 rounds this phase:   {len(phase_history)}
 reviewer session:    {reviewer.continuity_summary(state, config)}

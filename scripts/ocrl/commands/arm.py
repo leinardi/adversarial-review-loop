@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from ocrl import commands, gitsnap, paths, planrev, reviewer_probe
+from ocrl import commands, gitsnap, harness, paths, planrev, reviewer_probe
 from ocrl import config as config_module
 from ocrl.atomic import ensure_private_dir, locked, write_private_atomic
 from ocrl.config import Config
@@ -109,13 +109,18 @@ class _Request:
 
 @dataclass(frozen=True)
 class _Flags:
-    """The four flags ``implement`` accepts, parsed but not yet semantically validated."""
+    """The flags ``implement`` accepts, parsed but not yet semantically validated."""
 
     allow_dirty: bool = False
     #: Raw ``--until`` text -- "", "0", "all" or a digit string -- resolved by ``_resolve_until``.
     until: str = ""
     #: ``None`` means "not given", distinct from an empty string: only a flag the user
-    #: actually typed may override the stored model or variant.
+    #: actually typed may override the stored harness, model or variant.
+    #:
+    #: ``harness`` is not validated here, only carried: it is checked in ``_check_reviewer``,
+    #: with the binary and the model, so "this build does not implement that" is reported
+    #: beside "that binary is not installed" rather than as a separate class of refusal.
+    harness: str | None = None
     model: str | None = None
     variant: str | None = None
 
@@ -215,7 +220,7 @@ def _parse(argv: list[str]) -> tuple[str, str, list[str]]:
 
 #: Flags accepted by ``implement``, and whether each one takes a value.
 _BOOL_FLAGS: Final = ("--allow-dirty",)
-_VALUE_FLAGS: Final = ("--until", "--model", "--variant")
+_VALUE_FLAGS: Final = ("--until", "--harness", "--model", "--variant")
 
 
 def parse_flag_tokens(tokens: list[str], *, bool_flags: tuple[str, ...], value_flags: tuple[str, ...], usage: str) -> dict[str, str | bool]:
@@ -261,10 +266,11 @@ def flag_bool(raw: dict[str, str | bool], key: str) -> bool:
 
 def _parse_flags(tokens: list[str]) -> _Flags:
     """Turn raw flag tokens into ``_Flags``. Raises ``_ArmFailure`` on the first problem."""
-    raw = parse_flag_tokens(tokens, bool_flags=_BOOL_FLAGS, value_flags=_VALUE_FLAGS, usage="--allow-dirty, --until, --model, --variant")
+    raw = parse_flag_tokens(tokens, bool_flags=_BOOL_FLAGS, value_flags=_VALUE_FLAGS, usage="--allow-dirty, --until, --harness, --model, --variant")
     return _Flags(
         allow_dirty=flag_bool(raw, "--allow-dirty"),
         until=flag_str(raw, "--until") or "",
+        harness=flag_str(raw, "--harness"),
         model=flag_str(raw, "--model"),
         variant=flag_str(raw, "--variant"),
     )
@@ -319,21 +325,38 @@ def _check_reviewer(config: Config) -> None:
     Arming with an unreachable reviewer would produce an activation whose every commit fails
     the review for an operational reason -- denials that look like findings. Better to say so
     now, while the user is watching the slash command's output.
+
+    Three checks, narrowing: the ``harness`` names something this build implements, its binary
+    is on ``PATH``, and -- only for a CLI that can enumerate them -- the model is one it
+    reports. A harness whose ``probe_models`` answers ``None`` has no model list to check
+    against, and that is not a reason to refuse: a name it does not know exits non-zero, which
+    is an ``OP_FAILURE`` that blocks, so nothing is ever approved on the strength of a model
+    that was never reached (Rule 1).
     """
-    if os.environ.get("OCRL_REVIEWER_CMD"):
-        # The test seam stands in for OpenCode entirely; probing the real binary would make
-        # the suite depend on it being installed.
-        return
-    if not paths.have("opencode"):
-        raise _ArmFailure("the `opencode` binary is not on PATH, so the review gate cannot run")
+    # Checked ahead of the test seam, and never skipped by it: the seam replaces the reviewer
+    # *command*, not the harness -- session minting, id validation and every lease are still
+    # sized from whatever `harness` names, so an unimplemented value would reach the review
+    # path anyway. This is the "hard refusal at arm time, never a silent fallback".
     try:
-        models = reviewer_probe.list_models(reviewer_probe.MODELS_PROBE_TIMEOUT)
+        implementation = harness.selected(config)
+    except harness.UnknownHarness as exc:
+        raise _ArmFailure(f"{exc}. Set `harness` in .opencode-review-loop.json or OCRL_HARNESS to one of them.") from exc
+    if os.environ.get("OCRL_REVIEWER_CMD"):
+        # The test seam stands in for the reviewer CLI entirely; probing the real binary would
+        # make the suite depend on it being installed.
+        return
+    if not paths.have(implementation.binary):
+        raise _ArmFailure(f"the `{implementation.binary}` binary is not on PATH, so the review gate cannot run")
+    try:
+        models = implementation.probe_models(reviewer_probe.MODELS_PROBE_TIMEOUT)
     except reviewer_probe.ProbeFailed as exc:
-        raise _ArmFailure(f"could not list OpenCode models ({exc}); the reviewer is unreachable") from exc
-    model = config.as_str("model")
+        raise _ArmFailure(f"could not list {implementation.name} models ({exc}); the reviewer is unreachable") from exc
+    if models is None:
+        return
+    model = harness.model(config, implementation)
     if model not in models:
         raise _ArmFailure(
-            f'the configured model "{model}" is not among the models OpenCode reports. '
+            f'the configured model "{model}" is not among the models {implementation.name} reports. '
             "Set `model` in .opencode-review-loop.json or OCRL_MODEL to one that is."
         )
 
@@ -393,12 +416,14 @@ def _record_failure(state: State, *, session: str, repo: str, reason: str, publi
 
 def _armed_message(request: _Request, frozen: _Frozen) -> str:
     # frozen.effective_config, not request.config or frozen.overrides directly: the
-    # environment can itself outrank a --model/--variant override (defaults < user < repo <
-    # overrides < env), so the override alone is not always what actually gets probed and
-    # armed with -- only the fully-resolved config is.
+    # environment can itself outrank a --harness/--model/--variant override (defaults < user <
+    # repo < overrides < env), so the override alone is not always what actually gets probed
+    # and armed with -- only the fully-resolved config is.
     config = frozen.effective_config
     variant = config.as_str("variant")
-    reviewer = f"{config.as_str('model')}{f' (variant {variant})' if variant else ''}"
+    # `_check_reviewer` has already accepted the harness by the time this runs, so resolving
+    # the model through it cannot raise here.
+    reviewer = f"{config.as_str('harness')} {harness.model(config)}{f' (variant {variant})' if variant else ''}"
     return f"""\
 **opencode-review-loop is ARMED for this worktree.**
 
@@ -424,7 +449,7 @@ Do this first, and nothing else:
        {commands.plugin_root()}/scripts/ocrl.sh set-phases --phase "…" --phase "…"
 
 After that the loop is: implement phase N -> `git add -A && git commit -m "…"`.
-The commit is intercepted, the working tree is reviewed by OpenCode, and the
+The commit is intercepted, the working tree goes to the reviewer named above, and the
 commit only proceeds when the review passes. Findings come back as a denial with
 the full list; fix them and commit again.
 
@@ -498,10 +523,35 @@ def _arm(state: State, request: _Request) -> _Frozen:
 
     # The candidate overrides are built, and the config reloaded with them applied, *before*
     # the reviewer is probed: probing the stored config would validate a model this run will
-    # not use, and pass `--model <invalid>` on the strength of a model nobody asked for.
-    overrides = {key: value for key, value in (("model", parsed.model), ("variant", parsed.variant)) if value is not None}
+    # not use, and pass `--model <invalid>` on the strength of a model nobody asked for. The
+    # same argument is why `--harness` is in here: the binary checked and the model list
+    # probed have to be the ones this activation will actually run against.
+    overrides = {
+        key: value for key, value in (("harness", parsed.harness), ("model", parsed.model), ("variant", parsed.variant)) if value is not None
+    }
     probe_config = config_module.load(repo, overrides=overrides)
     _check_reviewer(probe_config)
+    # The harness is pinned to whatever was actually probed, whether or not `--harness` was
+    # typed -- unlike `model` and `variant`, which stay unpinned and keep resolving through the
+    # config layers on every round.
+    #
+    # It is the *only* key that decides which binary has to exist, so it is the only one whose
+    # drift silently voids the check just above: a repo config edited to another harness
+    # mid-activation leaves every later review failing with "that binary is not on PATH", an
+    # operational failure that reads as the reviewer's fault. `.opencode-review-loop.json`
+    # travels with the tree under review and is not a trust boundary (AGENTS.md, "Adding
+    # config"), so "the reviewer this activation was armed against" must not be something an
+    # edit to it can change. Pinning is also what makes a mid-activation switch *explicit*:
+    # `--harness` on `resume`, or `OCRL_HARNESS`, which still outranks this overlay.
+    #
+    # **What is pinned is `probe_config`'s harness, not `parsed.harness`** -- the value read
+    # back out of the fully-resolved config, not the flag that went in. `OCRL_HARNESS`
+    # outranks this overlay (`config.load`: overrides < env), so with the two disagreeing the
+    # flag never reaches the probe: `_check_reviewer` above checked the *environment's*
+    # harness. Storing the flag anyway would pin a harness nothing verified, and the moment
+    # the variable left the environment the activation would run it. Same rule the banner
+    # already follows for `--model`/`--variant`: report and record what was resolved.
+    overrides["harness"] = probe_config.as_str("harness")
 
     head_commit = gitsnap.head_commit(repo)
     frozen = _Frozen(

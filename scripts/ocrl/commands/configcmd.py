@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any, Final
 
-from ocrl import atomic, commands, paths, reviewer_probe
+from ocrl import atomic, commands, harness, paths, reviewer_probe
 from ocrl import config as config_module
 from ocrl.config import Config
 
@@ -85,30 +85,48 @@ def _coerce(key: str, raw: str) -> Any:
         if lowered not in config_module.SEVERITY_LABELS:
             raise _ConfigFailure(f'"{raw}" is not a recognised severity; use one of {sorted(config_module.SEVERITY_LABELS)}')
         return lowered
+    # Refused outright, with no `--force` escape, unlike a model name: which harnesses exist
+    # is a fact about this build, not something a probe can be inconclusive about. An
+    # unimplemented value is refused at arm time too (`arm._check_reviewer`); catching it here
+    # just means the user hears about the typo when they make it.
+    if key == "harness" and raw not in harness.names():
+        raise _ConfigFailure(f'"{raw}" is not a harness this build implements; use one of {harness.names()}')
     return raw
 
 
-def _validate_model(model: str, *, force: bool) -> str | None:
+def _validate_model(model: str, config: Config, *, force: bool) -> str | None:
     """Returns a warning to print, or ``None``. Raises ``_ConfigFailure`` on a bad name.
 
     Unlike ``arm._check_reviewer`` this never refuses over an unreachable reviewer: an
-    unreachable ``opencode`` at config time is not the same failure as an unreachable one at
-    arm time, and arming will refuse on its own if it is still unreachable then. It refuses
-    only when the reviewer answered *completely* and the name given is not in what it
-    reported -- a probe that timed out, exited non-zero or never started is exactly as
-    inconclusive as one that printed nothing, so it warns rather than trusting whatever
-    partial output it happened to produce (``reviewer_probe.ProbeFailed``).
+    unreachable CLI at config time is not the same failure as an unreachable one at arm time,
+    and arming will refuse on its own if it is still unreachable then. It refuses only when the
+    reviewer answered *completely* and the name given is not in what it reported -- a probe
+    that timed out, exited non-zero or never started is exactly as inconclusive as one that
+    printed nothing, so it warns rather than trusting whatever partial output it happened to
+    produce (``reviewer_probe.ProbeFailed``).
+
+    Which reviewer is asked follows the *currently resolved* ``harness``, not the one this
+    ``config set`` may be about to change it to: setting ``model`` and setting ``harness`` are
+    two commands, and validating a name against a harness nobody has selected yet would refuse
+    correct input. A configuration whose two halves have not met yet is caught at arm time,
+    where both are known at once.
     """
     if force or os.environ.get("OCRL_REVIEWER_CMD"):
         return None
-    if not paths.have("opencode"):
-        return "warning: `opencode` is not on PATH; the model name was not validated."
     try:
-        models = reviewer_probe.list_models(reviewer_probe.MODELS_PROBE_TIMEOUT)
+        implementation = harness.selected(config)
+    except harness.UnknownHarness as exc:
+        return f"warning: {exc}; the model name was not validated."
+    if not paths.have(implementation.binary):
+        return f"warning: `{implementation.binary}` is not on PATH; the model name was not validated."
+    try:
+        models = implementation.probe_models(reviewer_probe.MODELS_PROBE_TIMEOUT)
     except reviewer_probe.ProbeFailed as exc:
-        return f"warning: could not list OpenCode models ({exc}); the model name was not validated."
+        return f"warning: could not list {implementation.name} models ({exc}); the model name was not validated."
+    if models is None:
+        return f"note: {implementation.name} cannot enumerate its models, so the name was not validated."
     if model not in models:
-        raise _ConfigFailure(f'"{model}" is not among the models OpenCode reports; pass --force to set it anyway.')
+        raise _ConfigFailure(f'"{model}" is not among the models {implementation.name} reports; pass --force to set it anyway.')
     return None
 
 
@@ -156,9 +174,9 @@ def _write(target: Path, document: dict[str, Any]) -> None:
 
 def _set(key: str, raw: str, *, repo_flag: bool, force: bool) -> int:
     value = _coerce(key, raw)
-    warning = _validate_model(value, force=force) if key == "model" else None
 
     repo = commands.current_repo()
+    warning = _validate_model(value, config_module.load(repo), force=force) if key == "model" else None
     target = _target(repo, repo_flag=repo_flag)
     target.parent.mkdir(parents=True, exist_ok=True)
     # Locked across read, mutate and write: two concurrent `config` invocations targeting
@@ -250,7 +268,34 @@ def _invalid_note(final: Config, key: str) -> str:
             return "stored value is not an integer; showing the default"
     elif key in config_module.SEVERITY_KEYS and final.as_str(key).lower() not in config_module.SEVERITY_LABELS:
         return "not a recognised severity; the gate treats it as the laxest threshold"
+    elif key == "harness" and final.as_str(key) not in harness.names():
+        # No silent fallback to say "showing the default" about: an unimplemented harness is
+        # refused at arm time and denies on the review path, so what this reports is that
+        # nothing will run until it is changed.
+        return f"not implemented by this build ({', '.join(harness.names())}); arming will refuse"
     return ""
+
+
+def _model_row(final: Config, layer: str) -> tuple[str, str]:
+    """``(layer, note)`` for the ``model`` row, whose default lives on the harness.
+
+    ``DEFAULTS["model"]`` is ``""``, so the value printed for this key is never the one the
+    layers resolved to -- it is whatever the selected harness calls its own. That has to be
+    said, or the row shows a model name with nothing explaining where it came from.
+
+    **Which layer to credit is decided by the resolved value, not by the layer walk**, because
+    a layer can set the key and still not supply a model: ``OCRL_MODEL=""`` is *set*
+    (``config.from_env`` keeps empty values deliberately), so the walk credits ``env`` while
+    the model actually used is still the harness's. Crediting ``env`` alone would attribute a
+    model name to a layer that named none. The layer is still reported -- it is a real fact
+    about the configuration, and a user who set that empty value needs to see it -- with the
+    fallback stated beside it.
+    """
+    if final.as_str("model"):
+        return layer, ""
+    if layer == "default":
+        return f"{layer}: {final.as_str('harness')}", ""
+    return layer, f"set to empty; showing {final.as_str('harness')}'s own default"
 
 
 def _show() -> int:
@@ -287,10 +332,10 @@ def _show() -> int:
     width = max(len(key) for key in config_module.DEFAULTS)
     lines = ["opencode-review-loop configuration", "-----------------------------------"]
     for key in sorted(config_module.DEFAULTS):
-        value = _typed_value(final, key)
-        note = _invalid_note(final, key)
+        value = harness.display_model(final) if key == "model" else _typed_value(final, key)
+        layer, note = _model_row(final, source[key]) if key == "model" else (source[key], _invalid_note(final, key))
         suffix = f" [{note}]" if note else ""
-        lines.append(f"{key.ljust(width)}  {_display(value):<28} ({source[key]}){suffix}")
+        lines.append(f"{key.ljust(width)}  {_display(value):<28} ({layer}){suffix}")
     sys.stdout.write("\n".join(lines) + "\n")
     return 0
 

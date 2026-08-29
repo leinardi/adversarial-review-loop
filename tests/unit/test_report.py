@@ -145,13 +145,13 @@ def test_a_missing_raw_file_does_not_stop_the_report(act_dir: Path, tmp_path: Pa
 def test_a_continued_review_shows_its_session_and_round(act_dir: Path) -> None:
     review = a_review(session="ses_abc12345", round=2)
     text = report.store(review, a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
-    assert "- opencode session: `ses_abc12345` (round 2, continued)\n" in text
+    assert "- reviewer session: `ses_abc12345` (round 2, continued)\n" in text
 
 
 def test_a_fresh_sessions_first_round_is_not_called_continued(act_dir: Path) -> None:
     review = a_review(session="ses_abc12345", round=1)
     text = report.store(review, a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
-    assert "- opencode session: `ses_abc12345` (round 1)\n" in text
+    assert "- reviewer session: `ses_abc12345` (round 1)\n" in text
     assert "continued" not in text
 
 
@@ -317,14 +317,14 @@ def test_the_newest_report_is_the_default(act_dir: Path) -> None:
     store_seq(act_dir, "001", "CHANGES_REQUIRED")
     store_seq(act_dir, "002", "APPROVED")
 
-    assert "# OpenCode review 002 (phase1)" in report.render(act_dir)
+    assert "# Review 002 (phase1)" in report.render(act_dir)
 
 
 def test_a_report_can_be_asked_for_by_number(act_dir: Path) -> None:
     store_seq(act_dir, "001", "CHANGES_REQUIRED")
     store_seq(act_dir, "002", "APPROVED")
 
-    assert "# OpenCode review 001 (phase1)" in report.render(act_dir, 1)
+    assert "# Review 001 (phase1)" in report.render(act_dir, 1)
 
 
 def test_an_unknown_number_lists_what_there_is(act_dir: Path) -> None:

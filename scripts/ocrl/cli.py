@@ -23,8 +23,8 @@ __all__ = ["HOOK_DEADLINE_SEC", "HOOK_STARTED", "USAGE", "main"]
 
 USAGE = """usage: ocrl.sh <subcommand> [args]
 
-  arm --session <id> --plan <path> [--allow-dirty] [--until N] [--model X] [--variant V]
-  resume --session <id> [--until N] [--plan <path>] [--allow-dirty] [--abandon-pending] [--model X] [--variant V]
+  arm --session <id> --plan <path> [--allow-dirty] [--until N] [--harness H] [--model X] [--variant V]
+  resume --session <id> [--until N] [--plan <path>] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]
   set-phases --phase "…" [--phase "…" …]
   pretool | confirm-commit | posttool-failure | gate-stop   (hook entrypoints)
   status | report [n] | defer --reason "…" | finish | deactivate

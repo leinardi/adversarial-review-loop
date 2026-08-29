@@ -713,14 +713,14 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
         deferred = report.deferred_text(review, what="commit")
         extra = f"\n{deferred}" if deferred else ""
         extra += f"\nNon-blocking findings (recorded, not required):\n{review.all_findings}" if review.all_findings else ""
-        approve(f"opencode-review-loop: OpenCode approved phase {phase}.\n{extra}\nFull report: {review.report}".rstrip("\n"), review=review)
+        approve(f"opencode-review-loop: the reviewer approved phase {phase}.\n{extra}\nFull report: {review.report}".rstrip("\n"), review=review)
     if review.verdict == "CHANGES_REQUIRED":
         # No preamble: the report's own headline already says what this is, as it did in the
         # shell -- `ocrl_deny "$(ocrl_report_reason …)"`, with no `ocrl_deny_preamble`.
         # `with_clarify_hint` adds the clarify offer as its own paragraph, and nothing once the
         # allowance is spent.
         headline = report.with_clarify_hint(
-            f"opencode-review-loop: OpenCode requires changes before phase {phase} can be committed.", state=state, config=config
+            f"opencode-review-loop: the reviewer requires changes before phase {phase} can be committed.", state=state, config=config
         )
         hook.deny(report.reason(review, headline, config=config).rstrip("\n"))
     if review.verdict == "NEEDS_HUMAN":

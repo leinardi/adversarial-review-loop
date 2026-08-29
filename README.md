@@ -52,8 +52,8 @@ The variable is read at process start, so restart Claude Code after setting it. 
 
 | Command | Who | What it does |
 | --- | --- | --- |
-| `/opencode-review-loop:implement <plan.md> [--allow-dirty] [--until N] [--model X] [--variant V]` | you | Arms the loop for this worktree and starts the phased implementation |
-| `/opencode-review-loop:resume [--until N] [--plan <path>] [--replan] [--allow-dirty] [--abandon-pending] [--model X] [--variant V]` | you | Continues an armed activation — in a new session, or adjusts it in this one — without losing the baseline or any approval. See "Running a long plan across sessions" below |
+| `/opencode-review-loop:implement <plan.md> [--allow-dirty] [--until N] [--harness H] [--model X] [--variant V]` | you | Arms the loop for this worktree and starts the phased implementation |
+| `/opencode-review-loop:resume [--until N] [--plan <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]` | you | Continues an armed activation — in a new session, or adjusts it in this one — without losing the baseline or any approval. See "Running a long plan across sessions" below |
 | `/opencode-review-loop:status` | anyone | Current state: phase, baseline, approvals, counters, stored reports |
 | `/opencode-review-loop:report [n]` | anyone | Prints a stored review in full, untruncated |
 | `/opencode-review-loop:finish` | you | Runs the final cumulative review now, even with phases outstanding — and regardless of `final_review`, which makes it the way to get one on a default install |
@@ -168,8 +168,9 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `model` | `openai/gpt-5.6-sol` | probed for reachability at arm time |
-| `variant` | unset | reasoning effort (`high`, `max`, …) |
+| `harness` | `opencode` | which reviewer CLI runs the review — `opencode` or `claude-code`. Pinned into the activation when you arm, so switching it mid-run is explicit (`--harness` on `resume`, or `OCRL_HARNESS`); an unimplemented name is refused at arm time, never quietly replaced |
+| `model` | the harness's own (`openai/gpt-5.6-sol` for `opencode`, `opus` for `claude-code`) | probed for reachability at arm time, for a harness that can enumerate its models |
+| `variant` | unset | reasoning effort — `--variant` on OpenCode, `--effort` (`low`…`max`) on Claude Code |
 | `block_severity` | `medium` | blocks when `actionable=yes AND severity >= this` |
 | `late_block_severity` | `high` | from round 2 of a phase on, a new finding outside the paths changed since the previous round blocks only at or above this; never below `block_severity` |
 | `timeout_sec` | `900` | per review run |
@@ -178,8 +179,8 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 | `max_stop_blocks` | `3` | **no-progress** Stop blocks before escalating |
 | `max_defers` | `3` | pause escapes per activation |
 | `verify_cmd` | unset | run by the hook, output attached as evidence |
-| `pure` | `true` | pass `--pure` |
-| `disable_project_config` | `false` | set `OPENCODE_DISABLE_PROJECT_CONFIG` |
+| `pure` | `true` | run the reviewer without its ambient extensions — `--pure` on OpenCode, `--safe-mode --disable-slash-commands` on Claude Code |
+| `disable_project_config` | `false` | ignore the repository's own agent config — `OPENCODE_DISABLE_PROJECT_CONFIG` on OpenCode, `--setting-sources user` on Claude Code |
 | `chunk_diff_bytes` | `400000` | per-attachment chunk size |
 | `hard_diff_ceiling` | `8388608` | above this → `needs-human` |
 | `max_file_bytes` | `16777216` | oversized-file guard |

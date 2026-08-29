@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ocrl import config
+from ocrl import config, harness
 
 
 @pytest.fixture
@@ -34,7 +34,11 @@ def write_repo_config(repo: Path, values: object) -> None:
 
 def test_defaults_stand_when_nothing_else_exists(layers: dict[str, str], tmp_path: Path) -> None:
     cfg = config.load(str(tmp_path / "repo"), layers)
-    assert cfg.as_str("model") == "openai/gpt-5.6-sol"
+    assert cfg.as_str("harness") == "opencode"
+    # Empty, not a model name: `model`'s real default is the selected harness's own, resolved
+    # through `harness.model` -- see `test_harness.py` for that half of the contract.
+    assert cfg.as_str("model") == ""
+    assert harness.model(cfg) == "openai/gpt-5.6-sol"
     assert cfg.as_int("ttl_hours") == 24
     assert cfg.as_bool("pure") is True
     assert cfg.as_bool("final_review") is False
@@ -58,7 +62,7 @@ def test_all_four_layers_in_order(layers: dict[str, str], tmp_path: Path) -> Non
 
 def test_a_missing_repo_argument_skips_the_repo_layer(layers: dict[str, str], tmp_path: Path) -> None:
     write_repo_config(tmp_path / "repo", {"model": "repo-model"})
-    assert config.load("", layers).as_str("model") == "openai/gpt-5.6-sol"
+    assert config.load("", layers).as_str("model") == "", "the repo layer's model must not have been read"
 
 
 # -- the activation overlay --------------------------------------------------
@@ -107,7 +111,7 @@ def test_an_unparseable_file_drops_the_whole_file_layer(layers: dict[str, str], 
 
     cfg = config.load(str(repo), layers)
 
-    assert cfg.as_str("model") == "openai/gpt-5.6-sol", "the good file must not survive alone"
+    assert cfg.as_str("model") == "", "the good file must not survive alone"
     assert cfg.as_str("block_severity") == "critical", "the environment still applies"
 
 
@@ -302,3 +306,15 @@ def test_an_unrecognised_late_block_severity_falls_back_to_block_severity(layers
     write_repo_config(repo, {"late_block_severity": "spicy"})
     cfg = config.load(str(repo), layers)
     assert config.late_threshold_rank(cfg) == config.threshold_rank("medium"), "unknown ranks at the floor, then the clamp restores the ordinary rule"
+
+
+def test_the_harness_is_settable_from_the_environment(layers: dict[str, str], tmp_path: Path) -> None:
+    """``harness`` is a plain string key, so `OCRL_HARNESS` reaches it through `from_env`'s
+    string branch like any other -- which is what makes `OCRL_HARNESS=claude-code make dry-run`
+    work without a config file."""
+    layers["OCRL_HARNESS"] = "claude-code"
+
+    cfg = config.load(str(tmp_path / "repo"), layers)
+
+    assert cfg.as_str("harness") == "claude-code"
+    assert harness.model(cfg) == harness.get("claude-code").default_model

@@ -626,3 +626,64 @@ def test_mixed_same_and_cross_session_resumes_do_not_duplicate_a_revision(
     # published -- not a second, duplicate one for the identical edit.
     assert len(revisions) == 2, revisions
     assert (state_dir(env, git_repo, "s2") / revisions[1]["file"]).read_text() == "# plan\n\nphase one, edited\n"
+
+
+# --------------------------------------------------------------------------
+# resume: the activation overlay
+# --------------------------------------------------------------------------
+
+
+def test_concurrent_resumes_never_store_an_overlay_neither_of_them_probed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Two same-session resumes each probe their own pre-lock overlay, then both write.
+
+    **Fails on a resume that merges the overlay at write time, however it merges.** One call
+    switches the harness, another sets a model; whichever composing rule the writes follow, the
+    pair that lands is one neither call ran ``_check_reviewer`` against -- a model only the old
+    harness reports, now paired with the new one, so every later review fails for an
+    operational reason. Composing under the lock does not fix that; it *is* that. Taking only
+    the first writer's overlay and refusing the rest is what keeps "the reviewer was checked"
+    true of whatever ends up stored.
+
+    So the property is not "everyone succeeds": it is that the stored overlay is always exactly
+    one call's, the losers are refused before writing anything, and no mixture ever appears.
+    Driven through ``activation_lock``/``settle`` like the revision race above, so every worker
+    is held past its pre-lock read before any may write.
+    """
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    set_phases(git_repo, env, "one")
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "opencode"}
+
+    switch = ["resume", "--session", "s1", "--args", "--harness claude-code"]
+    remodel = ["resume", "--session", "s1", "--args", "--model vendor/other"]
+    with activation_lock(env, git_repo):
+        workers = [spawn(switch if index % 2 == 0 else remodel, cwd=git_repo, env=env) for index in range(8)]
+        settle(workers, env, git_repo)
+
+    results = [(worker.wait(), *worker.communicate()) for worker in workers]
+    assert any(code == 0 for code, _out, _err in results), results
+    for code, out, _err in results:
+        if code != 0:
+            assert "changed while this resume was preparing" in out, out
+            assert "the live activation was left untouched" in out, "a refused resume must write nothing"
+
+    overrides = read_state(env, git_repo, "s1")["overrides"]
+    # Exactly one call's overlay -- never {"harness": "claude-code", "model": "vendor/other"},
+    # the combination that would have reached the reviewer unvalidated.
+    assert overrides in ({"harness": "claude-code"}, {"harness": "opencode", "model": "vendor/other"}), overrides
+
+
+def test_a_refused_concurrent_resume_succeeds_when_run_again(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The refusal is a retry instruction, not a wedge: the second run probes the combination
+    against the overlay that is now on disk, and composes with it."""
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    set_phases(git_repo, env, "one")
+
+    assert run_bootstrap(["resume", "--session", "s1", "--args", "--harness claude-code"], cwd=git_repo, env=env).returncode == 0
+    proc = run_bootstrap(["resume", "--session", "s1", "--args", "--model vendor/other"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "claude-code", "model": "vendor/other"}

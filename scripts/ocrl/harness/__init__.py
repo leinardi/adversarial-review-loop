@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 from ocrl.errors import OcrlError
 
@@ -33,6 +33,7 @@ if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from ocrl.config import Config
 
 __all__ = [
+    "UNIMPLEMENTED_MODEL",
     "Attachment",
     "CaptureSpec",
     "Captured",
@@ -44,8 +45,11 @@ __all__ = [
     "SessionStrategy",
     "TranscriptError",
     "UnknownHarness",
+    "display_model",
     "get",
+    "model",
     "names",
+    "selected",
     "strategies",
 ]
 
@@ -365,3 +369,50 @@ def get(name: str) -> Harness:
         return _registry()[name]
     except KeyError:
         raise UnknownHarness(f"unknown harness {name!r}; this build implements: {', '.join(names())}") from None
+
+
+def selected(config: Config) -> Harness:
+    """The harness this configuration's ``harness`` key selects.
+
+    The one place that key is turned into an implementation, so the harness a command is
+    built from, the harness a status line names and the harness a lease is sized for cannot
+    disagree. Raises :class:`UnknownHarness` rather than falling back to the default: see
+    that class for why a typo must never quietly select a different reviewer.
+    """
+    return get(config.as_str("harness"))
+
+
+def model(config: Config, implementation: Harness | None = None) -> str:
+    """The model id one invocation actually runs with.
+
+    ``model`` is per-harness by default (:data:`ocrl.config.DEFAULTS`), so "the configured
+    model" is not something ``Config`` can answer on its own -- and four commands print it
+    while a fifth passes it to the CLI. This is the single reader they all go through.
+
+    ``implementation`` is passed by a harness composing its *own* command, where the answer
+    must come from that module rather than from whatever the configuration happens to select
+    -- a directly-called ``review_argv`` must not pick up another harness's default. Everyone
+    else omits it and gets :func:`selected`'s answer, raising :class:`UnknownHarness` with it.
+    """
+    chosen = selected(config) if implementation is None else implementation
+    return config.as_str("model") or chosen.default_model
+
+
+#: What :func:`display_model` shows when the configured harness is not one this build has.
+#: A placeholder, never a model name: nothing can run under an unknown harness, so there is
+#: no id to report and inventing the default harness's would be a lie about what would run.
+UNIMPLEMENTED_MODEL: Final = "<no harness>"
+
+
+def display_model(config: Config) -> str:
+    """:func:`model`, for the two callers that must render rather than raise.
+
+    ``status`` and ``config`` describe a configuration; they are how a user *finds* a bad
+    ``harness`` value, so crashing on one would take away the tool that diagnoses it. Every
+    caller that decides something -- arming, resuming, composing a command -- uses
+    :func:`model` and takes the refusal.
+    """
+    try:
+        return model(config)
+    except UnknownHarness:
+        return UNIMPLEMENTED_MODEL

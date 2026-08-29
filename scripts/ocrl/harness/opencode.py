@@ -31,7 +31,7 @@ from typing import Any, Final
 from ocrl import reviewer_probe
 from ocrl.atomic import FILE_MODE, ensure_private_dir
 from ocrl.config import Config
-from ocrl.harness import Captured, CaptureSpec, ClarifySpec, Command, ReviewSpec
+from ocrl.harness import Captured, CaptureSpec, ClarifySpec, Command, ReviewSpec, model
 from ocrl.paths import state_root
 from ocrl.util import log
 
@@ -128,7 +128,9 @@ def review_argv(repo: str, title: str, *, config: Config, session_id: str = "", 
     """
     argv: list[str] = [*isolation_argv(config)]
     argv += ["--dir", repo]
-    argv += ["-m", config.as_str("model")]
+    # `HARNESS`, not the configured harness: this function can be called directly (the dry
+    # run, the tests), and an OpenCode argv must carry OpenCode's default model even then.
+    argv += ["-m", model(config, HARNESS)]
     variant = config.as_str("variant")
     if variant:
         argv += ["--variant", variant]
@@ -159,7 +161,7 @@ def clarify_argv(repo: str, attachments: Sequence[Path], question_file: Path, ti
     """
     argv: list[str] = [*isolation_argv(config)]
     argv += ["--dir", repo]
-    argv += ["-m", config.as_str("model")]
+    argv += ["-m", model(config, HARNESS)]
     variant = config.as_str("variant")
     if variant:
         argv += ["--variant", variant]

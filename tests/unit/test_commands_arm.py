@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from conftest import FAKE_REVIEWER, git, run_bootstrap
 
-from ocrl import paths
+from ocrl import harness, paths
 from ocrl.atomic import locked as _real_locked
 from ocrl.commands import arm
 
@@ -446,7 +446,7 @@ def test_a_model_opencode_does_not_report_is_refused(git_repo: Path, tmp_path: P
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
     assert proc.returncode == 1
-    assert 'the configured model "vendor/wanted-model" is not among the models OpenCode reports' in proc.stdout
+    assert 'the configured model "vendor/wanted-model" is not among the models opencode reports' in proc.stdout
     assert read_state(env, git_repo, "s1")["status"] == "ARM_FAILED"
 
 
@@ -461,7 +461,7 @@ def test_a_silent_opencode_is_refused(git_repo: Path, tmp_path: Path, clean_env:
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
     assert proc.returncode == 1
-    assert "could not list OpenCode models" in proc.stdout
+    assert "could not list opencode models" in proc.stdout
 
 
 def test_a_reported_model_is_accepted(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -599,7 +599,7 @@ def test_the_armed_banner_reflects_the_environment_not_the_override_alone(
     assert "vendor/env-wins" in proc.stdout
     assert "vendor/flag-loses" not in proc.stdout
     # The override is still recorded in state -- it is only not what actually runs here.
-    assert read_state(env, git_repo, "s1")["overrides"] == {"model": "vendor/flag-loses"}
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "opencode", "model": "vendor/flag-loses"}
 
 
 def test_an_out_of_range_until_is_clamped_with_a_warning_once_phases_are_frozen(
@@ -629,17 +629,20 @@ def test_model_and_variant_are_persisted_as_overrides(git_repo: Path, tmp_path: 
     )
 
     assert proc.returncode == 0, proc.stdout
-    assert read_state(env, git_repo, "s1")["overrides"] == {"model": "vendor/x", "variant": "fast"}
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "opencode", "model": "vendor/x", "variant": "fast"}
     assert "vendor/x" in proc.stdout
     assert "fast" in proc.stdout
 
 
-def test_no_model_or_variant_flag_leaves_overrides_empty(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+def test_no_model_or_variant_flag_leaves_only_the_pinned_harness(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``model`` and ``variant`` stay unpinned -- they keep resolving through the config layers
+    on every round. ``harness`` does not: see ``test_the_harness_is_pinned_even_without_a_flag``.
+    """
     env = armed_env(clean_env)
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
     assert proc.returncode == 0, proc.stdout
-    assert read_state(env, git_repo, "s1")["overrides"] == {}
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "opencode"}
 
 
 def test_a_model_override_is_probed_instead_of_the_stored_default(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -667,7 +670,7 @@ def test_a_model_override_is_probed_instead_of_the_stored_default(git_repo: Path
     )
 
     assert proc.returncode == 1
-    assert 'the configured model "vendor/not-reported" is not among the models OpenCode reports' in proc.stdout
+    assert 'the configured model "vendor/not-reported" is not among the models opencode reports' in proc.stdout
     assert read_state(env, git_repo, "s1")["status"] == "ARM_FAILED"
     # The stored default was never even the question -- nothing about it appears here.
     assert "vendor/stored" not in proc.stdout
@@ -692,4 +695,161 @@ def test_a_model_override_that_is_reported_arms(git_repo: Path, tmp_path: Path, 
     assert proc.returncode == 0, proc.stdout
     document = read_state(env, git_repo, "s1")
     assert document["status"] == "ARMED"
-    assert document["overrides"] == {"model": "vendor/override"}
+    assert document["overrides"] == {"harness": "opencode", "model": "vendor/override"}
+
+
+# --------------------------------------------------------------------------
+# --harness
+# --------------------------------------------------------------------------
+
+
+def test_the_harness_is_persisted_as_an_override(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """An armed activation carries its own harness, so a resume keeps it and the review path
+    reads the same one the arm-time checks were run against."""
+    env = armed_env(clean_env)
+    proc = run_bootstrap(
+        ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --harness claude-code"],
+        cwd=git_repo,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "claude-code"}
+    assert "claude-code" in proc.stdout, "the armed banner must say which reviewer this activation runs"
+
+
+def test_the_armed_banner_names_the_harnesss_own_default_model(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``model`` is unset by default, and its real default belongs to the harness -- a banner
+    that printed the raw config value would show a blank where the reviewer is named."""
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --harness claude-code"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert f"- reviewer: claude-code {harness.get('claude-code').default_model}\n" in proc.stdout
+
+
+def test_an_unimplemented_harness_is_refused_at_arm_time(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A hard refusal, never a silent fallback to the default harness: an activation armed
+    against a reviewer nobody chose would produce verdicts nobody asked for."""
+    env = armed_env(clean_env)
+    proc = run_bootstrap(
+        ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --harness not-a-harness"],
+        cwd=git_repo,
+        env=env,
+    )
+
+    assert proc.returncode == 1
+    assert "unknown harness 'not-a-harness'" in proc.stdout
+    assert "opencode" in proc.stdout, "the refusal must say what this build does implement"
+    assert read_state(env, git_repo, "s1")["status"] == "ARM_FAILED"
+
+
+def test_the_reviewer_seam_does_not_excuse_an_unimplemented_harness(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``OCRL_REVIEWER_CMD`` replaces the reviewer *command*, not the harness: session minting,
+    id validation and every lease are still sized from whatever ``harness`` names, so the name
+    is checked ahead of the seam rather than behind it.
+
+    ``armed_env`` sets the seam, so the refusal above already runs under it -- this states the
+    property directly, because moving the check below the early return would silently arm.
+    """
+    env = armed_env(clean_env, OCRL_HARNESS="not-a-harness")
+    assert env["OCRL_REVIEWER_CMD"], "this test is only meaningful with the seam in place"
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+
+    assert proc.returncode == 1
+    assert "unknown harness 'not-a-harness'" in proc.stdout
+
+
+def test_a_harness_that_cannot_enumerate_models_checks_only_its_binary(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Claude Code has no model-list subcommand. That is not a reason to refuse: a name it does
+    not know exits non-zero at review time, which blocks (Rule 1). But the binary must be there.
+    """
+    bindir = Path(_path_without_opencode(tmp_path))
+    env = {**clean_env, "PATH": str(bindir), "OCRL_HARNESS": "claude-code", "OCRL_MODEL": "a-model-nothing-reports"}
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+    assert proc.returncode == 1
+    assert "the `claude` binary is not on PATH" in proc.stdout
+
+    fake = bindir / "claude"
+    fake.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake.chmod(0o755)
+
+    proc = run_bootstrap(["arm", "--session", "s2", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, "s2")["status"] == "ARMED"
+
+
+def test_the_harness_is_pinned_even_without_a_flag(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Arming records the harness it actually probed, so a later config edit cannot move a live
+    activation onto a reviewer whose binary was never checked.
+
+    ``.opencode-review-loop.json`` travels with the tree under review and is not a trust
+    boundary; without the pin, editing it mid-activation switches the reviewer silently and
+    every later review fails with "that binary is not on PATH" -- an operational failure that
+    reads as the reviewer's fault. `harness` is the only key that decides which binary must
+    exist, which is why it is pinned and `model`/`variant` are not.
+    """
+    env = armed_env(clean_env)
+    (git_repo / ".opencode-review-loop.json").write_text('{"harness": "claude-code"}')
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "repo config")
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "claude-code"}
+
+
+def test_a_repo_config_edit_cannot_switch_the_harness_mid_activation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The pin's whole point, asserted through what the gate actually resolves afterwards."""
+    env = armed_env(clean_env)
+    (git_repo / ".opencode-review-loop.json").write_text('{"harness": "claude-code"}')
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "repo config")
+    assert run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env).returncode == 0
+
+    (git_repo / ".opencode-review-loop.json").write_text('{"harness": "opencode"}')
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "harness:             claude-code\n" in proc.stdout, "a repo config edit must not switch the armed harness"
+
+
+def test_the_environment_still_outranks_the_pinned_harness(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The pin sits in the activation overlay, which `OCRL_*` beats -- so the documented
+    one-off escape still works and the pin is not a lock."""
+    env = armed_env(clean_env)
+    assert run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env).returncode == 0
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env={**env, "OCRL_HARNESS": "claude-code"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert "harness:             claude-code\n" in proc.stdout
+
+
+def test_an_environment_masked_harness_flag_pins_what_was_actually_probed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``OCRL_HARNESS`` outranks the activation overlay, so with the two disagreeing the flag
+    never reaches the probe -- and must not reach the stored overlay either.
+
+    **Fails on a pin that records ``--harness``' own value.** `_check_reviewer` checked the
+    environment's harness; storing the flag's would pin one nothing verified, and the moment
+    the variable left the environment the activation would silently start running it.
+    """
+    env = armed_env(clean_env, OCRL_HARNESS="opencode")
+
+    proc = run_bootstrap(
+        ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --harness claude-code"],
+        cwd=git_repo,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "opencode"}
+    assert "- reviewer: opencode " in proc.stdout, "the banner reports what was resolved, not what was typed"
+
+    # And with the variable gone, the activation still runs the harness that was probed.
+    status = run_bootstrap(["status"], cwd=git_repo, env=armed_env(clean_env))
+    assert "harness:             opencode\n" in status.stdout

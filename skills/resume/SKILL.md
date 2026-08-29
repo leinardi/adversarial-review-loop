@@ -1,7 +1,7 @@
 ---
 name: resume
 description: Continue an already-armed opencode-review-loop plan in a new session (or adjust the pause target, model, or plan in this one), without losing the original baseline or any approvals already recorded.
-argument-hint: "[--until N] [--plan <path>] [--replan] [--allow-dirty] [--abandon-pending] [--model X] [--variant V]"
+argument-hint: "[--until N] [--plan <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]"
 disable-model-invocation: true
 user-invocable: true
 hooks:

@@ -217,15 +217,19 @@ KILL_GRACE_SEC: Final = 2.0
 
 
 def _harness(config: Config) -> harness.Harness:
-    """Which reviewer CLI this invocation runs.
+    """Which reviewer CLI this invocation runs: whatever the ``harness`` key selects.
 
     One reader, so the harness a command is built from, the harness every message names and
-    the harness the budgets are sized for can never disagree. Fixed to OpenCode for now --
-    the ``harness`` config key that lets a user choose does not exist yet, and adding it
-    changes only this function.
+    the harness the budgets are sized for can never disagree.
+
+    A value this build does not implement raises :class:`ocrl.harness.UnknownHarness`, which
+    is deliberately *not* caught anywhere on the review path: it unwinds to the fail-closed
+    guard in ``hookio.Hook.run`` and denies (Rule 1). Arming and resuming refuse it up front
+    (``commands.arm._check_reviewer``), so reaching it here means the configuration changed
+    underneath a live activation -- a gate that cannot tell which reviewer it is talking to
+    has nothing to say except "no".
     """
-    del config
-    return opencode_harness.HARNESS
+    return harness.selected(config)
 
 
 def _sessions(config: Config) -> harness.SessionStrategy:
@@ -2923,11 +2927,20 @@ def continuity_summary(state: State, config: Config) -> str:
     if not isinstance(pointer, dict) or not pointer:
         return "none (the next review starts a fresh session)"
 
+    try:
+        strategy = _sessions(config)
+    except harness.UnknownHarness as exc:
+        # `status` is how a user *finds* a bad `harness` value, so it reports it instead of
+        # unwinding. The pointer is not shown at all: there is no harness to judge its shape
+        # against, and printing an id as if it were usable would be the misleading half.
+        return f"unreadable ({exc}); no review can run until `harness` names one this build implements"
+
     session_id = pointer.get("id")
     # Printed in full, never abbreviated: this is the id a human pastes into
-    # `opencode session delete`, and a truncated one cannot be used for anything. Validated
-    # against the *configured* harness's shape, which is what the next review would use it as.
-    shown = session_id if _sessions(config).is_session_id(session_id) else _UNREADABLE
+    # the reviewer CLI's own session commands, and a truncated one cannot be used for
+    # anything. Validated against the *configured* harness's shape, which is what the next
+    # review would use it as.
+    shown = session_id if strategy.is_session_id(session_id) else _UNREADABLE
 
     label = pointer.get("label")
     label_text = label if _is_single_stored_line(label) else _UNREADABLE

@@ -263,3 +263,89 @@ def test_no_harness_can_compute_a_lease_above_the_ceiling(implementation: harnes
     largest = reviewer._active_review_reclaim_after(config_with(timeout_sec=reviewer.MAX_TIMEOUT_SEC))
 
     assert largest <= reviewer._MAX_LEASE_SEC, f"{implementation.name} computes a lease its own ceiling rejects"
+
+
+# --------------------------------------------------------------------------
+# selection and model resolution
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
+def test_the_harness_key_selects_the_implementation_of_that_name(implementation: harness.Harness) -> None:
+    """``harness`` is a config key like any other, and its value is the harness's own ``name``.
+
+    Asserted per implementation rather than for one hard-coded string, so a harness registered
+    under a name its module does not answer to -- which would make ``config harness <name>``
+    select something else -- cannot be added.
+    """
+    assert harness.selected(config_with(harness=implementation.name)) is implementation
+
+
+@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
+def test_an_unset_model_resolves_to_the_harnesss_own_default(implementation: harness.Harness) -> None:
+    """``DEFAULTS["model"]`` is "" on purpose: a provider-qualified id meaningful to one CLI is
+    meaningless to another, so the default belongs to the harness and is read through one helper."""
+    assert DEFAULTS["model"] == ""
+    assert harness.model(config_with(harness=implementation.name)) == implementation.default_model
+    assert implementation.default_model, f"{implementation.name} offers no default model to fall back to"
+
+
+@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
+def test_a_configured_model_beats_the_harnesss_default(implementation: harness.Harness) -> None:
+    assert harness.model(config_with(harness=implementation.name, model="vendor/chosen")) == "vendor/chosen"
+
+
+@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
+def test_a_harness_composing_its_own_command_uses_its_own_default(implementation: harness.Harness) -> None:
+    """A harness passes itself to ``model``, so a directly-called command builder cannot pick up
+    a *different* harness's default when configuration selects one and this module spells the
+    other -- which is exactly what the dry run and these tests do."""
+    other = next((candidate for candidate in every_harness() if candidate is not implementation), None)
+    if other is None:  # pragma: no cover - only with a single registered harness
+        pytest.skip("a second harness is needed to tell the two defaults apart")
+    assert harness.model(config_with(harness=other.name), implementation) == implementation.default_model
+
+
+def test_an_unimplemented_harness_is_refused_rather_than_replaced() -> None:
+    """No silent fallback to the default harness: a typo that quietly selected a *different*
+    reviewer would produce verdicts nobody asked for, from a CLI nobody chose."""
+    with pytest.raises(harness.UnknownHarness) as excinfo:
+        harness.selected(config_with(harness="not-a-harness"))
+    assert "not-a-harness" in str(excinfo.value)
+    for name in harness.names():
+        assert name in str(excinfo.value), "the refusal must say what this build does implement"
+
+    with pytest.raises(harness.UnknownHarness):
+        harness.model(config_with(harness="not-a-harness"))
+
+
+def test_display_model_renders_an_unimplemented_harness_instead_of_raising() -> None:
+    """``status`` and `config` are how a user *finds* a bad ``harness`` value, so they must not
+    be the thing that crashes on one -- and must not print a model name that nothing will run."""
+    shown = harness.display_model(config_with(harness="not-a-harness"))
+
+    assert shown == harness.UNIMPLEMENTED_MODEL
+    assert shown not in {implementation.default_model for implementation in every_harness()}
+
+
+@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
+def test_the_review_path_binds_to_the_configured_harness(implementation: harness.Harness) -> None:
+    """``reviewer._harness`` is the one reader on the review path, so the harness a command is
+    built from, the harness a message names and the harness a lease is sized for agree."""
+    config = config_with(harness=implementation.name)
+
+    assert reviewer._harness(config) is implementation
+    assert reviewer._sessions(config) is implementation.sessions()
+
+
+def test_the_review_path_refuses_an_unimplemented_harness_rather_than_defaulting() -> None:
+    """Not caught anywhere on the review path: it unwinds to ``hookio.Hook.run``'s fail-closed
+    guard and denies (Rule 1). A gate that cannot tell which reviewer it is talking to has
+    nothing to say except "no" -- and must never say it with the default harness instead.
+    """
+    config = config_with(harness="not-a-harness")
+
+    with pytest.raises(harness.UnknownHarness):
+        reviewer._harness(config)
+    with pytest.raises(harness.UnknownHarness):
+        reviewer._sessions(config)

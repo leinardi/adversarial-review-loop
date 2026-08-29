@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ocrl import commands
+from ocrl import commands, harness
 from ocrl.atomic import ensure_private_dir, write_private_atomic
 from ocrl.config import Config
 from ocrl.paths import state_root
@@ -114,11 +114,16 @@ def report_path(act_dir: Path, target: Target, seq: str, verdict: str) -> Path:
 
 
 def _session_line(review: Review) -> str:
-    """``- opencode session: `ses_…` (round N[, continued])``, or "" when there is none."""
+    """``- reviewer session: `…` (round N[, continued])``, or "" when there is none.
+
+    Names the role rather than the CLI: which reviewer produced it is reported once, on the
+    ``harness`` line :func:`render_report` writes, and an id spelled by one harness must not
+    be labelled with another's name.
+    """
     if not review.session:
         return ""
     suffix = ", continued" if review.round > 1 else ""
-    return f"- opencode session: `{review.session}` (round {review.round}{suffix})\n"
+    return f"- reviewer session: `{review.session}` (round {review.round}{suffix})\n"
 
 
 def _findings_and_raw(review: Review, *, heading_level: str = "##") -> str:
@@ -187,11 +192,16 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
     verdict = review.verdict or "UNKNOWN"
     variant = config.as_str("variant")
 
-    out: list[str] = [f"# OpenCode review {seq} ({target.label})\n\n"]
+    out: list[str] = [f"# Review {seq} ({target.label})\n\n"]
     out.append(f"- verdict (recomputed by the gate): **{verdict}**\n")
     out.append(f"- base tree: `{target.base}`\n")
     out.append(f"- head tree: `{target.head}`\n")
-    out.append(f"- model: `{config.as_str('model')}`{f' (variant `{variant}`)' if variant else ''}\n")
+    # `display_model`, not `model`: a report is written *after* a review ran, including the
+    # ones that failed, and a stored record of what happened must not be the thing that
+    # raises. The harness name is printed beside it, unvalidated, so a configuration that
+    # changed underneath the activation is visible in the report rather than hidden by it.
+    out.append(f"- harness: `{config.as_str('harness')}`\n")
+    out.append(f"- model: `{harness.display_model(config)}`{f' (variant `{variant}`)' if variant else ''}\n")
     out.append(f"- block_severity: `{config.as_str('block_severity')}`\n")
     if target.is_phase:
         out.append(f"- late_block_severity: `{config.as_str('late_block_severity')}`\n")

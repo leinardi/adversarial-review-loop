@@ -196,7 +196,7 @@ def test_uncommitted_work_is_reviewed_before_the_turn_may_end(git_repo: Path, tm
 
     reason = blocked(stop(git_repo, env))
 
-    assert "uncommitted work that OpenCode requires changes to" in reason
+    assert "uncommitted work that the reviewer requires changes to" in reason
     assert "Returns success on a failed lookup" in reason
 
 
@@ -223,7 +223,7 @@ def test_a_blocking_sweep_drops_the_clarify_offer_when_none_are_left(git_repo: P
 
     reason = blocked(stop(git_repo, env))
 
-    assert "uncommitted work that OpenCode requires changes to" in reason
+    assert "uncommitted work that the reviewer requires changes to" in reason
     assert "clarify" not in reason
 
 
@@ -1034,7 +1034,7 @@ def test_disabled_final_review_the_sweep_still_blocks(git_repo: Path, tmp_path: 
 
     reason = blocked(stop(git_repo, env))
 
-    assert "uncommitted work that OpenCode requires changes to" in reason
+    assert "uncommitted work that the reviewer requires changes to" in reason
 
 
 def test_disabled_final_review_outstanding_phases_still_block(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

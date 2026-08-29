@@ -155,7 +155,7 @@ ABANDONED_MARKER_UNVERIFIABLE: Final = (
     "An unreadable history is not the same as nothing having landed, so the turn cannot end on it."
 )
 
-SWEEP_CHANGES: Final = "opencode-review-loop: the turn is ending with uncommitted work that OpenCode requires changes to."
+SWEEP_CHANGES: Final = "opencode-review-loop: the turn is ending with uncommitted work that the reviewer requires changes to."
 
 SWEEP_ACTIVATION_MOVED: Final = (
     "opencode-review-loop: the activation changed while the unreviewed-work sweep was running (a same-session resume "

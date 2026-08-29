@@ -94,7 +94,7 @@ DIRTY_AFTERWARDS: Final = (
 VERIFIED_HEADER: Final = """\
 **opencode-review-loop: phase {phase} of {total} committed and verified.**
 
-The commit's tree is exactly the tree OpenCode approved, and the worktree is clean.
+The commit's tree is exactly the tree the reviewer approved, and the worktree is clean.
 """
 
 ALL_PHASES_DONE: Final = (

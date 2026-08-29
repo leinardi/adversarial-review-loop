@@ -13,7 +13,7 @@ defaults  <  user config  <  repo config  <  activation overrides  <  OCRL_* env
 | defaults | built into `config.py` | nobody — the fallback |
 | user config | `$XDG_CONFIG_HOME/opencode-review-loop/config.json` | `/opencode-review-loop:config <key> <value>` |
 | repo config | `<repo>/.opencode-review-loop.json` | `/opencode-review-loop:config <key> <value> --repo`, or hand-edited |
-| activation overrides | inside `state.json`, for the current activation only | `--model`/`--variant` on `implement` or `resume` |
+| activation overrides | inside `state.json`, for the current activation only | `--harness`/`--model`/`--variant` on `implement` or `resume` |
 | environment | the process environment | `OCRL_*` variables |
 
 A concrete example: your user config sets `model` to `openai/gpt-5.6-sol`. The repo you're
@@ -30,8 +30,9 @@ guessing.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `model` | `openai/gpt-5.6-sol` | probed for reachability at arm time |
-| `variant` | unset | reasoning effort (`high`, `max`, …) |
+| `harness` | `opencode` | which reviewer CLI runs the review — `opencode` or `claude-code`. An unimplemented name is refused when you arm, never quietly replaced with the default |
+| `model` | the harness's own (`openai/gpt-5.6-sol` for `opencode`, `opus` for `claude-code`) | probed for reachability at arm time, for a harness that can enumerate its models |
+| `variant` | unset | reasoning effort — `--variant` on OpenCode, `--effort` (`low`…`max`) on Claude Code |
 | `block_severity` | `medium` | blocks when `actionable=yes AND severity >= this` |
 | `late_block_severity` | `high` | from round 2 of a phase on, a new finding outside the paths changed since the previous round blocks only at or above this; never below `block_severity` |
 | `timeout_sec` | `900` | per review run |
@@ -40,8 +41,8 @@ guessing.
 | `max_stop_blocks` | `3` | **no-progress** Stop blocks before escalating |
 | `max_defers` | `3` | pause escapes per activation |
 | `verify_cmd` | unset | run by the hook, output attached as evidence |
-| `pure` | `true` | pass `--pure` to OpenCode |
-| `disable_project_config` | `false` | set `OPENCODE_DISABLE_PROJECT_CONFIG` |
+| `pure` | `true` | run the reviewer without its ambient extensions — `--pure` on OpenCode, `--safe-mode --disable-slash-commands` on Claude Code |
+| `disable_project_config` | `false` | ignore the repository's own agent config — `OPENCODE_DISABLE_PROJECT_CONFIG` on OpenCode, `--setting-sources user` on Claude Code |
 | `chunk_diff_bytes` | `400000` | per-attachment diff chunk size |
 | `hard_diff_ceiling` | `8388608` | above this → `needs-human` |
 | `max_file_bytes` | `16777216` | oversized-file guard |
@@ -50,7 +51,7 @@ guessing.
 | `max_findings_bytes` | `65536` | same cap, measured by size instead of count |
 | `max_clarifications` | `2` | `clarify` questions per run before it points at `accept` |
 | `stall_rounds` | `3` | consecutive rounds a finding must persist before `needs-human`; `0` disables |
-| `max_session_rounds` | `3` | rounds one OpenCode review session may carry before the next round starts a fresh one; `0` never resets |
+| `max_session_rounds` | `3` | rounds one reviewer session may carry before the next round starts a fresh one; `0` never resets |
 | `allow_dirty` | `false` | alternative to passing `--allow-dirty` every time |
 | `ttl_hours` | `24` | after this, gates block and ask for a re-arm — `resume` is usually the right fix, not a fresh `implement` |
 | `ignore_globs` | `[]` | paths whose sole change skips a review entirely |
@@ -69,12 +70,17 @@ this — their values are already the right type.
 
 ```console
 $ /opencode-review-loop:config
-model                    openai/gpt-5.6-sol   (default)
+harness                  opencode             (default)
+model                    openai/gpt-5.6-sol   (default: opencode)
 variant                                       (default)
 block_severity           medium               (default)
 ...
 ttl_hours                72                   (user)
 ```
+
+`model` prints `(default: <harness>)` rather than plain `(default)` because its default is
+not a constant: it is whatever the selected harness calls its own, so the value shown is
+what a run would actually pass and the layer says which harness decided it.
 
 ```console
 $ /opencode-review-loop:config ttl_hours 72
@@ -95,18 +101,50 @@ of your own — see "Repo config is not fully trusted," below, before reaching f
 `config` is `disable-model-invocation: true` and registers no hooks: it works whether or
 not anything is armed, and Claude can never invoke it itself.
 
-Setting `model` additionally checks the name against `opencode models`. An unreachable
-reviewer only warns at config time — arming will refuse on its own if it's still
-unreachable when you actually start a run — but a name the reviewer actively rejects is
-refused outright; pass `--force` to set it anyway.
+Setting `model` additionally checks the name against the selected harness's model list
+(`opencode models`). An unreachable reviewer only warns at config time — arming will refuse
+on its own if it's still unreachable when you actually start a run — but a name the
+reviewer actively rejects is refused outright; pass `--force` to set it anyway. A harness
+that cannot enumerate its models at all (Claude Code has no such subcommand) says so and
+validates nothing: a name it does not know exits non-zero at review time, which blocks.
+
+Setting `harness` is checked against the harnesses this build implements, and an
+unimplemented name is refused with no `--force` escape — that list is a fact about the
+build, not something a probe can be inconclusive about.
 
 ## Per-run overrides
 
-`--model X` and `--variant V` on `implement` or `resume` apply for that one activation
-only, without touching either config file — useful for trying a different reviewer on one
-run, or recovering an activation whose configured model has since become unreachable.
-They're stored in the activation's own `overrides` and sit above both config files in the
-precedence chain, but below the environment.
+`--harness H`, `--model X` and `--variant V` on `implement` or `resume` apply for that one
+activation only, without touching either config file — useful for trying a different
+reviewer on one run, or recovering an activation whose configured model has since become
+unreachable. They're stored in the activation's own `overrides` and sit above both config
+files in the precedence chain, but below the environment.
+
+`harness` is the one key that is **pinned** into `overrides` when you arm, whether or not
+you passed `--harness`. `model` and `variant` are not: they keep resolving through the
+config layers on every round. The difference is that `harness` is what decides which binary
+has to exist, so it is the only one whose drift silently voids the reachability check
+arming just did — a `.opencode-review-loop.json` edited to another harness mid-activation
+would leave every later review failing with "that binary is not on PATH", and that file
+travels with the tree under review and is not a trust boundary.
+
+So an activation keeps the harness it was armed with, and switching it is explicit: pass
+`--harness` to `resume`, or set `OCRL_HARNESS`, which still outranks the overlay. A
+`resume` that names a harness has its binary and model list checked against the one being
+switched *to*. Continuity does not carry across a switch: a session pointer minted by one
+harness is not presentable to another, so the next review simply starts fresh.
+
+What gets pinned is the harness that was actually **probed**, not the one you typed. Since
+`OCRL_HARNESS` outranks the overlay, `OCRL_HARNESS=opencode … --harness claude-code` checks
+*opencode* — so opencode is what is recorded, and the armed banner says so. Recording the
+flag instead would pin a reviewer nothing verified, and the activation would start running
+it the moment the variable left your environment.
+
+Two `resume` calls running at once are refused rather than combined: each checks the
+reviewer against the overrides it read, so merging their writes could store a
+harness/model pair neither one checked. The first to write wins; the other reports that the
+overrides moved and writes nothing. Run it again and it checks the combination against
+what is now on disk.
 
 ## Example repo config
 

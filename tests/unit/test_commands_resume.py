@@ -371,7 +371,7 @@ def test_a_same_session_failure_leaves_the_live_document_untouched(git_repo: Pat
     code, output = resume_argv(git_repo, env, S1, ["--model", "vendor/does-not-exist-anywhere"])
 
     assert code == 1
-    assert 'the configured model "vendor/does-not-exist-anywhere" is not among the models OpenCode reports' in output
+    assert 'the configured model "vendor/does-not-exist-anywhere" is not among the models opencode reports' in output
     after = (state_dir(env, git_repo, S1) / "state.json").read_bytes()
     assert after == before, "a same-session failure must write nothing at all"
 
@@ -568,12 +568,12 @@ def test_a_model_override_is_probed_instead_of_the_stored_default(git_repo: Path
     fake.chmod(0o755)
     env = {**clean_env, "PATH": str(bindir)}
     active(git_repo, tmp_path, env, extra_args="--model vendor/stored")
-    assert read_state(env, git_repo, S1)["overrides"] == {"model": "vendor/stored"}
+    assert read_state(env, git_repo, S1)["overrides"] == {"harness": "opencode", "model": "vendor/stored"}
 
     code, output = resume_argv(git_repo, env, S2, ["--model", "vendor/not-reported"])
 
     assert code == 1
-    assert 'the configured model "vendor/not-reported" is not among the models OpenCode reports' in output
+    assert 'the configured model "vendor/not-reported" is not among the models opencode reports' in output
     assert read_state(env, git_repo, S2)["status"] == "ARM_FAILED"
     assert "vendor/stored" not in output
 
@@ -581,12 +581,12 @@ def test_a_model_override_is_probed_instead_of_the_stored_default(git_repo: Path
 def test_model_and_variant_overrides_are_persisted_and_merged_over_the_stored_ones(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed(clean_env)
     active(git_repo, tmp_path, env, extra_args="--model vendor/original")
-    assert read_state(env, git_repo, S1)["overrides"] == {"model": "vendor/original"}
+    assert read_state(env, git_repo, S1)["overrides"] == {"harness": "opencode", "model": "vendor/original"}
 
     code, _ = resume_argv(git_repo, env, S2, ["--variant", "fast"])
 
     assert code == 0
-    assert read_state(env, git_repo, S2)["overrides"] == {"model": "vendor/original", "variant": "fast"}
+    assert read_state(env, git_repo, S2)["overrides"] == {"harness": "opencode", "model": "vendor/original", "variant": "fast"}
 
 
 # --------------------------------------------------------------------------
@@ -1051,3 +1051,58 @@ def test_a_genuine_git_failure_while_checking_for_an_unborn_head_still_raises(mo
 
     with pytest.raises(gitsnap.GitUnavailable):
         hooks.find_abandoned_marker_commit("/nonexistent", activation_commit="", marker_head="", marker_tree="deadbeef")
+
+
+# --------------------------------------------------------------------------
+# --harness
+# --------------------------------------------------------------------------
+
+
+def test_an_activation_keeps_its_harness_across_a_resume(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The stored override stands unless this resume names another: a resume that silently
+    reverted to the default harness would move a live activation onto a reviewer nobody chose.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env, extra_args="--harness claude-code")
+    assert read_state(env, git_repo, S1)["overrides"] == {"harness": "claude-code"}
+
+    code, banner = resume(git_repo, env)
+
+    assert code == 0, banner
+    assert read_state(env, git_repo, S2)["overrides"] == {"harness": "claude-code"}
+    assert "claude-code" in banner
+
+
+def test_the_harness_can_be_switched_mid_activation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env, extra_args="--harness claude-code")
+
+    code, banner = resume_argv(git_repo, env, S2, ["--harness", "opencode"])
+
+    assert code == 0, banner
+    assert read_state(env, git_repo, S2)["overrides"] == {"harness": "opencode"}
+
+
+def test_resuming_onto_an_unimplemented_harness_is_refused(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The same hard refusal as at arm time, and the live activation is left untouched."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    before = (state_dir(env, git_repo, S1) / "state.json").read_bytes()
+
+    code, output = resume_argv(git_repo, env, S2, ["--harness", "not-a-harness"])
+
+    assert code == 1
+    assert "unknown harness 'not-a-harness'" in output
+    assert (state_dir(env, git_repo, S1) / "state.json").read_bytes() == before
+
+
+def test_a_resume_pins_the_probed_harness_not_an_environment_masked_flag(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The same rule as ``arm``: ``OCRL_HARNESS`` outranks the overlay, so a ``--harness`` it
+    masks was never probed and must not be stored as though it had been."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    code, banner = resume_argv(git_repo, {**env, "OCRL_HARNESS": "opencode"}, S2, ["--harness", "claude-code"])
+
+    assert code == 0, banner
+    assert read_state(env, git_repo, S2)["overrides"] == {"harness": "opencode"}

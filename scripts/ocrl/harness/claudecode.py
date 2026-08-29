@@ -44,7 +44,7 @@ from typing import Any, Final
 
 from ocrl.atomic import ensure_private_dir, read_verified_file
 from ocrl.config import Config
-from ocrl.harness import Attachment, Captured, CaptureSpec, ClarifySpec, Command, PayloadError, ReviewSpec, TranscriptError
+from ocrl.harness import Attachment, Captured, CaptureSpec, ClarifySpec, Command, PayloadError, ReviewSpec, TranscriptError, model
 from ocrl.util import log
 
 __all__ = [
@@ -190,7 +190,8 @@ def _model_argv(config: Config) -> list[str]:
     blocks. Validating it here would only move the same refusal earlier -- and a list of
     accepted levels baked into this file is a list that goes stale silently.
     """
-    argv = ["--model", config.as_str("model") or DEFAULT_MODEL]
+    # `HARNESS`, not the configured harness: see the same call in `opencode.review_argv`.
+    argv = ["--model", model(config, HARNESS)]
     variant = config.as_str("variant")
     if variant:
         argv += ["--effort", variant]

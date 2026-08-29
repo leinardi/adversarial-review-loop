@@ -19,6 +19,7 @@ from conftest import SCRIPTS_DIR, run_bootstrap
 from test_commands_arm import _path_without_opencode, armed_env
 
 from ocrl import config as config_module
+from ocrl import harness
 
 
 def user_config_file(env: dict[str, str]) -> Path:
@@ -257,7 +258,7 @@ def test_model_probe_refuses_a_name_the_reviewer_does_not_report(git_repo: Path,
     proc = run_bootstrap(["config", "model", "vendor/wanted-model"], cwd=git_repo, env=env)
 
     assert proc.returncode == 1
-    assert "is not among the models OpenCode reports" in proc.stdout
+    assert "is not among the models opencode reports" in proc.stdout
     assert not user_config_file(env).exists()
 
 
@@ -482,3 +483,111 @@ def test_the_config_listing_shows_late_block_severity_default_high(git_repo: Pat
     line = next(line for line in proc.stdout.splitlines() if line.startswith("late_block_severity"))
     assert "high" in line
     assert "(default)" in line
+
+
+# --------------------------------------------------------------------------
+# harness, and `model`'s per-harness default
+# --------------------------------------------------------------------------
+
+
+def test_show_names_the_harness_whose_default_model_it_prints(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """``model``'s default is not a constant -- it belongs to the selected harness. The value
+    shown is what a run would actually pass, and the layer says which harness decided it, so an
+    unset key does not print a model name with no explanation of where it came from.
+    """
+    proc = run_bootstrap(["config"], cwd=git_repo, env=clean_env)
+
+    lines = proc.stdout.splitlines()
+    harness_line = next(line for line in lines if line.startswith("harness"))
+    model_line = next(line for line in lines if line.startswith("model"))
+    assert "opencode" in harness_line and "(default)" in harness_line
+    assert harness.get("opencode").default_model in model_line
+    assert "(default: opencode)" in model_line
+
+
+def test_show_follows_the_configured_harness_for_the_model_default(git_repo: Path, clean_env: dict[str, str]) -> None:
+    env = {**clean_env, "OCRL_HARNESS": "claude-code"}
+
+    proc = run_bootstrap(["config"], cwd=git_repo, env=env)
+
+    model_line = next(line for line in proc.stdout.splitlines() if line.startswith("model"))
+    assert harness.get("claude-code").default_model in model_line
+    assert "(default: claude-code)" in model_line
+
+
+def test_show_flags_a_harness_this_build_does_not_implement(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """``config`` is how a user finds a bad ``harness`` value, so it reports one rather than
+    crashing on it -- and never prints a model name that nothing is going to run."""
+    env = {**clean_env, "OCRL_HARNESS": "not-a-harness"}
+
+    proc = run_bootstrap(["config"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+    harness_line = next(line for line in lines if line.startswith("harness"))
+    model_line = next(line for line in lines if line.startswith("model"))
+    assert "not implemented by this build" in harness_line
+    assert harness.UNIMPLEMENTED_MODEL in model_line
+    assert harness.get("opencode").default_model not in model_line
+
+
+def test_setting_an_unimplemented_harness_is_refused_and_writes_nothing(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """No ``--force`` escape, unlike a model name: which harnesses exist is a fact about the
+    build, not something a probe can be inconclusive about."""
+    proc = run_bootstrap(["config", "harness", "not-a-harness", "--force"], cwd=git_repo, env=clean_env)
+
+    assert proc.returncode == 1
+    assert "is not a harness this build implements" in proc.stdout
+    assert not user_config_file(clean_env).exists()
+
+
+def test_setting_an_implemented_harness_is_written(git_repo: Path, clean_env: dict[str, str]) -> None:
+    proc = run_bootstrap(["config", "harness", "claude-code"], cwd=git_repo, env=clean_env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert json.loads(user_config_file(clean_env).read_text())["harness"] == "claude-code"
+
+
+def test_a_model_is_not_validated_for_a_harness_that_cannot_enumerate(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Claude Code has no model-list subcommand, so there is nothing to check the name against.
+    Refusing on that basis would refuse every name; the note says so instead, and a name the
+    CLI does not know is a non-zero exit at review time, which blocks (Rule 1).
+    """
+    bindir = Path(_path_without_opencode(tmp_path))
+    (bindir / "claude").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (bindir / "claude").chmod(0o755)
+    env = {**clean_env, "PATH": str(bindir), "OCRL_HARNESS": "claude-code"}
+
+    proc = run_bootstrap(["config", "model", "whatever-they-call-it"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "claude-code cannot enumerate its models" in proc.stdout
+    assert json.loads(user_config_file(env).read_text())["model"] == "whatever-they-call-it"
+
+
+def test_show_credits_the_harness_when_a_layer_sets_an_empty_model(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """``OCRL_MODEL=""`` is *set* -- `from_env` keeps empty values deliberately -- so the layer
+    walk credits ``env`` while the model actually used is still the harness's own. Crediting
+    ``env`` alone would attribute a model name to a layer that named none.
+    """
+    env = {**clean_env, "OCRL_MODEL": ""}
+
+    proc = run_bootstrap(["config"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    model_line = next(line for line in proc.stdout.splitlines() if line.startswith("model"))
+    assert harness.get("opencode").default_model in model_line
+    assert "(env)" in model_line, "the layer that set it is still a real fact about the configuration"
+    assert "set to empty; showing opencode's own default" in model_line
+
+
+def test_show_credits_the_layer_alone_when_it_names_a_real_model(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """The note is only about a fallback, so a layer that actually supplies a model gets none."""
+    env = {**clean_env, "OCRL_MODEL": "vendor/named"}
+
+    proc = run_bootstrap(["config"], cwd=git_repo, env=env)
+
+    model_line = next(line for line in proc.stdout.splitlines() if line.startswith("model"))
+    assert "vendor/named" in model_line
+    assert "(env)" in model_line
+    assert "own default" not in model_line

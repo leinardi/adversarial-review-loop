@@ -482,7 +482,7 @@ def test_an_approving_review_allows_the_commit_and_records_the_pending_tree(
     verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
 
     assert verdict == "allow"
-    assert "OpenCode approved phase 1" in reason
+    assert "the reviewer approved phase 1" in reason
     document = read_state(env, git_repo, SESSION)
     assert document["pending_approved_tree"]
     assert document["pending_command"] == 'git add -A && git commit -m "x"'
@@ -516,7 +516,7 @@ def test_a_blocking_review_offers_clarify_with_the_budget_left(git_repo: Path, t
     lines = reason.splitlines()
     hint = next(i for i, line in enumerate(lines) if line.startswith("If a finding is ambiguous"))
     assert lines[hint - 1] == ""
-    assert lines[0].startswith("opencode-review-loop: OpenCode requires changes before phase 1")
+    assert lines[0].startswith("opencode-review-loop: the reviewer requires changes before phase 1")
     assert reason.index("Clarifications left") < reason.index("Blocking findings")
 
 
@@ -1319,7 +1319,7 @@ def test_a_round_two_medium_outside_the_changed_paths_is_deferred_and_shown(git_
     verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
 
     assert verdict == "allow"
-    assert "OpenCode approved phase 1" in reason
+    assert "the reviewer approved phase 1" in reason
     assert "Deferred findings" in reason
     assert "did not block this commit" in reason
     assert "new.txt:1" in reason

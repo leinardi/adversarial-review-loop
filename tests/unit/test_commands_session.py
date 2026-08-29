@@ -15,7 +15,7 @@ import pytest
 from conftest import FAKE_REVIEWER, git, run_bootstrap
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
 
-from ocrl import paths
+from ocrl import harness, paths
 
 
 def arm(repo: Path, tmp_path: Path, env: dict[str, str], session: str = "s1") -> None:
@@ -496,3 +496,35 @@ def test_a_reviewer_seam_is_all_these_tests_ever_call(clean_env: dict[str, str])
     """Guard the guard: the suite must never be able to reach a real model."""
     assert FAKE_REVIEWER.is_file()
     assert "OCRL_REVIEWER_CMD" in armed_env(clean_env)
+
+
+def test_status_names_the_harness_and_the_model_it_would_run(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``model`` is unset by default and resolves to the harness's own, so a status line built
+    from the raw config value would show a blank where the reviewer is named."""
+    env = armed_env(clean_env, OCRL_HARNESS="claude-code")
+    arm(git_repo, tmp_path, env)
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "harness:             claude-code\n" in proc.stdout
+    assert f"model:               {harness.get('claude-code').default_model} \n" in proc.stdout
+
+
+def test_status_reports_an_unimplemented_harness_instead_of_crashing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``status`` is how a user finds a bad ``harness`` value -- unwinding on one would take
+    away the tool that diagnoses it. It reports; it does not present a session as usable."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    path = state_dir(env, git_repo, "s1") / "state.json"
+    document = json.loads(path.read_text())
+    document["reviewer_session"] = {"id": "ses_fb7592bccffeVl5WXE354RQsD9", "label": "phase1", "round": 3}
+    path.write_text(json.dumps(document))
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env={**env, "OCRL_HARNESS": "not-a-harness"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert "harness:             not-a-harness\n" in proc.stdout
+    assert f"model:               {harness.UNIMPLEMENTED_MODEL} \n" in proc.stdout
+    assert "reviewer session:    unreadable (unknown harness 'not-a-harness'" in proc.stdout
+    assert "ses_fb7592bccffeVl5WXE354RQsD9" not in proc.stdout

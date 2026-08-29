@@ -43,7 +43,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
-from ocrl import commands, gitsnap, paths, planrev
+from ocrl import commands, gitsnap, harness, paths, planrev
 from ocrl import config as config_module
 from ocrl.atomic import DIR_MODE, FILE_MODE, ensure_private_dir, write_private_atomic
 from ocrl.commands import arm
@@ -54,7 +54,7 @@ from ocrl.util import now
 __all__ = ["run"]
 
 _BOOL_FLAGS: Final = ("--allow-dirty", "--abandon-pending", "--replan")
-_VALUE_FLAGS: Final = ("--until", "--plan", "--model", "--variant")
+_VALUE_FLAGS: Final = ("--until", "--plan", "--harness", "--model", "--variant")
 
 #: The only stored statuses resume may continue from -- deliberately an allow-list, not a
 #: deny-list of terminal ones. A deny-list fails open the moment a new status is added and
@@ -136,6 +136,9 @@ class _Flags:
     #: ``None`` means "not given"; only an explicit ``--plan`` triggers a forced re-read.
     plan: str | None = None
     abandon_pending: bool = False
+    #: ``None`` means "not given": an activation keeps the harness it was armed with across a
+    #: resume, and only a flag the user actually typed switches it mid-activation.
+    harness: str | None = None
     model: str | None = None
     variant: str | None = None
     #: Permission to redefine the remaining, not-yet-committed phases. See ``_Decision.replan``.
@@ -172,7 +175,13 @@ class _Decision:
     retirement window to flip the policy a plain resume was already refused under.
     """
 
+    #: The overlay this resume validated: the stored one, plus the flags it was given, with
+    #: ``harness`` set to what ``_check_reviewer`` actually probed.
     overrides: dict[str, str]
+    #: The stored overlay :attr:`overrides` was merged from, kept for the compare-and-swap in
+    #: :func:`_refuse_if_the_overlay_moved`. Writing :attr:`overrides` is only sound while the
+    #: document still carries this; otherwise the pair that would land is one nothing probed.
+    stored_overrides: dict[str, str]
     revision: _RevisionChange | None
     #: The warning from deciding ``revision`` -- kept apart from ``warnings`` because a
     #: same-session (and, for the retirement window, a cross-session) resume re-decides the
@@ -228,7 +237,7 @@ def _parse_flags(tokens: list[str]) -> _Flags:
         tokens,
         bool_flags=_BOOL_FLAGS,
         value_flags=_VALUE_FLAGS,
-        usage="--until, --plan, --allow-dirty, --abandon-pending, --replan, --model, --variant",
+        usage="--until, --plan, --allow-dirty, --abandon-pending, --replan, --harness, --model, --variant",
     )
     return _Flags(
         allow_dirty=arm.flag_bool(raw, "--allow-dirty"),
@@ -236,9 +245,69 @@ def _parse_flags(tokens: list[str]) -> _Flags:
         plan=arm.flag_str(raw, "--plan"),
         abandon_pending=arm.flag_bool(raw, "--abandon-pending"),
         replan=arm.flag_bool(raw, "--replan"),
+        harness=arm.flag_str(raw, "--harness"),
         model=arm.flag_str(raw, "--model"),
         variant=arm.flag_str(raw, "--variant"),
     )
+
+
+def _stored_overrides(document: object) -> dict[str, str]:
+    """The activation overlay a state document carries, normalised.
+
+    Typed ``object`` because it comes straight out of ``state.json``, which is not a trust
+    boundary: anything that is not a mapping of strings is read as "no overlay" rather than
+    trusted to be one. Normalising here is also what lets a missing ``overrides``, a ``null``
+    one and an empty one compare equal in :func:`_refuse_if_the_overlay_moved`.
+    """
+    if not isinstance(document, dict):
+        return {}
+    raw = document.get("overrides")
+    if not isinstance(raw, dict):
+        return {}
+    return {key: str(value) for key, value in raw.items() if isinstance(key, str)}
+
+
+def _merged_overrides(stored: dict[str, str], flags: _Flags) -> dict[str, str]:
+    """The activation overlay this resume would leave behind: what is stored, plus what was typed.
+
+    Only the keys actually given: an activation keeps the harness, model and variant it was
+    armed with unless this call names another. The harness this returns is therefore the
+    *requested* one; ``_resume`` overwrites it with the one ``_check_reviewer`` really probed,
+    for the reason ``arm._arm`` documents at length.
+    """
+    merged = dict(stored)
+    for key, value in (("harness", flags.harness), ("model", flags.model), ("variant", flags.variant)):
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
+def _refuse_if_the_overlay_moved(current: object, decision: _Decision) -> None:
+    """Refuse when the stored overlay changed after this resume probed against it.
+
+    A compare-and-swap, and the only thing that keeps ``_check_reviewer`` meaningful under
+    concurrency. Two same-session resumes each probe their *own* pre-lock merge and then both
+    write: one switching the harness, one setting a model. Whatever combining rule the writes
+    follow, the pair that ends up stored is one neither call ever validated -- a model only the
+    old harness reports, now paired with the new one, so every later review fails for an
+    operational reason. Composing them under the lock does not fix that; it *is* that.
+
+    So the second writer is refused instead, and says so: the overlay it validated against is
+    no longer the one on disk, and the fix is to run the command again, which re-probes the
+    combination and either passes or reports exactly why not. Raised as
+    ``commands.Refused`` from inside the caller's transaction, so nothing is written and the
+    live activation is left exactly as it was -- the same contract every other pre-write
+    refusal here has.
+
+    Two identical resumes do not trip this: what is compared is the overlay's *value*, so a
+    call that writes back what was already there leaves the next one's base unchanged.
+    """
+    if _stored_overrides(current) != decision.stored_overrides:
+        raise commands.Refused(
+            "the activation's model/harness overrides changed while this resume was preparing (a concurrent resume), so the "
+            "combination it checked the reviewer against is no longer the one on disk. Nothing was written. Run "
+            "/opencode-review-loop:resume again to check and apply it against the current configuration.\n"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -383,6 +452,8 @@ def _build_successor_document(
         resumed_into="",
         resume_count=int(data.get("resume_count") or 0) + 1,
         activation_generation=int(data.get("activation_generation") or 0) + 1,
+        # Sound because `_retire` already refused if the predecessor's overlay had moved since
+        # this one was probed, so `snapshot` still carries the base it was merged from.
         overrides=decision.overrides,
         plan_revisions=revisions,
     )
@@ -494,15 +565,23 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
     repo = identity.repo
     _refuse_unless_resumable(prev_state)
 
-    overrides = dict(prev_state.data.get("overrides") or {})
-    for key, value in (("model", flags.model), ("variant", flags.variant)):
-        if value is not None:
-            overrides[key] = value
+    # Probed against the overlay this resume *would* write, so the binary checked and the model
+    # list probed are the harness's being switched to rather than the one being left. The base
+    # it was merged from is carried on the decision: by the time the lock is taken a concurrent
+    # resume may have moved it, and `_refuse_if_the_overlay_moved` refuses rather than storing
+    # a combination this probe never covered.
+    stored_overrides = _stored_overrides(prev_state.data)
+    overrides = _merged_overrides(stored_overrides, flags)
     probe_config = config_module.load(repo, overrides=overrides)
     try:
         arm._check_reviewer(probe_config)
     except arm._ArmFailure as exc:
         raise _ResumeFailure(str(exc)) from exc
+    # The harness that was *probed*, not the one that was asked for -- `OCRL_HARNESS` outranks
+    # this overlay, so with the two disagreeing `--harness` never reached the check above.
+    # Recording the flag anyway would pin a harness nothing verified, and the activation would
+    # start running it the moment the variable left the environment. See `arm._arm`.
+    overrides["harness"] = probe_config.as_str("harness")
 
     activation_commit = prev_state.get("activation_commit")
     if activation_commit and not gitsnap.is_ancestor(repo, activation_commit, "HEAD"):
@@ -567,6 +646,7 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
     # before it is shown, against whatever finally got published.
     decision = _Decision(
         overrides=overrides,
+        stored_overrides=stored_overrides,
         revision=revision,
         revision_warning=revision_warning,
         until=until,
@@ -665,6 +745,10 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
             revision, revision_warning = _apply_revision_and_replan(state, repo=repo, flags=flags, decision=decision)
             if decision.until_given:
                 state.update(stop_after_phase=decision.until)
+            # Checked against the *reloaded* document before writing: a concurrent same-session
+            # resume may have switched the harness since this call probed, and storing this
+            # overlay on top of that would leave a harness/model pair nothing ever validated.
+            _refuse_if_the_overlay_moved(state.data, decision)
             state.update(overrides=decision.overrides, activation_generation=state.get_int("activation_generation") + 1)
             # Convergence counters are per-run, exactly as in `_build_successor_document`: a
             # resume is a fresh start, so an inherited retry backoff (`retry_not_before` is a
@@ -714,6 +798,11 @@ def _resume_cross_session(*, prev_state: State, identity: _Identity, flags: _Fla
     def _retire() -> None:
         nonlocal snapshot, fresh_revision, fresh_revision_warning
         _refuse_unless_resumable(prev_state)
+        # Before the retirement write below, so a refusal here leaves the predecessor live and
+        # `retired=False` correct: a same-session resume against this *same* predecessor can
+        # move the overlay while this call is queued for the lock, and the successor must not
+        # be published with a harness/model pair neither call probed.
+        _refuse_if_the_overlay_moved(prev_state.data, decision)
         if decision.replan and not prev_state.get_array("phases"):
             raise commands.Refused("the phase list is not frozen yet, so there is nothing to replan. Run set-phases normally instead of --replan.\n")
         # Decided again here, against the document this transaction just reloaded -- exactly
@@ -870,7 +959,9 @@ def _banner(*, state: State, identity: _Identity, decision: _Decision) -> str:
     warnings = decision.revision_warning + decision.warnings
     config = config_module.load(repo, overrides=state.data.get("overrides"))
     variant = config.as_str("variant")
-    reviewer = f"{config.as_str('model')}{f' (variant {variant})' if variant else ''}"
+    # `arm._check_reviewer` has already accepted the harness on every path that reaches this
+    # banner, so `harness.model` cannot raise here.
+    reviewer = f"{config.as_str('harness')} {harness.model(config)}{f' (variant {variant})' if variant else ''}"
     total = state.phase_count()
     phase = state.get_int("phase")
     target = state.get_int("stop_after_phase")
