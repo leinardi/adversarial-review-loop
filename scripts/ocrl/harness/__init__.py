@@ -23,19 +23,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
+    from collections.abc import Mapping
+
     from ocrl.config import Config
 
 __all__ = [
+    "CaptureSpec",
+    "Captured",
     "ClarifySpec",
     "Command",
     "Harness",
     "ReviewSpec",
+    "SessionStrategy",
     "UnknownHarness",
     "get",
     "names",
+    "strategies",
 ]
 
 
@@ -81,6 +87,13 @@ class ReviewSpec:
     :func:`ocrl.reviewer.stage_invocation` staged (never a directory to glob), and
     ``cold`` states the intent -- "this run must see no model-influenced context" --
     which each harness honours in whatever way its own CLI provides.
+
+    **The two session fields are never both set, and they mean different things.**
+    ``session_id`` is a session that already exists and this run continues; it is only ever
+    non-empty when the gate decided continuity holds. ``new_session_id`` is an id
+    :meth:`SessionStrategy.mint` produced for a *fresh* run, so a CLI that pre-assigns
+    sessions can name the one it is about to create -- empty for a harness that cannot
+    pre-assign, which is what leaves post-hoc discovery the only way to learn it.
     """
 
     repo: str
@@ -94,6 +107,7 @@ class ReviewSpec:
     config: Config
     attachments: tuple[Path, ...] = ()
     session_id: str = ""
+    new_session_id: str = ""
     cold: bool = False
 
 
@@ -115,6 +129,104 @@ class ClarifySpec:
     config: Config
     question_file: Path
     attachments: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True)
+class CaptureSpec:
+    """What a strategy needs to answer "which session did this fresh run use?".
+
+    ``started_ms`` is the wall clock immediately before the reviewer was launched, in
+    milliseconds: it bounds a discovery search to sessions this run could actually have
+    created. ``seq`` names any scratch file the call writes, so two concurrent reviews cannot
+    collide over one. ``new_session_id`` is what :meth:`SessionStrategy.mint` pre-assigned,
+    which a pre-assigning strategy simply hands back.
+    """
+
+    repo: str
+    title: str
+    act_dir: Path
+    seq: str
+    started_ms: int
+    config: Config
+    new_session_id: str = ""
+
+
+@dataclass(frozen=True)
+class Captured:
+    """The session one fresh run turned out to have used, or nothing.
+
+    Falsy when the session could not be established, which every caller must treat as
+    "this round has no continuity to offer the next one" -- never as an error. Capturing a
+    session is an optimisation; failing to capture one costs tokens, not correctness.
+    """
+
+    session_id: str = ""
+    #: The CLI's own creation timestamp, in milliseconds. Stored beside the id and re-checked
+    #: on every later use, so an id that is reused for a *different* session does not read as
+    #: the same one. ``0`` for a harness that has no such timestamp to offer.
+    created: int = 0
+
+    def __bool__(self) -> bool:
+        return bool(self.session_id)
+
+
+@runtime_checkable
+class SessionStrategy(Protocol):
+    """How one harness's sessions come into existence, and how one is recognised.
+
+    **The two harness families differ in kind here, not in detail.** OpenCode *discovers* a
+    session after the fact -- it is created by the run itself, and the only way to learn its
+    id is to list sessions and match the unique ``--title`` the run was given. Claude Code
+    *assigns* one up front: the gate mints a uuid, hands it over, and there is nothing to
+    look up afterwards. Everything else about continuity -- the claim, the round cap, the
+    structural pointer checks, the cold-approval invariant -- is shared, so only this seam
+    varies.
+
+    Everything a strategy produces is a continuity **hint**. Nothing here can authorise an
+    approval: the cold-approval invariant in ``reviewer.execute`` is what makes a tampered or
+    wrong pointer unable to turn a review into a pass, and it does not consult this at all.
+    """
+
+    @property
+    def capture_timeout_sec(self) -> int:
+        """The longest one :meth:`verify` or :meth:`capture` call can take, in seconds.
+
+        The gate's claim leases are sized from this rather than from a constant, because a
+        strategy that runs no subprocess at all genuinely needs none of that window -- and a
+        lease padded for a listing that never happens is a lease an abandoned claim is
+        honoured far past anything real. ``0`` for a strategy that makes no call.
+        """
+
+    def is_session_id(self, value: object) -> bool:
+        """Is ``value`` a well-formed session id for this harness?
+
+        Given ``object``, not ``str``, deliberately: every caller reads its value out of
+        ``state.json`` or a CLI's own output, neither of which is a trust boundary, so the
+        type check belongs here with the shape check rather than being repeated -- and
+        forgotten -- at each call site.
+        """
+
+    def mint(self) -> str:
+        """A fresh session id for a run about to start, or ``""`` for a harness that cannot
+        pre-assign one. See :attr:`ReviewSpec.new_session_id`."""
+
+    def verify(self, pointer: Mapping[str, Any], *, repo: str, config: Config, act_dir: Path, seq: str) -> bool:
+        """Does the remembered ``pointer`` still name a session this harness can continue?
+
+        ``False`` drops continuity for this round -- never an error, and never anything the
+        caller has to distinguish: a fresh review is always a correct review. A strategy that
+        has nothing to check answers ``True`` and lets its CLI refuse the id itself, which is
+        a non-zero exit and therefore an ``OP_FAILURE`` that blocks (Rule 1).
+
+        Any *reason* worth an operator's attention is logged here, by the strategy that knows
+        what it looked at; the caller logs only the consequence.
+        """
+
+    def capture(self, spec: CaptureSpec) -> Captured:
+        """The session this fresh run used, for the next round to continue.
+
+        Must never raise: every failure is a log line and a falsy :class:`Captured`.
+        """
 
 
 @runtime_checkable
@@ -146,6 +258,9 @@ class Harness(Protocol):
     def clarify_command(self, spec: ClarifySpec) -> Command:
         """The command that answers one clarify question."""
 
+    def sessions(self) -> SessionStrategy:
+        """How this harness's sessions are named, minted and found again."""
+
     def probe_models(self, timeout: float) -> list[str] | None:
         """The models this reviewer reports, or ``None`` when it cannot enumerate them.
 
@@ -169,6 +284,17 @@ def _registry() -> dict[str, Harness]:
 def names() -> list[str]:
     """Every implemented harness name, sorted -- for error messages and `config` output."""
     return sorted(_registry())
+
+
+def strategies() -> list[SessionStrategy]:
+    """Every implemented harness's session strategy.
+
+    For the one thing that has to hold across *all* of them at once rather than for the
+    configured one: ``reviewer._MAX_LEASE_SEC``, the ceiling a stored ``lease_sec`` is
+    validated against. That ceiling has to be the largest lease **any** harness can
+    legitimately produce, or a real lease from a slower harness would read as tampered.
+    """
+    return [implementation.sessions() for implementation in _registry().values()]
 
 
 def get(name: str) -> Harness:

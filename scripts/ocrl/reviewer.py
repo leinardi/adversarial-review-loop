@@ -90,7 +90,6 @@ import dataclasses
 import datetime
 import difflib
 import hashlib
-import json
 import math
 import os
 import re
@@ -154,15 +153,14 @@ __all__ = [
     "staging_dir_for",
 ]
 
-#: How long a `session list` call is given. Metadata, not a model call -- bounded well below
-#: the review timeout.
-SESSION_LIST_TIMEOUT_SEC: Final = 60
-
-#: How many sessions ``session list`` is asked for. The continuity pointer must appear inside
-#: this window or continuity silently drops, so :func:`session_ref` logs the row count whenever
-#: a listing fails to match -- a count equal to this cap is what distinguishes "the session is
-#: gone" from "it fell off the end of the list", which are the same silent fresh review today.
-SESSION_LIST_MAX: Final = 50
+#: The longest any registered harness's session bookkeeping can take
+#: (:attr:`ocrl.harness.SessionStrategy.capture_timeout_sec`). Used **only** where a bound has
+#: to hold across every harness at once rather than for the configured one -- which is
+#: :data:`_MAX_LEASE_SEC` and nothing else. Every per-review budget reads the configured
+#: harness's own figure instead (:func:`_capture_timeout`), because padding a lease for a
+#: listing that harness never makes is a lease an abandoned claim is honoured far past
+#: anything real.
+_MAX_CAPTURE_TIMEOUT_SEC: Final = max(strategy.capture_timeout_sec for strategy in harness.strategies())
 
 #: The largest ``timeout_sec`` the reviewer will honour. Configuration is unbounded, but a
 #: reviewer deadline past this is not a deadline -- the hook that launched it, and the session
@@ -187,20 +185,6 @@ GIT_DIFF_TIMEOUT_SEC: Final = 300
 #: (`_renew_active_review`), so this number only has to be generous, never precise, and a
 #: future call added to the bundle path does not silently invalidate the lease.
 BUNDLE_GIT_BUDGET_SEC: Final = 600
-
-#: A canonical OpenCode session id. Matched before a stored or listed id is ever compared,
-#: joined, or shown to a reviewer -- see `_pointer_structurally_usable`, `capture_session` and
-#: `continuity_summary`.
-#:
-#: **Anchored with ``\Z``, not ``$``, and that is the whole point of the anchor.** Python's ``$``
-#: also matches immediately before a single trailing newline, so ``"ses_abcdefgh\n"`` satisfied
-#: ``^ses_[A-Za-z0-9]{8,64}$`` -- an id read out of ``state.json``, which is not a trust boundary.
-#: Nothing could be smuggled *after* the break (a second newline, or any trailing text, already
-#: failed), but a stored id ending in one still rendered a line break into `continuity_summary`'s
-#: status line and travelled as a session id everywhere else. ``\Z`` matches only at the true end
-#: of the string, so every one of the three call sites tightens together -- which is what keeps
-#: the summary exactly as strict as the gate rather than more so.
-_SESSION_ID_RE: Final = re.compile(r"^ses_[A-Za-z0-9]{8,64}\Z")
 
 #: The contract the reviewer prompts demand. Both must be present or the output is refused.
 FINDINGS_MARKER: Final = "<<<OCRL-FINDINGS>>>"
@@ -231,17 +215,65 @@ VERIFY_TIMEOUT_SEC: Final = 600
 #: deadline expires, so every bounded step's real worst case is its own timeout plus this.
 KILL_GRACE_SEC: Final = 2.0
 
-#: Flat slack the lease carries for everything neither of its two stretches bounds -- staging,
-#: the transactions either side, the SIGTERM-to-SIGKILL grace each invocation may pay
-#: (:data:`KILL_GRACE_SEC`), and the session-list call `_settle_pointer` can make *between*
-#: the primary invocation and the cold confirmation. That last one is why this is not simply
-#: 60: the two model calls are not back to back, and a window sized as though they were
-#: expires while its owner is still legitimately between them.
-_LEASE_SLACK_SEC: Final = SESSION_LIST_TIMEOUT_SEC + 120
 
-#: The "building" stretch of the lease: everything `build_bundle` and `session_ref` do before
-#: the first model call. Each step separately bounded -- see `_active_review_reclaim_after`.
-_BUILDING_BUDGET_SEC: Final = SESSION_LIST_TIMEOUT_SEC + VERIFY_TIMEOUT_SEC + 2 * GIT_DIFF_TIMEOUT_SEC + BUNDLE_GIT_BUDGET_SEC
+def _harness(config: Config) -> harness.Harness:
+    """Which reviewer CLI this invocation runs.
+
+    One reader, so the harness a command is built from, the harness every message names and
+    the harness the budgets are sized for can never disagree. Fixed to OpenCode for now --
+    the ``harness`` config key that lets a user choose does not exist yet, and adding it
+    changes only this function.
+    """
+    del config
+    return opencode_harness.HARNESS
+
+
+def _sessions(config: Config) -> harness.SessionStrategy:
+    """How this harness names, mints and finds a session. One reader, like :func:`_harness`."""
+    return _harness(config).sessions()
+
+
+def _capture_timeout(config: Config) -> int:
+    """This harness's session-bookkeeping ceiling -- what every lease below is sized from."""
+    return _sessions(config).capture_timeout_sec
+
+
+def _mint_session(config: Config) -> str:
+    """A session id for one invocation that starts fresh, or ``""`` when the harness cannot
+    pre-assign one.
+
+    **Every** fresh invocation mints its own, not just the ones a continuity pointer can be
+    captured from: a cold confirmation and a contract repair are as session-less as a first
+    round, and a pre-assigning harness has to be able to name each of them or it is minting
+    ids outside this seam. What separates them is ``capture``, not the id -- these two are
+    never stored and never continued, so the id they carry names a *new, empty* session and
+    can never be spelled as a resume. That is the cold-approval invariant's whole point, and
+    ``tests/unit/test_harness.py`` asserts no harness can spell it any other way.
+
+    The one reader, so a second call site cannot start minting differently.
+    """
+    return _sessions(config).mint()
+
+
+def _lease_slack(capture_timeout_sec: int) -> int:
+    """Flat slack the lease carries for everything neither of its two stretches bounds.
+
+    Staging, the transactions either side, the SIGTERM-to-SIGKILL grace each invocation may
+    pay (:data:`KILL_GRACE_SEC`), and the session-capture call `_settle_pointer` can make
+    *between* the primary invocation and the cold confirmation. That last one is why this is
+    not simply 60: the two model calls are not back to back, and a window sized as though they
+    were expires while its owner is still legitimately between them. It is also why the term
+    is the *harness's* capture timeout rather than a constant -- a strategy that captures
+    without a subprocess spends none of it.
+    """
+    return capture_timeout_sec + 120
+
+
+def _building_budget(capture_timeout_sec: int) -> int:
+    """The "building" stretch of the lease: everything `build_bundle` and `session_ref` do
+    before the first model call. Each step separately bounded -- see
+    `_active_review_reclaim_after`."""
+    return capture_timeout_sec + VERIFY_TIMEOUT_SEC + 2 * GIT_DIFF_TIMEOUT_SEC + BUNDLE_GIT_BUDGET_SEC
 
 
 #: How long the contract-repair call (:func:`_repair_contract`) is given. Fixed, and far
@@ -253,21 +285,31 @@ REPAIR_TIMEOUT_SEC: Final = 120
 #: `_settle_pointer` / `_publish` / `_release_active_review` transactions, writing the stored
 #: report, and the caller's own state write and JSON emit. Generous rather than precise --
 #: every one of them is a local file write under a lock -- and deliberately the *only*
-#: unmeasured term in :data:`SETTLE_MARGIN_SEC`.
+#: unmeasured term in :func:`settle_margin`.
 _PUBLISH_BUDGET_SEC: Final = 30
 
-#: What :func:`_repair_fits` keeps back from the hook's remaining budget for everything that
-#: still has to happen after the repair returns. **Derived from the steps it covers, not
-#: chosen**, for the same reason :data:`_MAX_LEASE_SEC` is: a hand-picked number is a number
-#: nobody re-checks when a step is added under it, and this one was wrong the first time --
-#: a flat 60 did not cover the single largest step after the repair, which is
-#: `_settle_pointer` capturing a *fresh* round's session through a full
-#: :data:`SESSION_LIST_TIMEOUT_SEC` listing. A round whose repair times out and whose listing
-#: then times out too pays both deadlines **and both SIGTERM-to-SIGKILL grace windows**
-#: (:func:`_kill_group` waits the grace out on each), which at 60 overran the budget by
-#: seconds and lost exactly what the reserve exists to protect: the stored report and the
-#: recovered round, killed by the shim between the repair and :func:`_publish`.
-SETTLE_MARGIN_SEC: Final = SESSION_LIST_TIMEOUT_SEC + 2 * math.ceil(KILL_GRACE_SEC) + _PUBLISH_BUDGET_SEC
+
+def settle_margin(config: Config) -> int:
+    """What :func:`_repair_fits` keeps back from the hook's remaining budget for everything
+    that still has to happen after the repair returns.
+
+    **Derived from the steps it covers, not chosen**, for the same reason
+    :data:`_MAX_LEASE_SEC` is: a hand-picked number is a number nobody re-checks when a step
+    is added under it, and this one was wrong the first time -- a flat 60 did not cover the
+    single largest step after the repair, which is `_settle_pointer` capturing a *fresh*
+    round's session (:attr:`ocrl.harness.SessionStrategy.capture_timeout_sec`). A round whose
+    repair times out and whose capture then times out too pays both deadlines **and both
+    SIGTERM-to-SIGKILL grace windows** (:func:`_kill_group` waits the grace out on each),
+    which at 60 overran the budget by seconds and lost exactly what the reserve exists to
+    protect: the stored report and the recovered round, killed by the shim between the repair
+    and :func:`_publish`.
+
+    Per-harness, because the capture step is: a strategy that captures without a subprocess
+    reserves nothing for it, and a reserve padded for a call that never happens skips repairs
+    there is room for -- which costs a recoverable round every time.
+    """
+    return _capture_timeout(config) + 2 * math.ceil(KILL_GRACE_SEC) + _PUBLISH_BUDGET_SEC
+
 
 #: How much of the malformed transcript the repair call is shown: its **tail**, because the
 #: findings block is what the reviewer writes last. A tail can have lost blocking findings
@@ -313,9 +355,10 @@ def remaining_budget() -> float | None:
     A **whole-hook** deadline, not a sum of per-call ceilings. ``scripts/ocrl.sh`` runs
     ``pretool`` under ``timeout 1150`` and ``gate-stop`` under ``timeout 1750``, and by the
     time a reviewer call returns the hook may already have spent a bundle build (including
-    ``verify_cmd``'s :data:`VERIFY_TIMEOUT_SEC`), a session listing
-    (:data:`SESSION_LIST_TIMEOUT_SEC`) and a full ``timeout_sec`` invocation. Only a number
-    measured from process entry can say whether there is room for anything more, which is why
+    ``verify_cmd``'s :data:`VERIFY_TIMEOUT_SEC`), a session verify
+    (:attr:`ocrl.harness.SessionStrategy.capture_timeout_sec`) and a full ``timeout_sec``
+    invocation. Only a number measured from process entry can say whether there is room for
+    anything more, which is why
     ``cli`` stamps the clock and the shim passes its own ceiling in rather than either side
     guessing.
 
@@ -330,7 +373,7 @@ def remaining_budget() -> float | None:
     return cli.HOOK_DEADLINE_SEC - (time.monotonic() - cli.HOOK_STARTED)
 
 
-def _repair_fits() -> bool:
+def _repair_fits(config: Config) -> bool:
     """Is there room in the hook's budget for a repair call *and* for finishing afterwards?
 
     Skipping is the safe direction and needs no apology: a repair can only ever turn a
@@ -340,7 +383,7 @@ def _repair_fits() -> bool:
     decided, and the round and report it was about to publish are lost.
     """
     remaining = remaining_budget()
-    if remaining is None or remaining >= REPAIR_TIMEOUT_SEC + SETTLE_MARGIN_SEC:
+    if remaining is None or remaining >= REPAIR_TIMEOUT_SEC + settle_margin(config):
         return True
     log(f"contract repair: skipped, only {remaining:.0f}s of the hook's budget remain; the contract failure stands")
     return False
@@ -353,7 +396,10 @@ def _repair_fits() -> bool:
 #: indefinitely. Being exactly the largest lease `_active_review_reclaim_after` can legitimately
 #: produce, this rejects tampered values without ever rejecting a real one -- the failure mode a
 #: hand-picked constant had, where a big-but-legal `timeout_sec` fell through to the fallback.
-_MAX_LEASE_SEC: Final = max(_BUILDING_BUDGET_SEC, _invoking_budget(MAX_TIMEOUT_SEC)) + _LEASE_SLACK_SEC
+#: Taken at :data:`_MAX_CAPTURE_TIMEOUT_SEC` -- the *slowest* harness, not the configured one
+#: -- because both terms grow with it, so any narrower ceiling would read a slower harness's
+#: perfectly legitimate lease as tampered.
+_MAX_LEASE_SEC: Final = max(_building_budget(_MAX_CAPTURE_TIMEOUT_SEC), _invoking_budget(MAX_TIMEOUT_SEC)) + _lease_slack(_MAX_CAPTURE_TIMEOUT_SEC)
 VERIFY_TAIL_BYTES: Final = 200000
 
 #: ``split -d -a 2`` can name 100 files before it gives up.
@@ -528,7 +574,11 @@ class Invocation:
     """Where one run of the reviewer reads its bundle and writes its answer.
 
     ``session_id`` is "" for a fresh run (``--title`` is passed) or a session to continue
-    (``-s``, no ``--title``) -- see ``review_argv``. ``capture`` is only ever true for a fresh
+    (``-s``, no ``--title``) -- see ``review_argv``. ``new_session_id`` is its mirror: the id
+    a pre-assigning harness minted for a *fresh* run, "" under a harness that discovers its
+    sessions instead. They are never both set, and **every** fresh invocation carries one --
+    the cold confirmation and the contract repair included, both of which are as session-less
+    as a first round (see :func:`_mint_session`). ``capture`` is only ever true for a fresh
     run whose session, once it exists, is eligible to become the phase's continuity pointer;
     a cold confirmation is always ``capture=False``, and so is a fresh run reached because the
     real pointer was claimed by a live owner elsewhere. See ``session_ref``.
@@ -576,6 +626,7 @@ class Invocation:
     title: str
     out_path: Path
     session_id: str = ""
+    new_session_id: str = ""
     capture: bool = True
     attachments: tuple[tuple[Path, str], ...] = ()
     context_files: tuple[Path, ...] = ()
@@ -829,6 +880,10 @@ class SessionRef:
     is the round this invocation represents, needed before the review even runs (it goes into
     ``range.txt``) -- 1 for any fresh run, one past the stored round for a continued one.
 
+    ``new_session_id`` is the mirror of ``session_id`` and is only ever set when that is "":
+    the id :meth:`ocrl.harness.SessionStrategy.mint` pre-assigned to this fresh run, "" for a
+    harness that discovers its sessions after the fact instead. See :func:`_fresh_ref`.
+
     A ``session_id`` here is a hint the reviewer may hold extra context, never an
     authorization: see the module docstring, "the cold-approval invariant".
     """
@@ -837,6 +892,7 @@ class SessionRef:
     claim_id: str
     capturable: bool
     round: int
+    new_session_id: str = ""
 
 
 # --------------------------------------------------------------------------
@@ -1823,25 +1879,6 @@ def _act_dir_of(bundle_dir: Path) -> Path:
     return bundle_dir.parent.parent
 
 
-def _harness(config: Config) -> harness.Harness:
-    """Which reviewer CLI this invocation runs.
-
-    One reader, so the harness a command is built from and the harness every message names
-    can never disagree. Fixed to OpenCode for now -- the ``harness`` config key that lets a
-    user choose does not exist yet, and adding it changes only this function.
-    """
-    del config
-    return opencode_harness.HARNESS
-
-
-#: The isolation flags and env vars now live with the harness that defines them
-#: (:mod:`ocrl.harness.opencode`). Re-exported under their original private names because
-#: they are what the drift test asserts `review_argv` and `_list_sessions` share -- the
-#: assertion is about the two call sites agreeing, and it stays exactly as strict here.
-_isolation_argv = opencode_harness.isolation_argv
-_isolation_env = opencode_harness.isolation_env
-
-
 def context_attachments(bundle_dir: Path) -> list[Path]:
     """The ``context/`` files written for this review's sequence, in attachment order.
 
@@ -2200,6 +2237,7 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
             config=config,
             attachments=tuple(path for path, _digest in run.attachments),
             session_id=run.session_id,
+            new_session_id=run.new_session_id,
             cold=run.cold,
         )
         built = _harness(config).review_command(spec)
@@ -2612,88 +2650,39 @@ def _claim_is_live(pointer: dict[str, Any], reclaim_after: int) -> bool:
 
 
 def _unique_title(state: State, target: Target, label: str) -> str:
-    """A ``--title`` unique enough that a listing match is reliable. See ``capture_session``."""
+    """The title one review's session is given.
+
+    Harness-neutral -- every :class:`ocrl.harness.ReviewSpec` carries one -- but built to be
+    *unique* because a discovery-based strategy has nothing else to match a listed row
+    against (see ``ocrl.harness.opencode.DiscoveredSessions``). A harness that pre-assigns
+    its session ids does not depend on the uniqueness; it costs nothing there.
+    """
     base = f"review-loop phase {target.phase}" if target.is_phase else "review-loop final review"
     fingerprint = sha256_hex(str(state.act_dir))[:8]
     return f"{base} [{fingerprint}/{label}]"
 
 
-def _same_repo(directory: object, repo: str) -> bool:
-    """Canonicalised on both sides, so a symlinked path reads as neither a false mismatch
-    nor a false match."""
-    return isinstance(directory, str) and os.path.realpath(directory) == os.path.realpath(repo)
+def _pointer_structurally_usable(pointer: dict[str, Any], state: State, target: Target, *, config: Config) -> bool:
+    """The cheap checks -- no subprocess -- that decide whether a strategy's verify is worth
+    running at all.
 
-
-def _list_sessions(target: Target, *, config: Config, act_dir: Path, seq: str) -> list[Any] | None:
-    """``opencode session list --format json -n 50``, parsed -- or ``None`` on anything else.
-
-    Written to ``act_dir/tmp/session-list-<seq>.json`` and deleted in a ``finally``, never
-    inside the bundle: the bundle is what a continued reviewer can read back
-    (``permission``), and this listing names every other OpenCode session in the repository --
-    ids, titles and all, including the user's own unrelated work.
-
-    ``OCRL_SESSION_LIST_CMD`` is the test seam, parallel to ``OCRL_REVIEWER_CMD``: a stand-in
-    that writes the same JSON shape to stdout. When the reviewer seam is active and this one
-    is not, the call is skipped entirely rather than reaching a real ``opencode`` -- exactly
-    like every other reviewer-adjacent call under that seam.
+    **The harness the pointer was minted under is one of them.** A session id is only
+    meaningful to the CLI that created it, so a pointer left behind by a different harness
+    must never be presentable as a continuation: at best the id is refused (a non-zero exit,
+    i.e. a blocking ``OP_FAILURE``), at worst it names an unrelated session of the other CLI's
+    that this review would then be talking to. A pointer written before this field existed
+    carries no ``harness`` and so reads as a mismatch -- one fresh review, which is the same
+    safe direction ``generation`` and ``revisions`` already fall in.
     """
-    reviewer_cmd = os.environ.get("OCRL_REVIEWER_CMD", "")
-    session_list_cmd = os.environ.get("OCRL_SESSION_LIST_CMD", "")
-    if reviewer_cmd and not session_list_cmd:
-        return None
-
-    if session_list_cmd:
-        argv = [session_list_cmd]
-        env = dict(os.environ)
-    else:
-        argv = ["opencode", *_isolation_argv(config), "session", "list", "--format", "json", "-n", str(SESSION_LIST_MAX)]
-        env = _isolation_env(config, dict(os.environ))
-
-    listing_path = act_dir / "tmp" / f"session-list-{seq}.json"
-    try:
-        ensure_private_dir(listing_path.parent, root=state_root())
-        fd = os.open(listing_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, FILE_MODE)
-        with os.fdopen(fd, "wb") as sink:
-            status = run_bounded(argv, stdout=sink, timeout_sec=SESSION_LIST_TIMEOUT_SEC, env=env, cwd=target.repo)
-        if status != 0:
-            log(f"session list exited with status {status}")
-            return None
-        data = json.loads(listing_path.read_bytes())
-        if not isinstance(data, list):
-            log("session list output was not a JSON list")
-            return None
-    except Exception as exc:
-        log(f"session list failed: {exc}")
-        return None
-    finally:
-        listing_path.unlink(missing_ok=True)
-    return data
-
-
-def _pointer_structurally_usable(pointer: dict[str, Any], state: State, target: Target) -> bool:
-    """The cheap checks -- no subprocess -- that decide whether a listing verify is worth
-    running at all."""
-    session_id = pointer.get("id")
-    if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+    if not _sessions(config).is_session_id(pointer.get("id")):
+        return False
+    if pointer.get("harness") != _harness(config).name:
         return False
     if pointer.get("label") != target.label:
         return False
     if pointer.get("revisions") != len(state.data.get("plan_revisions") or []):
         return False
     return pointer.get("generation") == state.get_int("activation_generation")
-
-
-def _exactly_one_match(rows: list[Any], *, session_id: str, title: object, created: object, repo: str) -> bool:
-    matches = [
-        row
-        for row in rows
-        if isinstance(row, dict)
-        and row.get("id") == session_id
-        and row.get("title") == title
-        and row.get("created") == created
-        and _same_repo(row.get("directory"), repo)
-    ]
-    return len(matches) == 1
 
 
 def _try_claim(state: State, *, target: Target, session_id: str, config: Config) -> tuple[str | None, int]:
@@ -2729,7 +2718,7 @@ def _try_claim(state: State, *, target: Target, session_id: str, config: Config)
         with state.transaction():
             current = state.data.get("reviewer_session")
             current = current if isinstance(current, dict) else {}
-            if current.get("id") != session_id or not _pointer_structurally_usable(current, state, target):
+            if current.get("id") != session_id or not _pointer_structurally_usable(current, state, target, config=config):
                 claimed = None
                 raise _TransactionAborted
             if _claim_is_live(current, _reclaim_after(config)):
@@ -2747,15 +2736,22 @@ def _try_claim(state: State, *, target: Target, session_id: str, config: Config)
     return claimed, round_number
 
 
-def session_ref(  # noqa: PLR0911 - one return per distinguishable fall-back reason, which is exactly what the docstring below commits to; merging any two would merge their log lines with them
-    state: State, target: Target, *, config: Config
-) -> SessionRef:
+def _fresh_ref(config: Config, *, capturable: bool) -> SessionRef:
+    """A ref for a review that continues nothing -- round 1, no claim, its own new session.
+
+    ``""`` for a harness that discovers its sessions instead, which is what leaves ``capture``
+    the only way that round's session becomes known.
+    """
+    return SessionRef(session_id="", claim_id="", capturable=capturable, round=1, new_session_id=_mint_session(config))
+
+
+def session_ref(state: State, target: Target, *, config: Config) -> SessionRef:
     """Decide whether this review continues a remembered session. Never raises.
 
-    Two phases, deliberately: the listing verify below can take up to
-    :data:`SESSION_LIST_TIMEOUT_SEC` and runs with **no lock held**, exactly like every other
-    slow operation in this gate. Only the final claim -- a reload, a comparison and a write --
-    takes the activation lock, and it is fast (:func:`_try_claim`).
+    Two phases, deliberately: the strategy's verify below can take up to
+    :attr:`ocrl.harness.SessionStrategy.capture_timeout_sec` and runs with **no lock held**,
+    exactly like every other slow operation in this gate. Only the final claim -- a reload, a
+    comparison and a write -- takes the activation lock, and it is fast (:func:`_try_claim`).
 
     Reads ``state.data`` as the caller already loaded it, deliberately without a defensive
     reload here: this runs synchronously inside the same call chain that loaded it (no slow
@@ -2779,9 +2775,10 @@ def session_ref(  # noqa: PLR0911 - one return per distinguishable fall-back rea
     someone else holds), and the difference is worth real tokens per round. The messages are
     advisory only: nothing here reads them back, and no branch below may change because of one.
     """
+    strategy = _sessions(config)
     pointer = state.data.get("reviewer_session")
     pointer = pointer if isinstance(pointer, dict) else {}
-    if not _pointer_structurally_usable(pointer, state, target):
+    if not _pointer_structurally_usable(pointer, state, target, config=config):
         # Only when the pointer actually names *this* label: no pointer at all (round 1 of a
         # phase) and a pointer left behind by an earlier phase are the ordinary, correct way to
         # start fresh, and logging those would bury the one case worth seeing -- a generation or
@@ -2790,14 +2787,15 @@ def session_ref(  # noqa: PLR0911 - one return per distinguishable fall-back rea
             log(
                 f"session continuity: the pointer for {target.label} is no longer usable "
                 f"(generation {pointer.get('generation')!r} vs {state.get_int('activation_generation')!r}, "
-                f"revisions {pointer.get('revisions')!r} vs {len(state.data.get('plan_revisions') or [])!r}); starting fresh"
+                f"revisions {pointer.get('revisions')!r} vs {len(state.data.get('plan_revisions') or [])!r}, "
+                f"harness {pointer.get('harness')!r} vs {_harness(config).name!r}); starting fresh"
             )
-        return SessionRef(session_id="", claim_id="", capturable=True, round=1)
+        return _fresh_ref(config, capturable=True)
 
     session_id = str(pointer["id"])
 
-    # The round cap, checked before the (slow) listing verify: a session this call is not
-    # going to continue is not worth an `opencode session list` to verify. Capping is always
+    # The round cap, checked before the (slow) verify: a session this call is not going to
+    # continue is not worth a strategy's verification call. Capping is always
     # safe in the direction it points -- a fresh session carries *less* model-influenced
     # context into the review, never more -- and the memory it drops is not actually lost:
     # `prior-rounds.txt` and `incremental.diff` carry the earlier rounds forward as bounded,
@@ -2821,33 +2819,23 @@ def session_ref(  # noqa: PLR0911 - one return per distinguishable fall-back rea
             f"max_session_rounds cap of {cap}; starting fresh"
             f"{', and this round will not capture -- another review holds the pointer' if busy else ''}"
         )
-        return SessionRef(session_id="", claim_id="", capturable=not busy, round=1)
+        return _fresh_ref(config, capturable=not busy)
 
-    rows = _list_sessions(target, config=config, act_dir=state.act_dir, seq=f"verify-{secrets.token_hex(4)}")
-    if rows is None:
-        # `_list_sessions` already logged *why* the call failed; this adds the consequence,
-        # which is the half an operator actually needs -- this round pays full token price.
+    # The strategy logs *why* it could not vouch for the session -- a listing that failed, a
+    # row that no longer matches -- because only it knows what it looked at. This adds the
+    # consequence, which is the half an operator actually needs: this round pays full token
+    # price. A strategy with nothing to check answers True and never reaches here.
+    if not strategy.verify(pointer, repo=target.repo, config=config, act_dir=state.act_dir, seq=f"verify-{secrets.token_hex(4)}"):
         log(f"session continuity: could not verify {session_id} for {target.label}; starting fresh")
-        return SessionRef(session_id="", claim_id="", capturable=True, round=1)
-    if not _exactly_one_match(rows, session_id=session_id, title=pointer.get("title"), created=pointer.get("created"), repo=target.repo):
-        # The row count, and whether it saturated the cap, is what separates the two failure
-        # modes this branch merges: a session that is genuinely gone, and one that is merely
-        # past `SESSION_LIST_MAX` in a busy project. Only the second is worth raising the cap
-        # for, and without this line neither is distinguishable from the other.
-        saturated = " -- the listing is saturated, so the session may simply be past the cap" if len(rows) >= SESSION_LIST_MAX else ""
-        log(
-            f"session continuity: {session_id} did not match exactly one listed session for {target.label} "
-            f"({len(rows)} rows returned, cap {SESSION_LIST_MAX}{saturated}); starting fresh"
-        )
-        return SessionRef(session_id="", claim_id="", capturable=True, round=1)
+        return _fresh_ref(config, capturable=True)
 
     claim_id, round_number = _try_claim(state, target=target, session_id=session_id, config=config)
     if claim_id is None:
         log(f"session continuity: the pointer for {target.label} changed under the claim; starting fresh")
-        return SessionRef(session_id="", claim_id="", capturable=True, round=1)
+        return _fresh_ref(config, capturable=True)
     if claim_id == "":
         log(f"session continuity: another review holds the pointer for {target.label}; starting fresh, and this round will not capture")
-        return SessionRef(session_id="", claim_id="", capturable=False, round=1)
+        return _fresh_ref(config, capturable=False)
     return SessionRef(session_id=session_id, claim_id=claim_id, capturable=False, round=round_number)
 
 
@@ -2868,8 +2856,9 @@ def continuity_summary(state: State, config: Config) -> str:
     phase directly above this, which is what a reader compares the stored label against.
 
     Every field is untrusted (``state.json``), so each is validated with the same helpers the
-    review path uses -- :data:`_SESSION_ID_RE`, :func:`_is_single_stored_line`, :func:`_as_int`
-    -- and a field that fails falls back to :data:`_UNREADABLE` rather than reaching the output.
+    review path uses -- :meth:`ocrl.harness.SessionStrategy.is_session_id`,
+    :func:`_is_single_stored_line`, :func:`_as_int` -- and a field that fails falls back to
+    :data:`_UNREADABLE` rather than reaching the output.
     """
     pointer = state.data.get("reviewer_session")
     if not isinstance(pointer, dict) or not pointer:
@@ -2877,8 +2866,9 @@ def continuity_summary(state: State, config: Config) -> str:
 
     session_id = pointer.get("id")
     # Printed in full, never abbreviated: this is the id a human pastes into
-    # `opencode session delete`, and a truncated one cannot be used for anything.
-    shown = session_id if isinstance(session_id, str) and _SESSION_ID_RE.match(session_id) else _UNREADABLE
+    # `opencode session delete`, and a truncated one cannot be used for anything. Validated
+    # against the *configured* harness's shape, which is what the next review would use it as.
+    shown = session_id if _sessions(config).is_session_id(session_id) else _UNREADABLE
 
     label = pointer.get("label")
     label_text = label if _is_single_stored_line(label) else _UNREADABLE
@@ -2987,50 +2977,34 @@ class _CaptureContext:
     target: Target
     title: str
     round_number: int
+    #: What :meth:`ocrl.harness.SessionStrategy.mint` pre-assigned this run, or "". Carried
+    #: here rather than re-minted, because the id the *next* round continues has to be the one
+    #: this round's invocation actually ran under -- a second mint would be a different session.
+    new_session_id: str = ""
 
 
-@dataclass(frozen=True)
-class _Captured:
-    """A fresh run's session, if exactly one row matched. Falsy when nothing did."""
+def capture_session(ctx: _CaptureContext, *, config: Config, act_dir: Path, seq: str, started_ms: int) -> harness.Captured:
+    """The session this fresh run used, as the configured harness's strategy reports it.
 
-    session_id: str = ""
-    created: int = 0
-
-    def __bool__(self) -> bool:
-        return bool(self.session_id)
-
-
-def capture_session(ctx: _CaptureContext, *, config: Config, act_dir: Path, seq: str, started_ms: int) -> _Captured:
-    """The session ``opencode session list`` shows for this fresh run's title, or falsy.
-
-    Every failure -- non-zero exit, timeout, unparseable JSON, a row predating this run, no
-    match -- is :func:`log` plus the empty result; this must never be able to fail a review.
-    **Exactly one** matching row is required: two rows carrying our title inside the window
-    means something else created one, so the answer is a cold session, not a guess.
+    A thin delegation, kept as a named function because it is one of the two halves of
+    settling a pointer and its counterpart :func:`_store_captured_session` is the half with
+    the transaction. Whatever the strategy does -- a listing match, or simply handing back the
+    id it minted -- it must never raise: every failure there is a log line and a falsy
+    :class:`ocrl.harness.Captured`, and this must never be able to fail a review.
     """
-    rows = _list_sessions(ctx.target, config=config, act_dir=act_dir, seq=seq)
-    if rows is None:
-        return _Captured()
-    matches = [
-        row
-        for row in rows
-        if isinstance(row, dict)
-        and row.get("title") == ctx.title
-        and isinstance(row.get("id"), str)
-        and _SESSION_ID_RE.match(row["id"])
-        and isinstance(row.get("created"), (int, float))
-        and row["created"] >= started_ms
-        and _same_repo(row.get("directory"), ctx.target.repo)
-    ]
-    if len(matches) != 1:
-        if matches:
-            log(f"capture_session: {len(matches)} rows matched title {ctx.title!r} in the window; not guessing")
-        return _Captured()
-    row = matches[0]
-    return _Captured(session_id=str(row["id"]), created=int(row["created"]))
+    spec = harness.CaptureSpec(
+        repo=ctx.target.repo,
+        title=ctx.title,
+        act_dir=act_dir,
+        seq=seq,
+        started_ms=started_ms,
+        config=config,
+        new_session_id=ctx.new_session_id,
+    )
+    return _sessions(config).capture(spec)
 
 
-def _store_captured_session(state: State, ctx: _CaptureContext, captured: _Captured, *, expected: hooks.Activation, config: Config) -> None:
+def _store_captured_session(state: State, ctx: _CaptureContext, captured: harness.Captured, *, expected: hooks.Activation, config: Config) -> None:
     """Store a fresh, capturable run's session as the phase's new continuity pointer.
 
     Fingerprinted like every other post-slow-work write: ``expected`` was captured before
@@ -3067,6 +3041,10 @@ def _store_captured_session(state: State, ctx: _CaptureContext, captured: _Captu
                 raise _TransactionAborted
             state.data["reviewer_session"] = {
                 "label": ctx.target.label,
+                # The harness this id belongs to. Checked back on every read
+                # (`_pointer_structurally_usable`), because an id is only meaningful to the
+                # CLI that minted it.
+                "harness": _harness(config).name,
                 "id": captured.session_id,
                 "title": ctx.title,
                 "created": captured.created,
@@ -3144,7 +3122,8 @@ def _active_review_reclaim_after(config: Config) -> int:
     into two stretches with :func:`_renew_active_review` between them, so the lease only ever
     has to outlast the longer one, not both end to end:
 
-    - *building* -- ``session_ref``'s listing verify (:data:`SESSION_LIST_TIMEOUT_SEC`),
+    - *building* -- ``session_ref``'s continuity verify
+      (:attr:`ocrl.harness.SessionStrategy.capture_timeout_sec`),
       ``verify_cmd`` (:data:`VERIFY_TIMEOUT_SEC`), the two bundle diffs
       (:data:`GIT_DIFF_TIMEOUT_SEC` each) and the bundle's metadata git calls
       (:data:`BUNDLE_GIT_BUDGET_SEC`);
@@ -3163,8 +3142,14 @@ def _active_review_reclaim_after(config: Config) -> int:
     let it expire while its owner is still legitimately running, which is precisely the race
     the slot exists to close, arrived at from the other direction. Plus the same flat slack
     :func:`_reclaim_after` carries for everything neither stretch bounds.
+
+    Both the building stretch and the slack are sized from the *configured harness's* session
+    bookkeeping (:func:`_capture_timeout`), not from a constant: the window has to cover what
+    this review will actually do, and a harness that captures its session without a subprocess
+    does none of it.
     """
-    return max(_BUILDING_BUDGET_SEC, _invoking_budget(_timeout_sec(config))) + _LEASE_SLACK_SEC
+    capture_timeout_sec = _capture_timeout(config)
+    return max(_building_budget(capture_timeout_sec), _invoking_budget(_timeout_sec(config))) + _lease_slack(capture_timeout_sec)
 
 
 def _claim_active_review(state: State, target: Target, config: Config) -> str | None:
@@ -3429,7 +3414,7 @@ def _settle_pointer(rr: _ReviewRun, ref: SessionRef, *, started_ms: int, invoked
         return ""
     if not invoked or not ref.capturable:
         return ""
-    ctx = _CaptureContext(target=rr.target, title=rr.title, round_number=ref.round)
+    ctx = _CaptureContext(target=rr.target, title=rr.title, round_number=ref.round, new_session_id=ref.new_session_id)
     captured = capture_session(ctx, config=rr.config, act_dir=rr.state.act_dir, seq=rr.label, started_ms=started_ms)
     _store_captured_session(rr.state, ctx, captured, expected=rr.expected, config=rr.config)
     return captured.session_id
@@ -3546,6 +3531,9 @@ def _confirm_cold(rr: _ReviewRun, continued: Review) -> Review:
         title=rr.title,
         out_path=rr.raw_dir / f"{rr.label}-{rr.target.label}-cold.out",
         session_id="",
+        # A brand-new, empty session -- never a resume. `capture=False` is what keeps it out
+        # of the continuity pointer; the id only names the conversation this one call opens.
+        new_session_id=_mint_session(rr.config),
         capture=False,
         attachments=attachments,
         context_files=(),
@@ -3675,6 +3663,8 @@ def _repair_contract(rr: _ReviewRun, failed: Review, out_path: Path) -> Review:
         title=f"{rr.title} repair",
         out_path=rr.raw_dir / f"{rr.label}-{rr.target.label}-repair.out",
         session_id="",
+        # Its own new session, for the same reason the cold confirmation gets one.
+        new_session_id=_mint_session(rr.config),
         capture=False,
         attachments=tuple(attachments),
         context_files=(attachments[-1][0],),
@@ -4306,7 +4296,7 @@ def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expec
         # cold invocation carries no history of.
         log(f"session claim: lost ownership before invoking; falling back to a fresh review for {target.label}")
         rr = dataclasses.replace(rr, bundle_digest=_downgrade_bundle_round(bundle_dir, state.act_dir, rr.bundle_digest))
-        ref = SessionRef(session_id="", claim_id="", capturable=False, round=1)
+        ref = _fresh_ref(config, capturable=False)
 
     # Listed exactly once, here, and carried on the invocation from this point on. Both the
     # argv and the cold-confirmation decision below read `run.context_files` rather than
@@ -4329,6 +4319,7 @@ def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expec
         title=title,
         out_path=raw_dir / f"{label}-{target.label}.out",
         session_id=ref.session_id,
+        new_session_id=ref.new_session_id,
         capture=(not ref.session_id) and ref.capturable,
         attachments=attachments,
         context_files=context_files,
@@ -4343,7 +4334,7 @@ def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expec
         # cold-confirmation decision below -- that reads the tuple, never the filesystem.
         shutil.rmtree(staging_dir, ignore_errors=True)
 
-    if review.verdict == "OP_FAILURE" and review.kind == "contract" and _repair_fits():
+    if review.verdict == "OP_FAILURE" and review.kind == "contract" and _repair_fits(config):
         # The reviewer ran to completion and then wrote a block the gate cannot read. One
         # cheap, session-less call can recover the *blocking* findings that transcript states
         # -- and only those; see `_repair_contract` for why no approval may come out of it.

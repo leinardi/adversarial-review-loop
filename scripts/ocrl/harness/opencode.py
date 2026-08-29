@@ -10,21 +10,38 @@ for the evidence boundary :mod:`ocrl.reviewer` documents: a ``context/`` attachm
 inlined into the prompt rather than handed over as a path, so no invocation can re-open
 one by name, and a cold confirmation -- passed none of them -- structurally cannot have
 seen model-authored prose.
+
+**Session continuity here is discovery, not assignment** (:class:`DiscoveredSessions`):
+``opencode run`` creates the session itself and offers no way to name it in advance, so the
+gate passes a unique ``--title`` and reads the id back out of ``opencode session list``. The
+listing, its cap and its timeout therefore belong to this module rather than to the gate --
+a harness that pre-assigns its sessions makes no such call at all, and the gate's claim
+leases are sized from :attr:`DiscoveredSessions.capture_timeout_sec` for exactly that reason.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+import os
+import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from ocrl import reviewer_probe
+from ocrl.atomic import FILE_MODE, ensure_private_dir
 from ocrl.config import Config
-from ocrl.harness import ClarifySpec, Command, ReviewSpec
+from ocrl.harness import Captured, CaptureSpec, ClarifySpec, Command, ReviewSpec
+from ocrl.paths import state_root
+from ocrl.util import log
 
 __all__ = [
     "HARNESS",
+    "SESSIONS",
+    "SESSION_ID_RE",
+    "SESSION_LIST_MAX",
+    "SESSION_LIST_TIMEOUT_SEC",
+    "DiscoveredSessions",
     "OpenCodeHarness",
     "clarify_argv",
     "isolation_argv",
@@ -36,11 +53,37 @@ __all__ = [
 #: ``model``'s default under this harness.
 DEFAULT_MODEL: Final = "openai/gpt-5.6-sol"
 
+#: How long a ``session list`` call is given. Metadata, not a model call -- bounded well below
+#: the review timeout.
+SESSION_LIST_TIMEOUT_SEC: Final = 60
+
+#: How many sessions ``session list`` is asked for. The continuity pointer must appear inside
+#: this window or continuity silently drops, so :meth:`DiscoveredSessions.verify` logs the row
+#: count whenever a listing fails to match -- a count equal to this cap is what distinguishes
+#: "the session is gone" from "it fell off the end of the list", which are the same silent
+#: fresh review today.
+SESSION_LIST_MAX: Final = 50
+
+#: A canonical OpenCode session id. Matched before a stored or listed id is ever compared,
+#: joined, or shown to a reviewer -- see ``reviewer._pointer_structurally_usable``,
+#: ``reviewer.capture_session`` and ``reviewer.continuity_summary``, all of which reach it
+#: through :meth:`DiscoveredSessions.is_session_id`.
+#:
+#: **Anchored with ``\\Z``, not ``$``, and that is the whole point of the anchor.** Python's ``$``
+#: also matches immediately before a single trailing newline, so ``"ses_abcdefgh\\n"`` satisfied
+#: ``^ses_[A-Za-z0-9]{8,64}$`` -- an id read out of ``state.json``, which is not a trust boundary.
+#: Nothing could be smuggled *after* the break (a second newline, or any trailing text, already
+#: failed), but a stored id ending in one still rendered a line break into `continuity_summary`'s
+#: status line and travelled as a session id everywhere else. ``\\Z`` matches only at the true end
+#: of the string, so every one of the call sites tightens together -- which is what keeps the
+#: summary exactly as strict as the gate rather than more so.
+SESSION_ID_RE: Final = re.compile(r"^ses_[A-Za-z0-9]{8,64}\Z")
+
 
 def isolation_argv(config: Config) -> list[str]:
     """The flags that keep any reviewer-adjacent OpenCode call structurally isolated.
 
-    Shared by :func:`review_argv` and ``reviewer._list_sessions``, so a unit test can assert
+    Shared by :func:`review_argv` and :func:`_list_sessions`, so a unit test can assert
     the two cannot drift apart -- see that test's own docstring for why this matters: a
     ``session list`` call missing these flags would load the repository under review's own
     OpenCode plugins and project config while running *from inside* that repository, which is
@@ -157,6 +200,154 @@ def permission(bundle_dir: Path, *, cold: bool = False) -> str:
     return json.dumps(document, separators=(",", ":"), ensure_ascii=False)
 
 
+def _same_repo(directory: object, repo: str) -> bool:
+    """Canonicalised on both sides, so a symlinked path reads as neither a false mismatch
+    nor a false match."""
+    return isinstance(directory, str) and os.path.realpath(directory) == os.path.realpath(repo)
+
+
+def _list_sessions(*, repo: str, config: Config, act_dir: Path, seq: str) -> list[Any] | None:
+    """``opencode session list --format json -n 50``, parsed -- or ``None`` on anything else.
+
+    Written to ``act_dir/tmp/session-list-<seq>.json`` and deleted in a ``finally``, never
+    inside the bundle: the bundle is what a continued reviewer can read back
+    (:func:`permission`), and this listing names every other OpenCode session in the
+    repository -- ids, titles and all, including the user's own unrelated work.
+
+    ``OCRL_SESSION_LIST_CMD`` is the test seam, parallel to ``OCRL_REVIEWER_CMD``: a stand-in
+    that writes the same JSON shape to stdout. When the reviewer seam is active and this one
+    is not, the call is skipped entirely rather than reaching a real ``opencode`` -- exactly
+    like every other reviewer-adjacent call under that seam.
+    """
+    from ocrl.reviewer import run_bounded  # noqa: PLC0415 - the gate imports this module at module scope; a top-level import back would be a cycle
+
+    reviewer_cmd = os.environ.get("OCRL_REVIEWER_CMD", "")
+    session_list_cmd = os.environ.get("OCRL_SESSION_LIST_CMD", "")
+    if reviewer_cmd and not session_list_cmd:
+        return None
+
+    if session_list_cmd:
+        argv = [session_list_cmd]
+        env = dict(os.environ)
+    else:
+        argv = ["opencode", *isolation_argv(config), "session", "list", "--format", "json", "-n", str(SESSION_LIST_MAX)]
+        env = isolation_env(config, dict(os.environ))
+
+    listing_path = act_dir / "tmp" / f"session-list-{seq}.json"
+    try:
+        ensure_private_dir(listing_path.parent, root=state_root())
+        fd = os.open(listing_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, FILE_MODE)
+        with os.fdopen(fd, "wb") as sink:
+            status = run_bounded(argv, stdout=sink, timeout_sec=SESSION_LIST_TIMEOUT_SEC, env=env, cwd=repo)
+        if status != 0:
+            log(f"session list exited with status {status}")
+            return None
+        data = json.loads(listing_path.read_bytes())
+        if not isinstance(data, list):
+            log("session list output was not a JSON list")
+            return None
+    except Exception as exc:
+        log(f"session list failed: {exc}")
+        return None
+    finally:
+        listing_path.unlink(missing_ok=True)
+    return data
+
+
+class DiscoveredSessions:
+    """OpenCode's session continuity: created by the run, found afterwards by title.
+
+    ``opencode run`` gives no way to name the session it is about to create, so the gate
+    passes a ``--title`` unique enough to match on (``reviewer._unique_title``) and reads the
+    id back out of ``opencode session list`` once the run is over. That is why
+    :meth:`capture_timeout_sec` is a full listing rather than zero, and why :meth:`mint`
+    answers ``""``.
+
+    **Every match is required to be exactly one row**, on both the capture and the verify
+    side. Two rows carrying our title means something else created one, and continuing a
+    session the gate is only guessing at is worse than starting fresh -- a fresh review costs
+    tokens, a wrong one costs the round.
+    """
+
+    @property
+    def capture_timeout_sec(self) -> int:
+        # Read at call time, not bound at class definition: the module constant is what tests
+        # shrink to drive the both-deadlines-expire path end to end.
+        return SESSION_LIST_TIMEOUT_SEC
+
+    def is_session_id(self, value: object) -> bool:
+        return isinstance(value, str) and SESSION_ID_RE.match(value) is not None
+
+    def mint(self) -> str:
+        """``""``: ``opencode run`` has no flag that pre-assigns a session id."""
+        return ""
+
+    def verify(self, pointer: Mapping[str, Any], *, repo: str, config: Config, act_dir: Path, seq: str) -> bool:
+        """Is the remembered session still exactly one row of a live ``session list``?
+
+        Checks the id **and** the title, ``created`` and directory recorded with it, not the
+        id alone: an id is only a name, and the row it names has to be the same session, in
+        the same repository, that the pointer was written from.
+        """
+        session_id = pointer.get("id")
+        rows = _list_sessions(repo=repo, config=config, act_dir=act_dir, seq=seq)
+        if rows is None:
+            # `_list_sessions` has already logged *why*; the caller logs the consequence.
+            return False
+        matches = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("id") == session_id
+            and row.get("title") == pointer.get("title")
+            and row.get("created") == pointer.get("created")
+            and _same_repo(row.get("directory"), repo)
+        ]
+        if len(matches) == 1:
+            return True
+        # The row count, and whether it saturated the cap, is what separates the two failure
+        # modes this branch merges: a session that is genuinely gone, and one that is merely
+        # past `SESSION_LIST_MAX` in a busy project. Only the second is worth raising the cap
+        # for, and without this line neither is distinguishable from the other.
+        saturated = " -- the listing is saturated, so the session may simply be past the cap" if len(rows) >= SESSION_LIST_MAX else ""
+        log(
+            f"session continuity: {session_id} did not match exactly one listed session ({len(rows)} rows returned, cap {SESSION_LIST_MAX}{saturated})"
+        )
+        return False
+
+    def capture(self, spec: CaptureSpec) -> Captured:
+        """The session ``opencode session list`` shows for this fresh run's title, or falsy.
+
+        Every failure -- non-zero exit, timeout, unparseable JSON, a row predating this run,
+        no match -- is :func:`log` plus the empty result; this must never be able to fail a
+        review. ``spec.new_session_id`` is always ``""`` here: nothing was pre-assigned, so
+        there is nothing to hand back and the listing is the only source.
+        """
+        rows = _list_sessions(repo=spec.repo, config=spec.config, act_dir=spec.act_dir, seq=spec.seq)
+        if rows is None:
+            return Captured()
+        matches = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("title") == spec.title
+            and self.is_session_id(row.get("id"))
+            and isinstance(row.get("created"), (int, float))
+            and row["created"] >= spec.started_ms
+            and _same_repo(row.get("directory"), spec.repo)
+        ]
+        if len(matches) != 1:
+            if matches:
+                log(f"capture_session: {len(matches)} rows matched title {spec.title!r} in the window; not guessing")
+            return Captured()
+        row = matches[0]
+        return Captured(session_id=str(row["id"]), created=int(row["created"]))
+
+
+#: The single instance :class:`OpenCodeHarness` hands out. Stateless, so one is enough.
+SESSIONS: Final = DiscoveredSessions()
+
+
 class OpenCodeHarness:
     """``opencode run`` as the reviewer. See the module docstring."""
 
@@ -187,6 +378,10 @@ class OpenCodeHarness:
             ],
             env=isolation_env(spec.config, {"OPENCODE_PERMISSION": permission(spec.bundle_dir, cold=True)}),
         )
+
+    def sessions(self) -> DiscoveredSessions:
+        """Post-hoc discovery by unique title. See :class:`DiscoveredSessions`."""
+        return SESSIONS
 
     def probe_models(self, timeout: float) -> list[str] | None:
         """``opencode models``. Raises ``reviewer_probe.ProbeFailed`` if it does not answer."""

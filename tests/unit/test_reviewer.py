@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import random
 import stat
@@ -17,15 +18,17 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import IO
 
 import pytest
 from conftest import FAKE_REVIEWER, git, git_status_ignored
 
 import ocrl
-from ocrl import cli, gitsnap, report, reviewer, state
+from ocrl import cli, gitsnap, harness, report, reviewer, state
 from ocrl import config as ocrl_config
 from ocrl.commands import hooks
 from ocrl.config import Config
+from ocrl.harness import opencode as opencode_harness
 from ocrl.reviewer import BundleError, BundleTooLarge, Invocation, Review, ReviewerFailed, Target
 from ocrl.util import now as ocrl_now
 
@@ -3074,6 +3077,7 @@ def stored_pointer(
 ) -> dict[str, object]:
     return {
         "label": label,
+        "harness": opencode_harness.HARNESS.name,
         "id": session_id,
         "title": "review-loop phase 1 [aaaaaaaa/001]",
         "created": 1234567890000,
@@ -3094,19 +3098,81 @@ def matching_row(pointer: dict[str, object], repo: Path) -> dict[str, object]:
 
 
 def test_isolation_argv_and_env_cannot_drift_between_invoke_and_session_list(git_repo: Path) -> None:
+    """One helper feeds both ``review_argv`` and the strategy's ``session list`` call.
+
+    They live in the same module now (``ocrl.harness.opencode``), which is the point: a
+    ``session list`` missing these flags would load the repository under review's own OpenCode
+    plugins and project config while running *from inside* that repository.
+    """
     pure_on = config_with(pure=True, disable_project_config=True)
     pure_off = config_with(pure=False, disable_project_config=False)
 
-    assert reviewer._isolation_argv(pure_on) == ["--pure"]
-    assert reviewer._isolation_argv(pure_off) == []
-    assert reviewer._isolation_env(pure_on, {})["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
-    assert "OPENCODE_DISABLE_PROJECT_CONFIG" not in reviewer._isolation_env(pure_off, {})
+    assert opencode_harness.isolation_argv(pure_on) == ["--pure"]
+    assert opencode_harness.isolation_argv(pure_off) == []
+    assert opencode_harness.isolation_env(pure_on, {})["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+    assert "OPENCODE_DISABLE_PROJECT_CONFIG" not in opencode_harness.isolation_env(pure_off, {})
 
     # `review_argv` (invoke's real path) is built from exactly this helper's output.
     invoke_argv = reviewer.review_argv("/repo", "t", config=pure_on)
-    assert invoke_argv[: len(reviewer._isolation_argv(pure_on))] == reviewer._isolation_argv(pure_on)
+    assert invoke_argv[: len(opencode_harness.isolation_argv(pure_on))] == opencode_harness.isolation_argv(pure_on)
     plain_argv = reviewer.review_argv("/repo", "t", config=pure_off)
     assert "--pure" not in plain_argv
+
+
+def argv_of(seen: dict[str, object]) -> list[str]:
+    """The argv the intercepted ``run_bounded`` was handed, typed for the assertions."""
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    return argv
+
+
+def env_of(seen: dict[str, object]) -> dict[str, str]:
+    """The environment the intercepted ``run_bounded`` was handed, typed for the assertions."""
+    env = seen["env"]
+    assert isinstance(env, dict)
+    return env
+
+
+def test_the_session_list_call_itself_carries_the_isolation_flags(activation: state.State, git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real ``opencode session list`` argv and environment, not just the helper's output.
+
+    **Fails on a ``_list_sessions`` that drops ``*isolation_argv(config)`` or
+    ``isolation_env``**, which the helper-level assertions above cannot see: a listing missing
+    them runs *from inside the repository under review* (``cwd=repo``) while loading that
+    repository's own OpenCode plugins and project config, which is precisely the boundary the
+    reviewer's isolation exists to hold. The flags have to precede the subcommand, too --
+    ``opencode session list --pure`` is not the same command.
+    """
+    seen: dict[str, object] = {}
+
+    def fake_run_bounded(command: list[str], *, stdout: IO[bytes], env: dict[str, str] | None = None, cwd: str | None = None, **_rest: object) -> int:
+        seen["argv"] = list(command)
+        seen["env"] = dict(env or {})
+        seen["cwd"] = cwd
+        stdout.write(b"[]")
+        return 0
+
+    monkeypatch.setattr(reviewer, "run_bounded", fake_run_bounded)
+    # Both seams off: this test is about the branch that builds a real `opencode` argv.
+    os.environ.pop("OCRL_REVIEWER_CMD", None)
+    os.environ.pop("OCRL_SESSION_LIST_CMD", None)
+
+    config = config_with(pure=True, disable_project_config=True)
+    rows = opencode_harness._list_sessions(repo=str(git_repo), config=config, act_dir=activation.act_dir, seq="isolation")
+
+    assert rows == []
+    argv = argv_of(seen)
+    assert argv[0] == "opencode"
+    assert argv[: 1 + len(opencode_harness.isolation_argv(config))] == ["opencode", *opencode_harness.isolation_argv(config)]
+    assert argv.index("--pure") < argv.index("session"), "the flags have to precede the subcommand"
+    assert env_of(seen) == opencode_harness.isolation_env(config, dict(os.environ))
+    assert seen["cwd"] == str(git_repo)
+
+    # And the other direction: nothing is smuggled in when isolation is off.
+    plain = config_with(pure=False, disable_project_config=False)
+    opencode_harness._list_sessions(repo=str(git_repo), config=plain, act_dir=activation.act_dir, seq="plain")
+    assert "--pure" not in argv_of(seen)
+    assert "OPENCODE_DISABLE_PROJECT_CONFIG" not in env_of(seen)
 
 
 # -- argv: -s vs --title -----------------------------------------------------
@@ -3996,7 +4062,7 @@ def test_session_ref_reads_state_as_the_caller_loaded_it(activation: state.State
     pointer = stored_pointer()
     activation.data["reviewer_session"] = pointer
     target = target_for(git_repo)
-    assert reviewer._pointer_structurally_usable(pointer, activation, target) is True
+    assert reviewer._pointer_structurally_usable(pointer, activation, target, config=config_with()) is True
 
     # Persisting only now is what lets the (legitimate, atomic) claim step below succeed --
     # it always reloads under its own lock, by design; only the earlier structural read must
@@ -4018,7 +4084,7 @@ def test_a_concurrent_live_claim_stops_a_fresh_capture_from_overwriting_it(activ
     Overwriting that live claim would be the same corruption the claim exists to prevent."""
     target = target_for(git_repo)
     ctx = reviewer._CaptureContext(target=target, title="t", round_number=1)
-    captured = reviewer._Captured(session_id="ses_freshcapture1", created=1)
+    captured = harness.Captured(session_id="ses_freshcapture1", created=1)
     config = config_with()
     expected = hooks.activation(activation, config)
 
@@ -4261,15 +4327,16 @@ def test_session_ref_distinguishes_a_gone_session_from_a_saturated_listing(
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [other]))
     assert reviewer.session_ref(activation, target_for(git_repo), config=config_with()).session_id == ""
     short = capsys.readouterr().err
-    assert "did not match exactly one listed session for phase1" in short
+    assert "did not match exactly one listed session" in short
+    assert f"could not verify {pointer['id']} for phase1" in short
     assert "1 rows returned" in short
     assert "saturated" not in short
 
-    rows = [dict(other, id=f"ses_filler{index:08d}") for index in range(reviewer.SESSION_LIST_MAX)]
+    rows = [dict(other, id=f"ses_filler{index:08d}") for index in range(opencode_harness.SESSION_LIST_MAX)]
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, rows, name="session-list-full.sh"))
     assert reviewer.session_ref(activation, target_for(git_repo), config=config_with()).session_id == ""
     full = capsys.readouterr().err
-    assert f"{reviewer.SESSION_LIST_MAX} rows returned" in full
+    assert f"{opencode_harness.SESSION_LIST_MAX} rows returned" in full
     assert "the listing is saturated" in full
 
 
@@ -4347,19 +4414,53 @@ def test_a_session_id_may_not_end_in_a_newline(activation: state.State, git_repo
     already failed -- but such an id still rendered a line break into the status line and
     travelled as a session id everywhere else. ``\\Z`` closes it at all three call sites at once,
     which is what keeps the summary exactly as strict as the gate rather than more so."""
-    assert reviewer._SESSION_ID_RE.match("ses_abcdefgh") is not None
-    assert reviewer._SESSION_ID_RE.match("ses_abcdefgh\n") is None
+    assert opencode_harness.SESSION_ID_RE.match("ses_abcdefgh") is not None
+    assert opencode_harness.SESSION_ID_RE.match("ses_abcdefgh\n") is None
 
     tampered = "ses_abcdefgh\n"
 
     # the gate path
-    assert reviewer._pointer_structurally_usable(stored_pointer(session_id=tampered), activation, target_for(git_repo)) is False
+    assert reviewer._pointer_structurally_usable(stored_pointer(session_id=tampered), activation, target_for(git_repo), config=config_with()) is False
 
     # the status renderer -- and the line it prints stays one line
     activation.data["reviewer_session"] = stored_pointer(session_id=tampered)
     summary = reviewer.continuity_summary(activation, config_with())
     assert "<unreadable>" in summary
     assert "\n" not in summary
+
+
+def test_a_pointer_minted_under_another_harness_is_never_continued(activation: state.State, git_repo: Path) -> None:
+    """A session id is only meaningful to the CLI that created it.
+
+    Presenting a foreign harness's id as a continuation is at best a non-zero exit (a blocking
+    ``OP_FAILURE``) and at worst a live session of the *other* CLI's that this review would
+    then be talking to. A pointer written before the field existed carries no ``harness`` at
+    all and falls in the same safe direction: one fresh review, exactly like a ``generation``
+    or ``revisions`` bump.
+    """
+    target = target_for(git_repo)
+    config = config_with()
+
+    foreign = stored_pointer(harness="some-other-harness")
+    assert reviewer._pointer_structurally_usable(foreign, activation, target, config=config) is False
+
+    legacy = stored_pointer()
+    del legacy["harness"]
+    assert reviewer._pointer_structurally_usable(legacy, activation, target, config=config) is False
+
+    assert reviewer._pointer_structurally_usable(stored_pointer(), activation, target, config=config) is True
+
+
+def test_a_captured_pointer_records_the_harness_that_minted_it(activation: state.State, git_repo: Path) -> None:
+    """The check above can only work if the write puts the field there in the first place."""
+    target = target_for(git_repo)
+    config = config_with()
+    ctx = reviewer._CaptureContext(target=target, title="t", round_number=1)
+    captured = harness.Captured(session_id="ses_freshcapture1", created=1)
+
+    reviewer._store_captured_session(activation, ctx, captured, expected=hooks.activation(activation, config), config=config)
+
+    assert activation.data["reviewer_session"]["harness"] == opencode_harness.HARNESS.name
 
 
 def test_capture_session_rejects_a_listed_id_ending_in_a_newline(
@@ -5071,7 +5172,7 @@ def test_the_repair_runs_when_the_hooks_budget_covers_the_call_and_the_publishin
     monkeypatch.setattr(cli, "HOOK_DEADLINE_SEC", 1150.0)
     # Five seconds over the boundary, not exactly on it: the check runs after a real bundle
     # build, and a test that lands on the boundary to the millisecond is a flake, not a proof.
-    monkeypatch.setattr(cli, "HOOK_STARTED", time.monotonic() - (1150 - reviewer.REPAIR_TIMEOUT_SEC - reviewer.SETTLE_MARGIN_SEC - 5))
+    monkeypatch.setattr(cli, "HOOK_STARTED", time.monotonic() - (1150 - reviewer.REPAIR_TIMEOUT_SEC - reviewer.settle_margin(config_with()) - 5))
 
     assert execute_repair(activation, git_repo).verdict == "CHANGES_REQUIRED"
 
@@ -5081,7 +5182,7 @@ def test_remaining_budget_is_none_outside_a_hook(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(cli, "HOOK_DEADLINE_SEC", None)
 
     assert reviewer.remaining_budget() is None
-    assert reviewer._repair_fits()
+    assert reviewer._repair_fits(config_with())
 
 
 def test_remaining_budget_counts_down_from_process_entry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5098,8 +5199,122 @@ def test_the_invoking_lease_covers_a_primary_call_plus_the_larger_second_one() -
     assert reviewer._invoking_budget(900) == 1800, "a cold confirmation dominates at the default timeout"
     assert reviewer._invoking_budget(30) == 30 + reviewer.REPAIR_TIMEOUT_SEC, "the repair dominates below two minutes"
     assert (
-        max(reviewer._BUILDING_BUDGET_SEC, reviewer._invoking_budget(reviewer.MAX_TIMEOUT_SEC)) + reviewer._LEASE_SLACK_SEC == reviewer._MAX_LEASE_SEC
+        max(reviewer._building_budget(reviewer._MAX_CAPTURE_TIMEOUT_SEC), reviewer._invoking_budget(reviewer.MAX_TIMEOUT_SEC))
+        + reviewer._lease_slack(reviewer._MAX_CAPTURE_TIMEOUT_SEC)
+        == reviewer._MAX_LEASE_SEC
     )
+
+
+class _StubSessions:
+    """A session strategy that exists only to have a ``capture_timeout_sec`` of our choosing.
+
+    Everything else is the minimum the protocol needs; nothing below calls it.
+    """
+
+    def __init__(self, capture_timeout_sec: int) -> None:
+        self._capture_timeout_sec = capture_timeout_sec
+
+    @property
+    def capture_timeout_sec(self) -> int:
+        return self._capture_timeout_sec
+
+    def is_session_id(self, value: object) -> bool:
+        return isinstance(value, str) and bool(value)
+
+    def mint(self) -> str:
+        return ""
+
+    def verify(self, pointer: object, **kwargs: object) -> bool:
+        return True
+
+    def capture(self, spec: harness.CaptureSpec) -> harness.Captured:
+        return harness.Captured()
+
+
+#: What :class:`_MintingSessions` pre-assigns. A stand-in shape, since the only harness this
+#: build registers cannot pre-assign at all.
+_MINTED_ID = "ses_mintedbystub"
+
+
+class _MintingSessions(_StubSessions):
+    """A strategy that *does* pre-assign its session ids, which OpenCode cannot.
+
+    The only way to observe the gate handing a minted id to an invocation before a
+    pre-assigning harness exists: under OpenCode ``mint()`` is ``""``, so every assertion
+    about where the id reaches would pass just as well if it reached nowhere.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(60)
+
+    def mint(self) -> str:
+        return _MINTED_ID
+
+
+@pytest.mark.usefixtures("_hook_budget")
+def test_every_fresh_invocation_carries_the_id_its_harness_minted(
+    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not just the primary round: the cold confirmation and the contract repair too.
+
+    **Fails on a ``_confirm_cold`` or ``_repair_contract`` that leaves ``new_session_id``
+    defaulted.** Both are as session-less as a first round, so a harness that pre-assigns has
+    to be able to name them; leaving them empty forces that harness to mint outside
+    :func:`reviewer._mint_session`, which is exactly the seam this split exists to keep whole.
+    The id is safe to carry precisely because these calls are ``capture=False`` and it names a
+    *new, empty* session -- never a resume, which ``tests/unit/test_harness.py`` asserts no
+    harness can spell.
+    """
+    monkeypatch.setattr(reviewer, "_sessions", lambda _config: _MintingSessions())
+    seen: list[Invocation] = []
+    real = reviewer._run_invocation
+
+    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
+        seen.append(run)
+        return real(tgt, run, config=config, scope=scope)
+
+    monkeypatch.setattr(reviewer, "_run_invocation", spy)
+
+    # Round 1 leaves `prior-rounds.txt` behind, which is what makes round 2's APPROVED worth
+    # confirming cold -- otherwise there is no model-influenced context and no second call.
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    _scripted_reviewer(tmp_path, "round2", _APPROVES)
+    reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True))
+    assert [run for run in seen if run.cold], "the approval really was cold-confirmed"
+
+    execute_repair(activation, git_repo)
+    assert [run for run in seen if not run.allow_supersedes], "a contract repair really did run"
+
+    for run in seen:
+        assert run.session_id == "", "every round here starts fresh"
+        assert run.new_session_id == _MINTED_ID, f"{run.out_path.name} was launched without the minted id"
+
+
+@pytest.mark.parametrize("delta", [0, 1000])
+def test_the_lease_and_the_repair_reserve_track_the_harnesss_own_capture_window(delta: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both budgets are sized from the configured strategy, not from a fixed number.
+
+    **Fails on a hard-coded 60-second session-list allowance**, which is what these were
+    before the harness split and what a reader cannot tell apart by testing OpenCode alone --
+    OpenCode's own window *is* 60. A harness that captures without a subprocess needs none of
+    it, and a lease padded for a call that never happens is a lease an abandoned claim is
+    honoured far past anything real; a reserve padded the same way skips repairs there is
+    room for, losing a recoverable round each time.
+
+    The reserve's assertion is exact rather than merely monotonic, because it is the one the
+    shim's kill window depends on: every other term in it is fixed.
+    """
+    config = config_with(timeout_sec=900)
+    monkeypatch.setattr(reviewer, "_sessions", lambda _config: _StubSessions(delta))
+
+    assert reviewer._capture_timeout(config) == delta
+    assert reviewer.settle_margin(config) == delta + 2 * math.ceil(reviewer.KILL_GRACE_SEC) + reviewer._PUBLISH_BUDGET_SEC
+
+    # The lease grows with it too -- strictly, once the building stretch dominates.
+    monkeypatch.setattr(reviewer, "_sessions", lambda _config: _StubSessions(delta + 10_000))
+    wider = reviewer._active_review_reclaim_after(config)
+    monkeypatch.setattr(reviewer, "_sessions", lambda _config: _StubSessions(delta))
+    assert wider > reviewer._active_review_reclaim_after(config), "a slower harness must get a longer lease"
 
 
 def test_the_repair_prompts_fallback_finding_is_a_line_the_gate_can_parse() -> None:
@@ -5161,10 +5376,11 @@ def test_the_settlement_reserve_covers_every_deadline_after_a_repair() -> None:
     SIGTERM-to-SIGKILL grace on top of their own deadline when they expire (``_kill_group``
     waits it out). A flat 60 covered none of that and lost the report the reserve exists to
     protect."""
-    worst_case_deadlines = reviewer.SESSION_LIST_TIMEOUT_SEC + 2 * reviewer.KILL_GRACE_SEC
+    config = config_with()
+    worst_case_deadlines = reviewer._capture_timeout(config) + 2 * reviewer.KILL_GRACE_SEC
 
-    assert worst_case_deadlines <= reviewer.SETTLE_MARGIN_SEC
-    assert reviewer.SETTLE_MARGIN_SEC - worst_case_deadlines >= reviewer._PUBLISH_BUDGET_SEC - 1, (
+    assert worst_case_deadlines <= reviewer.settle_margin(config)
+    assert reviewer.settle_margin(config) - worst_case_deadlines >= reviewer._PUBLISH_BUDGET_SEC - 1, (
         "and there is still room left for the publishing the deadlines do not bound"
     )
 
@@ -5179,7 +5395,7 @@ def test_the_whole_post_repair_path_still_publishes_when_both_deadlines_expire(
     publish allowance may sit on it -- so this asserts the report and the claim release
     actually happen after both expire, which is what a shim kill in between would have cost."""
     monkeypatch.setattr(reviewer, "REPAIR_TIMEOUT_SEC", 1)
-    monkeypatch.setattr(reviewer, "SESSION_LIST_TIMEOUT_SEC", 1)
+    monkeypatch.setattr(opencode_harness, "SESSION_LIST_TIMEOUT_SEC", 1)
     hanging_list = tmp_path / "hanging-session-list.sh"
     hanging_list.write_text("#!/usr/bin/env bash\nsleep 30\n")
     hanging_list.chmod(0o755)
@@ -5196,12 +5412,12 @@ def test_the_whole_post_repair_path_still_publishes_when_both_deadlines_expire(
 
 def test_the_repair_reserve_is_what_the_budget_check_actually_uses(monkeypatch: pytest.MonkeyPatch) -> None:
     """One boundary, stated once: the check is ``remaining >= repair + reserve``."""
-    needed = reviewer.REPAIR_TIMEOUT_SEC + reviewer.SETTLE_MARGIN_SEC
+    needed = reviewer.REPAIR_TIMEOUT_SEC + reviewer.settle_margin(config_with())
     # A second either side of the boundary rather than exactly on it: the clock is real, and a
     # test that lands on it to the microsecond is a flake, not a proof.
     monkeypatch.setattr(cli, "HOOK_DEADLINE_SEC", float(needed + 1))
     monkeypatch.setattr(cli, "HOOK_STARTED", time.monotonic())
-    assert reviewer._repair_fits()
+    assert reviewer._repair_fits(config_with())
 
     monkeypatch.setattr(cli, "HOOK_STARTED", time.monotonic() - 2)
-    assert not reviewer._repair_fits()
+    assert not reviewer._repair_fits(config_with())

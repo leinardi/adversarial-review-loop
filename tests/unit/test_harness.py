@@ -7,6 +7,7 @@ cannot be added without meeting them.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from pathlib import Path
 
@@ -142,8 +143,20 @@ def test_a_cold_review_never_carries_a_session(implementation: harness.Harness, 
 
     The cold-approval invariant is the gate's, but every harness has to be incapable of
     quietly reintroducing continuity into the one invocation that must not have it.
+
+    Driven with the ``new_session_id`` a cold confirmation really carries, not with an empty
+    spec: a cold confirmation is a *fresh* invocation, so ``reviewer._mint_session`` gives it
+    an id of its own (`_confirm_cold`), and a harness that spelled that as a resume rather
+    than as a new, empty session would hand the one call that must remember nothing the entire
+    warm conversation. ``session_id`` stays "" because that is what the gate passes here --
+    the seam's structural refusal of a *continuation* is asserted by ``ClarifySpec`` having no
+    such field at all, in the test below.
     """
-    built = implementation.review_command(spec_for(implementation, tmp_path, cold=True))
+    spec = dataclasses.replace(
+        spec_for(implementation, tmp_path, cold=True),
+        new_session_id=implementation.sessions().mint() or "ses_mintedfresh01",
+    )
+    built = implementation.review_command(spec)
     assert "-s" not in built.argv
     assert "--resume" not in built.argv
 
@@ -171,3 +184,67 @@ def test_a_clarify_command_never_carries_a_session(implementation: harness.Harne
 def test_an_unknown_harness_is_refused_not_defaulted() -> None:
     with pytest.raises(harness.UnknownHarness):
         harness.get("no-such-harness")
+
+
+# --------------------------------------------------------------------------
+# Session continuity: the strategy every harness has to bring
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
+def test_every_harness_brings_a_session_strategy(implementation: harness.Harness) -> None:
+    strategy = implementation.sessions()
+    assert isinstance(strategy, harness.SessionStrategy)
+    assert strategy.capture_timeout_sec >= 0, "a negative window would shrink a lease below the work it covers"
+
+
+@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
+def test_a_minted_id_is_one_its_own_strategy_recognises(implementation: harness.Harness) -> None:
+    """``mint`` and ``is_session_id`` are two halves of one shape and must agree.
+
+    A strategy that minted an id its own validator rejects would pre-assign a session and
+    then refuse to continue it -- continuity silently dead, and every round paying full token
+    price with nothing to show for it. ``""`` is the other legal answer: the harness cannot
+    pre-assign, so discovery is the only route.
+    """
+    strategy = implementation.sessions()
+    minted = strategy.mint()
+    assert minted == "" or strategy.is_session_id(minted)
+
+
+@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
+def test_is_session_id_refuses_a_trailing_newline_and_a_non_string(implementation: harness.Harness) -> None:
+    """Both checks belong to the strategy, because both call sites read untrusted values.
+
+    Every caller takes its value out of ``state.json`` or a CLI's own output, neither of which
+    is a trust boundary. A ``$``-anchored pattern accepts a single trailing newline, and such
+    an id travelled as a session id everywhere and rendered a line break into ``ocrl status``;
+    a non-string reaches the same validators from the same document.
+    """
+    strategy = implementation.sessions()
+    minted = strategy.mint() or "ses_abcdefgh"
+    if not strategy.is_session_id(minted):  # pragma: no cover - a harness whose ids this stand-in does not fit
+        pytest.skip(f"{implementation.name} mints nothing and does not recognise the stand-in id")
+
+    assert not strategy.is_session_id(minted + "\n")
+    assert not strategy.is_session_id(None)
+    assert not strategy.is_session_id(12345)
+    assert not strategy.is_session_id("")
+
+
+@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
+def test_no_harness_can_compute_a_lease_above_the_ceiling(implementation: harness.Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_MAX_LEASE_SEC`` is what a stored ``lease_sec`` is validated against, so it has to
+    bound the largest lease **every** registered harness can legitimately compute.
+
+    Asserted by running the real budget function under each harness at the largest
+    ``timeout_sec`` the clamp allows, rather than by restating the ceiling's own formula --
+    a restatement passes however wrong that formula is. A ceiling derived from the
+    *configured* harness instead would read a slower harness's perfectly legitimate lease as
+    tampered, fall back to the observer's own window, and make the claim observer-relative
+    again, which is the whole thing recording it was meant to stop.
+    """
+    monkeypatch.setattr(reviewer, "_sessions", lambda _config: implementation.sessions())
+    largest = reviewer._active_review_reclaim_after(config_with(timeout_sec=reviewer.MAX_TIMEOUT_SEC))
+
+    assert largest <= reviewer._MAX_LEASE_SEC, f"{implementation.name} computes a lease its own ceiling rejects"
