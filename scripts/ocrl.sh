@@ -71,6 +71,14 @@ ocrl_hook_fallback() {
             # clearing a pending approval, and a crash here leaves that pending
             # tree stale rather than granting anything.
             ;;
+        reorient)
+            # Silent, and it must be. SessionStart reads a hook's plain stdout as
+            # *context for Claude*, so there is no JSON decision to fall back to --
+            # anything printed here would be injected into the session as though the
+            # gate had said it. Failing to re-orient costs Claude a re-read of the
+            # frozen plan; the gate itself is unaffected, because this hook grants
+            # nothing and blocks nothing.
+            ;;
     esac
     return 0
 }
@@ -169,6 +177,7 @@ case "${1:-}" in
     confirm-commit) ocrl_hook_run confirm-commit "$(ocrl_bounded_timeout 50 "${OCRL_SHIM_TIMEOUT_CONFIRM_COMMIT:-}")" "$@" ;;
     posttool-failure) ocrl_hook_run posttool-failure "$(ocrl_bounded_timeout 20 "${OCRL_SHIM_TIMEOUT_POSTTOOL_FAILURE:-}")" "$@" ;;
     gate-stop) ocrl_hook_run gate-stop "$(ocrl_bounded_timeout 1750 "${OCRL_SHIM_TIMEOUT_GATE_STOP:-}")" "$@" ;;
+    reorient) ocrl_hook_run reorient "$(ocrl_bounded_timeout 25 "${OCRL_SHIM_TIMEOUT_REORIENT:-}")" "$@" ;;
     *)
         if ! command -v python3 >/dev/null 2>&1; then
             printf 'opencode-review-loop: python3 is not on PATH.\n' >&2

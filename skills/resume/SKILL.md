@@ -33,6 +33,13 @@ hooks:
           args: ["gate-stop"]
           timeout: 1800
           statusMessage: "OpenCode review loop: end-of-turn gate"
+  SessionStart:
+    - matcher: "compact"
+      hooks:
+        - type: command
+          command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
+          args: ["reorient"]
+          timeout: 30
 ---
 
 # Resume the review loop

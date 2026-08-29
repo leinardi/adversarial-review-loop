@@ -831,6 +831,35 @@ if start 'prior rounds: round 2 is shown round 1 findings, and no bundle file ho
     fi
 fi
 
+if start 'reorient: a compacted session is handed back the phase, the plan and the rules'; then
+    new_case
+    arm_ok && phases_ok
+
+    out=$(jq -nc --arg s "$SESSION" --arg c "$REPO" \
+        '{session_id:$s,cwd:$c,hook_event_name:"SessionStart",source:"compact"}' |
+        (cd "$REPO" && "$OCRL" reorient))
+
+    assert_contains 'names the phase in progress' "$out" 'Phase 1 of'
+    assert_contains 'restates the phase description' "$out" 'Phase one: the thing'
+    assert_contains 'points at the frozen plan' "$out" 'plan.frozen.md'
+    assert_contains 'restates the commit rule' "$out" 'git add -A && git commit'
+    assert_contains 'and tells it to carry on' "$out" 'Continue with phase 1.'
+
+    # Plain text, not JSON: SessionStart injects a hook's plain stdout as context, and a JSON
+    # object would be parsed as a decision document instead -- the text would never be seen.
+    if printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+        bad 'reorient emits plain text rather than a JSON decision'
+    else
+        ok 'reorient emits plain text rather than a JSON decision'
+    fi
+
+    # Not our session: silent, and still exit 0. This hook grants nothing and blocks nothing.
+    out=$(jq -nc --arg c "$REPO" \
+        '{session_id:"never-armed",cwd:$c,hook_event_name:"SessionStart",source:"compact"}' |
+        (cd "$REPO" && "$OCRL" reorient))
+    assert_eq 'an unarmed session is re-oriented silently' "$out" ''
+fi
+
 if start 'incremental diff: round 2 attaches it, round 1 does not'; then
     new_case
     arm_ok && phases_ok

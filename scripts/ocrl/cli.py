@@ -26,7 +26,7 @@ USAGE = """usage: ocrl.sh <subcommand> [args]
   arm --session <id> --plan <path> [--allow-dirty] [--until N] [--harness H] [--model X] [--variant V]
   resume --session <id> [--until N] [--plan <path>] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]
   set-phases --phase "…" [--phase "…" …]
-  pretool | confirm-commit | posttool-failure | gate-stop   (hook entrypoints)
+  pretool | confirm-commit | posttool-failure | gate-stop | reorient   (hook entrypoints)
   status | report [n] | defer --reason "…" | finish | deactivate
   clarify --question "…" [--session <id>]
   accept [--reason "…"] [--session <id>]
@@ -41,7 +41,7 @@ USAGE = """usage: ocrl.sh <subcommand> [args]
 #: only has to *agree* with it, and disagreeing in the safe direction (a smaller number here)
 #: costs an optional extra call, while trusting the environment for a larger one would let
 #: anything that can set an env var talk the gate into starting work the shim will kill.
-_HOOK_CEILINGS: Final = {"pretool": 1150, "confirm-commit": 50, "posttool-failure": 20, "gate-stop": 1750}
+_HOOK_CEILINGS: Final = {"pretool": 1150, "confirm-commit": 50, "posttool-failure": 20, "gate-stop": 1750, "reorient": 25}
 
 
 #: When this process started, as :func:`time.monotonic` reads it. Re-stamped at the top of
@@ -120,6 +120,10 @@ def main(argv: list[str]) -> int:  # noqa: PLR0911, PLR0912 - one return per sub
         from ocrl.commands import stop  # noqa: PLC0415
 
         return stop.run(rest)
+    if sub == "reorient":
+        from ocrl.commands import session  # noqa: PLC0415
+
+        return session.reorient(rest)
 
     if sub == "arm":
         from ocrl.commands import arm  # noqa: PLC0415

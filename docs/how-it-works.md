@@ -80,6 +80,43 @@ reporter tries again.
   not a jail cell for one that's actively trying to escape it. See
   [security.md](security.md) if you need to know exactly where that line is.
 
+## Long plans and the context window
+
+A long plan runs as one very long turn, and Claude's own context fills up as it goes. When it
+does, Claude Code compacts the conversation — the earlier turns are replaced by a summary.
+That summary is written to preserve the work, not the rules: the frozen plan, the phase
+descriptions and the loop's own instructions are exactly the sort of thing it drops.
+
+**The plugin cannot compact or clear the session for you.** No hook or plugin API can trigger
+either — a hook can only be told one happened. What the plugin does instead is notice: a
+`SessionStart` hook fires after every compaction, and it re-injects the things a compacted
+session needs to carry on —
+
+- which phase is in progress and its frozen description,
+- the path to the frozen plan, with an instruction to re-read the relevant part,
+- what the last review of this phase concluded, and the report number to read for the
+  findings themselves,
+- the commit rules, and the fact that the gate is still enforced.
+
+It never re-injects the plan itself: re-inserting a 64 KiB document into a context that was
+just compacted for being too large would undo the compaction. It also never quotes a
+reviewer's findings — that is model-authored text, and it stays behind
+`/opencode-review-loop:report`.
+
+**For a very long plan, pause deliberately rather than relying on compaction.** Compaction is
+lossy no matter what gets re-injected, and the cleanest context is a fresh one:
+
+```console
+$ /opencode-review-loop:implement plan.md --until 5     # stop after phase 5
+  … phases 1–5 land …
+$ /clear
+$ /opencode-review-loop:resume --until 10               # fresh context, same activation
+```
+
+`resume` re-arms the hooks, re-prints the plan path and names the next phase, and every
+approval already earned is kept. Nothing is lost by clearing — the activation lives on disk,
+not in the conversation.
+
 ## Why bother with all this?
 
 Because "I'll just read the diff at the end" doesn't scale, and "trust the agent" isn't a

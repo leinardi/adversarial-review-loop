@@ -602,3 +602,129 @@ def test_status_skips_a_malformed_cost_rather_than_totalling_it(git_repo: Path, 
 
     assert proc.returncode == 0
     assert "reviewer cost:       $2.50 over 1 round(s)" in proc.stdout
+
+
+# --------------------------------------------------------------------------
+# reorient, the hook that answers a compaction
+# --------------------------------------------------------------------------
+
+
+def compact_payload(session: str, cwd: Path) -> bytes:
+    """The SessionStart payload Claude Code sends after a compaction."""
+    return json.dumps({"session_id": session, "cwd": str(cwd), "source": "compact", "hook_event_name": "SessionStart"}).encode()
+
+
+def reorient(repo: Path, env: dict[str, str], *, session: str = "s1", cwd: Path | None = None) -> str:
+    proc = run_bootstrap(["reorient"], cwd=repo, env=env, stdin=compact_payload(session, cwd or repo))
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_reorient_restates_the_phase_and_the_plan_after_a_compaction(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A compacted session has lost the plan, the rules and where it is -- but the gate is
+    still enforced, so the next commit is still reviewed against all three."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing", "second thing")
+
+    out = reorient(git_repo, env)
+
+    assert "compacted" in out
+    assert "Phase 1 of 2 is in progress:" in out
+    assert "first thing" in out
+    assert "plan.frozen.md" in out
+    assert "git add -A && git commit" in out
+    assert "Continue with phase 1." in out
+
+
+def test_reorient_is_plain_text_because_that_is_what_gets_injected(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """`SessionStart` adds a hook's plain stdout to Claude's context. A JSON object would be
+    read as a decision document and the text would never be seen."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing")
+
+    out = reorient(git_repo, env)
+
+    assert out.lstrip()[:1] not in ("{", "["), out[:80]
+
+
+def test_reorient_quotes_no_reviewer_prose(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """This text is injected straight into Claude's context. Model-authored findings re-entering
+    the session as though the gate had said them is the one thing that must not happen, so the
+    findings are counted and the report is named instead."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing")
+    write_round_history(
+        env,
+        git_repo,
+        {"seq": 7, "verdict": "CHANGES_REQUIRED", "findings": ["FINDING severity=high actionable=yes file=a.py:1 | secret prose"]},
+    )
+
+    out = reorient(git_repo, env)
+
+    assert "secret prose" not in out
+    assert "report 007: CHANGES_REQUIRED, 1 finding(s)" in out
+    assert "/opencode-review-loop:report 7" in out
+
+
+def test_reorient_says_nothing_when_no_activation_owns_the_session(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """Not our session: print nothing, exit 0. This hook grants nothing and blocks nothing."""
+    assert reorient(git_repo, armed_env(clean_env), session="never-armed") == ""
+
+
+def test_reorient_says_nothing_outside_the_armed_worktree(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Work elsewhere in the same session is untouched, exactly as `pretool` leaves it."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing")
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+
+    assert reorient(git_repo, env, cwd=other) == ""
+
+
+def test_reorient_tells_a_needs_human_activation_to_stop(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Re-orienting an escalated activation into "continue with phase N" would send Claude back
+    around a loop the gate has already given up on."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing")
+    path = state_dir(env, git_repo, "s1") / "state.json"
+    document = json.loads(path.read_text())
+    document["status"] = "NEEDS_HUMAN"
+    path.write_text(json.dumps(document))
+
+    out = reorient(git_repo, env)
+
+    assert "NEEDS_HUMAN" in out
+    assert "Do not keep implementing." in out
+    assert "Continue with phase" not in out
+
+
+def test_reorient_says_nothing_once_the_activation_is_over(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing")
+    path = state_dir(env, git_repo, "s1") / "state.json"
+    document = json.loads(path.read_text())
+    document["status"] = "COMPLETE"
+    path.write_text(json.dumps(document))
+
+    assert reorient(git_repo, env) == ""
+
+
+def test_reorient_survives_a_malformed_payload_and_a_malformed_history(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """It has no fail-closed direction: the worst thing it can do is disturb a session that was
+    otherwise fine."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing")
+
+    assert run_bootstrap(["reorient"], cwd=git_repo, env=env, stdin=b"not json").returncode == 0
+
+    write_round_history(env, git_repo, {"seq": "seven", "verdict": None, "findings": "not a list"})
+    out = reorient(git_repo, env)
+    assert out, "a broken history entry must not silence the re-orientation"
+    assert "cannot be read back" in out

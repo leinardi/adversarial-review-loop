@@ -1,4 +1,5 @@
-"""The five commands a user runs against a live activation.
+"""The five commands a user runs against a live activation, and one hook that answers a
+compaction.
 
 Ports ``cmd_defer``, ``cmd_status``, ``cmd_report``, ``cmd_finish`` and ``cmd_deactivate``.
 
@@ -6,23 +7,51 @@ Ports ``cmd_defer``, ``cmd_status``, ``cmd_report``, ``cmd_finish`` and ``cmd_de
 here is reachable by Claude: the skills carry ``disable-model-invocation: true``, and
 ``pretool`` denies the Bash route to both. What that means for this module is that its
 output is written for a human -- it is the last thing said before the mode ends.
+
+:func:`reorient` is the exception on both counts: it is a ``SessionStart(compact)`` hook
+rather than a user command, and its reader is Claude rather than a human. It lives here
+because it is a *report* on the activation, assembled from the same fields :func:`status`
+prints -- and because, like everything else in this module, it decides nothing.
 """
 
 from __future__ import annotations
 
 import math
+import os
 import sys
-from typing import Any
+from typing import Any, Final
 
-from ocrl import commands, gitsnap, harness, oscillation, planrev, report, reviewer
-from ocrl.commands import completion
+from ocrl import commands, gitsnap, harness, hookio, oscillation, planrev, report, reviewer
+from ocrl.commands import completion, hooks
 from ocrl.commands.completion import Completion
 from ocrl.config import Config
 from ocrl.gitsnap import SnapshotError
-from ocrl.state import State
+from ocrl.state import State, pointer_read
 from ocrl.util import log, now
 
-__all__ = ["deactivate", "defer", "finish", "report_cmd", "status"]
+__all__ = ["deactivate", "defer", "finish", "reorient", "report_cmd", "status"]
+
+#: The working rules a compacted session has to get back, in the order they bite. Deliberately
+#: the *rules*, not the plan: the plan is on disk at a path this names, and re-injecting a 64
+#: KiB document into a context that was just compacted for being too large would undo the
+#: compaction. Kept close to ``commands.posttool``'s ``NEXT_PHASE`` banner in spirit -- both
+#: tell Claude how to proceed -- but not shared with it: that one is read mid-flow by a session
+#: that still remembers everything, this one by a session that remembers nothing, and merging
+#: them would make each carry the other's assumptions.
+REORIENT_RULES: Final = """\
+- Commit with `git add -A && git commit -m "..."` only. No --amend, no pathspecs, no `--only`
+  or `--include`, no command substitution. Builds, tests and formatters go in their own Bash
+  calls, never chained into the commit.
+- Every commit is intercepted and reviewed. A denial lists the blocking findings: fix all of
+  them and commit again. A failed or malformed review is never an approval.
+- Each phase ends with one commit and a clean worktree.
+- If a finding is ambiguous or contradicts an earlier round, ask before guessing:
+  `{root}/scripts/ocrl.sh clarify --question "..."`.
+- To stop mid-phase and ask the user something, run `{root}/scripts/ocrl.sh defer --reason "..."`
+  first, then end your turn.
+- You cannot end the mode; `/opencode-review-loop:finish` and `/opencode-review-loop:stop` are
+  the user's.
+"""
 
 NOT_ARMED: str = "opencode-review-loop: not armed in this worktree.\n"
 
@@ -402,4 +431,137 @@ State and reports are kept at:
 Re-arm at any time with /opencode-review-loop:implement <plan.md>.
 """
     )
+    return 0
+
+
+# --------------------------------------------------------------------------
+# reorient
+# --------------------------------------------------------------------------
+
+
+def _reorient_text(activation: commands.Activation) -> str:
+    """What a just-compacted session needs to know to carry on, or "" when it needs nothing.
+
+    **Every value here is gate-derived** -- ``state.json`` fields, the frozen phase
+    description, and a *count* of the last review's blocking findings. No reviewer prose and
+    no repository content: this text is injected straight into Claude's context, and the one
+    thing that must not happen is model-authored text from a review re-entering the session as
+    though the gate had said it. The report is named by path instead, for Claude to open if it
+    needs the findings themselves.
+    """
+    state, config = activation.state, activation.config
+    status = state.effective_status(config)
+    if status in ("COMPLETE", "DISARMED", "RESUMED"):
+        return ""
+
+    phase = state.get_int("phase")
+    total = state.phase_count()
+    root = commands.plugin_root()
+    head = [
+        f"opencode-review-loop: this session was compacted while the review loop is {status} in {state.get('worktree')}.",
+        "Re-orienting you, because the loop is still enforced and the compacted context may no longer carry it.",
+        "",
+    ]
+
+    if status in ("NEEDS_HUMAN", "STALE"):
+        head += [
+            f"The activation is {status} and needs the user, not another attempt. Stop, tell the user, and let them run",
+            "/opencode-review-loop:status and decide. Do not keep implementing.",
+        ]
+        return "\n".join(head) + "\n"
+
+    description = state.phase_desc(phase)
+    head += [
+        f"Phase {phase} of {total} is in progress:",
+        "",
+        f"    {description}" if description else "    (no description recorded)",
+        "",
+        f"The frozen plan is at {activation.act_dir}/{_active_plan_file(state)} -- re-read the part phase {phase} implements",
+        "before you continue. It is the plan the reviewer judges against, not the original file.",
+        "",
+    ]
+
+    last = _last_round_line(state, config, phase)
+    if last:
+        head += [last, ""]
+
+    head += ["Rules still in force:", REORIENT_RULES.format(root=root).rstrip("\n"), ""]
+    head.append(f"Continue with phase {phase}.")
+    return "\n".join(head) + "\n"
+
+
+def _active_plan_file(state: State) -> str:
+    """The frozen plan's filename, or a plain fallback when the evidence will not verify.
+
+    ``reorient`` never escalates and never raises (see :func:`reorient`), so a corrupted
+    revision list degrades to naming the original frozen copy -- which is where a reader
+    should look anyway -- rather than turning a re-orientation into a crash.
+    """
+    try:
+        return planrev.active_filename(state.data.get("plan_revisions") or [])
+    except planrev.EvidenceCorrupted:
+        return "plan.frozen.md"
+
+
+def _last_round_line(state: State, config: Config, phase: int) -> str:
+    """One line about the newest recorded round of the current phase, or "".
+
+    The blocking findings are *counted*, never quoted: they are reviewer prose. The stored
+    report is named so Claude can read them itself.
+    """
+    label = f"phase{phase}"
+    generation = state.get_int("activation_generation")
+    rounds = [entry for entry in state.get_array_of_dicts("round_history") if entry.get("label") == label and entry.get("generation") == generation]
+    if not rounds:
+        return f"No review of phase {phase} has run yet in this activation."
+    entry = rounds[-1]
+    seq = entry.get("seq")
+    verdict = entry.get("verdict")
+    findings = entry.get("findings")
+    count = len(findings) if isinstance(findings, list) else 0
+    del config
+    if not isinstance(seq, int) or isinstance(seq, bool) or not isinstance(verdict, str):
+        return f"The last recorded round of phase {phase} cannot be read back; run /opencode-review-loop:status."
+    return (
+        f"The last review of phase {phase} was report {seq:03d}: {verdict}, {count} finding(s) recorded. "
+        f"Read them with /opencode-review-loop:report {seq}."
+    )
+
+
+def reorient(argv: list[str]) -> int:
+    """``SessionStart(compact)``: re-inject the loop's own state after a compaction.
+
+    **Plain text on stdout, never JSON.** ``SessionStart`` is one of the few events whose
+    plain stdout Claude Code adds to the context, which is the entire mechanism here; a JSON
+    object would be parsed as a decision document instead and the text would never be seen.
+
+    **Silent on anything unexpected, and never a failure.** Not our session, not the armed
+    worktree, no activation, a terminal one, an unreadable document -- each prints nothing and
+    exits 0. This hook grants nothing, blocks nothing and decides nothing: it is the one
+    entrypoint in the plugin with no fail-closed direction, because the failure it could cause
+    is noise in a session that is otherwise fine, and the failure it prevents is only that
+    Claude has to re-read the plan itself.
+
+    The plugin cannot trigger a compaction or a ``/clear`` -- no hook or plugin API exposes
+    that -- so this reacts to one rather than avoiding it. ``docs/how-it-works.md`` carries the
+    manual pattern for very long plans.
+    """
+    del argv
+    try:
+        payload = hookio.read_hook_input()
+        worktree = pointer_read(payload.session_id)
+        if not worktree:
+            return 0
+        cwd = payload.cwd or os.getcwd()
+        if hooks.resolve_repo(cwd, worktree) != worktree:
+            return 0
+        activation = commands.resolve_local_activation(payload.session_id)
+        if activation is None or activation.repo != worktree:
+            return 0
+        text = _reorient_text(activation)
+    except Exception as exc:
+        log(f"reorient: {exc}")
+        return 0
+    if text:
+        sys.stdout.write(text)
     return 0
