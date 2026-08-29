@@ -31,7 +31,7 @@ from typing import Any, Final
 from ocrl import reviewer_probe
 from ocrl.atomic import FILE_MODE, ensure_private_dir
 from ocrl.config import Config
-from ocrl.harness import Captured, CaptureSpec, ClarifySpec, Command, ReviewSpec, model
+from ocrl.harness import Captured, CaptureSpec, ClarifySpec, Command, ReviewSpec, Usage, model
 from ocrl.paths import state_root
 from ocrl.util import log
 
@@ -350,6 +350,20 @@ class DiscoveredSessions:
 SESSIONS: Final = DiscoveredSessions()
 
 
+def _with_system_prompt(prompt_text: str, system_prompt: str) -> str:
+    """The prompt with the plugin's working guidance appended, or unchanged when there is none.
+
+    **This CLI has no system-prompt flag** (verified against ``opencode run --help``: ``--agent``
+    selects a persona, and nothing appends to the system prompt), so the guidance goes where the
+    only other instructions go. It is appended rather than prepended so the review instructions
+    still open the message, and it is the gate's own plugin text either way -- the same standing
+    as the prompt it is joined to, and nothing repo- or model-derived is involved.
+    """
+    if not system_prompt:
+        return prompt_text
+    return f"{prompt_text}\n\n{system_prompt}"
+
+
 class OpenCodeHarness:
     """``opencode run`` as the reviewer. See the module docstring."""
 
@@ -363,7 +377,7 @@ class OpenCodeHarness:
             argv=[
                 self.binary,
                 "run",
-                spec.prompt_text,
+                _with_system_prompt(spec.prompt_text, spec.system_prompt),
                 # Paths only: ``-f`` hands OpenCode a pathname it opens for itself, so the
                 # digests are the staging check's and there is nothing here that could act on
                 # them -- see :class:`ocrl.harness.Attachment`, and `reviewer.invoke`'s
@@ -385,7 +399,7 @@ class OpenCodeHarness:
             argv=[
                 self.binary,
                 "run",
-                spec.prompt_text,
+                _with_system_prompt(spec.prompt_text, spec.system_prompt),
                 *clarify_argv(
                     spec.repo,
                     [attachment.path for attachment in spec.attachments],
@@ -413,6 +427,16 @@ class OpenCodeHarness:
         :func:`ocrl.reviewer.invoke` has already checked by the time this is called.
         """
         return raw
+
+    def usage(self, raw: bytes) -> Usage | None:
+        """``None``: the transcript is the answer text, with no accounting around it.
+
+        Not a gap to be filled by estimating from the payload -- a guessed cost printed beside
+        a measured one in the same report is worse than no figure at all. If this CLI grows a
+        machine-readable output mode, this is where reading it belongs.
+        """
+        del raw
+        return None
 
 
 #: The single instance the registry hands out. Stateless, so one is enough.

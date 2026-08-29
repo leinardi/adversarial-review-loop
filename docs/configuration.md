@@ -193,6 +193,69 @@ load simply picks up whatever it now says. Treat every key here as something Cla
 set to whatever benefits Claude, not as a value that "can't weaken the gate." See
 [security.md](security.md) for the full picture.
 
+## Cost
+
+A review is an agentic run, and an agentic run's bill is roughly **context size × turns**:
+every tool call is a turn, and every turn re-reads the whole context. Two real rounds of the
+same phase under `harness=claude-code`, `model=opus`:
+
+| round | turns | tool calls | cache read | cache created | output | cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 (fresh session) | 50 | 49 | 5.65M | 189k | 32k | $5.58 |
+| 2 (resumed session) | 28 | 27 | 6.33M | 152k | 24k | $5.28 |
+
+The cache-read column is the bill. The payload itself was ~230 KB; it was re-read 50 times.
+
+**A resumed session costs *more* per turn under Claude Code, not less.** `--resume` replays
+every earlier round's attachments and tool results, so round 2 carried roughly twice the
+context per turn (~226k vs ~113k) and cost about the same as round 1 despite doing half the
+work. Continuity buys the reviewer's memory of the earlier round; it does not buy a discount.
+`prior-rounds.txt` and `incremental.diff` carry that memory anyway, as bounded, gate-rendered
+evidence — which is why `max_session_rounds 1` is a reasonable setting and not a loss.
+
+### The levers, roughly in order of effect
+
+| Lever | Effect |
+| --- | --- |
+| `model` | the largest single one. A smaller model is several times cheaper per token, and the token count barely moves |
+| `max_session_rounds 1` | never resume; each round pays fresh-session context instead of cumulative |
+| `variant low`/`medium` | `--effort` on Claude Code: less thinking output, and usually fewer turns |
+| a shorter plan | the frozen plan is capped at 64 KiB and sent **every round**, so plan length is a per-round tax |
+| `cold_confirm` off (the default) | on, it adds a second full model call to every approving round |
+| `final_review` off (the default) | on, it adds one cumulative review of the whole activation |
+| `ignore_globs` | a commit whose every changed path matches skips the review entirely |
+
+### What the gate already does for you
+
+Two things happen without any configuration, both aimed at the per-turn context that the
+table above shows is the real driver:
+
+- **The frozen plan is sent once per reviewer session, not once per round.** A plan cannot be
+  revised without ending the session it was sent in, so rounds 2 and 3 are told it is already
+  in their context instead of receiving another copy — ~16k tokens per round at the 64 KiB
+  cap. A cold confirmation, a fresh session and the rare mid-review loss of session ownership
+  all still get the full plan; with `cold_confirm` on it ships every time, since a cold call
+  reads the same bundle.
+- **The working guidance rides in the system prompt.** `prompts/reviewer-efficiency.md` — batch
+  independent tool calls, grep to locate then read with `offset`/`limit`, never re-open a file
+  — is passed as `--append-system-prompt` on Claude Code rather than buried in the prompt
+  payload, because measured across seven real rounds the same words inside a ~100 KB user
+  message produced zero batched tool calls. OpenCode has no system-prompt flag, so there it is
+  appended to the prompt.
+
+### Where to read the numbers
+
+For a harness that reports its accounting (Claude Code does; OpenCode has no machine-readable
+output mode, so nothing is shown rather than something estimated):
+
+- each stored report carries a `cost:` line per invocation — under `cold_confirm` the round
+  with context and the cold confirmation each get their own, which is the argument for or
+  against that setting in one place;
+- `/opencode-review-loop:status` totals the activation and the current phase;
+- the CLI's own output is kept verbatim beside each transcript as `raw/NNN-*.out.envelope`.
+
+None of these figures feed any decision the gate makes. They are reported, never read.
+
 ## Where config state lives
 
 State — `state.json`, frozen plans, reports, bundles — never lives inside the repository.

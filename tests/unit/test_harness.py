@@ -46,11 +46,12 @@ def written(path: Path, text: str = "evidence\n") -> harness.Attachment:
     return harness.Attachment(path, hashlib.sha256(path.read_bytes()).hexdigest())
 
 
-def spec_for(implementation: harness.Harness, tmp_path: Path, *, cold: bool = False) -> harness.ReviewSpec:
+def spec_for(implementation: harness.Harness, tmp_path: Path, *, cold: bool = False, system_prompt: str = "") -> harness.ReviewSpec:
     del implementation
     return harness.ReviewSpec(
         repo="/repo",
         prompt_text="review this",
+        system_prompt=system_prompt,
         title="review-loop phase 1",
         bundle_dir=tmp_path / "bundles" / "001",
         act_dir=tmp_path,
@@ -349,3 +350,27 @@ def test_the_review_path_refuses_an_unimplemented_harness_rather_than_defaulting
         reviewer._harness(config)
     with pytest.raises(harness.UnknownHarness):
         reviewer._sessions(config)
+
+
+@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
+def test_every_harness_can_be_asked_what_a_run_cost(implementation: harness.Harness) -> None:
+    """Part of the seam, so a second implementation cannot forget it. ``None`` is a valid
+    answer -- a CLI with no accounting to report has none -- but the method has to exist, and
+    it has to answer rather than raise on bytes it cannot read: this is display data, and a
+    report that raises while describing a finished review destroys the record it exists to keep.
+    """
+    for raw in (b"", b"not json", b"[]", b"VERDICT APPROVED\n"):
+        result = implementation.usage(raw)
+        assert result is None or isinstance(result, harness.Usage)
+
+
+@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
+def test_every_harness_delivers_the_working_guidance_somewhere(implementation: harness.Harness, tmp_path: Path) -> None:
+    """*Where* it goes is the harness's business -- Claude Code has `--append-system-prompt`,
+    OpenCode has no system-prompt flag at all and appends it to the prompt. That it arrives is
+    the seam's business, so it is asserted here rather than twice in the per-harness files."""
+    marker = "batch every independent tool call"
+    built = implementation.review_command(spec_for(implementation, tmp_path, system_prompt=marker))
+
+    delivered = marker in " ".join(built.argv) or (built.stdin is not None and marker.encode() in built.stdin)
+    assert delivered, f"{implementation.name} dropped the working guidance"

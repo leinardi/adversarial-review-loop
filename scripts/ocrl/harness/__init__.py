@@ -45,6 +45,7 @@ __all__ = [
     "SessionStrategy",
     "TranscriptError",
     "UnknownHarness",
+    "Usage",
     "display_model",
     "get",
     "model",
@@ -149,6 +150,19 @@ class ReviewSpec:
 
     repo: str
     prompt_text: str
+    #: Plugin-shipped guidance on *how* to work, as opposed to what to review
+    #: (``prompts/reviewer-efficiency.md``). Carried separately from ``prompt_text`` because
+    #: the two CLIs deliver it differently and only one of them has somewhere better than the
+    #: prompt to put it: Claude Code takes it as ``--append-system-prompt``, where an
+    #: instruction about tool use is followed far more reliably than the same words buried in
+    #: a 100 KB user message, while OpenCode has no system-prompt flag and appends it to the
+    #: prompt instead. **Fixed plugin text, never repo- or model-derived**, so it carries no
+    #: evidence-boundary weight -- it has exactly the standing of the prompt file itself.
+    #:
+    #: Defaults to "" and every harness skips it when empty. A review that runs without the
+    #: guidance is an ordinary review -- it costs more turns, not correctness -- so this is one
+    #: of the few fields whose absence is allowed to degrade quietly.
+    system_prompt: str = ""
     title: str
     bundle_dir: Path
     #: The activation directory this review belongs to -- the root of everything the gate
@@ -173,6 +187,9 @@ class ClarifySpec:
 
     repo: str
     prompt_text: str
+    #: See :attr:`ReviewSpec.system_prompt`. A clarify is an agentic run over the same
+    #: repository, so the same guidance applies to it.
+    system_prompt: str = ""
     title: str
     bundle_dir: Path
     #: See :attr:`ReviewSpec.act_dir`.
@@ -219,6 +236,39 @@ class Captured:
 
     def __bool__(self) -> bool:
         return bool(self.session_id)
+
+
+@dataclass(frozen=True)
+class Usage:
+    """What one reviewer invocation cost, as its CLI reported it.
+
+    **Observability only. Nothing in the gate reads this to decide anything** -- not a verdict,
+    not a budget, not a retry. It exists because the cost of a round was previously invisible:
+    the figures were sitting in the CLI's own output, which
+    :func:`ocrl.reviewer._reduce_transcript` moved aside into an ``.envelope`` file nobody
+    reads. A round that costs several dollars should say so in its report rather than only in
+    the provider's billing page.
+
+    Every field is ``None`` when the CLI did not report it or reported it as something other
+    than a number, and the whole object is ``None`` when there is nothing to read at all
+    (:meth:`Harness.usage`). A missing figure is displayed as missing; it is never defaulted to
+    ``0``, which would read as "this round was free".
+
+    ``cache_read_tokens`` is the one worth understanding: an agentic review re-reads its whole
+    context on every turn, so this is roughly *context size x turns* and is normally the
+    largest number here by an order of magnitude. It is what makes turn count, not payload
+    size alone, the thing that drives the bill.
+    """
+
+    #: Agentic turns the run took -- each one a full re-read of the context.
+    turns: int | None = None
+    input_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    output_tokens: int | None = None
+    #: What the CLI itself says the run cost, in US dollars.
+    cost_usd: float | None = None
+    duration_ms: int | None = None
 
 
 @runtime_checkable
@@ -325,6 +375,19 @@ class Harness(Protocol):
         on Claude Code. Anything of that kind raises :class:`TranscriptError` rather than
         returning text, because a review of less evidence than the gate believes it sent must
         never reach the parser as a verdict (Rule 1).
+        """
+
+    def usage(self, raw: bytes) -> Usage | None:
+        """What this run cost, read out of the same bytes :meth:`transcript` reduces.
+
+        ``None`` when the CLI reports nothing to read -- which is the correct answer for a
+        plain-text transcript, not a failure.
+
+        **Never raises, and never gates anything.** This is the one method on the protocol
+        whose result is displayed and nothing more (:class:`Usage`), so unlike
+        :meth:`transcript` it has no fail-closed direction to honour: malformed output means
+        an unknown cost, and an unknown cost is reported as unknown. Raising here would let a
+        display concern fail a review that had already succeeded.
         """
 
     def probe_models(self, timeout: float) -> list[str] | None:

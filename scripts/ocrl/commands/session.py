@@ -10,7 +10,9 @@ output is written for a human -- it is the last thing said before the mode ends.
 
 from __future__ import annotations
 
+import math
 import sys
+from typing import Any
 
 from ocrl import commands, gitsnap, harness, oscillation, planrev, report, reviewer
 from ocrl.commands import completion
@@ -78,6 +80,45 @@ def defer(argv: list[str]) -> int:
 # --------------------------------------------------------------------------
 
 
+def _spent(history: list[dict[str, Any]]) -> tuple[float, int]:
+    """``(dollars, rounds)`` over the entries that recorded a readable cost.
+
+    ``round_history`` comes out of ``state.json``, which is not a trust boundary, so every
+    hop is type-checked: a non-object ``usage``, a non-numeric ``cost_usd``, a ``bool``
+    (an ``int`` subclass in Python, so ``True`` would otherwise total as one dollar) and a
+    non-finite float are all skipped rather than coerced. ``status`` changes nothing and
+    escalates nothing -- the honest answer to an unreadable entry is to leave it out of the
+    total and out of the count, which is why the count is returned alongside: it says how many
+    rounds the figure actually covers.
+    """
+    total = 0.0
+    counted = 0
+    for entry in history:
+        usage = entry.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        cost = usage.get("cost_usd")
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost):
+            continue
+        total += float(cost)
+        counted += 1
+    return total, counted
+
+
+def _cost_line(history: list[dict[str, Any]], phase_history: list[dict[str, Any]]) -> str:
+    """``reviewer cost: …``, or "" when no round recorded one.
+
+    Empty rather than ``$0.00`` for an OpenCode activation or one armed before this was
+    recorded: a zero would claim the reviews were free, when what is true is that their cost
+    was never reported.
+    """
+    total, rounds = _spent(history)
+    if not rounds:
+        return ""
+    phase_total, phase_rounds = _spent(phase_history)
+    return f"reviewer cost:       ${total:.2f} over {rounds} round(s), ${phase_total:.2f} this phase ({phase_rounds})\n"
+
+
 def status(argv: list[str]) -> int:
     """Print everything the gate is currently deciding on. Never changes anything."""
     del argv
@@ -124,6 +165,13 @@ def status(argv: list[str]) -> int:
     persisting_points = oscillation.persisting(phase_history, phase_label, stall_rounds) if stall_rounds > 0 else []
     persisting_line = f"persisting findings:  {', '.join(point.anchor.file for point in persisting_points)}\n" if persisting_points else ""
 
+    # What this activation has spent, for a harness that reports it. Display only, and totalled
+    # here rather than stored as a running counter: a counter would have to be kept correct
+    # across every abort, reclaim and generation bump, which is real machinery for a number
+    # nothing depends on. Summing the rounds is exact whenever the rounds are, and simply omits
+    # what it cannot read.
+    cost_line = _cost_line(state.get_array_of_dicts("round_history"), phase_history)
+
     # Phase 6: the transient-failure budget and any active retry backoff -- distinct from
     # `operational failures` above, which is the ordinary operational/contract/bundle budget.
     retry_not_before = state.get_int("retry_not_before")
@@ -157,7 +205,7 @@ model:               {harness.display_model(config)} {config.as_str("variant")}
 block_severity:      {config.as_str("block_severity")}
 rounds this phase:   {len(phase_history)}
 reviewer session:    {reviewer.continuity_summary(state, config)}
-{persisting_line}state directory:     {activation.act_dir}
+{cost_line}{persisting_line}state directory:     {activation.act_dir}
 
 phases:
 {phases}

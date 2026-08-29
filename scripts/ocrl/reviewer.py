@@ -137,6 +137,7 @@ __all__ = [
     "clarify_argv",
     "context_attachments",
     "continuity_summary",
+    "efficiency_text",
     "execute",
     "invoke",
     "late_scope",
@@ -313,6 +314,26 @@ def settle_margin(config: Config) -> int:
     there is room for -- which costs a recoverable round every time.
     """
     return _capture_timeout(config) + 2 * math.ceil(KILL_GRACE_SEC) + _PUBLISH_BUDGET_SEC
+
+
+def efficiency_text() -> str:
+    """``prompts/reviewer-efficiency.md``: how to work, as opposed to what to review.
+
+    Read on every invocation rather than cached at import: a hook is a fresh process each
+    time, so there is nothing to cache across, and reading it at the call site keeps this the
+    same shape as every other prompt read (:func:`ocrl.prompt_path`).
+
+    **Missing or unreadable degrades to "", never to an error.** This text makes a review
+    cheaper, not more correct -- a review that runs without it is an ordinary review, while a
+    review that refuses to run because a guidance file went missing is a blocked commit for no
+    safety reason at all. That is the opposite direction from every other failure in this
+    module, and deliberately so: nothing here bears on a verdict.
+    """
+    try:
+        return _decode(ocrl.prompt_path("reviewer-efficiency").read_bytes()).rstrip("\n")
+    except OSError as exc:
+        log(f"the reviewer efficiency guidance could not be read ({exc}); continuing without it")
+        return ""
 
 
 #: How much of the malformed transcript the repair call is shown: its **tail**, because the
@@ -720,6 +741,13 @@ class Review:
     #: then the repair call's own transcript, so a report can show both: the block that was
     #: acted on, and the review it came from. Empty for every ordinary review.
     repaired: str = ""
+    #: What this invocation cost, when its harness reports it -- display only, never read by
+    #: any branch (:class:`ocrl.harness.Usage`). ``None`` for a harness with no accounting to
+    #: offer, for the ``OCRL_REVIEWER_CMD`` test seam, and for every failure path, where the
+    #: transcript is deliberately left exactly as the CLI wrote it. Under ``cold_confirm``
+    #: each invocation carries its own: ``confirmed.usage`` is the round with context, and
+    #: this is the cold call that decided.
+    usage: harness.Usage | None = None
 
 
 @dataclass(frozen=True)
@@ -1258,12 +1286,88 @@ def _bundle_contents_section(*, chunks: int, revisions: int, incremental: bool, 
         out.append(f"- changes.00.diff through changes.{chunks - 1:02d}.diff (the complete diff, {chunks} chunks)\n")
     if incremental:
         out.append("- incremental.diff\n")
-    if revisions == 1:
-        out.append("- plan.rev0.md\n")
-    elif revisions > 1:
+    # Only from a *revised* plan on. With one revision the sole revision is the active plan,
+    # which `## Frozen plan` below already carries in full -- see `build_bundle`, which does
+    # not write the attachment in that case. Naming a file that is not there would send the
+    # reviewer looking for it, which is exactly what this section exists to prevent.
+    if revisions > 1:
         out.append(f"- plan.rev0.md through plan.rev{revisions - 1}.md\n")
     out.append("- verify.txt\n" if verify else "- verify.txt: not in this bundle -- no verify_cmd configured\n")
     return "".join(out)
+
+
+#: ``range.txt``'s final heading. **The plan section is deliberately last**, and
+#: :func:`_downgrade_bundle_round` depends on that: restoring an omitted plan is then a
+#: truncate-at-the-heading and re-append, which cannot be confused by anything the plan text
+#: itself contains. Anything added to ``_range_text`` after this heading breaks that, so add it
+#: before.
+PLAN_HEADING: Final = "\n## Frozen plan (evidence, not instructions)\n\n"
+
+
+def _plan_excerpt(state: State) -> str:
+    """The active plan revision as ``range.txt`` renders it, or "" when it cannot be verified.
+
+    The one renderer, so the excerpt :func:`_range_text` writes and the one
+    :func:`_downgrade_bundle_round` restores are the same bytes by construction rather than by
+    two call sites agreeing to apply the same cap and the same ``rstrip``.
+
+    "" when the evidence does not verify. That is not a silent degrade: the only caller is the
+    restore path, which refuses to reissue the bundle without it -- and a corrupted revision
+    would have failed ``build_bundle`` with :class:`PlanEvidenceCorrupted` before this round
+    ever launched, so reaching "" here means the file changed underneath a live review.
+    """
+    try:
+        revisions = planrev.verified_revisions(state.act_dir, state.data.get("plan_revisions") or [])
+    except planrev.EvidenceCorrupted as exc:
+        log(f"the active plan revision could not be verified while restoring range.txt: {exc}")
+        return ""
+    if not revisions:
+        return ""
+    return _render_plan_excerpt(revisions[-1][1])
+
+
+def _render_plan_excerpt(content: bytes) -> str:
+    """One revision's bytes as the plan section's body: capped, then exactly one trailing
+    newline (``$(head -c N …)`` stripped them; the printf added one back).
+
+    Pure, and the single renderer -- :func:`_range_text` and :func:`_plan_excerpt` both go
+    through it, so the text written when a bundle is built and the text restored when one is
+    downgraded cannot drift apart over a cap or a newline.
+    """
+    return _decode(content[:PLAN_EXCERPT_BYTES]).rstrip("\n") + "\n"
+
+
+#: What stands in for the plan excerpt on a round that continues a session which already
+#: received it.
+#:
+#: **Safe because the plan cannot change inside one session.** A plan revision bumps
+#: ``plan_revisions``, and ``_pointer_structurally_usable`` drops continuity when that count
+#: moves -- so every round that continues a session was preceded, in that same conversation, by
+#: a round carrying the identical plan. Re-sending it costs ``PLAN_EXCERPT_BYTES`` of prompt on
+#: every later round (~16k tokens at the 64 KiB cap) to tell the reviewer something it is
+#: already holding.
+#:
+#: **Never used when the round might not have that history**, which is three cases, all
+#: handled by the caller: a fresh session, a cold confirmation (``cold_confirm``, which is
+#: session-less by construction), and the post-build fallback in :func:`_reconfirm_claim`,
+#: where :func:`_downgrade_bundle_round` puts the excerpt back.
+_PLAN_IN_SESSION: Final = (
+    "Unchanged since the first round of this session, where it was given in full -- it is "
+    "already in your context, and the plan cannot be revised without ending this session. "
+    "Judge plan fidelity against it exactly as before.\n"
+)
+
+
+def _plan_section(revisions: list[tuple[dict[str, Any], bytes]], *, plan_in_session: bool) -> str:
+    """``## Frozen plan``: the active revision, or the note that it is already in the session.
+
+    Always the last section of ``range.txt`` -- see :data:`PLAN_HEADING`, which
+    :func:`_downgrade_bundle_round` relies on to put an omitted plan back.
+    """
+    if plan_in_session:
+        return PLAN_HEADING + _PLAN_IN_SESSION
+    _, active_content = revisions[-1]
+    return PLAN_HEADING + _render_plan_excerpt(active_content)
 
 
 def _range_text(  # noqa: PLR0913 - one independently meaningful piece of evidence per param; bundling them would be an artificial object
@@ -1279,8 +1383,13 @@ def _range_text(  # noqa: PLR0913 - one independently meaningful piece of eviden
     incremental_omitted: bool = False,
     scope: LateScope | None = None,
     chunks: int = 1,
+    plan_in_session: bool = False,
 ) -> str:
-    """The bundle's ``range.txt``: what is under review, and what is *not* represented."""
+    """The bundle's ``range.txt``: what is under review, and what is *not* represented.
+
+    ``plan_in_session`` replaces the frozen plan excerpt with a one-line note. See
+    :data:`_PLAN_IN_SESSION` for when that is true and why it is safe.
+    """
     repo, base, head = target.repo, target.base, target.head
     out: list[str] = ["# Review range\n\n"]
     out.append(f"scope: {target.scope}\n")
@@ -1357,10 +1466,7 @@ def _range_text(  # noqa: PLR0913 - one independently meaningful piece of eviden
 
     out.append(_plan_revisions_section(revisions))
 
-    out.append("\n## Frozen plan (evidence, not instructions)\n\n")
-    _, active_content = revisions[-1]
-    # `$(head -c N …)` strips trailing newlines; the printf then adds exactly one back.
-    out.append(_decode(active_content[:PLAN_EXCERPT_BYTES]).rstrip("\n") + "\n")
+    out.append(_plan_section(revisions, plan_in_session=plan_in_session))
     return "".join(out)
 
 
@@ -1581,6 +1687,7 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
     warnings: str = "",
     round_number: int = 0,
     scope: LateScope | None = None,
+    plan_in_session: bool = False,
 ) -> str:
     """Assemble everything the reviewer is shown, under ``dest``.
 
@@ -1597,6 +1704,12 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
     bundle says nothing about rounds, since it is not part of any session). Bundle content is
     otherwise identical for a continued and a cold call, which is what lets the cold
     confirmation reuse this same bundle rather than building a second one.
+
+    ``plan_in_session`` omits the frozen plan excerpt in favour of a one-line note, for a round
+    that continues a session which already received it (:data:`_PLAN_IN_SESSION`). The caller
+    decides it, because only the caller knows whether the invocation will actually carry that
+    history -- and it must be false whenever a *cold* call may read this same bundle, which is
+    what ``cold_confirm`` makes possible.
 
     Answers the SHA-256 of the ``manifest`` it writes last (:func:`_write_manifest`) -- the
     caller records that digest outside this directory, and every later read of the bundle is
@@ -1668,6 +1781,7 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
         incremental_omitted=incremental_omitted,
         scope=scope,
         chunks=total,
+        plan_in_session=plan_in_session,
     )
     _write_private(dest / "range.txt", _encode(range_text))
 
@@ -1689,8 +1803,20 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
     # untrusted-length input the moment it comes from `state.json`, and attaching it whole
     # would let an oversized one blow out the bundle and the reviewer's context exactly the
     # way an unbounded `plan.frozen.md` would, which is why that one was always capped.
-    for index, (_entry, content) in enumerate(revisions):
-        _write_private(dest / f"plan.rev{index}.md", content[:PLAN_EXCERPT_BYTES])
+    #
+    # **Skipped entirely for an unrevised plan**, which is the common case: `_range_text`
+    # already inlines `revisions[-1]` under `## Frozen plan`, capped at the same
+    # `PLAN_EXCERPT_BYTES`, so a lone `plan.rev0.md` is a byte-identical second copy of the
+    # plan in the same payload. That is not free -- measured against a 64 KiB plan it is
+    # ~16k tokens *re-read on every agentic turn* of the review, and a round runs dozens of
+    # turns. The attachments exist for the case the section cannot cover: once the plan has
+    # been revised, only the newest revision is inlined, and the earlier phases were reviewed
+    # against text nothing else in the bundle carries. `_manifest_rows` and
+    # `_bundle_contents_section` apply the same `> 1` rule, so what is hashed, what is
+    # attached and what the reviewer is told exists cannot disagree.
+    if len(revisions) > 1:
+        for index, (_entry, content) in enumerate(revisions):
+            _write_private(dest / f"plan.rev{index}.md", content[:PLAN_EXCERPT_BYTES])
 
     # **Sealed before `verify_cmd` runs, and re-checked after.** `verify_cmd` is
     # repository-controlled configuration executed through a login shell (`_run_verify`), so it
@@ -1741,7 +1867,10 @@ def _manifest_rows(dest: Path, act_dir: Path, *, total: int, revisions: int) -> 
     incremental = dest / "incremental.diff"
     if incremental.is_file():
         rows.append(("bundle", "incremental.diff", incremental))
-    rows += [("bundle", f"plan.rev{index}.md", dest / f"plan.rev{index}.md") for index in range(revisions)]
+    # `> 1`, matching `build_bundle`: an unrevised plan writes no `plan.rev0.md`, and a row
+    # naming a file that does not exist is a `_hashed_row` failure, not a missing attachment.
+    if revisions > 1:
+        rows += [("bundle", f"plan.rev{index}.md", dest / f"plan.rev{index}.md") for index in range(revisions)]
     context = act_dir / "context" / f"{dest.name}-prior-rounds.txt"
     if context.is_file():
         rows.append(("context", context.name, context))
@@ -2190,14 +2319,22 @@ def _strip_ansi(path: Path) -> None:
 _ENVELOPE_SUFFIX: Final = ".envelope"
 
 
-def _reduce_transcript(implementation: harness.Harness, out_path: Path) -> None:
-    """Replace the reviewer's own output at ``out_path`` with the answer text :func:`parse` reads.
+def _reduce_transcript(implementation: harness.Harness, out_path: Path) -> harness.Usage | None:
+    """Replace the reviewer's own output at ``out_path`` with the answer text :func:`parse` reads,
+    and return what that run cost.
 
     A no-op for a harness whose CLI writes the answer and nothing around it -- the bytes are
     unchanged, so nothing is rewritten and no envelope is left behind. For one that wraps the
     answer in a report of its own, the wrapper moves to ``<out_path>.envelope`` and the answer
     takes its place, which is what lets :func:`parse` stay unaware that more than one output
     shape exists.
+
+    **The usage is read here because here is where the wrapper still exists.** The accounting
+    lives in the same event the answer is extracted from, and the very next statement moves
+    that event out of the way; reading it anywhere later would mean re-opening the envelope
+    file, which is a second place that would have to know the envelope's name and shape. It is
+    read *before* the reduction for the same reason, and returned rather than stored, so this
+    function keeps its single side effect.
 
     **Only on the success path.** A run that already failed keeps its output exactly as the CLI
     wrote it, because that is what :func:`_classify_op_failure` reads to tell a rate limit from
@@ -2206,11 +2343,13 @@ def _reduce_transcript(implementation: harness.Harness, out_path: Path) -> None:
     raw = read_verified_file(out_path, root=state_root())
     if raw is None:
         raise ReviewerFailed(f"the reviewer's output at {out_path} could not be read back")
+    usage = implementation.usage(raw)
     reduced = implementation.transcript(raw)
     if reduced == raw:
-        return
+        return usage
     _write_private(out_path.with_name(out_path.name + _ENVELOPE_SUFFIX), raw)
     _write_private(out_path, reduced)
+    return usage
 
 
 def _confirm_staged_unchanged(attachments: Sequence[tuple[Path, str]]) -> None:
@@ -2225,12 +2364,17 @@ def _confirm_staged_unchanged(attachments: Sequence[tuple[Path, str]]) -> None:
             raise BundleError(f"the staged attachment {path} changed after it was staged; nothing was sent to the reviewer")
 
 
-def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str, str] | None = None) -> None:
-    """Run the reviewer, leaving its output at ``out_path``.
+def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str, str] | None = None) -> harness.Usage | None:
+    """Run the reviewer, leaving its output at ``out_path``, and report what it cost.
 
     Raises :class:`ReviewerFailed` on a timeout or a non-zero exit. ``OCRL_REVIEWER_CMD`` is
     the test seam the selftest drives: a stand-in that reads the bundle and writes the same
     contract to stdout, so the loop can be exercised without spending a model call.
+
+    The return value is :class:`ocrl.harness.Usage` for a harness that reports its accounting,
+    and ``None`` for one that does not or for the test seam, where no model call was made and
+    there is nothing to account for. It is display-only in every caller (see that class); no
+    branch anywhere reads it.
     """
     env = dict(os.environ if environ is None else environ)
     # `run.timeout_sec` is the repair call's own, much smaller ceiling; 0 -- every ordinary
@@ -2265,6 +2409,7 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
         spec = harness.ReviewSpec(
             repo=target.repo,
             prompt_text=message,
+            system_prompt=efficiency_text(),
             title=run.title,
             bundle_dir=run.bundle_dir,
             act_dir=_act_dir_of(run.bundle_dir),
@@ -2292,14 +2437,16 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
         raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s", status=status)
     if status != 0:
         raise ReviewerFailed(f"the reviewer exited with status {status}", status=status)
-    if not reviewer_cmd:
-        try:
-            _reduce_transcript(_harness(config), run.out_path)
-        except harness.TranscriptError as exc:
-            # A zero exit the harness refuses to read as an answer. `status=0` keeps
-            # `_classify_op_failure` on its "operational" path, which is what this is: the
-            # reviewer reported something about its own run that no verdict may be read past.
-            raise ReviewerFailed(str(exc)) from exc
+    if reviewer_cmd:
+        # The stub wrote the contract itself; there was no model call to account for.
+        return None
+    try:
+        return _reduce_transcript(_harness(config), run.out_path)
+    except harness.TranscriptError as exc:
+        # A zero exit the harness refuses to read as an answer. `status=0` keeps
+        # `_classify_op_failure` on its "operational" path, which is what this is: the
+        # reviewer reported something about its own run that no verdict may be read past.
+        raise ReviewerFailed(str(exc)) from exc
 
 
 #: The clarify argv, likewise moved to :mod:`ocrl.harness.opencode`.
@@ -2348,6 +2495,7 @@ def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invoc
         spec = harness.ClarifySpec(
             repo=repo,
             prompt_text=message,
+            system_prompt=efficiency_text(),
             title=title,
             bundle_dir=bundle_dir,
             act_dir=_act_dir_of(bundle_dir),
@@ -2835,8 +2983,12 @@ def session_ref(state: State, target: Target, *, config: Config) -> SessionRef:
     **Every fall-back logs a distinguishable reason, and that is the only thing the logging is
     for.** Continuity dropping is invisible from the outside -- a fresh review looks identical
     whether it was correct (a new phase) or a silent loss (a listing that failed, a claim
-    someone else holds), and the difference is worth real tokens per round. The messages are
-    advisory only: nothing here reads them back, and no branch below may change because of one.
+    someone else holds) -- and which of those it was is worth knowing. What it is *not* is
+    reliably a saving: under Claude Code a resumed round replays every earlier round's
+    attachments and tool results, so it carries roughly twice the context per turn and can cost
+    as much as a fresh one (``docs/configuration.md``, "Cost"). Continuity buys the reviewer's
+    memory of the earlier round, not a discount. The messages are advisory only: nothing here
+    reads them back, and no branch below may change because of one.
     """
     strategy = _sessions(config)
     pointer = state.data.get("reviewer_session")
@@ -2983,7 +3135,7 @@ def _reconfirm_claim(state: State, ref: SessionRef, *, config: Config) -> bool:
     return held
 
 
-def _downgrade_bundle_round(bundle_dir: Path, act_dir: Path, digest: str) -> str:
+def _downgrade_bundle_round(bundle_dir: Path, act_dir: Path, digest: str, plan_excerpt: str = "") -> str:
     """Correct ``range.txt``'s ``round:`` line after a post-build fallback to a fresh review,
     answering the bundle's manifest digest afterwards (unchanged if nothing was rewritten).
 
@@ -3031,8 +3183,29 @@ def _downgrade_bundle_round(bundle_dir: Path, act_dir: Path, digest: str) -> str
         log("range.txt: does not match the hash recorded when the bundle was sealed; not correcting or reissuing anything")
         return digest
 
-    corrected = re.sub(r"(?m)^round: \d+\n", "round: 1\n", _decode(data), count=1)
-    if corrected == _decode(data):
+    text = _decode(data)
+    corrected = re.sub(r"(?m)^round: \d+\n", "round: 1\n", text, count=1)
+
+    # **The plan has to come back, and getting it back is not optional.** The bundle was built
+    # for a continued session, so `_PLAN_IN_SESSION` may stand where the plan should be -- and
+    # the invocation that now follows is cold, with none of the history that note asserts. A
+    # reviewer told "it is already in your context" when it is not would judge plan fidelity
+    # against nothing.
+    #
+    # Restored by truncating at `PLAN_HEADING` and re-appending, rather than by substituting
+    # the note text: the heading is the last thing `_range_text` writes, so everything after it
+    # is the plan section and nothing the plan itself contains can confuse the boundary.
+    if PLAN_HEADING in corrected and _PLAN_IN_SESSION in corrected.split(PLAN_HEADING, 1)[1]:
+        if not plan_excerpt:
+            # Fail closed: the returned digest no longer matches the bundle only if we write,
+            # so writing nothing leaves it valid -- but a valid bundle still carrying the note
+            # is the wrong evidence for the cold call about to run. Refuse to bless it instead;
+            # staging then rejects the bundle and the review fails rather than misleads.
+            log("range.txt: the plan was omitted for a continued session and no excerpt was supplied to restore it; not reissuing this bundle")
+            return ""
+        corrected = corrected.split(PLAN_HEADING, 1)[0] + PLAN_HEADING + plan_excerpt
+
+    if corrected == text:
         return digest
     try:
         _write_private(path, _encode(corrected))
@@ -3420,7 +3593,7 @@ def _run_invocation(target: Target, run: Invocation, *, config: Config, scope: L
     review = Review()
     review.raw = str(run.out_path)
     try:
-        invoke(target, run, config=config)
+        usage = invoke(target, run, config=config)
     except BundleError as exc:
         # The launch-time re-check of the staged attachments (`_confirm_staged_unchanged`)
         # found bytes that moved after staging verified them. Nothing ran, so there is no
@@ -3436,6 +3609,9 @@ def _run_invocation(target: Target, run: Invocation, *, config: Config, scope: L
         return review, False
     review = parse(run.out_path, config=config, allow_supersedes=target.is_phase and run.allow_supersedes, scope=scope)
     review.raw = str(run.out_path)
+    # `parse` builds a fresh `Review` from the transcript, so the cost has to be carried over
+    # explicitly -- it is a property of the invocation, not of anything the reviewer wrote.
+    review.usage = usage
     return review, True
 
 
@@ -3902,9 +4078,34 @@ def _record_round(state: State, rr: _ReviewRun, review: Review, *, round_number:
             "bundle_digest": rr.bundle_digest,
             "findings": [line for line in _records(review.all_findings) if line],
             "supersedes": [line for line in _records(str(getattr(review, "supersedes", ""))) if line],
+            **_usage_record(review),
         }
     )
     state.data["round_history"] = history
+
+
+def _usage_record(review: Review) -> dict[str, Any]:
+    """``{"usage": {...}}`` for a round whose harness reported a cost, else ``{}``.
+
+    Stored so ``status`` can total a phase without re-opening every ``.envelope``. Written as
+    an ordinary sub-object with ``None`` fields dropped, and **read back defensively wherever
+    it is read**: ``state.json`` is not a trust boundary, and this is display data with no
+    say in any decision -- a malformed entry must degrade to "cost unknown", never to a wrong
+    total and never to an exception (see ``commands.session.status``).
+    """
+    usage = review.usage
+    if usage is None:
+        return {}
+    fields = {
+        "cost_usd": usage.cost_usd,
+        "turns": usage.turns,
+        "input": usage.input_tokens,
+        "cache_creation": usage.cache_creation_tokens,
+        "cache_read": usage.cache_read_tokens,
+        "output": usage.output_tokens,
+    }
+    recorded = {key: value for key, value in fields.items() if value is not None}
+    return {"usage": recorded} if recorded else {}
 
 
 def approval_is_current(state: State, label: str, review: Review) -> bool:
@@ -4307,9 +4508,17 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     # that does not exist until the bundle does. The late-round scope comes first: `range.txt`
     # discloses the rule it implies, and `parse` decides by it, so it is one value read from
     # the same in-memory `state` the bundle's own previous-round lookup reads.
+    # The plan is omitted only for a round that continues a session which already holds it,
+    # and only when no *cold* call can read this same bundle. `cold_confirm` is exactly that
+    # possibility: `_confirm_cold` reuses `bundle_dir` with no session at all, so under it the
+    # excerpt always ships. One bundle per round is worth more than the tokens here, and the
+    # setting already trades tokens for independence.
+    plan_in_session = bool(ref.session_id) and not config.as_bool("cold_confirm")
     try:
         scope = late_scope(target, state=state)
-        digest = build_bundle(target, bundle_dir, state=state, config=config, warnings=warnings, round_number=ref.round, scope=scope)
+        digest = build_bundle(
+            target, bundle_dir, state=state, config=config, warnings=warnings, round_number=ref.round, scope=scope, plan_in_session=plan_in_session
+        )
     except (BundleTooLarge, PlanEvidenceCorrupted) as exc:
         _release_reservations(state, ref, claim_id=claim_id, expected=expected, config=config)
         return Review(verdict="NEEDS_HUMAN", error=str(exc))
@@ -4367,7 +4576,11 @@ def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expec
         # round -- corrected here so the reviewer is not told it is round N of a session this
         # cold invocation carries no history of.
         log(f"session claim: lost ownership before invoking; falling back to a fresh review for {target.label}")
-        rr = dataclasses.replace(rr, bundle_digest=_downgrade_bundle_round(bundle_dir, state.act_dir, rr.bundle_digest))
+        # The plan excerpt goes with it: this bundle may have omitted the plan on the strength
+        # of a session this call no longer owns, and the invocation that follows is cold.
+        rr = dataclasses.replace(
+            rr, bundle_digest=_downgrade_bundle_round(bundle_dir, state.act_dir, rr.bundle_digest, plan_excerpt=_plan_excerpt(state))
+        )
         ref = _fresh_ref(config, capturable=False)
 
     # Listed exactly once, here, and carried on the invocation from this point on. Both the

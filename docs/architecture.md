@@ -231,6 +231,12 @@ $XDG_STATE_HOME/opencode-review-loop/
         └── bundles/NNN/             gate-generated evidence shown to the reviewer for report NNN — no model output, ever
 ```
 
+A bundle holds `range.txt`, the `changes.NN.diff` chunks, `incremental.diff` from round 2 on,
+`verify.txt` when a `verify_cmd` is configured, and `plan.rev<n>.md` **only once the plan has
+actually been revised** — `range.txt` already inlines the active revision in full, so with an
+unrevised plan a `plan.rev0.md` would be a byte-identical second copy of it in the same
+payload, re-read on every agentic turn of the review. See [configuration.md](configuration.md#cost).
+
 Nothing here lives inside the repository under review, with one narrow exception —
 `config <key> <value> --repo`, an explicit user-only write to the repo's own
 `.opencode-review-loop.json`. See [security.md](security.md) for why that boundary matters
@@ -258,7 +264,7 @@ and exactly what does and doesn't cross it.
 | `scripts/ocrl/report.py` | report storage; the text Claude actually sees |
 | `scripts/ocrl/commands/` | one module per subcommand — `arm`, `resume`, `phases`, `session`, `configcmd`, `completion`, `dryrun`, plus the four hook entrypoints |
 | `scripts/ocrl/_vendor/bashlex/` | vendored parser, kept diffable against upstream |
-| `prompts/*.md` | the fixed reviewer prompts |
+| `prompts/*.md` | the fixed reviewer prompts — one per review kind, plus `reviewer-efficiency.md`, the working guidance each harness delivers its own way (a system prompt where the CLI has one) |
 | `skills/*/SKILL.md` | the seven slash commands |
 
 ## Testing

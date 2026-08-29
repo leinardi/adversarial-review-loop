@@ -17,7 +17,7 @@ import pytest
 from conftest import git
 
 from ocrl import config as ocrl_config
-from ocrl import report, state
+from ocrl import harness, report, state
 from ocrl.config import Config
 from ocrl.reviewer import Review, Target
 from ocrl.util import TRUNCATION_MARKER
@@ -442,3 +442,53 @@ def test_the_reason_carries_deferred_lines_on_a_blocking_round() -> None:
     assert "Deferred findings" in text
     assert DEFERRED_LINE in text
     assert text.index("Blocking findings") < text.index("Deferred findings") < text.index("Reviewer prose")
+
+
+# --------------------------------------------------------------------------
+# Cost
+# --------------------------------------------------------------------------
+
+
+def test_a_report_says_what_the_round_cost(act_dir: Path) -> None:
+    """The figures were always in the CLI's output; `_reduce_transcript` moved them into an
+    `.envelope` nobody reads. A round that costs several dollars should say so in its report."""
+    review = Review(
+        verdict="APPROVED",
+        usage=harness.Usage(
+            turns=50, cache_creation_tokens=189352, cache_read_tokens=5649958, output_tokens=31659, cost_usd=5.576844, duration_ms=460123
+        ),
+    )
+    text = report.store(review, a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
+
+    assert "- cost: $5.58" in text
+    assert "50 turns" in text
+    assert "189k new + 5,650k cached input" in text, "the ratio that explains the bill has to be readable at a glance"
+    assert "32k output" in text
+    assert "460s" in text
+
+
+def test_a_harness_that_reports_no_cost_gets_no_cost_line(act_dir: Path) -> None:
+    """An OpenCode review, a run under the test seam and every failed run land here. A `$0.00`
+    would claim the review was free, when what is true is that its cost was never reported."""
+    text = report.store(Review(verdict="APPROVED"), a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
+
+    assert "- cost:" not in text
+
+
+def test_a_partially_reported_cost_prints_only_what_was_reported(act_dir: Path) -> None:
+    review = Review(verdict="APPROVED", usage=harness.Usage(turns=12))
+    text = report.store(review, a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
+
+    assert "- cost: 12 turns\n" in text
+    assert "$" not in text.split("- cost:")[1].split("\n")[0]
+
+
+def test_both_invocations_of_a_confirmed_round_report_their_own_cost(act_dir: Path) -> None:
+    """Under `cold_confirm` a round is two model calls, and what the confirmation costs is the
+    whole argument about whether to run it -- so it cannot be folded into one figure."""
+    continued = Review(verdict="APPROVED", usage=harness.Usage(cost_usd=5.5, turns=50))
+    cold = Review(verdict="CHANGES_REQUIRED", usage=harness.Usage(cost_usd=3.25, turns=20), confirmed=continued)
+    text = report.store(cold, a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
+
+    assert "- cost: $5.50 — 50 turns\n" in text
+    assert "- cost: $3.25 — 20 turns\n" in text

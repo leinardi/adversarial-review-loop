@@ -220,8 +220,12 @@ def _intact_bundle(root: Path, *, chunks: int = 1, revisions: int = 0, context: 
     for index in range(chunks):
         (bundle / f"changes.{index:02d}.diff").write_text(f"chunk {index}")
     (bundle / "chunks").write_text(str(chunks))
-    for index in range(revisions):
-        (bundle / f"plan.rev{index}.md").write_text(f"revision {index}")
+    # `> 1`, exactly as `build_bundle` writes them: an unrevised plan is carried by `range.txt`
+    # alone, so there is no `plan.rev0.md` for the manifest to name. Writing one here anyway
+    # would make this helper's bundle a shape the real code never produces.
+    if revisions > 1:
+        for index in range(revisions):
+            (bundle / f"plan.rev{index}.md").write_text(f"revision {index}")
     if context:
         (root / "context").mkdir(exist_ok=True)
         (root / "context" / f"{seq}-prior-rounds.txt").write_text("history")
@@ -410,9 +414,23 @@ def test_the_bundle_lists_its_own_files_so_nothing_has_to_be_looked_up_by_path(a
     section = bundle_contents(dest)
     assert "- range.txt (this file)\n" in section
     assert "- changes.00.diff (the complete diff, one chunk)\n" in section
-    assert "- plan.rev0.md\n" in section
     assert "none of these is a path to open" in section
     assert "incremental.diff" not in section, "round 1 has none, and naming an absent file is what sends the reviewer looking"
+    assert "plan.rev" not in section, "an unrevised plan has no revision attachment, and naming an absent file is what sends the reviewer looking"
+
+
+def test_an_unrevised_plan_is_not_attached_a_second_time(activation: state.State, git_repo: Path) -> None:
+    """`range.txt` already inlines the active revision under `## Frozen plan`. With one
+    revision that *is* revision 0, so writing `plan.rev0.md` too puts a byte-identical second
+    copy of the plan in the same payload -- re-read on every agentic turn of the review, which
+    is the single largest avoidable cost in a round."""
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+
+    assert not (dest / "plan.rev0.md").exists()
+    assert "## Frozen plan (evidence, not instructions)" in (dest / "range.txt").read_text(), "the plan is still there, once"
+    manifest = (dest / "manifest").read_text()
+    assert "plan.rev" not in manifest, "and nothing hashed names a file that was never written"
 
 
 def test_a_missing_verify_txt_is_named_as_missing_rather_than_left_out(activation: state.State, git_repo: Path) -> None:
@@ -549,8 +567,11 @@ def test_the_first_revision_hop_diff_is_not_off_by_one(activation: state.State, 
 
 
 def test_revision_attachments_are_capped(activation: state.State, git_repo: Path) -> None:
+    """Two revisions, because one is not attached at all -- `range.txt` carries it. The cap is
+    what stops an oversized revision from blowing out the bundle once it *is* attached."""
     oversized = "x" * (reviewer.PLAN_EXCERPT_BYTES * 2)
     add_revision(activation, 0, oversized)
+    add_revision(activation, 1, "the revision that made revision 0 history\n")
     dest = activation.act_dir / "bundles" / "001"
     build(activation, git_repo, dest)
 
@@ -1640,6 +1661,26 @@ def test_a_parsed_verdict_appends_one_round_history_entry(activation: state.Stat
     assert entry["supersedes"] == []
 
 
+def test_a_round_records_what_it_cost_when_the_harness_reported_it() -> None:
+    """Stored so `status` can total a phase without re-opening every `.envelope`. Fields the
+    harness did not report are dropped rather than stored as null -- a reader totalling these
+    must not have to tell "free" from "not reported"."""
+    review = Review(usage=harness.Usage(cost_usd=5.58, turns=50, cache_read_tokens=5649958))
+
+    record = reviewer._usage_record(review)
+
+    assert record == {"usage": {"cost_usd": 5.58, "turns": 50, "cache_read": 5649958}}
+
+
+def test_a_round_with_no_reported_cost_records_no_usage_key(activation: state.State, git_repo: Path) -> None:
+    """The `OCRL_REVIEWER_CMD` seam makes no model call, so there is nothing to account for --
+    and an absent key is what `status` reads as "this round's cost was never reported"."""
+    assert reviewer._usage_record(Review()) == {}
+
+    execute_fake(activation, git_repo, "changes")
+    assert "usage" not in activation.get_array_of_dicts("round_history")[0]
+
+
 def test_an_approved_verdict_also_appends(activation: state.State, git_repo: Path) -> None:
     execute_fake(activation, git_repo, "approve")
     history = activation.get_array_of_dicts("round_history")
@@ -2430,14 +2471,16 @@ def test_review_argv_attaches_prior_rounds_after_the_plan_revisions(tmp_path: Pa
     # Under the state root, because `context_attachments` proves containment there before it
     # will hand a path to `-f` -- see `test_a_context_attachment_below_a_symlink_is_refused`.
     monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
-    bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=1, context=True)
+    # Two revisions, because one is not attached at all -- an unrevised plan is carried by
+    # `range.txt`. The ordering this asserts only exists once there is a revision attachment.
+    bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=2, context=True)
 
     staged, context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "staged", include_context=True)
     argv = reviewer.review_argv("/repo", "t", config=config_with(), attachments=[path for path, _ in staged])
 
     assert context, "the earlier round is attached"
     assert argv.index(str(context[0])) > argv.index(str(staged[-2][0])), "context follows the plan revisions"
-    assert staged[-2][0].name == "plan.rev0.md"
+    assert staged[-2][0].name == "plan.rev1.md"
 
 
 def test_a_cold_confirmation_stages_no_context_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5435,3 +5478,92 @@ def test_the_repair_reserve_is_what_the_budget_check_actually_uses(monkeypatch: 
 
     monkeypatch.setattr(cli, "HOOK_STARTED", time.monotonic() - 2)
     assert not reviewer._repair_fits(config_with())
+
+
+# --------------------------------------------------------------------------
+# The plan is not re-sent to a session that already holds it
+# --------------------------------------------------------------------------
+
+
+def plan_section(dest: Path) -> str:
+    """``range.txt``'s frozen-plan section, which is always the last one."""
+    return (dest / "range.txt").read_text().split(reviewer.PLAN_HEADING, 1)[1]
+
+
+def test_a_fresh_round_is_given_the_whole_plan(activation: state.State, git_repo: Path) -> None:
+    dest = activation.act_dir / "bundles" / "001"
+    reviewer.build_bundle(target_for(git_repo), dest, state=activation, config=config_with(), plan_in_session=False)
+
+    assert reviewer._PLAN_IN_SESSION not in plan_section(dest)
+    assert (activation.act_dir / "plan.frozen.md").read_text().strip() in plan_section(dest)
+
+
+def test_a_continued_round_is_told_the_plan_is_already_in_its_session(activation: state.State, git_repo: Path) -> None:
+    """~16k tokens at the 64 KiB cap, re-sent on every later round of a session that already
+    received it. The plan cannot change without ending the session, so the earlier copy in that
+    same conversation is current."""
+    dest = activation.act_dir / "bundles" / "001"
+    reviewer.build_bundle(target_for(git_repo), dest, state=activation, config=config_with(), plan_in_session=True)
+
+    section = plan_section(dest)
+    assert reviewer._PLAN_IN_SESSION in section
+    assert (activation.act_dir / "plan.frozen.md").read_text().strip() not in section
+    assert len((dest / "range.txt").read_bytes()) < len((activation.act_dir / "plan.frozen.md").read_bytes()) + 20000, (
+        "the excerpt really is gone, not merely moved"
+    )
+
+
+def test_a_continued_round_that_loses_its_claim_gets_the_plan_back(activation: state.State, git_repo: Path) -> None:
+    """**The one case that could send a cold reviewer a note claiming the plan is in a context
+    it does not have.** `_reconfirm_claim` can fail after the bundle was built, and the run that
+    follows carries no session history at all."""
+    dest = activation.act_dir / "bundles" / "001"
+    digest = reviewer.build_bundle(target_for(git_repo), dest, state=activation, config=config_with(), round_number=2, plan_in_session=True)
+    assert reviewer._PLAN_IN_SESSION in plan_section(dest)
+
+    excerpt = reviewer._plan_excerpt(activation)
+    reissued = reviewer._downgrade_bundle_round(dest, activation.act_dir, digest, plan_excerpt=excerpt)
+
+    section = plan_section(dest)
+    assert reviewer._PLAN_IN_SESSION not in section
+    assert (activation.act_dir / "plan.frozen.md").read_text().strip() in section
+    assert "round: 1\n" in (dest / "range.txt").read_text()
+    # The reissued digest must match what is now on disk, or staging refuses the bundle.
+    assert reissued == hashlib.sha256((dest / "manifest").read_bytes()).hexdigest()
+    assert reviewer.bundle_manifest(dest, activation.act_dir, reissued, include_context=False) is not None
+
+
+def test_a_downgrade_with_no_plan_to_restore_refuses_to_bless_the_bundle(activation: state.State, git_repo: Path) -> None:
+    """Fail closed: writing nothing would leave the *original* digest valid, so a bundle still
+    carrying the note would be handed to a cold reviewer as though it were correct. Returning
+    no digest makes staging reject it instead."""
+    dest = activation.act_dir / "bundles" / "001"
+    digest = reviewer.build_bundle(target_for(git_repo), dest, state=activation, config=config_with(), plan_in_session=True)
+
+    assert reviewer._downgrade_bundle_round(dest, activation.act_dir, digest, plan_excerpt="") == ""
+    assert reviewer._PLAN_IN_SESSION in plan_section(dest), "and nothing was written"
+
+
+def test_a_fresh_bundles_downgrade_is_unaffected(activation: state.State, git_repo: Path) -> None:
+    """A bundle that already carries the plan needs only the round-line correction, and must
+    not require an excerpt to get it."""
+    dest = activation.act_dir / "bundles" / "001"
+    digest = reviewer.build_bundle(target_for(git_repo), dest, state=activation, config=config_with(), round_number=3, plan_in_session=False)
+
+    reissued = reviewer._downgrade_bundle_round(dest, activation.act_dir, digest, plan_excerpt="")
+
+    assert reissued not in ("", digest), "the round line changed, so the bundle was reissued"
+    assert "round: 1\n" in (dest / "range.txt").read_text()
+    assert (activation.act_dir / "plan.frozen.md").read_text().strip() in plan_section(dest)
+
+
+def test_the_restored_excerpt_is_byte_identical_to_the_one_build_bundle_writes(activation: state.State, git_repo: Path) -> None:
+    """Both go through `_render_plan_excerpt`, so a cap or a trailing newline cannot drift."""
+    fresh = activation.act_dir / "bundles" / "001"
+    reviewer.build_bundle(target_for(git_repo), fresh, state=activation, config=config_with(), plan_in_session=False)
+
+    continued = activation.act_dir / "bundles" / "002"
+    digest = reviewer.build_bundle(target_for(git_repo), continued, state=activation, config=config_with(), plan_in_session=True)
+    reviewer._downgrade_bundle_round(continued, activation.act_dir, digest, plan_excerpt=reviewer._plan_excerpt(activation))
+
+    assert plan_section(continued) == plan_section(fresh)

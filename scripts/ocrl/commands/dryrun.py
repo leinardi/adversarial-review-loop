@@ -154,6 +154,9 @@ def _compose(
     spec = harness.ReviewSpec(
         repo=repo,
         prompt_text=_prompt_text().rstrip("\n"),
+        # The real path passes this, so the dry run must too -- its whole contract is that
+        # what it prints is the invocation a review would actually make.
+        system_prompt=reviewer.efficiency_text(),
         title=DRY_RUN_TITLE,
         bundle_dir=bundle_dir,
         act_dir=act_dir,

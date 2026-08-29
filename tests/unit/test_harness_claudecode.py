@@ -60,13 +60,16 @@ def result_events(**overrides: object) -> bytes:
     return json.dumps([{"type": "system", "subtype": "init"}, event]).encode()
 
 
-def spec(tmp_path: Path, *, cold: bool = False, session_id: str = "", new_session_id: str = "", **overrides: object) -> harness.ReviewSpec:
+def spec(
+    tmp_path: Path, *, cold: bool = False, session_id: str = "", new_session_id: str = "", system_prompt: str = "", **overrides: object
+) -> harness.ReviewSpec:
     attachments = overrides.pop("attachments", None)
     if attachments is None:
         attachments = (attach(tmp_path / "bundles" / "001" / "range.txt", _RANGE),)
     return harness.ReviewSpec(
         repo=str(write_dir(tmp_path / "repo")),
         prompt_text="review this",
+        system_prompt=system_prompt,
         title="review-loop phase 1",
         bundle_dir=tmp_path / "bundles" / "001",
         act_dir=tmp_path,
@@ -561,3 +564,154 @@ def test_a_harness_that_needs_no_reduction_leaves_no_envelope(tmp_path: Path, mo
 
     assert out.read_bytes() == _ANSWER.encode()
     assert not (tmp_path / "raw" / "001-phase.out.envelope").exists()
+
+
+# --------------------------------------------------------------------------
+# Usage
+# --------------------------------------------------------------------------
+
+#: The accounting fields as the CLI actually emits them, taken from a real envelope
+#: (`raw/047-phase8.out.envelope`): 50 agentic turns, and a cache read two orders of magnitude
+#: above the cache creation because every turn re-read the whole context.
+_MEASURED = {
+    "num_turns": 50,
+    "total_cost_usd": 5.576844,
+    "duration_ms": 460123,
+    "usage": {
+        "input_tokens": 80,
+        "cache_creation_input_tokens": 189352,
+        "cache_read_input_tokens": 5649958,
+        "output_tokens": 31659,
+    },
+}
+
+
+def test_the_run_reports_what_it_cost() -> None:
+    """The figures the report prints come out of the same result event the answer does."""
+    usage = claudecode.usage(result_events(**_MEASURED))
+
+    assert usage is not None
+    assert usage.turns == 50
+    assert usage.cost_usd == pytest.approx(5.576844)
+    assert usage.cache_read_tokens == 5649958
+    assert usage.cache_creation_tokens == 189352
+    assert usage.output_tokens == 31659
+    assert usage.input_tokens == 80
+    assert usage.duration_ms == 460123
+
+
+def test_a_cli_that_reports_no_accounting_reports_none_of_it() -> None:
+    """Every field is optional. A run that says nothing about its cost yields a `Usage` whose
+    fields are all `None` -- never zeros, which would read as "this round was free"."""
+    usage = claudecode.usage(result_events())
+
+    assert usage is not None
+    assert usage.turns is None
+    assert usage.cost_usd is None
+    assert usage.cache_read_tokens is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"num_turns": "fifty"},
+        {"num_turns": True},
+        {"total_cost_usd": "5.58"},
+        {"usage": "not an object"},
+        {"usage": {"cache_read_input_tokens": None}},
+        {"usage": {"output_tokens": 1.5}},
+    ],
+)
+def test_a_field_that_is_not_a_number_is_reported_as_unknown(overrides: dict[str, object]) -> None:
+    """`state.json` and the CLI's own output are both untrusted for this. A wrong type is
+    displayed as unknown; it never coerces, and it never raises out of a report."""
+    usage = claudecode.usage(result_events(**overrides))
+
+    assert usage is not None
+    assert usage.turns in (None, 50)
+    assert not isinstance(usage.turns, bool)
+    assert usage.cost_usd is None or isinstance(usage.cost_usd, float)
+    assert usage.cache_read_tokens is None or isinstance(usage.cache_read_tokens, int)
+    assert usage.output_tokens is None or isinstance(usage.output_tokens, int)
+
+
+@pytest.mark.parametrize("raw", [b"", b"not json", b"[]", b'{"type": "system"}', json.dumps([{"type": "error"}]).encode()])
+def test_output_with_no_readable_result_event_reports_no_cost_rather_than_raising(raw: bytes) -> None:
+    """Asymmetric with `transcript` on purpose: that decides whether a verdict may be acted on
+    and fails closed, this decides what a report prints. Raising here would destroy the record
+    of a review that had already finished."""
+    assert claudecode.usage(raw) is None
+
+
+def test_a_run_whose_transcript_would_be_refused_still_reports_no_cost() -> None:
+    """A denied tool call makes `transcript` raise. `usage` is never the thing that raises."""
+    raw = result_events(permission_denials=[{"tool_name": "Read"}])
+    with pytest.raises(harness.TranscriptError):
+        claudecode.transcript(raw)
+    assert claudecode.usage(raw) is not None
+
+
+def test_reducing_the_transcript_hands_back_what_the_run_cost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read where the wrapper still exists -- the very next thing `_reduce_transcript` does is
+    move that wrapper out of the way."""
+    monkeypatch.setattr(reviewer, "state_root", lambda: tmp_path)
+    out = write(tmp_path / "raw" / "001-phase.out", result_events(**_MEASURED))
+
+    usage = reviewer._reduce_transcript(claudecode.HARNESS, out)
+
+    assert usage is not None and usage.turns == 50
+    assert out.read_bytes() == _ANSWER.encode(), "and the reduction still happened"
+
+
+# --------------------------------------------------------------------------
+# The working guidance
+# --------------------------------------------------------------------------
+
+_GUIDANCE = "batch every independent tool call"
+
+
+def test_the_working_guidance_is_appended_to_the_system_prompt(tmp_path: Path) -> None:
+    """The whole point of the field. Seven real rounds produced zero batched tool calls with
+    the same words inside a ~100 KB user message; a system prompt is where an instruction
+    about *how to work* is actually followed."""
+    argv = claudecode.HARNESS.review_command(spec(tmp_path, system_prompt=_GUIDANCE)).argv
+
+    assert flag_values(argv, "--append-system-prompt") == [_GUIDANCE]
+
+
+def test_the_guidance_appends_rather_than_replaces_the_system_prompt(tmp_path: Path) -> None:
+    """`--system-prompt` would drop the CLI's own tool-use instructions, which is the opposite
+    of what this text is for."""
+    argv = claudecode.HARNESS.review_command(spec(tmp_path, system_prompt=_GUIDANCE)).argv
+
+    assert "--system-prompt" not in argv
+
+
+def test_a_clarify_gets_the_same_guidance(tmp_path: Path) -> None:
+    """A clarify is an agentic run over the same repository."""
+    clarify = harness.ClarifySpec(
+        repo="/repo",
+        prompt_text="question",
+        system_prompt=_GUIDANCE,
+        title="t",
+        bundle_dir=write_dir(tmp_path / "bundles" / "001"),
+        act_dir=tmp_path,
+        config=config_with(),
+        question_file=attach(tmp_path / "q.txt", b"why?\n"),
+    )
+
+    assert flag_values(claudecode.HARNESS.clarify_command(clarify).argv, "--append-system-prompt") == [_GUIDANCE]
+
+
+def test_no_guidance_passes_no_flag(tmp_path: Path) -> None:
+    """An empty value is a flag the CLI still has to interpret, with nothing to say."""
+    assert "--append-system-prompt" not in claudecode.HARNESS.review_command(spec(tmp_path)).argv
+
+
+def test_the_guidance_is_not_also_inlined_in_the_payload(tmp_path: Path) -> None:
+    """Moved, not duplicated: the same text in both places would pay for it twice, in the one
+    place -- the prompt payload -- where it was measured not working."""
+    built = claudecode.HARNESS.review_command(spec(tmp_path, system_prompt=_GUIDANCE))
+
+    assert built.stdin is not None
+    assert _GUIDANCE.encode() not in built.stdin

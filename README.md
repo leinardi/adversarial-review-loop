@@ -221,6 +221,8 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 
 Environment variables are the upper-cased key with an `OCRL_` prefix (`OCRL_BLOCK_SEVERITY`, `OCRL_MODEL`, …); `OCRL_IGNORE_GLOBS` is comma-separated.
 
+A review is an agentic run, so its cost is roughly context size × turns — measured rounds, the levers that move them (`model`, `max_session_rounds`, `variant`, plan length), and where each round's own figure is reported are in [docs/configuration.md](docs/configuration.md#cost).
+
 Example `.opencode-review-loop.json`:
 
 ```json

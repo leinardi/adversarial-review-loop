@@ -160,6 +160,50 @@ def _findings_and_raw(review: Review, *, heading_level: str = "##") -> str:
     return "".join(out)
 
 
+def _tokens(count: int | None) -> str:
+    """A token count as ``1,234`` below a thousand and ``5,650k`` above it.
+
+    Thousands throughout rather than switching to millions: the interesting comparison in a
+    review is cache reads against cache creation, and those routinely sit two orders of
+    magnitude apart -- rendering one as ``5.6M`` beside the other as ``189k`` makes the ratio
+    that explains the bill something the reader has to convert before they can see it.
+    """
+    if count is None:
+        return "?"
+    # Rounded, not floored: 5,649,958 truncates to "5,649k", which reads as a precision the
+    # figure does not have and is the wrong side of the real number. Nothing computes on this.
+    return f"{count:,}" if count < 1000 else f"{round(count / 1000):,}k"
+
+
+def _usage_line(review: Review) -> str:
+    """``- cost: …`` for an invocation whose harness reported one, else "".
+
+    Every field is printed only if the harness gave it, so a CLI that reports turns but no
+    dollar figure still gets a useful line and no invented zero. Omitted entirely when there is
+    nothing at all to say -- an OpenCode review, a run under the test seam, a failed run -- so
+    a report never carries an empty accounting line.
+
+    The cache-read figure is deliberately shown beside the turn count: it is *context x turns*,
+    and seeing them together is what makes an expensive round diagnosable rather than merely
+    expensive.
+    """
+    usage = review.usage
+    if usage is None:
+        return ""
+    parts: list[str] = []
+    if usage.cost_usd is not None:
+        parts.append(f"${usage.cost_usd:.2f}")
+    if usage.turns is not None:
+        parts.append(f"{usage.turns} turns")
+    if usage.cache_creation_tokens is not None or usage.cache_read_tokens is not None:
+        parts.append(f"{_tokens(usage.cache_creation_tokens)} new + {_tokens(usage.cache_read_tokens)} cached input")
+    if usage.output_tokens is not None:
+        parts.append(f"{_tokens(usage.output_tokens)} output")
+    if usage.duration_ms is not None:
+        parts.append(f"{usage.duration_ms // 1000}s")
+    return f"- cost: {' — '.join(parts)}\n" if parts else ""
+
+
 def _invocation_section(review: Review, *, heading: str) -> str:
     """One invocation's own verdict, session, findings and transcript, under ``## heading``.
 
@@ -170,6 +214,9 @@ def _invocation_section(review: Review, *, heading: str) -> str:
     out = [f"\n## {heading}\n\n"]
     out.append(f"- verdict: **{review.verdict or 'UNKNOWN'}**\n")
     out.append(_session_line(review))
+    # Per invocation, not once at the top: under `cold_confirm` a round is two model calls,
+    # and what the confirmation costs is the whole argument about whether to run it.
+    out.append(_usage_line(review))
     if review.error:
         out.append(f"- gate note: {review.error}\n")
     out.append(_findings_and_raw(review, heading_level="###"))
@@ -210,6 +257,7 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
         out.append(f"- findings block: re-emitted by a repair call; the primary transcript is `{review.repaired}`\n")
     if review.confirmed is None:
         out.append(_session_line(review))
+        out.append(_usage_line(review))
     if review.error:
         out.append(f"- gate note: {review.error}\n")
 

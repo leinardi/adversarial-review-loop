@@ -532,3 +532,73 @@ def test_status_reports_an_unimplemented_harness_instead_of_crashing(git_repo: P
     assert f"model:               {harness.UNIMPLEMENTED_MODEL} \n" in proc.stdout
     assert "reviewer session:    unreadable (unknown harness 'not-a-harness'" in proc.stdout
     assert "ses_fb7592bccffeVl5WXE354RQsD9" not in proc.stdout
+
+
+# --------------------------------------------------------------------------
+# status: reviewer cost
+# --------------------------------------------------------------------------
+
+
+def write_round_history(env: dict[str, str], repo: Path, *entries: dict[str, object]) -> None:
+    """Put ``round_history`` entries in place, the shape ``reviewer._record_round`` writes."""
+    path = state_dir(env, repo, "s1") / "state.json"
+    document = json.loads(path.read_text())
+    generation = document.get("activation_generation", 1)
+    document["round_history"] = [{"label": "phase1", "generation": generation, **entry} for entry in entries]
+    path.write_text(json.dumps(document))
+
+
+def test_status_totals_what_the_reviews_have_cost(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The per-round figure is in each report; what a human actually asks is what the whole
+    activation has spent, and totalling the rounds is exact whenever the rounds are."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing")
+    write_round_history(
+        env,
+        git_repo,
+        {"seq": 1, "usage": {"cost_usd": 5.58, "turns": 50}},
+        {"seq": 2, "usage": {"cost_usd": 5.28, "turns": 28}},
+    )
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "reviewer cost:       $10.86 over 2 round(s), $10.86 this phase (2)\n" in proc.stdout
+
+
+def test_status_omits_the_cost_when_no_round_reported_one(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """An OpenCode activation, or one armed before this was recorded. `$0.00` would claim the
+    reviews were free, when what is true is that their cost was never reported."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing")
+    write_round_history(env, git_repo, {"seq": 1})
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "reviewer cost:" not in proc.stdout
+
+
+def test_status_skips_a_malformed_cost_rather_than_totalling_it(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """`state.json` is not a trust boundary and `status` changes nothing, so an unreadable
+    entry leaves the total -- and the count, which says what the figure covers. `True` is the
+    one worth pinning: `bool` is an `int` subclass, so it would otherwise total as one dollar."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "first thing")
+    write_round_history(
+        env,
+        git_repo,
+        {"seq": 1, "usage": {"cost_usd": 2.50}},
+        {"seq": 2, "usage": {"cost_usd": True}},
+        {"seq": 3, "usage": {"cost_usd": "5.00"}},
+        {"seq": 4, "usage": "not an object"},
+        {"seq": 5, "usage": {"cost_usd": float("inf")}},
+    )
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "reviewer cost:       $2.50 over 1 round(s)" in proc.stdout

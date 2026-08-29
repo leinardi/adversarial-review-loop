@@ -44,7 +44,7 @@ from typing import Any, Final
 
 from ocrl.atomic import ensure_private_dir, read_verified_file
 from ocrl.config import Config
-from ocrl.harness import Attachment, Captured, CaptureSpec, ClarifySpec, Command, PayloadError, ReviewSpec, TranscriptError, model
+from ocrl.harness import Attachment, Captured, CaptureSpec, ClarifySpec, Command, PayloadError, ReviewSpec, TranscriptError, Usage, model
 from ocrl.util import log
 
 __all__ = [
@@ -58,6 +58,7 @@ __all__ = [
     "payload",
     "session_cwd",
     "transcript",
+    "usage",
 ]
 
 #: ``model``'s default under this harness. An alias rather than a pinned id, so the harness
@@ -232,14 +233,28 @@ def _session_argv(spec: ReviewSpec) -> list[str]:
     return []
 
 
-def _base_argv(config: Config) -> list[str]:
+def _base_argv(config: Config, system_prompt: str = "") -> list[str]:
     """``claude -p`` and the output contract, shared by a review and a clarify.
 
     ``--output-format json`` is what makes the run's *own* report readable: whether a tool was
     denied, and whether the CLI itself failed, are facts the plain text output does not carry.
     See :func:`transcript` for what is done with them.
+
+    ``--append-system-prompt`` carries :attr:`ocrl.harness.ReviewSpec.system_prompt`, and
+    *append* rather than ``--system-prompt`` is the whole point: replacing the system prompt
+    would take the CLI's own tool-use instructions with it, which is the opposite of what this
+    text is for. It is passed in the argv rather than inlined in the stdin payload because
+    that is the difference it exists to make -- an instruction about how to spend turns is
+    followed from the system prompt and was measured being ignored from inside a 100 KB user
+    message (0 batched tool calls across seven real rounds).
+
+    Empty is skipped rather than passed as ``""``: an empty flag value is a flag the CLI still
+    has to interpret, and there is nothing to say.
     """
-    return ["claude", "-p", "--output-format", "json", *_model_argv(config), *isolation_argv(config)]
+    argv = ["claude", "-p", "--output-format", "json", *_model_argv(config), *isolation_argv(config)]
+    if system_prompt:
+        argv += ["--append-system-prompt", system_prompt]
+    return argv
 
 
 # --------------------------------------------------------------------------
@@ -397,6 +412,54 @@ def transcript(raw: bytes) -> bytes:
     return answer.encode("utf-8", "surrogateescape")
 
 
+def _number(value: object, kind: type[int] | type[float]) -> Any:
+    """``value`` when it is a real number of ``kind``, else ``None``.
+
+    ``bool`` is excluded explicitly: it is a subclass of ``int`` in Python, so a
+    ``"num_turns": true`` would otherwise be displayed as one turn. An ``int`` is accepted
+    where a ``float`` is wanted (a cost of exactly ``5`` is legal JSON); the reverse is not,
+    because a fractional token count is not a token count.
+    """
+    if isinstance(value, bool):
+        return None
+    if kind is float and isinstance(value, (int, float)):
+        return float(value)
+    if kind is int and isinstance(value, int):
+        return value
+    return None
+
+
+def usage(raw: bytes) -> Usage | None:
+    """What the run cost, out of ``--output-format json``'s result event.
+
+    Reads the same event :func:`transcript` does, and reads it defensively: every field is
+    optional, every non-numeric value becomes ``None``, and an output this cannot parse at all
+    -- including one :func:`transcript` would refuse -- is ``None`` rather than an exception.
+    That asymmetry is deliberate. :func:`transcript` decides whether a verdict may be acted on
+    and so must fail closed; this decides what a report *prints*, and a report that raises
+    while describing a review that already finished would destroy the record it exists to keep.
+
+    ``usage.cache_read_input_tokens`` is the figure that explains a round's bill: measured on
+    two real rounds it was 5.6M and 6.3M against ~190k and ~150k of cache creation, because
+    every one of the 50 and 28 agentic turns re-read the whole context.
+    """
+    try:
+        event = _result_event(raw)
+    except TranscriptError:
+        return None
+    tokens = event.get("usage")
+    tokens = tokens if isinstance(tokens, dict) else {}
+    return Usage(
+        turns=_number(event.get("num_turns"), int),
+        input_tokens=_number(tokens.get("input_tokens"), int),
+        cache_creation_tokens=_number(tokens.get("cache_creation_input_tokens"), int),
+        cache_read_tokens=_number(tokens.get("cache_read_input_tokens"), int),
+        output_tokens=_number(tokens.get("output_tokens"), int),
+        cost_usd=_number(event.get("total_cost_usd"), float),
+        duration_ms=_number(event.get("duration_ms"), int),
+    )
+
+
 # --------------------------------------------------------------------------
 # Session continuity
 # --------------------------------------------------------------------------
@@ -497,7 +560,7 @@ class ClaudeCodeHarness:
         """``claude -p …`` with the whole prompt, attachments included, on stdin."""
         cwd = session_cwd(spec.act_dir)
         _ensure_cwd(cwd, spec.act_dir)
-        argv = [*_base_argv(spec.config), *_session_argv(spec)]
+        argv = [*_base_argv(spec.config, spec.system_prompt), *_session_argv(spec)]
         for directory in _read_directories(spec.repo, spec.bundle_dir, cold=spec.cold):
             argv += ["--add-dir", directory]
         return Command(argv=argv, stdin=payload(spec.prompt_text, spec.attachments, act_dir=spec.act_dir), cwd=str(cwd))
@@ -510,7 +573,7 @@ class ClaudeCodeHarness:
         """
         cwd = session_cwd(spec.act_dir)
         _ensure_cwd(cwd, spec.act_dir)
-        argv = list(_base_argv(spec.config))
+        argv = list(_base_argv(spec.config, spec.system_prompt))
         for directory in _read_directories(spec.repo, spec.bundle_dir, cold=True):
             argv += ["--add-dir", directory]
         attachments = (*spec.attachments, spec.question_file)
@@ -533,6 +596,10 @@ class ClaudeCodeHarness:
     def transcript(self, raw: bytes) -> bytes:
         """See :func:`transcript`."""
         return transcript(raw)
+
+    def usage(self, raw: bytes) -> Usage | None:
+        """See :func:`usage`."""
+        return usage(raw)
 
 
 def _ensure_cwd(cwd: Path, act_dir: Path) -> None:
