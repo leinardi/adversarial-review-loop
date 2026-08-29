@@ -200,6 +200,33 @@ def test_uncommitted_work_is_reviewed_before_the_turn_may_end(git_repo: Path, tm
     assert "Returns success on a failed lookup" in reason
 
 
+def test_a_blocking_sweep_offers_clarify_with_the_budget_left(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The sweep reviews the phase scope, so its round is one ``clarify`` can target."""
+    env = armed_env(clean_env, OCRL_FAKE_MODE="changes", OCRL_MAX_CLARIFICATIONS="2")
+    active(git_repo, tmp_path, env)
+    (git_repo / "unreviewed.txt").write_text("never gated\n")
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "Clarifications left: 2 of 2." in reason
+    lines = reason.splitlines()
+    hint = next(i for i, line in enumerate(lines) if line.startswith("If a finding is ambiguous"))
+    assert lines[hint - 1] == ""
+    assert lines[0].startswith("opencode-review-loop: the turn is ending with uncommitted work")
+    assert reason.index("Clarifications left") < reason.index("Blocking findings")
+
+
+def test_a_blocking_sweep_drops_the_clarify_offer_when_none_are_left(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env, OCRL_FAKE_MODE="changes", OCRL_MAX_CLARIFICATIONS="0")
+    active(git_repo, tmp_path, env)
+    (git_repo / "unreviewed.txt").write_text("never gated\n")
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "uncommitted work that OpenCode requires changes to" in reason
+    assert "clarify" not in reason
+
+
 def test_a_failed_sweep_review_is_never_an_approval(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed_env(clean_env, OCRL_FAKE_MODE="nonzero")
     active(git_repo, tmp_path, env)
@@ -1102,6 +1129,10 @@ def test_a_failed_finish_with_final_review_disabled_still_blocks_at_the_next_tur
 
     assert "the final cumulative review found problems" in reason
     assert read_state(env, git_repo, SESSION)["status"] != "COMPLETE"
+    # `clarify` binds to the latest `round_history` entry of the *current phase's* label; a
+    # final cumulative review writes none, so offering it here would send Claude at a round
+    # that is not the one it was just shown.
+    assert "clarify" not in reason
 
 
 def test_stop_does_not_complete_unreviewed_when_finish_lands_during_the_sweep(

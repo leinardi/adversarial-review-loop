@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ocrl import commands
 from ocrl.atomic import ensure_private_dir, write_private_atomic
 from ocrl.config import Config
 from ocrl.paths import state_root
@@ -25,10 +26,12 @@ from ocrl.util import truncate
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle broken for the type checker only
     from ocrl.reviewer import Review, Target
+    from ocrl.state import State
 
 __all__ = [
     "AcceptRecord",
     "accept_report_path",
+    "clarify_hint",
     "deferred_text",
     "list_reports",
     "promote_accept",
@@ -39,6 +42,7 @@ __all__ = [
     "report_path",
     "stage_accept",
     "store",
+    "with_clarify_hint",
 ]
 
 _FOOTER = "Verify and address the findings above, then commit again. The commit is gated until the review passes.\n"
@@ -48,6 +52,42 @@ _DEFERRED_INTRO = (
     "previous round, so below late_block_severity they did not block this {what}. Fix them now if cheap; they are "
     "recorded, and if this phase is reviewed again they will block:"
 )
+
+
+_CLARIFY_HINT = (
+    "If a finding is ambiguous, or contradicts an earlier round, ask one question with "
+    '`{entrypoint} clarify --question "..."` before guessing at a fix -- a wrong guess burns another whole round. '
+    "Clarifications left: {left} of {limit}."
+)
+
+
+def clarify_hint(*, state: State, config: Config) -> str:
+    """The line every blocking phase verdict carries, or "" when the allowance is spent.
+
+    Claude used ``clarify`` zero times across two full activations, so the hint gets its own
+    line rather than trailing a headline sentence, and names what is left: an allowance whose
+    size is invisible reads like something to save for later, and never gets spent at all.
+
+    Empty when nothing is left, so a caller can append it unconditionally -- pointing at a
+    command that can only refuse would cost a turn to discover. Only phase-scoped verdicts
+    should show it: ``clarify`` targets the current phase's latest ``round_history`` entry, and
+    a final cumulative review has none.
+    """
+    limit = config.as_int("max_clarifications")
+    left = max(limit - state.get_int("clarifications"), 0)
+    if left == 0:
+        return ""
+    return _CLARIFY_HINT.format(entrypoint=commands.entrypoint(), left=left, limit=limit)
+
+
+def with_clarify_hint(headline: str, *, state: State, config: Config) -> str:
+    """``headline`` with :func:`clarify_hint` under it, as a paragraph of its own.
+
+    Unchanged when the allowance is spent, so both blocking phase paths -- the commit gate and
+    the Stop sweep -- can call it unconditionally.
+    """
+    hint = clarify_hint(state=state, config=config)
+    return f"{headline}\n\n{hint}" if hint else headline
 
 
 def deferred_text(review: Review, *, what: str) -> str:

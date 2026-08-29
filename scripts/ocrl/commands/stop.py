@@ -680,7 +680,10 @@ def _sweep(gate: _Gate, *, snap: Snapshot, phase: int) -> str:
             _block_counted(gate, SWEEP_SUPERSEDED)
         return report.deferred_text(review, what="turn end")
     if review.verdict == "CHANGES_REQUIRED":
-        _block_counted(gate, report.reason(review, SWEEP_CHANGES, config=config).rstrip("\n"))
+        # The sweep reviews the *phase* scope, so `clarify` has a round to target here -- unlike
+        # `_final`, whose cumulative review leaves no `round_history` entry for this phase.
+        headline = report.with_clarify_hint(SWEEP_CHANGES, state=state, config=config)
+        _block_counted(gate, report.reason(review, headline, config=config).rstrip("\n"))
     if review.verdict == "NEEDS_HUMAN":
         _escalate(gate, review.error)
         gate.hook.stop_ok(SWEEP_ESCALATED.format(error=review.error))

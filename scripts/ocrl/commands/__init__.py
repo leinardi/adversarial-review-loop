@@ -27,6 +27,7 @@ __all__ = [
     "Activation",
     "Refused",
     "current_repo",
+    "entrypoint",
     "latest_session",
     "plugin_root",
     "resolve_local_activation",
@@ -69,6 +70,15 @@ def plugin_root() -> str:
     only, so this variable still reaches the gate.
     """
     return os.environ.get("CLAUDE_PLUGIN_ROOT") or str(ocrl.PLUGIN_ROOT)
+
+
+def entrypoint() -> str:
+    """The exact path ``arm`` told the model to run, and the only one ``set-phases`` accepts.
+
+    Shared, because every message that tells Claude to run a subcommand -- ``set-phases``,
+    ``clarify`` -- must name the same path the gate itself matches on.
+    """
+    return f"{plugin_root()}/scripts/ocrl.sh"
 
 
 def current_repo() -> str:

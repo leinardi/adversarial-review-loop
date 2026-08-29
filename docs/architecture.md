@@ -119,6 +119,15 @@ and `clarify_seq` (carried across a `resume` like `report_seq`, since it names f
 the copied-forward `context/`). A clarify leaves every `hooks.Activation` field and
 `round_history` byte-identical.
 
+Discovery is the hard part: across two full activations Claude reached for it zero times.
+So every **phase-scoped** blocking verdict — the commit gate's `CHANGES_REQUIRED` and the
+Stop sweep's — carries `report.with_clarify_hint`, a paragraph of its own naming the exact
+command and what is left of the allowance ("Clarifications left: N of M"), and both
+`/opencode-review-loop:implement` and `:resume` name it in "Rules while the mode is active".
+The hint is omitted once nothing is left, and never appears on the **final** cumulative
+review: `clarify` binds to the latest `round_history` entry of the current phase's label,
+and a final review writes none.
+
 ## One commit, start to finish
 
 ```text

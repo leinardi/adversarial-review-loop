@@ -357,6 +357,52 @@ def test_the_report_listing_matches_the_shell(report_env: dict[str, str], act_di
 
 
 # --------------------------------------------------------------------------
+# The clarify hint
+# --------------------------------------------------------------------------
+
+
+def a_state(*, clarifications: int) -> state.State:
+    """The activation the ``act_dir`` fixture created, with the clarify counter set."""
+    st = state.State("/wt", SESSION)
+    st.load()
+    st.update(clarifications=clarifications)
+    return st
+
+
+def test_the_clarify_hint_names_the_remaining_budget(act_dir: Path) -> None:
+    hint = report.clarify_hint(state=a_state(clarifications=1), config=config_with(max_clarifications=3))
+    assert "Clarifications left: 2 of 3." in hint
+    assert 'clarify --question "..."' in hint
+    assert hint.endswith("3.")
+
+
+def test_the_clarify_hint_is_a_single_line(act_dir: Path) -> None:
+    """It is appended as its own line; a hint with newlines of its own would break that up."""
+    assert "\n" not in report.clarify_hint(state=a_state(clarifications=0), config=config_with())
+
+
+def test_the_clarify_hint_is_empty_once_the_allowance_is_spent(act_dir: Path) -> None:
+    config = config_with(max_clarifications=2)
+    assert report.clarify_hint(state=a_state(clarifications=2), config=config) == ""
+    # A counter past the limit (a lowered `max_clarifications` on a resumed activation) must
+    # not wrap round to a positive "left".
+    assert report.clarify_hint(state=a_state(clarifications=5), config=config) == ""
+    assert report.clarify_hint(state=a_state(clarifications=0), config=config_with(max_clarifications=0)) == ""
+
+
+def test_with_clarify_hint_leaves_a_headline_alone_when_the_allowance_is_spent(act_dir: Path) -> None:
+    config = config_with(max_clarifications=1)
+    assert report.with_clarify_hint("headline", state=a_state(clarifications=1), config=config) == "headline"
+    assert report.with_clarify_hint("headline", state=a_state(clarifications=0), config=config).startswith("headline\n\nIf a finding")
+
+
+def test_the_clarify_hint_names_the_entrypoint_the_gate_accepts(act_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/plugins/ocrl")
+    hint = report.clarify_hint(state=a_state(clarifications=0), config=config_with())
+    assert '`/plugins/ocrl/scripts/ocrl.sh clarify --question "..."`' in hint
+
+
+# --------------------------------------------------------------------------
 # Deferred findings
 # --------------------------------------------------------------------------
 

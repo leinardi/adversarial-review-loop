@@ -344,11 +344,6 @@ def _guard_state_root(hook: Hook, payload: HookInput) -> None:
         hooks.deny(hook, STATE_ROOT_DENIED.format(path=payload.path, root=root))
 
 
-def _entrypoint() -> str:
-    """The exact path ``arm`` told the model to run, and the only one ``set-phases`` accepts."""
-    return f"{commands.plugin_root()}/scripts/ocrl.sh"
-
-
 def run(argv: list[str]) -> int:
     """Entrypoint for the ``PreToolUse`` hook."""
     del argv
@@ -491,7 +486,7 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
         # The whole command must *be* the exception, not merely contain it, and it must be
         # this gate's own script by exact path -- a basename test trusts any executable named
         # `ocrl` that the repository under review happens to ship. See `cmdshape.is_set_phases`.
-        if tool == "Bash" and cmdshape.is_set_phases(command, _entrypoint()):
+        if tool == "Bash" and cmdshape.is_set_phases(command, commands.entrypoint()):
             hook.allow(SET_PHASES_ALLOWED)
         hooks.deny(hook, PHASES_NOT_FROZEN.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file))
 
@@ -501,7 +496,7 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
         # the description it is meant to match exists. See AGENTS.md, "the replan fence".
         # Verified before the allow-check, same as the ARMED branch above.
         plan_file = _verified_plan_file(hook, state=state, config=config)
-        if tool == "Bash" and cmdshape.is_set_phases(command, _entrypoint()):
+        if tool == "Bash" and cmdshape.is_set_phases(command, commands.entrypoint()):
             hook.allow(SET_PHASES_ALLOWED_REPLAN)
         hooks.deny(hook, REPLAN_PENDING.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file))
 
@@ -722,10 +717,10 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
     if review.verdict == "CHANGES_REQUIRED":
         # No preamble: the report's own headline already says what this is, as it did in the
         # shell -- `ocrl_deny "$(ocrl_report_reason …)"`, with no `ocrl_deny_preamble`.
-        headline = (
-            f"opencode-review-loop: OpenCode requires changes before phase {phase} can be committed.\n"
-            "If a finding is ambiguous, or contradicts an earlier round, ask one question with "
-            f'`{_entrypoint()} clarify --question "..."` before guessing at a fix -- a wrong guess burns another whole round.'
+        # `with_clarify_hint` adds the clarify offer as its own paragraph, and nothing once the
+        # allowance is spent.
+        headline = report.with_clarify_hint(
+            f"opencode-review-loop: OpenCode requires changes before phase {phase} can be committed.", state=state, config=config
         )
         hook.deny(report.reason(review, headline, config=config).rstrip("\n"))
     if review.verdict == "NEEDS_HUMAN":

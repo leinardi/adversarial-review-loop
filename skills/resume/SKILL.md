@@ -67,4 +67,6 @@ Hooks identical to `/opencode-review-loop:implement` are registered for this ses
 
 Identical to `/opencode-review-loop:implement`: only `git commit`, or a chain of `git add` / `git status` / `git commit`, may create a commit; `--amend` and partial commits are denied; every phase leaves a clean worktree; you cannot end the mode yourself.
 
+When a blocking finding is ambiguous or contradicts an earlier round, ask `${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh clarify --question "…"` instead of guessing — one prose question against the review that just ran, no new round, and the denial names how many questions are left.
+
 Check state at any time with `/opencode-review-loop:status`, and print any stored review in full with `/opencode-review-loop:report [n]`.

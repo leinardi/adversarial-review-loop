@@ -502,6 +502,37 @@ def test_a_blocking_review_denies_and_returns_every_finding(git_repo: Path, tmp_
     assert not read_state(env, git_repo, SESSION)["pending_approved_tree"]
 
 
+def test_a_blocking_review_offers_clarify_with_the_budget_left(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env, OCRL_FAKE_MODE="changes", OCRL_MAX_CLARIFICATIONS="2")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "Clarifications left: 2 of 2." in reason
+    # Its own line, under the headline and above the findings -- not trailing the headline
+    # sentence, which is where it went unread for two whole activations.
+    lines = reason.splitlines()
+    hint = next(i for i, line in enumerate(lines) if line.startswith("If a finding is ambiguous"))
+    assert lines[hint - 1] == ""
+    assert lines[0].startswith("opencode-review-loop: OpenCode requires changes before phase 1")
+    assert reason.index("Clarifications left") < reason.index("Blocking findings")
+
+
+def test_a_blocking_review_drops_the_clarify_offer_when_none_are_left(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Pointing at a command that can only refuse would cost a round to find out."""
+    env = armed_env(clean_env, OCRL_FAKE_MODE="changes", OCRL_MAX_CLARIFICATIONS="0")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "requires changes before phase 1" in reason
+    assert "clarify" not in reason
+
+
 def test_a_reviewer_the_gate_contradicts_still_blocks(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """The reviewer's own verdict is advisory; an actionable critical finding blocks anyway."""
     env = armed_env(clean_env, OCRL_FAKE_MODE="approve-with-critical")
