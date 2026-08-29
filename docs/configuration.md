@@ -53,6 +53,7 @@ guessing.
 | `ttl_hours` | `24` | after this, gates block and ask for a re-arm — `resume` is usually the right fix, not a fresh `implement` |
 | `ignore_globs` | `[]` | paths whose sole change skips a review entirely |
 | `final_review` | `false` | run the final cumulative review at `Stop` |
+| `cold_confirm` | `false` | re-review an approving round cold — no session, no prior-round attachment — and act on that verdict instead |
 
 Environment variables are the upper-cased key with an `OCRL_` prefix — `OCRL_MODEL`,
 `OCRL_BLOCK_SEVERITY`, `OCRL_MAX_FAILURES`, and so on. Since an environment variable is

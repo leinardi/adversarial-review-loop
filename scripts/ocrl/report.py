@@ -93,11 +93,12 @@ def _invocation_section(review: Review, *, heading: str) -> str:
 def render_report(review: Review, target: Target, *, seq: str, config: Config) -> str:
     """The stored report's full text, raw reviewer output included verbatim.
 
-    When ``review.confirmed`` is set, ``review`` is the cold confirmation and
-    ``review.confirmed`` the approving round it exists to check -- a round that held
-    model-influenced context, meaning a continued session, a ``context/`` attachment carrying
-    an earlier round's findings, or both; see ``reviewer.execute``'s docstring for the
-    invariant this reflects. Both get their own verdict, findings, session id, round and raw
+    When ``review.confirmed`` is set -- only reachable under ``cold_confirm``, which is off by
+    default -- ``review`` is the cold confirmation and ``review.confirmed`` the approving round
+    it exists to check: a round that held model-influenced context, meaning a continued session,
+    a ``context/`` attachment carrying an earlier round's findings, or both; see
+    ``reviewer.execute``'s docstring for the rule this reflects and why it is opt-in.
+    Both get their own verdict, findings, session id, round and raw
     transcript, under headings that say which is which, because the cold verdict recorded at
     the top is the one the gate acted on and a reader has to be able to tell that apart from
     the round that triggered it.
@@ -122,9 +123,10 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
         out.append(
             "\nThis round was shown model-influenced context -- a continued session, an "
             "earlier round's own findings, or both -- and independently returned "
-            f"{continued.verdict or 'UNKNOWN'}. Such an approval is never acted on by itself: "
-            "one more, cold review of the same bundle decided, and that cold verdict -- the "
-            "one recorded at the top of this report -- is the one acted on.\n"
+            f"{continued.verdict or 'UNKNOWN'}. `cold_confirm` is on, so such an approval was "
+            "not acted on by itself: one more, cold review of the same bundle decided, and "
+            "that cold verdict -- the one recorded at the top of this report -- is the one "
+            "acted on.\n"
         )
         out.append(_invocation_section(continued, heading="Round with context (not the verdict acted on)"))
         out.append(_invocation_section(review, heading="Cold confirmation (the verdict acted on)"))

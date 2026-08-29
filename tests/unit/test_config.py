@@ -38,6 +38,7 @@ def test_defaults_stand_when_nothing_else_exists(layers: dict[str, str], tmp_pat
     assert cfg.as_int("ttl_hours") == 24
     assert cfg.as_bool("pure") is True
     assert cfg.as_bool("final_review") is False
+    assert cfg.as_bool("cold_confirm") is False
     assert cfg.as_list("ignore_globs") == []
 
 
@@ -151,6 +152,27 @@ def test_final_review_precedence_across_all_four_layers(layers: dict[str, str], 
 
     layers["OCRL_FINAL_REVIEW"] = "true"
     assert config.load(str(repo), layers).as_bool("final_review") is True, "environment must beat repo"
+
+
+def test_cold_confirm_env_override(layers: dict[str, str]) -> None:
+    """Off by default, and reachable for a single run without touching a config file."""
+    assert config.load("", layers).as_bool("cold_confirm") is False
+    layers["OCRL_COLD_CONFIRM"] = "true"
+    assert config.load("", layers).as_bool("cold_confirm") is True
+
+
+def test_cold_confirm_precedence_across_all_four_layers(layers: dict[str, str], tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    assert config.load(str(repo), layers).as_bool("cold_confirm") is False, "defaults must stand alone"
+
+    write_user_config(layers, {"cold_confirm": True})
+    assert config.load(str(repo), layers).as_bool("cold_confirm") is True, "user must beat defaults"
+
+    write_repo_config(repo, {"cold_confirm": False})
+    assert config.load(str(repo), layers).as_bool("cold_confirm") is False, "repo must beat user"
+
+    layers["OCRL_COLD_CONFIRM"] = "true"
+    assert config.load(str(repo), layers).as_bool("cold_confirm") is True, "environment must beat repo"
 
 
 def test_a_non_numeric_integer_override_is_skipped_not_zeroed(layers: dict[str, str]) -> None:

@@ -148,49 +148,98 @@ Within one review label (`phase3`, or `final`) consecutive reviews continue the 
 OpenCode session where one can be safely found and claimed, rather than starting cold every
 round — the `reviewer_session` pointer that makes this possible is itself a value read out of
 `state.json`, which the previous section already establishes is not a trust boundary. So the
-pointer is held to the same standard: it is never trusted to *authorize* anything. Concretely,
-**an approving verdict must come from an invocation whose entire content the gate created.**
-When a review that held any model-influenced context returns `APPROVED`, the gate does not act
-on it — it runs one more review of the same bundle cold (no `-s`, no `context/` attachments,
-evidence built from git, no memory of anything the earlier round said), and that cold review's
-verdict is the one that counts. The stricter of the two always wins.
+pointer is held to the same standard: it is never trusted to *authorize* anything. It cannot
+be: it selects which conversation a review continues, and nothing more. A review's verdict
+still has to come back through the same contract parse, and an actionable finding at or above
+`block_severity` still blocks whatever the reviewer concluded.
 
-**Two things count as model-influenced context, and gating on the session alone was a real
-hole.** A continued session (`-s`) is the obvious one. The other is a `context/` attachment:
-`NNN-prior-rounds.txt` carries earlier rounds' `FINDING` detail, which is unconstrained model
-prose, and it is attached to a *fresh* invocation just as readily as to a continued one —
-session continuity is best-effort and drops silently (a listing failure, a generation bump, a
-held claim), while the prior-rounds attachment does not. Gating the cold confirmation on `-s`
-alone therefore let exactly the rounds that *lost* continuity approve on prose an earlier round
-wrote, which is a one-hop path from a prompt-injected prior round to an approval of unreviewed
-code. `reviewer.execute` gates on either.
+**What continuity actually puts in front of the reviewer.** Two things, not one, and they are
+**not** equally checkable — the difference matters more than the count, because the default
+below turns on it.
 
-What that buys: a tampered `reviewer_session.id`, or a tampered `round_history` rendered into
-`prior-rounds.txt`, can make the reviewer hold extra, possibly misleading context and produce a
-verdict — but that verdict can never be an approval by itself. At worst it denies, which is a stronger failure mode than most of this document's
-findings (a denial-of-service, not a wrong grant), and the user's answer to it is
-`/opencode-review-loop:accept`. Every approval in the system remains exactly as trustworthy as
-it was before continuity existed.
+- **`NNN-prior-rounds.txt` — bounded, and the gate's own words.** It carries earlier rounds'
+  `FINDING` detail, and it is attached to a *fresh* invocation just as readily as to a continued
+  one: session continuity is best-effort and drops silently (a listing failure, a generation
+  bump, a held claim), while the prior-rounds attachment does not. It is not free-form model
+  output smuggled back in. It is the gate's own rendering (`reviewer._prior_rounds_section`) of
+  lines validated against `_FINDING_RE` before they were stored and re-validated before they are
+  rendered, out of entries whose `verdict`, `seq` and `tree` are each type-checked on the way
+  out; the section is bounded by `max_findings` lines and `max_findings_bytes` encoded bytes, so
+  a tampered history degrades to a *shorter* attachment rather than to smuggled prose. It
+  reaches OpenCode through `-f`, inlined, from a directory outside the invocation's own
+  permission allow-list, so it cannot be re-opened by path.
+- **A continued session (`-s`) — unbounded, and the gate never sees it.** This one has no such
+  story and it would be dishonest to give it one. `-s` hands the reviewer the entire earlier
+  conversation: every earlier round's attachments, the repository content inside those diffs
+  (which is where an injection would live), and the reviewer's own free prose across all of
+  them. None of it is re-read, re-validated or size-bounded by the gate at the point it
+  influences the next round — it lives in OpenCode, which may also compact it into a lossy
+  summary the gate cannot inspect either. A continued round's verdict can therefore be
+  influenced by content the gate cannot enumerate, including content from a diff that this
+  round's own bundle no longer contains.
 
-Two costs worth naming so neither is quietly "optimised away" by someone who has not read why
-it is there:
+What is true of both channels, and is doing the real work: neither is an approval path on its
+own. A verdict comes back only through the same contract parse, an actionable finding at or
+above `block_severity` blocks whatever the reviewer concluded, no operational failure becomes an
+approval, and the label-keyed reset (a new phase, or `final`, always starts a fresh session)
+bounds any one poisoned session to a single phase.
 
-- **One extra model call per phase**, on the approving round only — the price of the
-  invariant above. Rounds 2..n-1 of a phase that is still turning up findings are unaffected;
-  a phase that approves on its *first* round costs exactly what it cost before continuity
-  existed, because a first round has neither a session to continue nor a prior round to be
-  shown. Any later approving round pays it, whether or not continuity held. It is a *full*
-  call, not a cheap one: the confirmation is session-less by construction, so it shares no
-  prefix with anything and reads nothing from the provider's prompt cache — measured against
-  a 20k-token bundle, 20124 input tokens with 0 cached.
-- **Injection persistence, bounded to one phase.** A poisoned diff used to influence exactly
-  one review; with continuity it can influence every remaining round of that phase, since the
-  reviewer's session may hold it in context across rounds. The label-keyed reset (a new phase,
-  or `final`, always starts a fresh session) bounds the blast radius to one phase, and the
-  cold-approval invariant above means the poisoned context can only ever cause a *denial*, not
-  an approval it should not have gotten. A review loop that will not converge — whether from
-  injected content or an ordinary disagreement — is exactly what
-  `/opencode-review-loop:accept` exists to break out of.
+### `cold_confirm`: the second, cold read — off by default
+
+`cold_confirm` (default `false`) adds a stricter rule on top: **an approving verdict must come
+from an invocation whose entire content the gate created.** With the key on, when a review that
+held any model-influenced context returns `APPROVED` the gate does not act on it — it runs one
+more review of the same bundle cold (no `-s`, no `context/` attachments, evidence built from
+git, no memory of anything the earlier round said), and that cold review's verdict is the one
+that counts. The stricter of the two always wins. It gates on *either* kind of context, not on
+`-s` alone: gating on the session would exempt exactly the rounds that lost continuity but were
+still shown `prior-rounds.txt`, which is the population the key exists to cover.
+
+What the key buys, when it is on: a tampered `reviewer_session.id`, or a tampered
+`round_history` rendered into `prior-rounds.txt`, can make the reviewer hold extra, possibly
+misleading context and produce a verdict — but that verdict can never be an approval by itself.
+At worst it denies, which is a stronger failure mode than most of this document's findings (a
+denial-of-service, not a wrong grant), and the user's answer to it is
+`/opencode-review-loop:accept`.
+
+**Why it is not the default, and what that costs — stated without averaging the two channels
+together.** The cost of the key being *on* is a full second model call on every approving round
+past the first, and a *full* one: the confirmation is session-less by construction, so it shares
+no prefix with anything and reads nothing from the provider's prompt cache — measured against a
+20k-token bundle, 20124 input tokens with 0 cached. Measured over a real 45-round, 7-phase run:
+11 rounds were cold confirmations, and in every one of those the cold call raised *new*, medium
+findings the warm round had not — a second read of the same evidence with strictly less of it,
+disagreeing with itself rather than catching anything the first read had missed. Both manual
+`accept`s in that run followed such an override. An invariant whose observed effect is to make a
+converging phase stop converging is one worth paying for deliberately rather than by default.
+
+The cost of the key being *off* is equally concrete, and it is **not** "a re-read of validated
+`FINDING` lines is skipped". For a round that continued a session, it is that an approval may
+have been produced by a reviewer holding the whole unbounded conversation described above — the
+earlier diffs and any injection inside them, its own earlier prose, possibly compacted. Nothing
+in the gate bounds or inspects that. What is left standing is the list at the end of the
+previous section: the contract parse, `block_severity`, the deny-list, `confirm-commit`'s
+ancestry evidence, `approval_is_current`, and the label-keyed reset that confines a poisoned
+session to one phase. That is a real defence in depth and it is *not* the same guarantee as
+"every approving verdict came from an invocation whose entire content the gate created". The
+default gives that sentence up. Say so when quoting this section.
+
+- **Injection persistence, and how the two settings differ on it.** A poisoned diff used to
+  influence exactly one review; with continuity it can influence every remaining round of that
+  phase, since the reviewer's session may hold it in context across rounds — including rounds
+  whose own bundle no longer contains it. The label-keyed reset bounds the blast radius to one
+  phase either way. With `cold_confirm` **on**, that persistence can only ever cause a
+  *denial*, because the verdict acted on came from a call that never saw it. With it **off**,
+  an approving verdict may have been shaped by it, and the backstops above are what remains. A
+  review loop that will not converge — whether from injected content or an ordinary
+  disagreement — is exactly what `/opencode-review-loop:accept` exists to break out of.
+
+Turn it on — `/opencode-review-loop:config cold_confirm true`, or `OCRL_COLD_CONFIRM=true` for
+a single run — when the threat model is a tampered `state.json`, or a diff plausibly carrying an
+injection, rather than a review loop that will not settle. Like every other key it is
+repo-settable, and the note under "Repo config is not trusted for policy" applies: a repository
+config can set it back to `false`, which is a strictly smaller lever than `ignore_globs: ["**"]`
+already sitting open beside it.
 
 And one thing continuity is *not*, so nobody spends the safety budget above chasing it: **it is
 not a large token saving.** Measured against the same 20k-token bundle, a continued round reads
@@ -290,8 +339,9 @@ itself, minutes later. Two exposures live in that gap, and only one of them is c
   descriptor walk that validated the path, so the bytes that leave are the bytes of the inode
   that was checked. There is no window, because the check and the read are one operation on
   one descriptor. A source that cannot be read that way fails the review; it is never a
-  silently dropped attachment, because dropping one could also talk the gate out of the cold
-  confirmation an attached context requires.
+  silently dropped attachment — quite apart from the evidence lost, dropping one could also
+  talk the gate out of the cold confirmation an attached context requires when `cold_confirm`
+  is on.
 - **Handing over a pathname that later means something else — narrowed, not closed.** What
   `-f` names is a staged copy in a directory created fresh for that one invocation, with an
   unpredictable name, removed when the call returns (`reviewer.stage_attachments`). **Every**

@@ -152,7 +152,11 @@ The reviewer cannot run anything. Set `verify_cmd` and the hook runs it and atta
 
 Repo text and the frozen plan are labelled **evidence, not instructions**, and the reviewer is explicitly asked to flag a phase description that misrepresents the frozen plan.
 
-**Consecutive reviews of one phase continue the same OpenCode session** where one can be found and safely claimed — `-s <id>` instead of a fresh `--title` — so round 2 can see what round 1 already flagged instead of starting cold every time. A new phase, or the final cumulative review, always starts fresh. This is a pure convenience: an approving verdict from any round that was shown model-influenced context — a continued session, or an earlier round's own findings — is never acted on by itself. The gate runs one more, cold confirmation of the same evidence first, and that cold verdict is what decides. See [security.md](docs/security.md) for the full argument and its costs (one extra model call per approving phase, and diff/context growth across rounds — `/opencode-review-loop:accept` is the answer when a phase will not converge either way).
+**Consecutive reviews of one phase continue the same OpenCode session** where one can be found and safely claimed — `-s <id>` instead of a fresh `--title` — so round 2 can see what round 1 already flagged instead of starting cold every time. A new phase, or the final cumulative review, always starts fresh.
+
+`cold_confirm` (**off by default**) adds a second, cold read on top of that: an approving verdict from a round that was shown model-influenced context — a continued session, or an earlier round's own findings — is not acted on by itself; the gate re-reviews the same evidence with none of it attached, and that cold verdict decides.
+
+It is off because it is a full second model call on every approving round past the first, and over a real 45-round run it doubled 11 of them, each time raising new medium findings the warm round had not — disagreements that drove both manual `accept`s. Be clear about what turning it off gives up, because the two kinds of context it covers are not alike: an earlier round's findings reach the reviewer as `prior-rounds.txt`, the gate's own rendering of lines it validated and size-bounded, but a **continued session carries the whole earlier conversation** — previous diffs, the repository content in them, the reviewer's own prose — which the gate neither re-reads nor bounds. With the key off, an approval may have been shaped by all of that. What still stands is everything else: the contract parse, `block_severity`, the deny-list, `confirm-commit`, and the fact that a new phase always starts a fresh session, so one poisoned session stays inside one phase. Turn it on with `/opencode-review-loop:config cold_confirm true` (or `OCRL_COLD_CONFIRM=true` for one run) if your threat model is a tampered `state.json` or an injected diff rather than a slow loop. See [security.md](docs/security.md) for the argument in both directions; `/opencode-review-loop:accept` is still the answer when a phase will not converge either way.
 
 ## Configuration
 
@@ -183,6 +187,7 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 | `ttl_hours` | `24` | after this, gates block and ask for a re-arm — `resume` is usually the fix, not `implement`; see "Running a long plan across sessions" |
 | `ignore_globs` | `[]` | paths whose sole change skips a review |
 | `final_review` | `false` | run the final cumulative review at `Stop` |
+| `cold_confirm` | `false` | re-review an approving round cold, with no session and no prior-round attachment, and act on that verdict |
 
 Environment variables are the upper-cased key with an `OCRL_` prefix (`OCRL_BLOCK_SEVERITY`, `OCRL_MODEL`, …); `OCRL_IGNORE_GLOBS` is comma-separated.
 

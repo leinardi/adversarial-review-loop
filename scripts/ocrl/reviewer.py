@@ -20,28 +20,56 @@ markers or emits a verdict the gate does not recognise -- each maps to ``OP_FAIL
 reviewer's own verdict is advisory: an actionable finding at or above ``block_severity``
 blocks regardless of what the reviewer concluded.
 
-**Session continuity, and the invariant it is built around.** Within one review label
-(``phase3``, or ``final``) consecutive reviews continue the same OpenCode session where one
-can be found and safely claimed (``session_ref``); a resume or a new phase starts fresh. The
-session id travels through ``state.json``, which ``AGENTS.md`` is explicit is not a trust
-boundary -- so it must never be able to *authorize* anything. It cannot: **an approving
-verdict must come from an invocation whose entire content the gate created.** When a review
-that held *any* model-influenced context returns ``APPROVED``, ``execute`` does not act on
-it. It runs one more review of the same bundle cold -- no ``-s``, no ``context/``
-attachments, evidence built from git -- and that cold review's verdict is the one every
-caller acts on. The stricter of the two always wins. A tampered session pointer can therefore
-make the reviewer hold extra context and produce a verdict that cannot be an approval; at
-worst it denies, which the user answers with ``/opencode-review-loop:accept``. See
-``docs/security.md`` for the full argument.
+**Session continuity, and the confirmation that used to be unconditional.** Within one review
+label (``phase3``, or ``final``) consecutive reviews continue the same OpenCode session where
+one can be found and safely claimed (``session_ref``); a resume or a new phase starts fresh.
+The session id travels through ``state.json``, which ``AGENTS.md`` is explicit is not a trust
+boundary -- so it must never be able to *authorize* anything, and it cannot: the pointer
+selects which conversation a review continues, never whether a verdict is acted on. Under
+``cold_confirm`` (**off by default**) ``execute`` goes one step further: an ``APPROVED`` from a
+round that held *any* model-influenced context is not acted on directly, and one more review of
+the same bundle runs cold -- no ``-s``, no ``context/`` attachments, evidence built from git --
+whose verdict is the one every caller acts on. The stricter of the two always wins.
+
+**Why the default is off.** The confirmation costs a second full model call on every approving
+round past the first, and it is a *full* one: a session-less call shares no prefix and reads
+nothing from the provider's prompt cache. Measured over a real 45-round run, 11 of those rounds
+were cold confirmations, and in every one the cold call raised *new* medium findings the warm
+round had not -- a re-read of the same evidence with strictly less of it, disagreeing with
+itself rather than catching anything the first read missed; both manual ``accept``s in that run
+followed such an override.
+
+**The two context channels are not equally checkable, and the honest statement of the default
+says so rather than averaging them.** ``NNN-prior-rounds.txt`` is narrow and gate-controlled:
+it is this module's *own rendering* (``_prior_rounds_section``) of ``FINDING`` lines, each
+validated by ``_FINDING_RE`` before it was stored and re-validated before it is rendered, out of
+entries whose ``verdict``/``seq``/``tree`` are type-checked on the way out, bounded by
+``max_findings``/``max_findings_bytes`` -- a tampered history degrades to a *shorter*
+attachment, never to smuggled prose. **A continued session is none of those things.** ``-s``
+hands the reviewer the whole earlier conversation: every earlier round's attachments, the
+repository content inside those diffs, and the reviewer's own free prose, held by OpenCode,
+never re-read or re-validated by the gate, and possibly compacted by the provider into a lossy
+summary the gate cannot see either. So with ``cold_confirm`` off, an approval may come from a
+reviewer that was holding all of that, and nothing in this module bounds it. That is the cost
+of the default, stated plainly; ``cold_confirm`` on is what removes *both* influences from the
+verdict acted on.
+
+What still holds either way, and is what the default actually rests on: a verdict comes back
+only through the same contract parse, an actionable finding at or above ``block_severity``
+blocks whatever the reviewer concluded, no operational failure becomes an approval, and the
+label-keyed reset (a new phase, or ``final``, always starts fresh) bounds any one poisoned
+session to one phase. Turn ``cold_confirm`` on where the threat model is a tampered
+``state.json`` or a diff that may be carrying an injection, rather than a slow loop;
+``docs/security.md`` carries the full argument in both directions.
 
 **Two things count as model-influenced context, not one.** A continued session (``-s``) is
 the obvious one. The other is a ``context/`` attachment: ``NNN-prior-rounds.txt`` carries
-earlier rounds' ``FINDING`` detail, which is unconstrained model prose, and it is attached to
-a *fresh* invocation just as readily as to a continued one -- session continuity is
-best-effort and drops silently (a listing failure, a generation bump, a held claim), while
-the prior-rounds attachment does not. Gating the cold confirmation on ``-s`` alone would
-therefore let exactly the runs that lost continuity approve on prose an earlier round wrote.
-:func:`execute` gates on either.
+earlier rounds' ``FINDING`` detail, and it is attached to a *fresh* invocation just as readily
+as to a continued one -- session continuity is best-effort and drops silently (a listing
+failure, a generation bump, a held claim), while the prior-rounds attachment does not. Gating
+the cold confirmation on ``-s`` alone would therefore let exactly the runs that lost continuity
+approve on prose an earlier round wrote. :func:`execute` gates on either, whenever it gates at
+all.
 
 **The evidence boundary.** ``bundles/`` holds gate-generated evidence only -- no model
 output, ever (``docs/architecture.md``): a cold confirmation reuses an earlier round's
@@ -2983,9 +3011,10 @@ def stage_invocation(
 
 
 def _confirm_cold(rr: _ReviewRun, continued: Review) -> Review:
-    """The cold-approval invariant: one more, session-less review of the same bundle, in
+    """The ``cold_confirm`` path: one more, session-less review of the same bundle, in
     place of ``continued`` -- with ``continued`` attached via ``.confirmed`` so the report can
-    show both. See ``execute``'s own docstring.
+    show both. Reached only when the key is on; see ``execute``'s own docstring for when, and
+    the module docstring for why it is not the default.
 
     ``include_context=False`` and ``cold=True``: the invocation whose whole purpose is to judge
     gate-generated evidence with no model-influenced context receives none of the ``context/``
@@ -3476,17 +3505,22 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     concurrent reviews from claiming the same sequence number and overwriting each other's
     report.
 
-    **The cold-approval invariant lives here.** When the round below returns ``APPROVED`` and
-    it held any model-influenced context, that verdict is never acted on directly:
-    :func:`_confirm_cold` runs one more, cold review of the same bundle, and its verdict is
-    what this function returns. **Two things count as such context** -- a continued session
-    (``ref.session_id``) *and* a ``context/`` attachment
-    (:func:`context_attachments`, ``NNN-prior-rounds.txt``, whose finding detail is
-    unconstrained model prose). The second is not implied by the first: continuity is
-    best-effort and drops silently, while the prior-rounds attachment is written from
-    ``round_history`` regardless, so a run with ``ref.session_id == ""`` can still have been
-    shown an earlier round's prose. Gating on the session alone would let precisely those
-    runs approve on it. See the module docstring for the full argument.
+    **The cold confirmation lives here, behind ``cold_confirm`` (off by default).** With the key
+    on, an ``APPROVED`` from a round that held any model-influenced context is never acted on
+    directly: :func:`_confirm_cold` runs one more, cold review of the same bundle, and its
+    verdict is what this function returns. **Two things count as such context** -- a continued
+    session (``ref.session_id``) *and* a ``context/`` attachment
+    (:func:`context_attachments`, ``NNN-prior-rounds.txt``, which carries earlier rounds'
+    finding detail). The second is not implied by the first: continuity is best-effort and
+    drops silently, while the prior-rounds attachment is written from ``round_history``
+    regardless, so a run with ``ref.session_id == ""`` can still have been shown an earlier
+    round's lines. Gating on the session alone would let precisely those runs skip the check.
+    With the key off -- the default -- the warm verdict is the one acted on, for the reasons
+    the module docstring and ``docs/security.md`` set out: the attachment is the gate's own
+    rendering of ``_FINDING_RE``-validated, bounded lines, and it authorises nothing on its
+    own. Neither setting changes what a verdict has to survive afterwards: an actionable
+    finding at or above ``block_severity`` still blocks, and every operational failure is
+    still not an approval.
 
     **Phase 5's stall check also lives here, ahead of everything else.** :func:`_stall_review`
     runs first, inside the same lock that reserves the report sequence -- both callers of this
@@ -3660,7 +3694,7 @@ def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expec
         # this round's report can name the session it just created.
         review.session = captured_id
 
-    if review.verdict == "APPROVED" and (ref.session_id or run.context_files):
+    if review.verdict == "APPROVED" and (ref.session_id or run.context_files) and config.as_bool("cold_confirm"):
         # A second renewal, and it is not belt-and-braces. The lease is sized for the longer of
         # "building" and "invoking", restarted once before the primary call -- but the cold
         # confirmation is a *second* full model call, and between the two sit the SIGTERM grace

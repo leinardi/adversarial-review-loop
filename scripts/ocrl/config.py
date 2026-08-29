@@ -61,9 +61,10 @@ DEFAULTS: Final[dict[str, Any]] = {
     "ttl_hours": 24,
     "ignore_globs": [],
     "final_review": False,
+    "cold_confirm": False,
 }
 
-BOOL_KEYS: Final = ("pure", "disable_project_config", "allow_dirty", "final_review")
+BOOL_KEYS: Final = ("pure", "disable_project_config", "allow_dirty", "final_review", "cold_confirm")
 
 INT_KEYS: Final = (
     "timeout_sec",

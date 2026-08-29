@@ -109,8 +109,9 @@ just gave, without attempting a commit or spending a new round. It is Claude-inv
 it parses no `VERDICT`, writes nothing that can approve anything, and reaches
 `hook.pass_()` under `ACTIVE` without any gate change. It runs **cold and session-less**,
 against `bundles/<seq>/` for the most recent `round_history` entry of the current phase —
-never the `reviewer_session` continuity pointer, which may name a session whose continued
-`APPROVED` was overridden by a cold `CHANGES_REQUIRED` the acting verdict came from. The
+never the `reviewer_session` continuity pointer, which under `cold_confirm` may name a session
+whose continued `APPROVED` was overridden by a cold `CHANGES_REQUIRED` the acting verdict came
+from. The
 question is written to `context/<n>-question.txt` (a sibling of `bundles/`, inlined with
 `-f`, never re-openable by path) wrapped in an evidence-not-instruction fence. Two counters
 bound and number it: `clarifications` (capped by `max_clarifications`, reset by `resume`)
