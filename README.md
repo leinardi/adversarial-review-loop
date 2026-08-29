@@ -112,6 +112,8 @@ tree=$(GIT_INDEX_FILE=$tmp git write-tree)
 
 One rule: **`actionable=yes` AND `severity >= block_severity`**. The default `block_severity` is `medium`, so an actionable `low` finding is recorded but does not block; lowering it to `low` restores the stricter behaviour, raising it further is a deliberate relaxation.
 
+**From the second round of a phase on, one more condition applies.** A finding that clears `block_severity` blocks only if its path is in *Changed since round N-1* (the paths that moved between the previous round's tree and this one), or an earlier round already raised a finding in that file, or its severity is at or above `late_block_severity` (default `high`). Anything else is **deferred**: still reported, still recorded in the round history, shown in full on the approval message and in the stored report — but it does not block *that* approval. Deferral is one approval's grace, not a dismissal: if the same phase is reviewed again (a Stop sweep approved, then more edits, then the commit), that file is now a known finding and it blocks. The point is a reviewer that raises a brand-new medium in an untouched file on round 4 of a converging phase — measured at 11 of 45 rounds in a real run, and behind both manual `accept`s — no longer stalls the phase over it; `late_block_severity medium` restores the old behaviour, and it can only ever defer, never widen (set below `block_severity` it reads as `block_severity`). The scope fails closed: round 1, a `final` review, a previous-round tree that no longer resolves, or a round history that does not validate line by line all mean the ordinary rule — every finding at or above `block_severity` blocks — and a `git diff` that cannot list the changed paths is a bundle failure, never an approval.
+
 The reviewer's own `VERDICT` line is advisory. The gate recomputes the verdict from the `FINDING` lines and the stricter of the two wins — an `APPROVE` alongside an actionable critical finding still blocks.
 
 **Nothing converts a failure into an approval.** Missing contract markers, a missing verdict, a non-zero exit, a timeout, an empty response, a diff above the hard ceiling, or more findings than the cap — every one of those blocks or escalates to `needs-human`. Findings are never silently trimmed: above `max_findings` the gate escalates and keeps the full report on disk rather than showing you a shortened list.
@@ -167,6 +169,7 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 | `model` | `openai/gpt-5.6-sol` | probed for reachability at arm time |
 | `variant` | unset | reasoning effort (`high`, `max`, …) |
 | `block_severity` | `medium` | blocks when `actionable=yes AND severity >= this` |
+| `late_block_severity` | `high` | from round 2 of a phase on, a new finding outside the paths changed since the previous round blocks only at or above this; never below `block_severity` |
 | `timeout_sec` | `900` | per review run |
 | `max_failures` | `2` | op failures since the last approval before `needs-human` (transient failures excluded — see `max_transient_failures`) |
 | `max_transient_failures` | `5` | timeouts/rate-limits/busy-review-slot failures since the last approval before `needs-human`; paced with backoff |

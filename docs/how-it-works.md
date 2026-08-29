@@ -45,7 +45,12 @@ reporter tries again.
 6. **If it's clean, the commit is allowed to happen and the next phase starts.** If it
    finds a real problem, the commit is blocked and Claude is told exactly what's wrong, with
    the same specificity a strict human reviewer would give. Claude fixes it and tries again.
-   This can repeat as many times as it takes.
+   This can repeat as many times as it takes. From the second attempt on, the reviewer is
+   told exactly which files changed since it last looked, and a *new* medium-level complaint
+   about a file that didn't change — the kind of thing it could have said the first time —
+   is written down and shown to you but no longer holds the commit up on its own; anything
+   serious still does, wherever it is, and so does anything the reviewer already raised
+   earlier.
 7. **Once every phase is committed, the tool considers itself done and steps out of the
    way.** You can also ask for one more review first — looking at the *entire* change from
    start to finish, the way a final sign-off would, rather than phase by phase. That one is

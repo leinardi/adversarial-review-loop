@@ -27,9 +27,11 @@ __all__ = [
     "INT_KEYS",
     "LIST_KEYS",
     "REPO_CONFIG_NAME",
+    "SEVERITY_KEYS",
     "SEVERITY_LABELS",
     "Config",
     "from_env",
+    "late_threshold_rank",
     "load",
     "severity_rank",
     "threshold_rank",
@@ -41,6 +43,7 @@ DEFAULTS: Final[dict[str, Any]] = {
     "model": "openai/gpt-5.6-sol",
     "variant": "",
     "block_severity": "medium",
+    "late_block_severity": "high",
     "timeout_sec": 900,
     "max_failures": 2,
     "max_transient_failures": 5,
@@ -84,6 +87,9 @@ INT_KEYS: Final = (
 )
 
 LIST_KEYS: Final = ("ignore_globs",)
+
+#: The keys whose value is a severity label, validated and ranked through ``threshold_rank``.
+SEVERITY_KEYS: Final = ("block_severity", "late_block_severity")
 
 #: The keys the environment may override, in the shell's order.
 CONFIG_KEYS: Final = tuple(DEFAULTS)
@@ -279,3 +285,18 @@ def threshold_rank(label: str) -> int:
     rank clears most easily -- making the gate stricter on bad input, never looser.
     """
     return _SEVERITY_RANK.get(label.lower(), 1)
+
+
+def late_threshold_rank(config: Config) -> int:
+    """Rank the ``late_block_severity`` threshold, clamped up to ``block_severity``'s rank.
+
+    From the second review round of a phase on, a finding that is new *and* outside the paths
+    changed since the previous round blocks only when it reaches this rank
+    (``reviewer.parse``). It can only ever **defer** a finding that ``block_severity`` would
+    have blocked, never widen the blocking set: a ``late_block_severity`` set below
+    ``block_severity`` is meaningless in that direction, so it is read as ``block_severity``
+    itself. Both labels rank through :func:`threshold_rank`, so an unrecognised value ranks at
+    the floor -- and the clamp then lifts it to ``block_severity``, restoring the ordinary rule
+    rather than inventing a laxer one.
+    """
+    return max(threshold_rank(config.as_str("late_block_severity")), threshold_rank(config.as_str("block_severity")))

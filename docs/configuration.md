@@ -33,6 +33,7 @@ guessing.
 | `model` | `openai/gpt-5.6-sol` | probed for reachability at arm time |
 | `variant` | unset | reasoning effort (`high`, `max`, …) |
 | `block_severity` | `medium` | blocks when `actionable=yes AND severity >= this` |
+| `late_block_severity` | `high` | from round 2 of a phase on, a new finding outside the paths changed since the previous round blocks only at or above this; never below `block_severity` |
 | `timeout_sec` | `900` | per review run |
 | `max_failures` | `2` | op failures since the last approval before `needs-human` (transient failures excluded — see `max_transient_failures`) |
 | `max_transient_failures` | `5` | timeouts/rate-limits/busy-review-slot failures since the last approval before `needs-human`; paced with backoff, no provider call spent while it waits |
@@ -131,6 +132,11 @@ off from a self-serving edit:
   (`gitsnap.all_paths_ignored`, exercised with exactly this shape in `tests/selftest.sh`).
 - **`block_severity` raised to `critical`** means only a critical finding blocks; every
   medium or high finding still shows up in the report, but nothing stops the commit.
+- **`late_block_severity` raised to `critical`** widens what a later round may defer: from
+  round 2 on, a new high finding in a file untouched since the previous round would then be
+  recorded rather than block. It cannot go the other way — a value below `block_severity`
+  is read as `block_severity` — and it never reaches round 1, a `final` review, a changed
+  path, or a file an earlier round already raised a finding in.
 - **`max_findings` / `max_findings_bytes` / `hard_diff_ceiling`, tuned high enough,** raise
   the bar at which a well-formed review result escalates to `needs-human` instead of being
   taken at face value. This is separate from operational fail-closed handling — a genuine

@@ -354,3 +354,45 @@ def test_the_report_listing_matches_the_shell(report_env: dict[str, str], act_di
     )
     assert sorted(listing.stdout.split()) == report.list_reports(act_dir)
     assert git(git_repo, "status", "--porcelain") == "", "reports never land in the repository under review"
+
+
+# --------------------------------------------------------------------------
+# Deferred findings
+# --------------------------------------------------------------------------
+
+DEFERRED_LINE = "FINDING severity=medium actionable=yes file=untouched.py:3 | new medium in an untouched file\n"
+
+
+def test_deferred_text_is_empty_when_nothing_was_deferred() -> None:
+    assert report.deferred_text(a_review(), what="commit") == ""
+
+
+def test_deferred_text_names_what_was_approved_and_quotes_every_line() -> None:
+    text = report.deferred_text(a_review(deferred=DEFERRED_LINE), what="commit")
+    assert text.startswith("Deferred findings")
+    assert "did not block this commit" in text
+    assert "if this phase is reviewed again they will block" in text
+    assert text.endswith(DEFERRED_LINE)
+
+
+def test_the_stored_report_has_a_deferred_section_only_when_there_is_one(act_dir: Path) -> None:
+    approved = a_review(verdict="APPROVED", findings="", deferred=DEFERRED_LINE)
+    text = report.render_report(approved, a_target(), seq="001", config=config_with())
+    assert "## Deferred findings" in text
+    assert DEFERRED_LINE in text
+    assert "- late_block_severity: `high`" in text
+
+    plain = report.render_report(a_review(), a_target(), seq="001", config=config_with())
+    assert "## Deferred findings" not in plain
+
+
+def test_a_final_report_does_not_claim_a_late_rule(act_dir: Path) -> None:
+    text = report.render_report(a_review(), a_target(scope="final"), seq="001", config=config_with())
+    assert "late_block_severity" not in text
+
+
+def test_the_reason_carries_deferred_lines_on_a_blocking_round() -> None:
+    text = report.reason(a_review(deferred=DEFERRED_LINE), "headline", config=config_with())
+    assert "Deferred findings" in text
+    assert DEFERRED_LINE in text
+    assert text.index("Blocking findings") < text.index("Deferred findings") < text.index("Reviewer prose")

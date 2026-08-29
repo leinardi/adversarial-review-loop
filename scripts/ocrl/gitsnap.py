@@ -33,11 +33,13 @@ from ocrl.util import log
 
 __all__ = [
     "GIT_TIMEOUT_SEC",
+    "ChangedPathsUnavailable",
     "GitUnavailable",
     "Snapshot",
     "SnapshotError",
     "all_paths_ignored",
     "changed_paths",
+    "changed_paths_strict",
     "checked_tree",
     "dirty_summary",
     "format_oversized",
@@ -423,6 +425,81 @@ def changed_paths(repo: str, base: str, head: str) -> list[str]:
     if proc.returncode != 0:
         return []
     return [line for line in _decode(proc.stdout).splitlines() if line]
+
+
+class ChangedPathsUnavailable(OcrlError):
+    """:func:`changed_paths_strict` could not produce an honest path set.
+
+    Distinct from :func:`changed_paths`'s silent ``[]`` on purpose: that one feeds
+    :func:`all_paths_ignored`, where an empty list already means "do not skip the review", so
+    failing quietly there is the safe direction. Here the set decides which findings may be
+    *deferred* (``reviewer.LateScope``), and an empty or partial set would defer more than the
+    truth allows -- so the caller has to hear about it and refuse to build the scope.
+    """
+
+
+#: The one-path ``--name-status`` letters. ``R``/``C`` carry a score and two paths and are
+#: handled separately; anything else is a record this parser does not know and refuses.
+_ONE_PATH_STATUSES: Final = frozenset({b"A", b"M", b"D", b"T", b"U", b"X"})
+
+
+def _strict_path(raw: bytes) -> str:
+    """Decode one ``-z`` path record and refuse any the ``FINDING`` grammar could not spell.
+
+    A path holding a newline or ``|`` can never appear in a ``FINDING`` line's ``file=``
+    field, and neither can one with leading or trailing whitespace (``reviewer._FINDING_RE``
+    forbids both ends). A changed file with such a name can therefore never be matched by a
+    finding, which means no scope built from it would be honest -- the finding the reviewer
+    raised about it would look "outside the changed paths" and be deferred. Refuse instead.
+    """
+    path = raw.decode("utf-8", "surrogateescape")
+    if not path or "\n" in path or "|" in path or path != path.strip():
+        raise ChangedPathsUnavailable(f"a changed path cannot be named by a finding: {path!r}")
+    return path
+
+
+def changed_paths_strict(repo: str, base: str, head: str) -> frozenset[str]:
+    """Every path differing between two tree-ish ids, or :class:`ChangedPathsUnavailable`.
+
+    ``git diff --name-status -z -M base head --``, parsed **as NUL-separated bytes**:
+    ``<status>\\0<path>\\0`` for ``A``/``M``/``D``/``T`` (and the unmerged/unknown letters
+    git can print for a worktree diff), ``<status><score>\\0<old>\\0<new>\\0`` for ``R``/``C``
+    -- both sides of a rename are kept, because a reviewer may name either. Decoding is
+    ``surrogateescape``, like every other path read in this module.
+
+    Every doubt is an exception, never a shorter set: a non-zero exit (which is also how
+    :func:`git_run` reports its own timeout), a record whose status letter is not one this
+    parser knows, a record truncated before its path, or a path :func:`_strict_path` refuses.
+    """
+    proc = git_run(repo, ["diff", "--name-status", "-z", "-M", base, head, "--"])
+    if proc.returncode != 0:
+        raise ChangedPathsUnavailable(
+            f"git diff --name-status {base}..{head} failed (status {proc.returncode}): {_decode(proc.stderr[:512]).strip()}"
+        )
+    fields = proc.stdout.split(b"\0")
+    if fields and not fields[-1]:
+        fields.pop()
+    out: set[str] = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        if not status:
+            raise ChangedPathsUnavailable("git diff --name-status emitted an empty status record")
+        letter = status[:1]
+        if letter in (b"R", b"C"):
+            if index + 2 >= len(fields):
+                raise ChangedPathsUnavailable("git diff --name-status emitted a truncated rename/copy record")
+            out.add(_strict_path(fields[index + 1]))
+            out.add(_strict_path(fields[index + 2]))
+            index += 3
+            continue
+        if letter not in _ONE_PATH_STATUSES or len(status) != 1:
+            raise ChangedPathsUnavailable(f"git diff --name-status emitted an unknown record: {status[:16]!r}")
+        if index + 1 >= len(fields):
+            raise ChangedPathsUnavailable("git diff --name-status emitted a truncated record")
+        out.add(_strict_path(fields[index + 1]))
+        index += 2
+    return frozenset(out)
 
 
 def all_paths_ignored(repo: str, base: str, head: str, config: Config) -> bool:

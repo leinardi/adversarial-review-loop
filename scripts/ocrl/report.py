@@ -29,6 +29,7 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle broken for the type checker
 __all__ = [
     "AcceptRecord",
     "accept_report_path",
+    "deferred_text",
     "list_reports",
     "promote_accept",
     "reason",
@@ -41,6 +42,25 @@ __all__ = [
 ]
 
 _FOOTER = "Verify and address the findings above, then commit again. The commit is gated until the review passes.\n"
+
+_DEFERRED_INTRO = (
+    "Deferred findings -- actionable, at or above block_severity, but new and outside the paths changed since the "
+    "previous round, so below late_block_severity they did not block this {what}. Fix them now if cheap; they are "
+    "recorded, and if this phase is reviewed again they will block:"
+)
+
+
+def deferred_text(review: Review, *, what: str) -> str:
+    """The paragraph every approval path shows when ``review.deferred`` is non-empty.
+
+    ``what`` names the thing that was approved despite them -- "commit" for the commit gate,
+    "turn end" for the Stop sweep. Empty when nothing was deferred, so a caller can append it
+    unconditionally. The lines are the ``FINDING`` lines verbatim, exactly as the blocking set
+    is rendered: deferral changes what blocks, never what is shown.
+    """
+    if not review.deferred:
+        return ""
+    return f"{_DEFERRED_INTRO.format(what=what)}\n\n{review.deferred}"
 
 
 def _timestamp() -> str:
@@ -64,6 +84,14 @@ def _session_line(review: Review) -> str:
 def _findings_and_raw(review: Review, *, heading_level: str = "##") -> str:
     out = [f"\n{heading_level} Blocking findings\n\n"]
     out.append(f"```\n{review.findings}```\n" if review.findings else "(none)\n")
+    if review.deferred:
+        out.append(f"\n{heading_level} Deferred findings\n\n")
+        out.append(
+            "Actionable and at or above block_severity, but new, outside the paths changed since the previous "
+            "round, and below late_block_severity -- so they did not block this round. Recorded: a later review "
+            "of this phase treats their paths as known and blocks on them.\n\n"
+        )
+        out.append(f"```\n{review.deferred}```\n")
     if review.supersedes:
         out.append(f"\n{heading_level} Reversals of earlier rounds (SUPERSEDES)\n\n")
         out.append(f"```\n{review.supersedes}```\n")
@@ -112,6 +140,8 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
     out.append(f"- head tree: `{target.head}`\n")
     out.append(f"- model: `{config.as_str('model')}`{f' (variant `{variant}`)' if variant else ''}\n")
     out.append(f"- block_severity: `{config.as_str('block_severity')}`\n")
+    if target.is_phase:
+        out.append(f"- late_block_severity: `{config.as_str('late_block_severity')}`\n")
     out.append(f"- generated: {_timestamp()}\n")
     if review.confirmed is None:
         out.append(_session_line(review))
@@ -126,7 +156,11 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
             f"{continued.verdict or 'UNKNOWN'}. `cold_confirm` is on, so such an approval was "
             "not acted on by itself: one more, cold review of the same bundle decided, and "
             "that cold verdict -- the one recorded at the top of this report -- is the one "
-            "acted on.\n"
+            "acted on.\n\nThe cold section's finding lists are this **round's record**: the "
+            "cold call's own lines plus any the round with context reported and the cold one "
+            "did not, since a confirmation replaces the verdict, not the record. Each "
+            "section's raw transcript below it is that one invocation's own output, which is "
+            "what to read to tell which call said what.\n"
         )
         out.append(_invocation_section(continued, heading="Round with context (not the verdict acted on)"))
         out.append(_invocation_section(review, heading="Cold confirmation (the verdict acted on)"))
@@ -251,6 +285,10 @@ def reason(review: Review, headline: str, *, config: Config) -> str:
     if review.findings:
         out.append(f"\nBlocking findings (actionable, severity >= {config.as_str('block_severity')}) -- every one must be resolved:\n\n")
         out.append(review.findings)
+    if review.deferred:
+        # A `CHANGES_REQUIRED` that carries deferred lines: the reviewer's own verdict blocked
+        # (stricter wins), or other findings did. Either way these are shown as what they are.
+        out.append(f"\n{deferred_text(review, what='round')}")
     if review.all_findings and review.all_findings != review.findings:
         out.append("\nAll findings reported (non-blocking ones included, for context):\n\n")
         out.append(review.all_findings)

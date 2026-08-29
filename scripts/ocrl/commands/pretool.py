@@ -713,7 +713,11 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
     review = reviewer.execute(target, state=state, config=config, warnings=snap.warnings)
 
     if review.verdict == "APPROVED":
-        extra = f"\nNon-blocking findings (recorded, not required):\n{review.all_findings}" if review.all_findings else ""
+        # Deferred first: those are the findings that would have blocked under the ordinary
+        # rule and are the ones worth fixing before this commit lands.
+        deferred = report.deferred_text(review, what="commit")
+        extra = f"\n{deferred}" if deferred else ""
+        extra += f"\nNon-blocking findings (recorded, not required):\n{review.all_findings}" if review.all_findings else ""
         approve(f"opencode-review-loop: OpenCode approved phase {phase}.\n{extra}\nFull report: {review.report}".rstrip("\n"), review=review)
     if review.verdict == "CHANGES_REQUIRED":
         # No preamble: the report's own headline already says what this is, as it did in the

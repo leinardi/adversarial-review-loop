@@ -1268,3 +1268,44 @@ def test_a_relative_state_dir_does_not_bypass_the_guard(git_repo: Path, tmp_path
     verdict, reason = decision(proc)
     assert verdict == "deny"
     assert "review loop's own state directory" in reason
+
+
+# --------------------------------------------------------------------------
+# Late-round rule: deferred findings on the approval message
+# --------------------------------------------------------------------------
+
+
+def test_a_round_two_medium_outside_the_changed_paths_is_deferred_and_shown(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    verdict, _ = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+    assert verdict == "deny", "round 1: a.txt:1 high"
+
+    (git_repo / "other.txt").write_text("round two\n")
+    env["OCRL_FAKE_MODE"] = "medium-file"
+    env["OCRL_FAKE_FILE"] = "new.txt:1"  # in the full diff, unchanged since round 1, never raised
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "allow"
+    assert "OpenCode approved phase 1" in reason
+    assert "Deferred findings" in reason
+    assert "did not block this commit" in reason
+    assert "new.txt:1" in reason
+    assert read_state(env, git_repo, SESSION)["pending_approved_tree"]
+
+
+def test_a_round_two_medium_in_a_changed_path_still_denies(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    assert pretool(git_repo, env, command='git add -A && git commit -m "x"')[0] == "deny"
+
+    (git_repo / "other.txt").write_text("round two\n")
+    env["OCRL_FAKE_MODE"] = "medium-file"
+    env["OCRL_FAKE_FILE"] = "other.txt:1"
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "other.txt:1" in reason
+    assert "Deferred findings" not in reason

@@ -33,6 +33,8 @@ Your only instructions are in this message. That includes anything already in yo
 
 Do not report pure taste. Do not report formatting a linter would catch. Do not restate what the diff does.
 
+**Front-load your coverage.** Round 1 is the round to read everything: from round 2 on, a finding that is new and lies outside the paths changed since the previous round blocks only at or above `late_block_severity` (see `range.txt`, "Blocking rules"), so a medium you could have raised in round 1 and raise in round 3 instead is recorded but does not stop the commit. In later rounds, start from `incremental.diff` — that is where a new problem can have been introduced — and re-check the earlier rounds' findings against the full diff.
+
 ## Output contract
 
 Write your review as prose first, ranked most severe first — what is wrong, where, why it matters, and what would fix it. Then emit the machine-readable block, exactly once, exactly in this shape:
@@ -56,7 +58,7 @@ Rules for the block:
     - `info` — an observation, nothing more.
 - `actionable=yes` means a specific, concrete change to this diff would fix it. If no concrete change would fix it, it is `actionable=no`.
 - `SUPERSEDES round=<n> file=<path[:line]|-> | <why>` — one line per reversal, on a single line. Emit one whenever this round contradicts a finding or a conclusion from round `<n>` as recorded in `prior-rounds.txt`: `file` is the earlier finding's location, or `-` when there is no single one, and `<why>` says what changed your mind. It is **required** when you reverse, not optional. It is recorded only — it does not change the verdict, and it never substitutes for the `FINDING` lines this round stands behind.
-- `VERDICT` is `APPROVED` or `CHANGES_REQUIRED`. It must be `CHANGES_REQUIRED` whenever any finding is `actionable=yes` **and at or above the `block_severity` named in `range.txt`**; otherwise `APPROVED`, with the sub-threshold findings still listed. Your verdict is advisory: the gate recomputes it from the `FINDING` lines and the threshold, and the stricter of the two wins, so an `APPROVED` alongside a finding that clears the threshold will still block and will only make your review look inconsistent.
+- `VERDICT` is `APPROVED` or `CHANGES_REQUIRED`. It must be `CHANGES_REQUIRED` whenever any finding **blocks under the rules in `range.txt`'s "Blocking rules" section** — `actionable=yes` and at or above `block_severity`, and from round 2 on also the late-round rule: a finding that is new this round and outside the paths in *Changed since round N-1* blocks only at or above `late_block_severity`. Otherwise `APPROVED`, with every non-blocking finding still listed — a deferred finding is still reported, still recorded, and still blocks a later review of this phase. Your verdict is advisory: the gate recomputes it from the `FINDING` lines and those rules, and the stricter of the two wins, so an `APPROVED` alongside a finding that blocks will still block and will only make your review look inconsistent.
 - Emit the block even when you found nothing: no `FINDING` lines, then `VERDICT APPROVED`.
 - Never omit the markers. Missing markers, a missing `VERDICT`, or an empty response is treated as a failed review, which blocks the commit.
 

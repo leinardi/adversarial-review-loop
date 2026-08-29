@@ -41,6 +41,18 @@ case "$mode" in
         printf 'VERDICT CHANGES_REQUIRED\n'
         printf '<<<OCRL-END>>>\n'
         ;;
+    medium-file)
+        # A medium, actionable finding at OCRL_FAKE_FILE (default a.txt:1) under the
+        # reviewer's own APPROVED -- so the gate's recomputation alone decides whether it
+        # blocks. Drives the late-round rule: whether such a finding blocks from round 2 on
+        # depends on where it is, not on what the reviewer concluded.
+        f=${OCRL_FAKE_FILE:-a.txt:1}
+        printf 'A medium problem in %s.\n\n' "$f"
+        printf '<<<OCRL-FINDINGS>>>\n'
+        printf 'FINDING severity=medium actionable=yes file=%s | Medium problem in %s\n' "$f" "$f"
+        printf 'VERDICT APPROVED\n'
+        printf '<<<OCRL-END>>>\n'
+        ;;
     approve-with-critical)
         # A reviewer that contradicts itself: the gate must recompute and block.
         printf 'Looks fine overall.\n\n'

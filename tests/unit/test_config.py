@@ -268,3 +268,31 @@ def test_severity_labels_is_exactly_what_both_rank_functions_recognise() -> None
     for label in config.SEVERITY_LABELS:
         assert config.severity_rank(label) == config.threshold_rank(label)
     assert {"info", "trivial", "nit", "low", "minor", "medium", "moderate", "major", "high", "serious", "critical"} == config.SEVERITY_LABELS
+
+
+# -- late_block_severity ----------------------------------------------------
+
+
+def test_late_block_severity_defaults_to_high(layers: dict[str, str], tmp_path: Path) -> None:
+    cfg = config.load(str(tmp_path / "repo"), layers)
+    assert cfg.as_str("late_block_severity") == "high"
+    assert config.late_threshold_rank(cfg) == config.threshold_rank("high")
+
+
+def test_late_block_severity_env_override(layers: dict[str, str]) -> None:
+    layers["OCRL_LATE_BLOCK_SEVERITY"] = "critical"
+    assert config.load("", layers).as_str("late_block_severity") == "critical"
+
+
+def test_late_block_severity_is_clamped_up_to_block_severity(layers: dict[str, str], tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    write_repo_config(repo, {"block_severity": "high", "late_block_severity": "low"})
+    cfg = config.load(str(repo), layers)
+    assert config.late_threshold_rank(cfg) == config.threshold_rank("high"), "it can only defer, never widen"
+
+
+def test_an_unrecognised_late_block_severity_falls_back_to_block_severity(layers: dict[str, str], tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    write_repo_config(repo, {"late_block_severity": "spicy"})
+    cfg = config.load(str(repo), layers)
+    assert config.late_threshold_rank(cfg) == config.threshold_rank("medium"), "unknown ranks at the floor, then the clamp restores the ordinary rule"

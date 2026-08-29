@@ -467,3 +467,18 @@ def test_locked_config_target_serialises_two_processes(git_repo: Path, clean_env
     assert len(lines) == 2
     intervals = sorted((float(a), float(b)) for a, b in (line.split() for line in lines))
     assert intervals[0][1] <= intervals[1][0], f"the two critical sections overlapped: {intervals}"
+
+
+def test_an_unrecognised_late_block_severity_is_refused(git_repo: Path, clean_env: dict[str, str]) -> None:
+    proc = run_bootstrap(["config", "late_block_severity", "hihg"], cwd=git_repo, env=clean_env)
+    assert proc.returncode != 0
+    assert "not a recognised severity" in proc.stderr + proc.stdout
+    assert not user_config_file(clean_env).exists()
+
+
+def test_the_config_listing_shows_late_block_severity_default_high(git_repo: Path, clean_env: dict[str, str]) -> None:
+    proc = run_bootstrap(["config"], cwd=git_repo, env=clean_env)
+    assert proc.returncode == 0, proc.stderr
+    line = next(line for line in proc.stdout.splitlines() if line.startswith("late_block_severity"))
+    assert "high" in line
+    assert "(default)" in line

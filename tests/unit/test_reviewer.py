@@ -1642,9 +1642,9 @@ def test_by_default_a_warm_approval_is_acted_on_without_a_second_call(
     seen: list[Invocation] = []
     real = reviewer._run_invocation
 
-    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
         seen.append(run)
-        return real(tgt, run, config=config)
+        return real(tgt, run, config=config, scope=scope)
 
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
 
@@ -2370,9 +2370,9 @@ def test_confirm_cold_runs_a_context_free_bundle_scoped_invocation(
     seen: list[Invocation] = []
     real = reviewer._run_invocation
 
-    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
         seen.append(run)
-        return real(tgt, run, config=config)
+        return real(tgt, run, config=config, scope=scope)
 
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
 
@@ -2405,9 +2405,9 @@ def test_a_fresh_approval_shown_prior_rounds_is_still_cold_confirmed(
     seen: list[Invocation] = []
     real = reviewer._run_invocation
 
-    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
         seen.append(run)
-        return real(tgt, run, config=config)
+        return real(tgt, run, config=config, scope=scope)
 
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
     _scripted_reviewer(tmp_path, "round2", _APPROVES)
@@ -2441,9 +2441,9 @@ def test_context_vanishing_mid_review_does_not_skip_the_cold_confirmation(
     seen: list[Invocation] = []
     real = reviewer._run_invocation
 
-    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
         seen.append(run)
-        return real(tgt, run, config=config)
+        return real(tgt, run, config=config, scope=scope)
 
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
 
@@ -2477,9 +2477,9 @@ def test_an_approval_with_no_context_at_all_is_not_cold_confirmed(
     seen: list[Invocation] = []
     real = reviewer._run_invocation
 
-    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
         seen.append(run)
-        return real(tgt, run, config=config)
+        return real(tgt, run, config=config, scope=scope)
 
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
     _scripted_reviewer(tmp_path, "round1", _APPROVES)
@@ -2539,12 +2539,12 @@ def test_the_attached_path_is_a_staged_copy_not_the_stable_source(
     seen: list[Invocation] = []
     real = reviewer._run_invocation
 
-    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
         seen.append(run)
         for path in run.context_files:
             # Read inside the invocation: the staged copy exists only for its duration.
             assert path.read_bytes() == source.read_bytes(), "the staged copy carries the validated bytes"
-        return real(tgt, run, config=config)
+        return real(tgt, run, config=config, scope=scope)
 
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
     _run_scripted(activation, git_repo, tmp_path, "round2", _ROUND_2)
@@ -2658,9 +2658,9 @@ def test_the_whole_evidence_set_is_staged_not_only_the_context(
     seen: list[Invocation] = []
     real = reviewer._run_invocation
 
-    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
         seen.append(run)
-        return real(tgt, run, config=config)
+        return real(tgt, run, config=config, scope=scope)
 
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
     _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
@@ -2839,12 +2839,12 @@ def test_a_staged_attachment_swapped_after_staging_is_refused_at_launch(
     code, which sent the substituted bytes."""
     real = reviewer._run_invocation
 
-    def swap_then_run(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+    def swap_then_run(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
         for path, _digest in run.attachments:
             if path.name.startswith("changes."):
                 path.write_text("substituted after staging")
                 break
-        return real(tgt, run, config=config)
+        return real(tgt, run, config=config, scope=scope)
 
     monkeypatch.setattr(reviewer, "_run_invocation", swap_then_run)
 
@@ -3487,7 +3487,7 @@ def test_a_review_that_lost_its_active_review_claim_while_building_never_invokes
     monkeypatch.setattr(reviewer, "_renew_active_review", lambda *a, **k: False)
     seen: list[Invocation] = []
 
-    def never(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+    def never(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
         seen.append(run)
         return Review(), False
 
@@ -3738,9 +3738,9 @@ def test_the_cold_confirmation_is_not_run_once_the_slot_is_lost(
     seen: list[Invocation] = []
     real = reviewer._run_invocation
 
-    def spy(tgt: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
         seen.append(run)
-        return real(tgt, run, config=config)
+        return real(tgt, run, config=config, scope=scope)
 
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
     os.environ["OCRL_REVIEWER_CMD"] = str(_slot_stealing_reviewer(tmp_path, activation.state_file, "APPROVED", "thief-approve"))
@@ -4208,3 +4208,471 @@ def test_capture_session_rejects_a_listed_id_ending_in_a_newline(
     )
 
     assert not captured
+
+
+# --------------------------------------------------------------------------
+# Late-round blocking scope (late_block_severity)
+# --------------------------------------------------------------------------
+
+
+def _scope(changed: tuple[str, ...] = (), prior: tuple[str, ...] = ()) -> reviewer.LateScope:
+    return reviewer.LateScope(changed_paths=frozenset(changed), prior_files=frozenset(prior))
+
+
+def test_scope_covers_a_changed_path_exactly_and_by_line_stripping() -> None:
+    scope = _scope(changed=("src/a.py",))
+    assert scope.covers("src/a.py")
+    assert scope.covers("src/a.py:42")
+    assert scope.covers("./src/a.py:42"), "a leading ./ is normalised on the finding side only"
+    assert not scope.covers("src/b.py:42")
+    assert not scope.covers("src/a.py.bak")
+
+
+def test_scope_matches_a_changed_file_literally_named_with_a_colon_suffix() -> None:
+    """A file called ``x:1`` matches exactly; the line-stripping fallback runs only after."""
+    scope = _scope(changed=("x:1",))
+    assert scope.covers("x:1")
+    assert not scope.covers("x"), "the changed path is `x:1`, not `x`"
+    assert scope.covers("x:1:7"), "`x:1` at line 7"
+
+
+def test_scope_always_covers_a_finding_with_no_location() -> None:
+    assert _scope().covers("-"), "a missing location must never widen a bypass"
+
+
+def test_scope_covers_a_prior_round_file_exactly_and_line_stripped() -> None:
+    scope = _scope(prior=("lib/x.go:10", "lib/x.go"))
+    assert scope.covers("lib/x.go:10")
+    assert scope.covers("lib/x.go:99"), "re-raised at another line of a file an earlier round named"
+    assert scope.covers("lib/x.go")
+
+
+def test_scope_matches_a_dot_slash_finding_against_its_normalised_prior_file() -> None:
+    """Both sides go through the same normalisation, so a value always matches itself."""
+    scope = _scope(prior=("README.md:4", "README.md"))
+    assert scope.covers("./README.md:4")
+    assert scope.covers("README.md:4")
+    assert scope.covers("./README.md:9"), "another line of a file an earlier round named"
+
+
+def _write_block(tmp_path: Path, *findings: str, verdict: str = "APPROVED") -> Path:
+    out = tmp_path / "late.out"
+    body = "prose\n\n<<<OCRL-FINDINGS>>>\n" + "".join(f"{line}\n" for line in findings) + f"VERDICT {verdict}\n<<<OCRL-END>>>\n"
+    out.write_text(body)
+    return out
+
+
+MEDIUM_UNTOUCHED = "FINDING severity=medium actionable=yes file=untouched.py:3 | new medium in an untouched file"
+MEDIUM_CHANGED = "FINDING severity=medium actionable=yes file=changed.py:3 | medium in a changed file"
+HIGH_UNTOUCHED = "FINDING severity=high actionable=yes file=untouched.py:3 | high anywhere"
+MEDIUM_PRIOR = "FINDING severity=medium actionable=yes file=known.py:77 | re-raised at another line"
+
+
+def test_parse_without_a_scope_blocks_every_finding_at_or_above_block_severity(tmp_path: Path) -> None:
+    review = reviewer.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config_with(), allow_supersedes=True)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.findings == f"{MEDIUM_UNTOUCHED}\n"
+    assert review.deferred == ""
+
+
+def test_parse_with_a_scope_defers_a_new_medium_outside_the_changed_paths(tmp_path: Path) -> None:
+    scope = _scope(changed=("changed.py",), prior=("known.py:1", "known.py"))
+    review = reviewer.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config_with(), allow_supersedes=True, scope=scope)
+    assert review.verdict == "APPROVED"
+    assert review.findings == ""
+    assert review.deferred == f"{MEDIUM_UNTOUCHED}\n"
+    assert review.all_findings == f"{MEDIUM_UNTOUCHED}\n", "deferred is still reported and recorded"
+
+
+def test_parse_with_a_scope_blocks_a_medium_in_a_changed_path(tmp_path: Path) -> None:
+    scope = _scope(changed=("changed.py",))
+    review = reviewer.parse(_write_block(tmp_path, MEDIUM_CHANGED), config=config_with(), allow_supersedes=True, scope=scope)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.findings == f"{MEDIUM_CHANGED}\n"
+    assert review.deferred == ""
+
+
+def test_parse_with_a_scope_blocks_a_high_anywhere(tmp_path: Path) -> None:
+    scope = _scope(changed=("changed.py",))
+    review = reviewer.parse(_write_block(tmp_path, HIGH_UNTOUCHED), config=config_with(), allow_supersedes=True, scope=scope)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.findings == f"{HIGH_UNTOUCHED}\n"
+
+
+def test_parse_with_a_scope_blocks_a_medium_in_a_prior_round_file(tmp_path: Path) -> None:
+    scope = _scope(changed=(), prior=("known.py:1", "known.py"))
+    review = reviewer.parse(_write_block(tmp_path, MEDIUM_PRIOR), config=config_with(), allow_supersedes=True, scope=scope)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.findings == f"{MEDIUM_PRIOR}\n"
+
+
+def test_late_block_severity_medium_restores_the_ordinary_rule(tmp_path: Path) -> None:
+    scope = _scope(changed=("changed.py",))
+    config = config_with(late_block_severity="medium")
+    review = reviewer.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config, allow_supersedes=True, scope=scope)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.deferred == ""
+
+
+def test_late_block_severity_below_block_severity_is_clamped_up(tmp_path: Path) -> None:
+    """``late_block_severity`` can only defer, never widen: set below ``block_severity`` it
+    reads as ``block_severity`` itself, so a *low* finding still does not block."""
+    scope = _scope(changed=("changed.py",))
+    config = config_with(block_severity="high", late_block_severity="low")
+    assert ocrl_config.late_threshold_rank(config) == ocrl_config.threshold_rank("high")
+    review = reviewer.parse(_write_block(tmp_path, MEDIUM_CHANGED), config=config, allow_supersedes=True, scope=scope)
+    assert review.verdict == "APPROVED"
+    assert review.deferred == "", "below block_severity is not deferred, it is simply non-blocking"
+
+
+def test_the_reviewers_own_changes_required_still_wins_over_a_deferred_only_set(tmp_path: Path) -> None:
+    scope = _scope(changed=("changed.py",))
+    out = _write_block(tmp_path, MEDIUM_UNTOUCHED, verdict="CHANGES_REQUIRED")
+    review = reviewer.parse(out, config=config_with(), allow_supersedes=True, scope=scope)
+    assert review.verdict == "CHANGES_REQUIRED", "stricter wins; the scope narrows the gate's recomputation only"
+    assert review.findings == ""
+    assert review.deferred == f"{MEDIUM_UNTOUCHED}\n"
+
+
+def test_a_scope_never_defers_a_finding_below_block_severity_into_the_deferred_set(tmp_path: Path) -> None:
+    low = "FINDING severity=low actionable=yes file=untouched.py:1 | low"
+    review = reviewer.parse(_write_block(tmp_path, low), config=config_with(), allow_supersedes=True, scope=_scope(changed=("x",)))
+    assert review.verdict == "APPROVED"
+    assert review.deferred == ""
+    assert review.all_findings == f"{low}\n"
+
+
+# -- late_scope: when a scope exists at all ----------------------------------
+
+
+def test_round_one_has_no_scope(activation: state.State, git_repo: Path) -> None:
+    assert reviewer.late_scope(target_for(git_repo), state=activation) is None
+
+
+def test_a_final_review_has_no_scope(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")
+    assert reviewer.late_scope(target_for(git_repo, scope="final"), state=activation) is None
+
+
+def test_round_two_scope_holds_the_paths_changed_since_round_one_and_round_ones_files(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")  # a.txt:1, high
+    (git_repo / "b.txt").write_text("second round\n")
+    scope = reviewer.late_scope(target_for(git_repo), state=activation)
+    assert scope is not None
+    assert scope.changed_paths == frozenset({"b.txt"})
+    assert scope.prior_files == frozenset({"a.txt:1", "a.txt"})
+
+
+def test_prior_files_are_stored_with_a_leading_dot_slash_normalised_away(activation: state.State, git_repo: Path) -> None:
+    """``covers`` normalises the value it is asked about, so the stored side must match."""
+    os.environ["OCRL_FAKE_FILE"] = "./README.md:4"  # `medium-file` emits this value verbatim
+    execute_fake(activation, git_repo, "medium-file")
+    (git_repo / "b.txt").write_text("second round\n")
+    scope = reviewer.late_scope(target_for(git_repo), state=activation)
+    assert scope is not None
+    assert scope.prior_files == frozenset({"README.md:4", "README.md"})
+    assert scope.covers("./README.md:4")
+
+
+def test_round_two_scope_keeps_both_sides_of_a_rename(activation: state.State, git_repo: Path) -> None:
+    (git_repo / "renamed-src.txt").write_text("x" * 200 + "\n")
+    execute_fake(activation, git_repo, "approve")
+    (git_repo / "renamed-src.txt").rename(git_repo / "renamed-dst.txt")
+    scope = reviewer.late_scope(target_for(git_repo), state=activation)
+    assert scope is not None
+    assert {"renamed-src.txt", "renamed-dst.txt"} <= scope.changed_paths, "a reviewer may name either side"
+    assert scope.covers("renamed-src.txt:1")
+    assert scope.covers("renamed-dst.txt:1")
+
+
+def test_a_malformed_round_history_entry_disables_the_scope(activation: state.State, git_repo: Path) -> None:
+    """Dropping a bad line is right for display and wrong here: a missing path authorises a
+    deferral, so any doubt about the history disables the scope entirely."""
+    execute_fake(activation, git_repo, "changes")
+    history = activation.get_array_of_dicts("round_history")
+    history[0]["findings"] = ["FINDING severity=medium actionable=yes file=a.txt:1 | ok", "not a finding line"]
+    activation.update(round_history=history)
+    activation.save()
+    (git_repo / "b.txt").write_text("second round\n")
+    assert reviewer.late_scope(target_for(git_repo), state=activation) is None
+
+
+@pytest.mark.parametrize("field", ["seq", "tree", "verdict", "findings"])
+def test_a_tampered_round_history_field_disables_the_scope(activation: state.State, git_repo: Path, field: str) -> None:
+    execute_fake(activation, git_repo, "changes")
+    history = activation.get_array_of_dicts("round_history")
+    history[0][field] = {"seq": "1", "tree": "not-an-id", "verdict": "OK", "findings": "not-a-list"}[field]
+    activation.update(round_history=history)
+    activation.save()
+    (git_repo / "b.txt").write_text("second round\n")
+    assert reviewer.late_scope(target_for(git_repo), state=activation) is None
+
+
+def test_an_unresolvable_previous_tree_disables_the_scope(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")
+    history = activation.get_array_of_dicts("round_history")
+    history[0]["tree"] = "0" * 40
+    activation.update(round_history=history)
+    activation.save()
+    (git_repo / "b.txt").write_text("second round\n")
+    assert reviewer.late_scope(target_for(git_repo), state=activation) is None
+
+
+def test_a_failed_changed_path_listing_is_a_bundle_error_not_a_scope(
+    activation: state.State, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    execute_fake(activation, git_repo, "changes")
+    (git_repo / "b.txt").write_text("second round\n")
+
+    def broken(repo: str, base: str, head: str) -> frozenset[str]:
+        raise gitsnap.ChangedPathsUnavailable("simulated git failure")
+
+    monkeypatch.setattr(reviewer, "changed_paths_strict", broken)
+    with pytest.raises(BundleError, match="simulated git failure"):
+        reviewer.late_scope(target_for(git_repo), state=activation)
+
+
+def test_a_scope_build_failure_is_an_op_failure_of_kind_bundle_never_an_approval(
+    activation: state.State, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    execute_fake(activation, git_repo, "changes")
+    (git_repo / "b.txt").write_text("second round\n")
+
+    def broken(repo: str, base: str, head: str) -> frozenset[str]:
+        raise gitsnap.ChangedPathsUnavailable("simulated git failure")
+
+    monkeypatch.setattr(reviewer, "changed_paths_strict", broken)
+    review = execute_fake(activation, git_repo, "approve")
+    assert review.verdict == "OP_FAILURE"
+    assert review.kind == "bundle"
+    assert "simulated git failure" in review.error
+    assert len(activation.get_array_of_dicts("round_history")) == 1, "a refused review records no round"
+
+
+# -- end to end through execute ----------------------------------------------
+
+
+def test_round_one_blocks_a_new_medium_wherever_it_is(activation: state.State, git_repo: Path) -> None:
+    os.environ["OCRL_FAKE_FILE"] = "a.txt:1"
+    review = execute_fake(activation, git_repo, "medium-file")
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.deferred == ""
+
+
+def test_round_two_defers_a_new_medium_in_an_untouched_file(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")  # round 1: a.txt:1 high
+    (git_repo / "b.txt").write_text("second round\n")
+    os.environ["OCRL_FAKE_FILE"] = "README.md:4"  # neither changed since round 1 nor named before
+    review = execute_fake(activation, git_repo, "medium-file")
+    assert review.verdict == "APPROVED"
+    assert review.findings == ""
+    assert "README.md:4" in review.deferred
+    entry = activation.get_array_of_dicts("round_history")[-1]
+    assert entry["verdict"] == "APPROVED"
+    assert any("README.md:4" in line for line in entry["findings"]), "deferred is recorded as evidence"
+    assert "## Deferred findings" in Path(review.report).read_text()
+
+
+def test_round_two_blocks_the_same_medium_in_a_touched_file(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")
+    (git_repo / "b.txt").write_text("second round\n")
+    os.environ["OCRL_FAKE_FILE"] = "b.txt:1"
+    review = execute_fake(activation, git_repo, "medium-file")
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert "b.txt:1" in review.findings
+
+
+def test_round_two_blocks_a_medium_in_a_file_round_one_named_at_another_line(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")  # a.txt:1
+    (git_repo / "b.txt").write_text("second round\n")
+    os.environ["OCRL_FAKE_FILE"] = "a.txt:9"
+    review = execute_fake(activation, git_repo, "medium-file")
+    assert review.verdict == "CHANGES_REQUIRED"
+
+
+def test_round_two_blocks_a_high_in_an_untouched_file(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "approve")
+    (git_repo / "b.txt").write_text("second round\n")
+    os.environ["OCRL_FAKE_FILE"] = "README.md"
+    review = execute_fake(activation, git_repo, "changes-file")  # high
+    assert review.verdict == "CHANGES_REQUIRED"
+
+
+def test_a_deferred_finding_blocks_the_next_review_of_the_same_phase(activation: state.State, git_repo: Path) -> None:
+    """Deferral applies to one approval only: the recorded line puts its path in
+    ``prior_files`` for every later round of this phase."""
+    execute_fake(activation, git_repo, "changes")
+    (git_repo / "b.txt").write_text("second round\n")
+    os.environ["OCRL_FAKE_FILE"] = "README.md:4"
+    assert execute_fake(activation, git_repo, "medium-file").verdict == "APPROVED"
+
+    (git_repo / "b.txt").write_text("third round\n")
+    review = execute_fake(activation, git_repo, "medium-file")
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert "README.md:4" in review.findings
+
+
+def test_round_two_with_late_block_severity_medium_blocks_as_before(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")
+    (git_repo / "b.txt").write_text("second round\n")
+    os.environ["OCRL_FAKE_FILE"] = "README.md:4"
+    review = execute_fake(activation, git_repo, "medium-file", config=config_with(late_block_severity="medium"))
+    assert review.verdict == "CHANGES_REQUIRED"
+
+
+def test_range_txt_discloses_the_blocking_rules_and_the_policy_round(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")
+    first = (activation.act_dir / "bundles" / "001" / "range.txt").read_text()
+    assert "## Blocking rules\n" in first
+    assert "review round of this phase: 1\n" in first
+    assert "late_block_severity: high\n" in first
+
+    (git_repo / "b.txt").write_text("second round\n")
+    execute_fake(activation, git_repo, "approve")
+    second = (activation.act_dir / "bundles" / "002" / "range.txt").read_text()
+    assert "review round of this phase: 2\n" in second
+    assert "From round 2 on, a finding blocks only if its path is in *Changed since round 1*" in second
+
+
+def test_range_txt_says_when_the_late_rule_is_off_for_a_later_round(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")
+    history = activation.get_array_of_dicts("round_history")
+    history[0]["findings"] = ["tampered"]
+    activation.update(round_history=history)
+    activation.save()
+    (git_repo / "b.txt").write_text("second round\n")
+    os.environ["OCRL_FAKE_FILE"] = "README.md:4"
+    review = execute_fake(activation, git_repo, "medium-file")
+    assert review.verdict == "CHANGES_REQUIRED", "no scope: the ordinary rule"
+    text = (activation.act_dir / "bundles" / "002" / "range.txt").read_text()
+    assert "The late-round rule is not in effect for this round" in text
+
+
+def test_a_dot_slash_deferred_finding_still_blocks_the_next_review(activation: state.State, git_repo: Path) -> None:
+    """Regression: deferral is one approval's grace whatever spelling the reviewer used.
+
+    ``covers`` normalises a leading ``./`` on the finding side, so ``prior_files`` has to hold
+    the normalised form too -- storing the raw ``./README.md:4`` made the very same finding
+    miss its own recorded line on every later round and be deferred again, indefinitely."""
+    execute_fake(activation, git_repo, "changes")
+    (git_repo / "b.txt").write_text("second round\n")
+    os.environ["OCRL_FAKE_FILE"] = "./README.md:4"
+    assert execute_fake(activation, git_repo, "medium-file").verdict == "APPROVED", "round 2 defers it once"
+
+    (git_repo / "b.txt").write_text("third round\n")
+    review = execute_fake(activation, git_repo, "medium-file")
+    assert review.verdict == "CHANGES_REQUIRED", "round 3 must treat it as a known finding"
+    assert "./README.md:4" in review.findings
+    assert review.deferred == ""
+
+
+def _two_call_reviewer(tmp_path: Path, first: str, second: str) -> None:
+    """A stand-in whose first invocation and every later one emit different blocks.
+
+    The cold confirmation is a second call in the same ``execute``, so this is how a test
+    gives the warm round and the cold one different output.
+    """
+    counter = tmp_path / "call-count"
+    script = tmp_path / "two-call.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f"n=$(cat {counter} 2>/dev/null || echo 0)\n"
+        f"n=$((n+1)); printf '%s' \"$n\" > {counter}\n"
+        f"if [ \"$n\" = 1 ]; then printf '%b' '{first}'; else printf '%b' '{second}'; fi\n"
+    )
+    script.chmod(0o755)
+    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+
+
+_WARM_DEFERS = (
+    "A medium elsewhere.\\n\\n<<<OCRL-FINDINGS>>>\\n"
+    "FINDING severity=medium actionable=yes file=README.md:4 | new medium in an untouched file\\n"
+    "VERDICT APPROVED\\n<<<OCRL-END>>>\\n"
+)
+
+
+def test_a_cold_approval_keeps_the_warm_rounds_deferred_findings(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """Turning ``cold_confirm`` on must not *lose* what the warm round reported.
+
+    The cold call replaces the warm round's **verdict**, not its record: a deferred finding
+    the warm round raised has to reach the approval message and ``round_history``, or the key
+    that exists to add scrutiny would silently drop findings the default keeps."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    (git_repo / "b.txt").write_text("second round\n")
+    _two_call_reviewer(tmp_path, _WARM_DEFERS, _APPROVES)
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True))
+
+    assert review.verdict == "APPROVED"
+    assert review.confirmed is not None, "the warm round is attached"
+    assert review.confirmed.deferred == "FINDING severity=medium actionable=yes file=README.md:4 | new medium in an untouched file\n"
+    assert "README.md:4" in review.deferred, "the acted-on review carries the warm round's deferred lines"
+    assert "README.md:4" in review.all_findings
+
+    entry = activation.get_array_of_dicts("round_history")[-1]
+    assert any("README.md:4" in line for line in entry["findings"]), "recorded, so a later round blocks on it"
+
+
+def test_a_finding_a_cold_approval_dropped_still_blocks_the_next_review(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """The consequence the record exists for: deferral lasts one approval, cold or not."""
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    (git_repo / "b.txt").write_text("second round\n")
+    _two_call_reviewer(tmp_path, _WARM_DEFERS, _APPROVES)
+    assert reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True)).verdict == "APPROVED"
+
+    (git_repo / "b.txt").write_text("third round\n")
+    os.environ["OCRL_FAKE_FILE"] = "README.md:4"
+    review = execute_fake(activation, git_repo, "medium-file", config=config_with())
+
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert "README.md:4" in review.findings
+
+
+def test_carry_forward_deduplicates_lines_both_invocations_reported() -> None:
+    line = "FINDING severity=medium actionable=yes file=README.md:4 | same finding\n"
+    cold = Review(verdict="APPROVED", all_findings=line, deferred=line)
+    warm = Review(verdict="APPROVED", all_findings=line, deferred=line)
+    reviewer._carry_forward(cold, warm)
+    assert cold.all_findings == line
+    assert cold.deferred == line
+
+
+def test_carry_forward_never_lists_a_line_as_both_blocking_and_deferred() -> None:
+    """The cold call blocked on what the warm one deferred: it is blocking, not deferred."""
+    line = "FINDING severity=medium actionable=yes file=README.md:4 | same finding\n"
+    cold = Review(verdict="CHANGES_REQUIRED", findings=line, all_findings=line)
+    warm = Review(verdict="APPROVED", all_findings=line, deferred=line)
+    reviewer._carry_forward(cold, warm)
+    assert cold.findings == line
+    assert cold.deferred == ""
+    assert cold.all_findings == line
+
+
+def test_carry_forward_leaves_a_failed_cold_call_alone() -> None:
+    """An ``OP_FAILURE`` keeps its finding fields empty on purpose and records no round."""
+    warm = Review(verdict="APPROVED", all_findings="FINDING severity=low actionable=no file=a.py:1 | x\n")
+    cold = Review(verdict="OP_FAILURE", kind="contract", error="no VERDICT line")
+    reviewer._carry_forward(cold, warm)
+    assert cold.all_findings == ""
+    assert cold.deferred == ""
+
+
+def test_carry_forward_keeps_the_warm_rounds_supersedes_lines() -> None:
+    """Merging findings but not retractions would make a round look more stuck than it was."""
+    warm = Review(verdict="APPROVED", supersedes="SUPERSEDES round=1 file=a.py:1 | retracted\n")
+    cold = Review(verdict="APPROVED")
+    reviewer._carry_forward(cold, warm)
+    assert cold.supersedes == "SUPERSEDES round=1 file=a.py:1 | retracted\n"
+
+
+def test_a_cold_confirmed_report_shows_each_invocations_own_transcript(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
+    (git_repo / "b.txt").write_text("second round\n")
+    _two_call_reviewer(tmp_path, _WARM_DEFERS, _APPROVES)
+
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True))
+    text = Path(review.report).read_text()
+
+    assert "The cold section's finding lists are this **round's record**" in text
+    assert "Round with context (not the verdict acted on)" in text
+    assert "Cold confirmation (the verdict acted on)" in text

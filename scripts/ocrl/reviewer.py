@@ -106,9 +106,9 @@ from typing import IO, TYPE_CHECKING, Any, Final
 import ocrl
 from ocrl import oscillation, paths, planrev, report
 from ocrl.atomic import FILE_MODE, ensure_private_dir, read_verified_file, verified_file
-from ocrl.config import Config, severity_rank, threshold_rank
+from ocrl.config import Config, late_threshold_rank, severity_rank, threshold_rank
 from ocrl.errors import OcrlError
-from ocrl.gitsnap import checked_tree, git_run, looks_like_object_id
+from ocrl.gitsnap import ChangedPathsUnavailable, changed_paths_strict, checked_tree, git_run, looks_like_object_id
 from ocrl.paths import sha256_hex, state_root
 from ocrl.state import State
 from ocrl.util import log, now
@@ -122,6 +122,7 @@ __all__ = [
     "ContractError",
     "Finding",
     "Invocation",
+    "LateScope",
     "PlanEvidenceCorrupted",
     "Review",
     "ReviewerFailed",
@@ -137,6 +138,7 @@ __all__ = [
     "continuity_summary",
     "execute",
     "invoke",
+    "late_scope",
     "parse",
     "permission",
     "review_argv",
@@ -322,7 +324,7 @@ _TRAILING_SPACE: Final = re.compile(rf"[{_SPACE}]+$")
 _FINDING_RE: Final = re.compile(
     r"^FINDING[ \t]+severity=(?P<severity>info|low|medium|high|critical)"
     r"[ \t]+actionable=(?P<actionable>yes|no)"
-    rf"[ \t]+file=[^|{_SPACE}](?:[^|]*[^|{_SPACE}])?[ \t]*\|[ \t]*[^{_SPACE}]"
+    rf"[ \t]+file=(?P<file>[^|{_SPACE}](?:[^|]*[^|{_SPACE}])?)[ \t]*\|[ \t]*[^{_SPACE}]"
 )
 
 #: The ``SUPERSEDES`` grammar, exactly as ``prompts/reviewer-phase.md`` specifies it:
@@ -487,6 +489,8 @@ class Finding:
     line: str
     severity: str
     actionable: bool
+    #: The raw ``file=`` value -- ``path``, ``path:line`` or ``-`` -- exactly as written.
+    file: str = "-"
 
 
 @dataclass
@@ -511,6 +515,15 @@ class Review:
     kind: str = ""
     #: Blocking ``FINDING`` lines, newline-terminated.
     findings: str = ""
+    #: ``FINDING`` lines that are actionable and at or above ``block_severity`` but did
+    #: **not** block this review, newline-terminated -- same shape as ``findings``. Only ever
+    #: non-empty under the late-round rule (:class:`LateScope`): from the second round of a
+    #: phase on, a finding that is new, outside the paths changed since the previous round,
+    #: and below ``late_block_severity`` is deferred rather than blocking. Shown on every
+    #: approval path so it is fixed or knowingly carried; it stays in ``round_history`` as
+    #: evidence, so a later review of the same phase treats its path as a known finding and
+    #: blocks on it. Empty whenever the verdict is not one this review recomputed.
+    deferred: str = ""
     #: Every ``FINDING`` line, newline-terminated.
     all_findings: str = ""
     #: Every ``SUPERSEDES`` line, newline-terminated. Recorded only -- it never changes
@@ -545,6 +558,155 @@ class Review:
     #: returned review is always the cold one -- see ``execute``'s docstring for why that is
     #: the verdict every caller must act on.
     confirmed: Review | None = None
+
+
+@dataclass(frozen=True)
+class LateScope:
+    """What may block from the second review round of a phase on.
+
+    Built by :func:`late_scope` for phase reviews only, and only when it can be built
+    *honestly* -- see that function for every condition under which it is ``None`` instead.
+    With a scope in hand, :func:`parse` blocks an actionable finding at or above
+    ``block_severity`` when its path is in ``changed_paths`` (changed since the previous
+    round's tree), or in ``prior_files`` (an earlier round already raised a finding there), or
+    when its severity is at or above ``late_block_severity`` regardless of path. Anything else
+    is *deferred* (``Review.deferred``): reported, recorded, but not blocking this approval.
+
+    ``None`` -- no scope -- means the ordinary rule: every actionable finding at or above
+    ``block_severity`` blocks. A scope can therefore only ever narrow what blocks, so every
+    doubt in building one must resolve to ``None``, never to a smaller set (Rule 1).
+    """
+
+    #: Exact paths from ``git diff --name-status`` between the previous round's tree and
+    #: this one's -- both sides of a rename. Git never prints a ``./`` prefix, so these are
+    #: already in the form :func:`_normalized_file` produces.
+    changed_paths: frozenset[str]
+    #: Every earlier round's ``file=`` value **as :func:`_normalized_file` renders it**,
+    #: each one both whole and with a trailing ``:line`` stripped -- so a finding re-raised at
+    #: another line of the same file still counts as known. Normalised on the way in because
+    #: :meth:`covers` normalises on the way out, and the two sides have to agree: stored raw,
+    #: a ``file=./README.md:4`` never matched *its own* recorded line, so the deferral that
+    #: is meant to last one approval repeated on every later round instead.
+    prior_files: frozenset[str]
+
+    def covers(self, file: str) -> bool:
+        """Whether a ``FINDING``'s raw ``file=`` value is inside this scope.
+
+        Normalised through :func:`_normalized_file` first, then matched whole (a changed file
+        may itself be named ``x:1``); only if that fails is a trailing ``:digits`` stripped
+        and compared again. ``-`` (no single location) is always in scope: a finding the
+        reviewer could not pin to a path must not be deferred on the strength of that, or a
+        missing location would become a way past the gate.
+        """
+        if file == "-":
+            return True
+        file = _normalized_file(file)
+        known = self.changed_paths | self.prior_files
+        if file in known:
+            return True
+        stripped = _LINE_SUFFIX_RE.sub("", file)
+        return stripped != file and stripped in known
+
+
+#: A trailing ``:<digits>`` on a ``file=`` value.
+_LINE_SUFFIX_RE: Final = re.compile(r":[0-9]+$")
+
+
+def _normalized_file(file: str) -> str:
+    """One spelling for a ``FINDING``'s ``file=`` value, used on **both** sides of a match.
+
+    Only a leading ``./`` is removed: git never emits one, so a reviewer that writes
+    ``./src/a.py`` means the path git calls ``src/a.py``. Every producer and consumer of a
+    :class:`LateScope` path goes through this, because a normalisation applied to one side
+    alone silently stops a value matching itself -- which in this direction means a deferred
+    finding never becoming a known one.
+    """
+    return file[2:] if file.startswith("./") else file
+
+
+def _validated_prior_files(state: State, target: Target) -> frozenset[str] | None:
+    """The ``file=`` values every earlier round of this label raised, or ``None`` when the
+    history cannot be trusted to be complete.
+
+    **Malformed history disables the scope; it never narrows it.** ``_prior_rounds_section``
+    drops a tampered line and shows the rest, which is right for a display. Here a dropped
+    line would mean a path missing from ``prior_files`` -- and a missing path is what
+    *authorises* a deferral. So every entry for this label at this generation must be whole:
+    an int ``seq``, an object-id ``tree``, a verdict in ``_ROUND_VERDICTS``, a list of
+    ``findings`` each of which is one line matching ``_FINDING_RE``. Any violation is ``None``.
+
+    Each surviving ``file=`` value is stored through :func:`_normalized_file`, in both its
+    whole and its ``:line``-stripped form -- the same normalisation :meth:`LateScope.covers`
+    applies to the value it is asked about, so a finding always matches its own recorded line.
+    """
+    generation = state.get_int("activation_generation")
+    files: set[str] = set()
+    for entry in state.get_array_of_dicts("round_history"):
+        if entry.get("label") != target.label or entry.get("generation") != generation:
+            continue
+        seq = entry.get("seq")
+        tree = entry.get("tree")
+        findings = entry.get("findings")
+        if (
+            not isinstance(seq, int)
+            or isinstance(seq, bool)
+            or not (_is_single_stored_line(tree) and looks_like_object_id(tree))
+            or entry.get("verdict") not in _ROUND_VERDICTS
+            or not isinstance(findings, list)
+        ):
+            log(f"late scope for {target.label}: a round_history entry is malformed; every finding at or above block_severity blocks this round")
+            return None
+        for line in findings:
+            match = _FINDING_RE.match(line) if _is_single_stored_line(line) else None
+            if match is None:
+                log(f"late scope for {target.label}: a stored finding line is malformed; every finding at or above block_severity blocks this round")
+                return None
+            # Normalised exactly as `LateScope.covers` normalises the value it is asked
+            # about: a stored `./README.md:4` compared against a normalised `README.md:4`
+            # matches nothing, so the finding this line records would be deferred again on
+            # every later round instead of blocking the next one.
+            file = _normalized_file(match.group("file"))
+            files.add(file)
+            files.add(_LINE_SUFFIX_RE.sub("", file))
+    return frozenset(files)
+
+
+def late_scope(target: Target, *, state: State) -> LateScope | None:
+    """The :class:`LateScope` for this review, or ``None`` when the ordinary rule applies.
+
+    ``None`` -- and therefore "everything at or above ``block_severity`` blocks" -- for a
+    ``final`` review, for the first round of a phase (no earlier round of this label at this
+    generation), when the previous round's tree does not resolve through
+    :func:`ocrl.gitsnap.checked_tree`, and when any earlier entry fails
+    :func:`_validated_prior_files`. **The round here is the policy round, not the session
+    round**: the count of recorded ``round_history`` entries for this label at this
+    generation (:func:`_previous_round`), the same pair the incremental diff and
+    ``range.txt``'s "Changed since round N-1" are keyed off, so the three agree by
+    construction. The session counter ``execute`` discloses as ``round:`` resets whenever
+    continuity drops and advances even for a round that recorded nothing, and neither of those
+    may loosen what blocks.
+
+    Raises :class:`BundleError` when the changed-path set cannot be obtained honestly
+    (:func:`ocrl.gitsnap.changed_paths_strict`): the scope exists to let findings through,
+    so a guess at it is a refusal to review, exactly like a diff that cannot be produced.
+    """
+    if not target.is_phase:
+        return None
+    previous_tree_raw, previous_round_number = _previous_round(state, target)
+    if previous_round_number < 1:
+        return None
+    previous_tree = checked_tree(target.repo, previous_tree_raw)
+    if not previous_tree:
+        log(f"late scope for {target.label}: the previous round's tree does not resolve; every finding at or above block_severity blocks this round")
+        return None
+    prior_files = _validated_prior_files(state, target)
+    if prior_files is None:
+        return None
+    try:
+        changed = changed_paths_strict(target.repo, previous_tree, target.head)
+    except ChangedPathsUnavailable as exc:
+        raise BundleError(f"the paths changed since round {previous_round_number} could not be listed: {exc}") from exc
+    return LateScope(changed_paths=changed, prior_files=prior_files)
 
 
 @dataclass(frozen=True)
@@ -860,6 +1022,45 @@ def _prior_rounds_section(state: State, target: Target, config: Config) -> str:
     return "".join(out)
 
 
+def _blocking_rules_section(target: Target, config: Config, *, previous_round_number: int, scope: LateScope | None) -> str:
+    """``## Blocking rules`` -- the thresholds the gate recomputes the verdict with.
+
+    States the review round of this phase (``previous_round_number + 1``, the policy round
+    -- a count of recorded rounds, not the session counter on the ``round:`` line above) and,
+    for a phase review, whether the late-round rule is in effect. It is disclosure: the
+    reviewer's ``VERDICT`` is asked to follow these rules, and the gate applies them whatever
+    the reviewer says.
+    """
+    block = config.as_str("block_severity")
+    late = config.as_str("late_block_severity")
+    out = ["\n## Blocking rules\n\n"]
+    out.append(f"block_severity: {block}\n")
+    if not target.is_phase:
+        out.append(f"A finding blocks when it is actionable=yes and its severity is at or above {block}.\n")
+        return "".join(out)
+    review_round = previous_round_number + 1
+    out.append(f"late_block_severity: {late}\n")
+    out.append(f"review round of this phase: {review_round}\n")
+    if scope is not None:
+        out.append(
+            f"From round 2 on, a finding blocks only if its path is in *Changed since round {previous_round_number}*, "
+            f"or it was raised in an earlier round of this review, or its severity is at or above late_block_severity ({late}). "
+            f"Every other actionable finding at or above block_severity ({block}) is reported and recorded but does not block this round.\n"
+        )
+    elif review_round > 1:
+        out.append(
+            f"The late-round rule is not in effect for this round (the earlier rounds' record could not be verified), "
+            f"so a finding blocks when it is actionable=yes and its severity is at or above {block}.\n"
+        )
+    else:
+        out.append(
+            f"Round 1: a finding blocks when it is actionable=yes and its severity is at or above {block}. "
+            "Cover the whole diff now -- from round 2 on, a new finding outside the paths that changed since the previous round "
+            f"blocks only at or above late_block_severity ({late}).\n"
+        )
+    return "".join(out)
+
+
 def _range_text(  # noqa: PLR0913 - one independently meaningful piece of evidence per param; bundling them would be an artificial object
     target: Target,
     *,
@@ -871,6 +1072,7 @@ def _range_text(  # noqa: PLR0913 - one independently meaningful piece of eviden
     previous_tree: str = "",
     previous_round_number: int = 0,
     incremental_omitted: bool = False,
+    scope: LateScope | None = None,
 ) -> str:
     """The bundle's ``range.txt``: what is under review, and what is *not* represented."""
     repo, base, head = target.repo, target.base, target.head
@@ -882,6 +1084,8 @@ def _range_text(  # noqa: PLR0913 - one independently meaningful piece of eviden
     out.append(f"base_tree: {base}\n")
     out.append(f"head_tree: {head}\n")
     out.append(f"repository: {repo}\n")
+
+    out.append(_blocking_rules_section(target, config, previous_round_number=previous_round_number, scope=scope))
 
     count = state.phase_count()
     if target.is_phase:
@@ -1154,9 +1358,20 @@ def _run_verify(repo: str, command: str, dest: Path) -> None:
 
 
 def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evidence per param; bundling them would be an artificial object
-    target: Target, dest: Path, *, state: State, config: Config, warnings: str = "", round_number: int = 0
+    target: Target,
+    dest: Path,
+    *,
+    state: State,
+    config: Config,
+    warnings: str = "",
+    round_number: int = 0,
+    scope: LateScope | None = None,
 ) -> str:
     """Assemble everything the reviewer is shown, under ``dest``.
+
+    ``scope`` is the late-round blocking scope :func:`late_scope` built for this review (or
+    ``None``); it is disclosed in ``range.txt``'s "Blocking rules" section and nothing else
+    here reads it -- the decision it drives is :func:`parse`'s.
 
     Raises :class:`BundleTooLarge` past ``hard_diff_ceiling``, :class:`PlanEvidenceCorrupted`
     when a recorded plan revision cannot be verified, and :class:`BundleError` when the diff
@@ -1226,6 +1441,7 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
         previous_tree=previous_tree,
         previous_round_number=previous_round_number,
         incremental_omitted=incremental_omitted,
+        scope=scope,
     )
     _write_private(dest / "range.txt", _encode(range_text))
 
@@ -2012,7 +2228,9 @@ def _scan_block(block_lines: list[str], *, allow_supersedes: bool) -> tuple[list
             continue
         match = _FINDING_RE.match(line)
         if match is not None:
-            findings.append(Finding(line=line, severity=match.group("severity"), actionable=match.group("actionable") == "yes"))
+            findings.append(
+                Finding(line=line, severity=match.group("severity"), actionable=match.group("actionable") == "yes", file=match.group("file"))
+            )
             continue
         if allow_supersedes and _SUPERSEDES_RE.match(line):
             supersedes.append(line)
@@ -2073,7 +2291,7 @@ def _byte_contract_violation(raw: bytes) -> str:
     return ""
 
 
-def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False) -> Review:
+def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False, scope: LateScope | None = None) -> Review:
     """Turn the reviewer's output into a :class:`Review`, recomputing the verdict.
 
     The reviewer's own verdict is advisory: any actionable finding at or above
@@ -2084,6 +2302,14 @@ def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False) -> 
 
     ``allow_supersedes`` defaults to false and is set true only for a phase review (see
     :func:`_scan_block`): a ``SUPERSEDES`` line from any other invocation fails the contract.
+
+    ``scope`` (:class:`LateScope`, phase reviews from their second round on) narrows what
+    blocks: a finding that would block under ``block_severity`` alone still needs to be in
+    the scope -- a changed path, a path an earlier round raised, or a severity at or above
+    ``late_block_severity`` -- and is otherwise recorded in ``Review.deferred``. ``None`` is
+    the ordinary rule. The reviewer's ``CHANGES_REQUIRED`` still wins over a deferred-only
+    block set: stricter-wins is unchanged, the scope only ever decides for the gate's own
+    recomputation.
     """
     review = Review()
     try:
@@ -2115,8 +2341,22 @@ def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False) -> 
     # would do the opposite -- an unknown `block_severity` ranking at 5 would clear almost
     # nothing, silently blocking far less than the default. See `config.threshold_rank`.
     threshold = threshold_rank(config.as_str("block_severity"))
-    blocking = [f for f in findings if f.actionable and severity_rank(f.severity) >= threshold]
+    late_threshold = late_threshold_rank(config)
+    blocking: list[Finding] = []
+    deferred: list[Finding] = []
+    for finding in findings:
+        rank = severity_rank(finding.severity)
+        if not (finding.actionable and rank >= threshold):
+            continue
+        # Round 1, a final review, or a scope that could not be built honestly: the ordinary
+        # rule. Otherwise the late-round rule -- and the severity floor is checked before the
+        # path, so a high/critical finding blocks wherever it is.
+        if scope is None or rank >= late_threshold or scope.covers(finding.file):
+            blocking.append(finding)
+        else:
+            deferred.append(finding)
     review.findings = "".join(f"{finding.line}\n" for finding in blocking)
+    review.deferred = "".join(f"{finding.line}\n" for finding in deferred)
 
     # Measured over the block as the shell measured it: joined, trailing newlines stripped.
     block = "\n".join(block_lines).rstrip("\n")
@@ -2909,9 +3149,12 @@ def _classify_op_failure(exc: ReviewerFailed, out_path: Path) -> str:
     return "operational"
 
 
-def _run_invocation(target: Target, run: Invocation, *, config: Config) -> tuple[Review, bool]:
+def _run_invocation(target: Target, run: Invocation, *, config: Config, scope: LateScope | None = None) -> tuple[Review, bool]:
     """One invoke()+parse() cycle. The bool says whether the process ran to completion --
-    only then is there anything for ``capture_session``/``_release_claim`` to act on."""
+    only then is there anything for ``capture_session``/``_release_claim`` to act on.
+
+    ``scope`` is handed straight to :func:`parse`; the same one serves the primary and the
+    cold invocation of a review, since both judge the same bundle under the same rules."""
     review = Review()
     review.raw = str(run.out_path)
     try:
@@ -2929,7 +3172,7 @@ def _run_invocation(target: Target, run: Invocation, *, config: Config) -> tuple
         review.error = str(exc)
         review.kind = _classify_op_failure(exc, run.out_path)
         return review, False
-    review = parse(run.out_path, config=config, allow_supersedes=target.is_phase)
+    review = parse(run.out_path, config=config, allow_supersedes=target.is_phase, scope=scope)
     review.raw = str(run.out_path)
     return review, True
 
@@ -2956,6 +3199,10 @@ class _ReviewRun:
     #: SHA-256 of the ``manifest`` `build_bundle` wrote. Every read of this bundle is checked
     #: against it, so the attachment set cannot be shortened or substituted after the fact.
     bundle_digest: str = ""
+    #: The late-round blocking scope (:func:`late_scope`), ``None`` for the ordinary rule.
+    #: Computed once, before the bundle, so `range.txt`'s disclosure and `parse`'s decision
+    #: are the same object.
+    scope: LateScope | None = None
 
 
 def _settle_pointer(rr: _ReviewRun, ref: SessionRef, *, started_ms: int, invoked: bool) -> str:
@@ -3010,6 +3257,56 @@ def stage_invocation(
     return tuple(staged), tuple(context_staged)
 
 
+def _merge_lines(primary: str, extra: str) -> str:
+    """Union of two newline-terminated line blocks: ``primary``'s order first, deduplicated.
+
+    Split with :func:`_records` -- ``\\n`` only -- for the reason ``_record_round`` documents:
+    ``str.splitlines`` would break a ``FINDING`` detail carrying a stray ``\\r`` or U+2028 into
+    two fragments, and a fragment is not a line the contract allows.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for block in (primary, extra):
+        for line in _records(block):
+            if line and line not in seen:
+                seen.add(line)
+                out.append(line)
+    return "".join(f"{line}\n" for line in out)
+
+
+def _carry_forward(cold: Review, continued: Review) -> None:
+    """Fold the warm round's reported lines into the cold review that replaces it.
+
+    **A cold confirmation replaces the warm round's verdict, not its record of findings.**
+    Both invocations read the same bundle, and the gate acts on the cold verdict -- but the
+    warm one genuinely reported what it reported, and two things downstream depend on that
+    record surviving: the approval message a caller shows (``report.deferred_text``) and the
+    ``round_history`` entry, whose ``findings`` become the next round's ``prior_files``. Left
+    unmerged, a warm round that raised a medium in an untouched file -- deferred, so the
+    verdict was still ``APPROVED`` -- lost it the moment a cold call approved without
+    mentioning it: nothing showed it to anyone, and the *next* round did not know the path,
+    so the deferral that is meant to last one approval repeated indefinitely. Turning on a key
+    whose whole purpose is more scrutiny must not drop findings the default keeps.
+
+    Merged only when the cold call produced a **parsed verdict**. An ``OP_FAILURE`` keeps its
+    finding fields deliberately empty (:func:`_fail`: half-read evidence would suggest the
+    parse succeeded) and records no round, so there is nothing for the merge to serve there.
+
+    ``findings`` -- the blocking set -- is **not** merged: ``_confirm_cold`` runs only for a
+    warm ``APPROVED``, which by construction has an empty blocking set (:func:`parse` returns
+    ``CHANGES_REQUIRED`` whenever one is non-empty), and merging blocking lines without
+    recomputing the verdict would produce a ``Review`` whose verdict and findings contradict
+    each other. A line the cold call blocks on is dropped from the merged ``deferred`` for the
+    same reason: it cannot be both.
+    """
+    if cold.verdict not in _ROUND_VERDICTS:
+        return
+    cold.all_findings = _merge_lines(cold.all_findings, continued.all_findings)
+    cold.supersedes = _merge_lines(cold.supersedes, continued.supersedes)
+    blocking = set(_records(cold.findings))
+    cold.deferred = "".join(f"{line}\n" for line in _records(_merge_lines(cold.deferred, continued.deferred)) if line not in blocking)
+
+
 def _confirm_cold(rr: _ReviewRun, continued: Review) -> Review:
     """The ``cold_confirm`` path: one more, session-less review of the same bundle, in
     place of ``continued`` -- with ``continued`` attached via ``.confirmed`` so the report can
@@ -3026,6 +3323,11 @@ def _confirm_cold(rr: _ReviewRun, continued: Review) -> Review:
     should be as unwilling to attach a bundle that has stopped being intact as the first was.
     A staging failure makes the confirmation an ``OP_FAILURE``, which is not an approval --
     the only direction Rule 1 allows when the cold check cannot be carried out.
+
+    The warm round's own reported lines are folded into the returned review by
+    :func:`_carry_forward`, which is what keeps the *record* whole while the *verdict* is
+    replaced -- see its docstring. ``continued`` itself is left exactly as it was, so the
+    report can still show each invocation's own words next to its own transcript.
     """
     cold_staging = staging_dir_for(rr.state.act_dir, f"{rr.label}-cold")
     try:
@@ -3045,10 +3347,11 @@ def _confirm_cold(rr: _ReviewRun, continued: Review) -> Review:
         cold=True,
     )
     try:
-        cold, _invoked = _run_invocation(rr.target, cold_run, config=rr.config)
+        cold, _invoked = _run_invocation(rr.target, cold_run, config=rr.config, scope=rr.scope)
     finally:
         shutil.rmtree(cold_staging, ignore_errors=True)
     cold.confirmed = continued
+    _carry_forward(cold, continued)
     return cold
 
 
@@ -3589,9 +3892,12 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     title = _unique_title(state, target, label)
 
     # Built before the run record, because the run carries the bundle's manifest digest and
-    # that does not exist until the bundle does.
+    # that does not exist until the bundle does. The late-round scope comes first: `range.txt`
+    # discloses the rule it implies, and `parse` decides by it, so it is one value read from
+    # the same in-memory `state` the bundle's own previous-round lookup reads.
     try:
-        digest = build_bundle(target, bundle_dir, state=state, config=config, warnings=warnings, round_number=ref.round)
+        scope = late_scope(target, state=state)
+        digest = build_bundle(target, bundle_dir, state=state, config=config, warnings=warnings, round_number=ref.round, scope=scope)
     except (BundleTooLarge, PlanEvidenceCorrupted) as exc:
         _release_reservations(state, ref, claim_id=claim_id, expected=expected, config=config)
         return Review(verdict="NEEDS_HUMAN", error=str(exc))
@@ -3611,6 +3917,7 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
         expected=expected,
         claim_id=claim_id,
         bundle_digest=digest,
+        scope=scope,
     )
 
     try:
@@ -3679,7 +3986,7 @@ def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expec
 
     started_ms = int(time.time() * 1000)
     try:
-        review, invoked = _run_invocation(target, run, config=config)
+        review, invoked = _run_invocation(target, run, config=config, scope=rr.scope)
     finally:
         # The staged copies exist only for the length of this call. `run.context_files` keeps
         # the record of what was attached, so removing the files cannot affect the

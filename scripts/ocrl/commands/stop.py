@@ -16,6 +16,7 @@ Two shapes of answer, and the difference matters:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, NoReturn
@@ -49,6 +50,12 @@ class _Gate:
     #: What the activation was when this turn end started. Every escalation below is guarded
     #: with it, because a review takes minutes and the user can leave the mode during them.
     expected: hooks.Activation
+    #: The deferred-findings paragraph an approving unreviewed-work sweep left behind
+    #: (``report.deferred_text``), or "". The sweep itself emits nothing on approval -- the
+    #: turn goes on to the outstanding-phase, pause or completion response -- so whichever of
+    #: those speaks next carries it, as the first paragraph of the same ``reason`` /
+    #: ``systemMessage``: one channel, not a new field. See :func:`_say`.
+    deferred: str = ""
 
 
 NO_SESSION: Final = (
@@ -322,6 +329,11 @@ def _terminal_status_or_none(state: State, config: Config) -> str:
     return status if status in ("COMPLETE", "DISARMED", "RESUMED") else ""
 
 
+def _say(gate: _Gate, text: str) -> str:
+    """``text``, prefixed by the sweep's deferred-findings paragraph when there is one."""
+    return f"{gate.deferred.rstrip(chr(10))}\n\n{text}" if gate.deferred else text
+
+
 def _block_counted(gate: _Gate, reason: str, *, after_completion_refusal: bool = False) -> NoReturn:
     """Block the turn, but account for whether anything moved since the last block.
 
@@ -363,6 +375,7 @@ def _block_counted(gate: _Gate, reason: str, *, after_completion_refusal: bool =
     than by ``_escalate``'s comparison against ``gate.expected``, which existed only to
     reconstruct, indirectly, the same fact a fresh reload now answers directly.
     """
+    reason = _say(gate, reason)
     state = gate.state
     peeked = _terminal_status_or_none(state, gate.config)
     if peeked:
@@ -555,9 +568,11 @@ def _review(gate: _Gate) -> NoReturn:
     # `ocrl.commands.completion`.
     pending = completion.start(state, config=gate.config, repo=worktree)
 
-    # Unreviewed work sweep: anything not yet approved gets reviewed now.
+    # Unreviewed work sweep: anything not yet approved gets reviewed now. An approving sweep
+    # returns the deferred-findings paragraph (or ""), which every response below carries as
+    # its first paragraph -- the sweep has no response of its own to put it in.
     if tree != state.get("last_approved_tree") and not state.tree_approved(tree):
-        _sweep(gate, snap=snap, phase=phase)
+        gate = dataclasses.replace(gate, deferred=_sweep(gate, snap=snap, phase=phase))
 
     finish_requested = _finish_requested_after_sweep(gate)
 
@@ -571,11 +586,11 @@ def _review(gate: _Gate) -> NoReturn:
     # asked to finish early: pause here. Status, baseline_tree and approved_trees are
     # untouched, and `_final` never runs -- a pause must never reach COMPLETE, which disarms.
     if phase <= total and not finish_requested:
-        gate.hook.stop_ok(PAUSED.format(phase=phase, total=total, target=target, description=state.phase_desc(phase)).rstrip("\n"))
+        gate.hook.stop_ok(_say(gate, PAUSED.format(phase=phase, total=total, target=target, description=state.phase_desc(phase)).rstrip("\n")))
 
     # This exact tree already passed a final review, so there is nothing left to say.
     if state.get("final_done_tree") == tree:
-        gate.hook.stop_ok()
+        gate.hook.stop_ok(_say(gate, ""))
 
     if not gate.config.as_bool("final_review") and not finish_requested:
         # State is not a trust boundary: everything above (the outstanding-phase and pause
@@ -599,12 +614,19 @@ def _review(gate: _Gate) -> NoReturn:
             gate,
             f"the no-review completion path was reached with unexpected state (status={state.get('status')!r}, phase={phase}, total={total})",
         )
-        gate.hook.stop_ok(SKIP_PATH_STATE_INVALID.format(status=state.get("status"), phase=phase, total=total).rstrip("\n"))
+        gate.hook.stop_ok(_say(gate, SKIP_PATH_STATE_INVALID.format(status=state.get("status"), phase=phase, total=total).rstrip("\n")))
     _final(gate, pending, snap=snap, total=total)
 
 
-def _sweep(gate: _Gate, *, snap: Snapshot, phase: int) -> None:
-    """Review whatever is in the worktree but not yet approved, before the turn may end."""
+def _sweep(gate: _Gate, *, snap: Snapshot, phase: int) -> str:
+    """Review whatever is in the worktree but not yet approved, before the turn may end.
+
+    Returns only on approval, with the deferred-findings paragraph the approval carries
+    (``report.deferred_text``, "" when nothing was deferred); every other outcome blocks or
+    ends the turn from here. The caller stores it on the gate so the response that ends this
+    turn shows it -- an approval that silently dropped a deferred finding would be the one
+    place the late-round rule became invisible.
+    """
     from ocrl import report, reviewer  # noqa: PLC0415 - only a sweep needs the reviewer
 
     state, config = gate.state, gate.config
@@ -656,7 +678,7 @@ def _sweep(gate: _Gate, *, snap: Snapshot, phase: int) -> None:
             _block_counted(gate, SWEEP_ACTIVATION_MOVED)
         if superseded:
             _block_counted(gate, SWEEP_SUPERSEDED)
-        return
+        return report.deferred_text(review, what="turn end")
     if review.verdict == "CHANGES_REQUIRED":
         _block_counted(gate, report.reason(review, SWEEP_CHANGES, config=config).rstrip("\n"))
     if review.verdict == "NEEDS_HUMAN":
@@ -709,7 +731,7 @@ def _complete_without_review(gate: _Gate, pending: completion.Completion, *, sna
         reason="completed without a final cumulative review (final_review is disabled)",
         refuse_if_review_now_required=True,
     )
-    gate.hook.stop_ok(COMPLETE_UNREVIEWED.format(total=total).rstrip("\n"))
+    gate.hook.stop_ok(_say(gate, COMPLETE_UNREVIEWED.format(total=total).rstrip("\n")))
 
 
 def _final(gate: _Gate, pending: completion.Completion, *, snap: Snapshot, total: int) -> NoReturn:
@@ -724,10 +746,10 @@ def _final(gate: _Gate, pending: completion.Completion, *, snap: Snapshot, total
 
     if review.verdict == "APPROVED":
         _commit_or_yield_to_terminal(gate, pending, reviewed=snap.tree, reason="final cumulative review approved", review=review)
-        gate.hook.stop_ok(COMPLETE.format(base=base, head=snap.tree, total=total, report=review.report).rstrip("\n"))
+        gate.hook.stop_ok(_say(gate, COMPLETE.format(base=base, head=snap.tree, total=total, report=review.report).rstrip("\n")))
     if review.verdict == "CHANGES_REQUIRED":
         _block_counted(gate, report.reason(review, FINAL_CHANGES, config=config).rstrip("\n"))
     if review.verdict == "NEEDS_HUMAN":
         _escalate(gate, review.error)
-        gate.hook.stop_ok(FINAL_ESCALATED.format(error=review.error))
+        gate.hook.stop_ok(_say(gate, FINAL_ESCALATED.format(error=review.error)))
     _block_counted(gate, FINAL_FAILED.format(error=review.error))

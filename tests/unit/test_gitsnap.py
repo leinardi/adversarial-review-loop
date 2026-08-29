@@ -456,3 +456,80 @@ def test_is_ancestor_checked_distinguishes_no_from_cannot_answer(git_repo: Path)
         gitsnap.is_ancestor_checked(str(git_repo), root, "--output=/tmp/x")
     with pytest.raises(gitsnap.GitUnavailable):
         gitsnap.is_ancestor_checked(str(git_repo), root, "0" * 40)  # well-formed but absent
+
+
+# -- changed_paths_strict ------------------------------------------------------
+
+
+def _trees(repo: Path) -> tuple[str, str]:
+    return git(repo, "rev-parse", "HEAD^{tree}"), gitsnap.snapshot(str(repo)).tree
+
+
+def test_changed_paths_strict_lists_added_modified_and_deleted_paths(git_repo: Path) -> None:
+    (git_repo / "a.txt").write_text("modified\n")
+    (git_repo / "new.txt").write_text("added\n")
+    (git_repo / "gone.txt").write_text("to be deleted\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "setup")
+    (git_repo / "gone.txt").unlink()
+    (git_repo / "a.txt").write_text("modified again\n")
+    (git_repo / "later.txt").write_text("later\n")
+    base, head = _trees(git_repo)
+    assert gitsnap.changed_paths_strict(str(git_repo), base, head) == frozenset({"a.txt", "gone.txt", "later.txt"})
+
+
+def test_changed_paths_strict_keeps_both_sides_of_a_rename(git_repo: Path) -> None:
+    (git_repo / "src.txt").write_text("x" * 300 + "\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "setup")
+    (git_repo / "src.txt").rename(git_repo / "dst.txt")
+    base, head = _trees(git_repo)
+    assert gitsnap.changed_paths_strict(str(git_repo), base, head) == frozenset({"src.txt", "dst.txt"})
+
+
+def test_changed_paths_strict_is_empty_for_identical_trees(git_repo: Path) -> None:
+    base, _head = _trees(git_repo)
+    assert gitsnap.changed_paths_strict(str(git_repo), base, base) == frozenset()
+
+
+def test_changed_paths_strict_raises_on_a_git_failure(git_repo: Path) -> None:
+    with pytest.raises(gitsnap.ChangedPathsUnavailable, match="failed"):
+        gitsnap.changed_paths_strict(str(git_repo), "0" * 40, "HEAD")
+
+
+def test_changed_paths_strict_keeps_a_path_named_like_a_line_reference(git_repo: Path) -> None:
+    (git_repo / "x:1").write_text("colon\n")
+    base, head = _trees(git_repo)
+    assert "x:1" in gitsnap.changed_paths_strict(str(git_repo), base, head)
+
+
+@pytest.mark.parametrize("name", ["with|pipe.txt", " leading.txt", "trailing.txt "])
+def test_changed_paths_strict_refuses_a_path_no_finding_could_name(git_repo: Path, name: str) -> None:
+    (git_repo / name).write_text("unnameable\n")
+    base, head = _trees(git_repo)
+    with pytest.raises(gitsnap.ChangedPathsUnavailable, match="cannot be named by a finding"):
+        gitsnap.changed_paths_strict(str(git_repo), base, head)
+
+
+def test_changed_paths_strict_refuses_a_path_with_a_newline(git_repo: Path) -> None:
+    (git_repo / "new\nline.txt").write_text("unnameable\n")
+    base, head = _trees(git_repo)
+    with pytest.raises(gitsnap.ChangedPathsUnavailable, match="cannot be named by a finding"):
+        gitsnap.changed_paths_strict(str(git_repo), base, head)
+
+
+def test_changed_paths_strict_decodes_a_non_utf8_path_with_surrogateescape(git_repo: Path) -> None:
+    raw = b"caf\xe9.txt"
+    (git_repo / os.fsdecode(raw)).write_bytes(b"latin-1 name\n")
+    base, head = _trees(git_repo)
+    assert raw.decode("utf-8", "surrogateescape") in gitsnap.changed_paths_strict(str(git_repo), base, head)
+
+
+@pytest.mark.parametrize("stdout", [b"M\0", b"R100\0old\0", b"Q\0path\0", b"MM\0path\0", b"\0path\0"])
+def test_changed_paths_strict_refuses_a_truncated_or_unknown_record(git_repo: Path, monkeypatch: pytest.MonkeyPatch, stdout: bytes) -> None:
+    def fake_run(repo: str, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr=b"")
+
+    monkeypatch.setattr(gitsnap, "git_run", fake_run)
+    with pytest.raises(gitsnap.ChangedPathsUnavailable):
+        gitsnap.changed_paths_strict(str(git_repo), "a", "b")

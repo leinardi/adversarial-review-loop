@@ -76,7 +76,7 @@ def _coerce(key: str, raw: str) -> Any:
         return int(raw)
     if key in config_module.LIST_KEYS:
         return [part for part in raw.split(",") if part]
-    if key == "block_severity":
+    if key in config_module.SEVERITY_KEYS:
         # A word `config.threshold_rank` does not recognise silently ranks at 1 -- the
         # *laxest* threshold, not a refusal -- so a typo here would not error, it would
         # quietly make the gate block on (almost) everything. Rejecting it here is strictly
@@ -236,7 +236,7 @@ def _invalid_note(final: Config, key: str) -> str:
     ``Config.as_int`` falls back to ``DEFAULTS[key]`` for anything that will not ``int()``,
     so an unparseable stored ``"ttl_hours": "soon"`` is *not* what a real run uses. Showing
     the value from ``_typed_value`` without this note would show a number nothing actually
-    reads without saying so. ``block_severity`` gets the same treatment for the same reason,
+    reads without saying so. The severity keys get the same treatment for the same reason,
     but the silent fallback there is ``threshold_rank``'s rank ``1`` rather than a value in
     ``DEFAULTS`` -- ``_coerce`` refuses an unrecognised word when it comes through
     ``config set``, but a file written some other way (hand-edited, or set before that
@@ -248,7 +248,7 @@ def _invalid_note(final: Config, key: str) -> str:
             int(raw)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return "stored value is not an integer; showing the default"
-    elif key == "block_severity" and final.as_str(key).lower() not in config_module.SEVERITY_LABELS:
+    elif key in config_module.SEVERITY_KEYS and final.as_str(key).lower() not in config_module.SEVERITY_LABELS:
         return "not a recognised severity; the gate treats it as the laxest threshold"
     return ""
 

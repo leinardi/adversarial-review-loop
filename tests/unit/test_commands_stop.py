@@ -1664,3 +1664,35 @@ def test_an_unreadable_repository_is_reported_at_turn_end(git_repo: Path, tmp_pa
 
     assert "could not be read" in message
     assert "says nothing about whether the history was reviewed" in message
+
+
+# --------------------------------------------------------------------------
+# Late-round rule: the sweep's deferred findings ride on the next response
+# --------------------------------------------------------------------------
+
+
+def test_a_sweep_approval_with_deferred_findings_prefixes_the_outstanding_phase_block(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str]
+) -> None:
+    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env)
+    (git_repo / "unreviewed.txt").write_text("round one\n")
+    assert "requires changes" in blocked(stop(git_repo, env))
+
+    (git_repo / "other.txt").write_text("round two\n")
+    env["OCRL_FAKE_MODE"] = "medium-file"
+    env["OCRL_FAKE_FILE"] = "unreviewed.txt:1"
+    reason = blocked(stop(git_repo, env))
+
+    assert reason.startswith("Deferred findings"), reason
+    assert "did not block this turn end" in reason
+    assert "unreviewed.txt:1" in reason
+    assert "phases 1..1 are still outstanding" in reason, "the sweep approved; the outstanding-phase block is what ends the turn"
+    document = read_state(env, git_repo, SESSION)
+    assert gitsnap_tree(git_repo) in document["approved_trees"]  # type: ignore[operator]
+
+
+def gitsnap_tree(repo: Path) -> str:
+    from ocrl import gitsnap  # noqa: PLC0415 - test-local helper
+
+    return gitsnap.snapshot(str(repo)).tree
