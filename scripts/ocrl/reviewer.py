@@ -105,11 +105,12 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Final
 
 import ocrl
-from ocrl import oscillation, paths, planrev, report
+from ocrl import harness, oscillation, paths, planrev, report
 from ocrl.atomic import FILE_MODE, ensure_private_dir, read_verified_file, verified_file
 from ocrl.config import Config, late_threshold_rank, severity_rank, threshold_rank
 from ocrl.errors import OcrlError
 from ocrl.gitsnap import ChangedPathsUnavailable, changed_paths_strict, checked_tree, git_run, looks_like_object_id
+from ocrl.harness import opencode as opencode_harness
 from ocrl.paths import sha256_hex, state_root
 from ocrl.state import State
 from ocrl.util import log, now
@@ -1812,24 +1813,33 @@ def _write_manifest(dest: Path, rows: list[_Row]) -> str:
 # --------------------------------------------------------------------------
 
 
-def _isolation_argv(config: Config) -> list[str]:
-    """The flags that keep any reviewer-adjacent OpenCode call structurally isolated.
+def _act_dir_of(bundle_dir: Path) -> Path:
+    """The activation directory a bundle belongs to: ``<act_dir>/bundles/<seq>`` -> ``<act_dir>``.
 
-    Shared by :func:`review_argv` and :func:`_list_sessions`, so a unit test can assert the
-    two cannot drift apart -- see that test's own docstring for why this matters: a
-    ``session list`` call missing these flags would load the repository under review's own
-    OpenCode plugins and project config while running *from inside* that repository, which is
-    exactly the boundary the reviewer's own isolation exists to hold.
+    The same derivation :func:`context_attachments` makes for ``context/``, kept in one place
+    so the two cannot drift. Not read off ``State`` because both callers here are handed a
+    bundle rather than the state it came from.
     """
-    return ["--pure"] if config.as_bool("pure") else []
+    return bundle_dir.parent.parent
 
 
-def _isolation_env(config: Config, base: dict[str, str]) -> dict[str, str]:
-    """``base``, plus the isolation env vars, iff configured. Never mutates ``base``."""
-    env = dict(base)
-    if config.as_bool("disable_project_config"):
-        env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
-    return env
+def _harness(config: Config) -> harness.Harness:
+    """Which reviewer CLI this invocation runs.
+
+    One reader, so the harness a command is built from and the harness every message names
+    can never disagree. Fixed to OpenCode for now -- the ``harness`` config key that lets a
+    user choose does not exist yet, and adding it changes only this function.
+    """
+    del config
+    return opencode_harness.HARNESS
+
+
+#: The isolation flags and env vars now live with the harness that defines them
+#: (:mod:`ocrl.harness.opencode`). Re-exported under their original private names because
+#: they are what the drift test asserts `review_argv` and `_list_sessions` share -- the
+#: assertion is about the two call sites agreeing, and it stays exactly as strict here.
+_isolation_argv = opencode_harness.isolation_argv
+_isolation_env = opencode_harness.isolation_env
 
 
 def context_attachments(bundle_dir: Path) -> list[Path]:
@@ -1971,75 +1981,14 @@ def staging_dir_for(act_dir: Path, label: str) -> Path:
     return act_dir / "context" / f".staged-{label}-{secrets.token_hex(8)}"
 
 
-def review_argv(repo: str, title: str, *, config: Config, session_id: str = "", attachments: Sequence[Path] = ()) -> list[str]:
-    """The flags that follow the prompt.
-
-    The prompt is **not** routed through here. ``-f`` is a yargs *array* option, so it keeps
-    swallowing arguments: a prompt placed after the attachments would be read as one more
-    attachment path. It goes immediately after ``run`` instead.
-
-    ``--title`` and ``-s`` are mutually exclusive: ``-s <session_id>`` continues a remembered
-    session and is passed alone; a fresh run passes ``--title`` instead, and only a fresh run
-    -- re-passing a newer-sequence title on a continuation would rename the row the stored id
-    was matched against. See ``session_ref``.
-
-    ``attachments`` is the complete, ordered ``-f`` list, passed in and **never derived here**
-    -- not by glob, not by existence check. Two separate reasons, and both were live bugs:
-
-    - a glob attaches whatever happens to be sitting in the directory, so a planted
-      ``changes.99.diff`` symlink rode into the provider prompt. The list now comes from
-      :func:`bundle_manifest`, which is driven by the bundle's own ``chunks`` count and
-      rejects extras;
-    - "what was attached" must be **one** value, decided once. ``execute`` gates its cold
-      confirmation on whether model-derived context was among these, and a second, later
-      derivation from the filesystem could disagree with the first.
-
-    See :class:`Invocation`, which carries both this list and the subset of it that is
-    model-derived.
-    """
-    argv: list[str] = [*_isolation_argv(config)]
-    argv += ["--dir", repo]
-    argv += ["-m", config.as_str("model")]
-    variant = config.as_str("variant")
-    if variant:
-        argv += ["--variant", variant]
-    if session_id:
-        argv += ["-s", session_id]
-    else:
-        argv += ["--title", title]
-    for attachment in attachments:
-        argv += ["-f", str(attachment)]
-    return argv
+#: Argv composition moved to :mod:`ocrl.harness.opencode`; kept here as the name the gate
+#: and `commands/dryrun.py` have always used. See that module for the reasoning that used to
+#: sit in this docstring.
+review_argv = opencode_harness.review_argv
 
 
-def permission(bundle_dir: Path, *, cold: bool = False) -> str:
-    """``OPENCODE_PERMISSION`` for a structurally read-only reviewer.
-
-    The bundle lives outside the repository (Rule 3), so ``external_directory`` is denied
-    everywhere except the bundles root -- ``bundle_dir.parent``, not the activation directory,
-    which also holds ``state.json``, ``plan.frozen.md`` and the reports. Widened from a single
-    bundle to the whole bundles root so a continued reviewer can re-open paths it remembers
-    from an earlier round's bundle; every one of them is still gate-generated evidence only,
-    never model output -- see the module docstring, "bundles/ holds gate-generated evidence
-    only". Patterns are last-match-wins, which is why the broad deny is written first -- and
-    why the key order below is load-bearing rather than cosmetic.
-
-    ``cold`` narrows the allow to *this one bundle* (``bundle_dir/**``). The wildcard above
-    exists so a *continued* reviewer can re-open paths it remembers from an earlier round; a
-    cold invocation remembers nothing and needs none of it. Defence in depth behind the
-    ``context/`` boundary -- the ``context/`` directory is a sibling of ``bundles/`` and
-    outside either allow regardless.
-    """
-    allowed = bundle_dir if cold else bundle_dir.parent
-    document = {
-        "*": "deny",
-        "read": "allow",
-        "grep": "allow",
-        "glob": "allow",
-        "list": "allow",
-        "external_directory": {"*": "deny", f"{allowed}/**": "allow"},
-    }
-    return json.dumps(document, separators=(",", ":"), ensure_ascii=False)
+#: The ``OPENCODE_PERMISSION`` document, likewise moved to :mod:`ocrl.harness.opencode`.
+permission = opencode_harness.permission
 
 
 def _kill_group(proc: subprocess.Popen[bytes]) -> None:
@@ -2090,7 +2039,14 @@ def _kill_group(proc: subprocess.Popen[bytes]) -> None:
 
 
 def run_bounded(  # noqa: PLR0913 - each arg is an independent knob of the run; folding them into an object would only move the count
-    command: list[str], *, stdout: IO[bytes], timeout_sec: int, env: dict[str, str] | None = None, cwd: str | None = None, reap_group: bool = False
+    command: list[str],
+    *,
+    stdout: IO[bytes],
+    timeout_sec: int,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+    reap_group: bool = False,
+    stdin: bytes | None = None,
 ) -> int:
     """Run ``command`` under a deadline, both streams to ``stdout``, answering its status.
 
@@ -2109,14 +2065,45 @@ def run_bounded(  # noqa: PLR0913 - each arg is an independent knob of the run; 
     **It does not reach a descendant that calls ``setsid`` for itself**, which leaves its
     session entirely; :func:`_kill_group` documents the same limit for the timeout path. That
     residual is real and is recorded in ``docs/security.md`` rather than papered over here.
+
+    ``stdin`` feeds the child bytes on its standard input, for a harness whose prompt does not
+    fit in an argv (Linux caps a single argv element at 128KiB, which a bundle-sized prompt
+    passes easily). ``None`` -- every OpenCode call -- leaves stdin inherited and takes the
+    plain :meth:`~subprocess.Popen.wait` path below, byte-for-byte as before.
+
+    **The deadline covers the write, not just the wait, and that is the whole reason
+    :meth:`~subprocess.Popen.communicate` is used here.** A pipe holds 64KiB by default; a
+    bundle-sized prompt is far past that. Writing it in full *before* starting the timed wait
+    blocks this process the moment the child stops reading -- and a reviewer that hangs
+    without draining its input is exactly the case a deadline exists for. Measured on the
+    first version of this function: a 1MiB payload against a child that never read stdin ran
+    **30s under ``timeout_sec=1``**, i.e. no deadline at all, leaving the hook that launched
+    it wedged until the outer shim's own timeout. ``communicate`` writes and waits under one
+    ``timeout``, so expiry is detected during the write, and the group is killed exactly as on
+    the wait path. It also swallows ``EPIPE`` on a child that exits early, which is why no
+    write guard is needed: the exit status is the fact that matters and is checked either way.
     """
     try:
-        proc = subprocess.Popen(command, stdout=stdout, stderr=subprocess.STDOUT, env=env, cwd=cwd, start_new_session=True)
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE if stdin is not None else None,
+            stdout=stdout,
+            stderr=subprocess.STDOUT,
+            env=env,
+            cwd=cwd,
+            start_new_session=True,
+        )
     except OSError as exc:
         log(f"{command[0]} could not be started: {exc}")
         return 127
     try:
-        status = proc.wait(timeout=timeout_sec)
+        if stdin is None:
+            status = proc.wait(timeout=timeout_sec)
+        else:
+            # stdout/stderr are a regular file here, never PIPE, so `communicate` only has the
+            # input side to service -- it writes it under the same deadline it then waits on.
+            proc.communicate(input=stdin, timeout=timeout_sec)
+            status = proc.returncode
     except subprocess.TimeoutExpired:
         _kill_group(proc)
         return 124
@@ -2131,12 +2118,14 @@ def run_bounded(  # noqa: PLR0913 - each arg is an independent knob of the run; 
     return status
 
 
-def _capture_to_file(command: list[str], env: dict[str, str], out_path: Path, timeout_sec: int) -> int:
+def _capture_to_file(  # noqa: PLR0913 - one more knob of the same run; see `run_bounded`'s own note
+    command: list[str], env: dict[str, str], out_path: Path, timeout_sec: int, stdin: bytes | None = None, cwd: str | None = None
+) -> int:
     """Run the reviewer with both streams to ``out_path``, answering ``timeout``'s status."""
     fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, FILE_MODE)
     try:
         with os.fdopen(fd, "wb") as sink:
-            return run_bounded(command, stdout=sink, timeout_sec=timeout_sec, env=env)
+            return run_bounded(command, stdout=sink, timeout_sec=timeout_sec, env=env, stdin=stdin, cwd=cwd)
     finally:
         _strip_ansi(out_path)
 
@@ -2187,6 +2176,8 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
     # the open as this process can get. See `stage_attachments`.
     _confirm_staged_unchanged(run.attachments)
 
+    stdin: bytes | None = None
+    cwd: str | None = None
     if reviewer_cmd:
         env["OCRL_BUNDLE_DIR"] = str(run.bundle_dir)
         if run.session_id:
@@ -2200,49 +2191,30 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
     else:
         # `$(cat …)` strips trailing newlines; the prompt is a fixed file in the plugin.
         message = _decode(run.prompt_file.read_bytes()).rstrip("\n")
-        env = _isolation_env(config, env)
-        env["OPENCODE_PERMISSION"] = permission(run.bundle_dir, cold=run.cold)
-        command = [
-            "opencode",
-            "run",
-            message,
-            *review_argv(target.repo, run.title, config=config, session_id=run.session_id, attachments=[path for path, _digest in run.attachments]),
-        ]
+        spec = harness.ReviewSpec(
+            repo=target.repo,
+            prompt_text=message,
+            title=run.title,
+            bundle_dir=run.bundle_dir,
+            act_dir=_act_dir_of(run.bundle_dir),
+            config=config,
+            attachments=tuple(path for path, _digest in run.attachments),
+            session_id=run.session_id,
+            cold=run.cold,
+        )
+        built = _harness(config).review_command(spec)
+        command, stdin, cwd = built.argv, built.stdin, built.cwd
+        env.update(built.env)
 
-    status = _capture_to_file(command, env, run.out_path, timeout_sec)
+    status = _capture_to_file(command, env, run.out_path, timeout_sec, stdin, cwd)
     if status in _TIMEOUT_STATUSES:
         raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s", status=status)
     if status != 0:
         raise ReviewerFailed(f"the reviewer exited with status {status}", status=status)
 
 
-def clarify_argv(repo: str, attachments: list[Path], question_file: Path, title: str, *, config: Config) -> list[str]:
-    """The bounded argv for a clarify run.
-
-    Deliberately narrower than :func:`review_argv`: exactly ``attachments`` -- the stored
-    bundle's ``range.txt`` then its ``changes.NN.diff`` chunks, **as a caller-supplied list,
-    never a directory glob here** -- then the one question file. No plan revisions, no
-    ``prior-rounds.txt``, no ``verify.txt``, and above all **no ``-s``**. A clarify never
-    continues a session (see ``commands/clarify.py`` for why binding it to the continuity
-    pointer would be wrong) and never captures one, so ``--title`` is passed purely because
-    ``opencode run`` wants one -- the row it names is never matched against later.
-
-    The attachment list comes from ``commands.clarify._bundle_attachments``, which builds it
-    from the bundle's own ``chunks`` manifest and refuses any extra or symlinked
-    ``changes.*.diff`` -- so a file dropped into ``bundles/<seq>/`` cannot be inlined to the
-    provider through ``-f`` by riding a glob.
-    """
-    argv: list[str] = [*_isolation_argv(config)]
-    argv += ["--dir", repo]
-    argv += ["-m", config.as_str("model")]
-    variant = config.as_str("variant")
-    if variant:
-        argv += ["--variant", variant]
-    argv += ["--title", title]
-    for path in attachments:
-        argv += ["-f", str(path)]
-    argv += ["-f", str(question_file)]
-    return argv
+#: The clarify argv, likewise moved to :mod:`ocrl.harness.opencode`.
+clarify_argv = opencode_harness.clarify_argv
 
 
 def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invocation, exactly as review_argv notes
@@ -2274,17 +2246,29 @@ def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invoc
     timeout_sec = _timeout_sec(config)
     reviewer_cmd = env.get("OCRL_REVIEWER_CMD", "")
 
+    stdin: bytes | None = None
+    cwd: str | None = None
     if reviewer_cmd:
         env["OCRL_BUNDLE_DIR"] = str(bundle_dir)
         env["OCRL_QUESTION_FILE"] = str(question_file)
         command = [reviewer_cmd, str(bundle_dir), str(prompt_file)]
     else:
         message = _decode(prompt_file.read_bytes()).rstrip("\n")
-        env = _isolation_env(config, env)
-        env["OPENCODE_PERMISSION"] = permission(bundle_dir, cold=True)
-        command = ["opencode", "run", message, *clarify_argv(repo, attachments, question_file, title, config=config)]
+        spec = harness.ClarifySpec(
+            repo=repo,
+            prompt_text=message,
+            title=title,
+            bundle_dir=bundle_dir,
+            act_dir=_act_dir_of(bundle_dir),
+            config=config,
+            attachments=tuple(attachments),
+            question_file=question_file,
+        )
+        built = _harness(config).clarify_command(spec)
+        command, stdin, cwd = built.argv, built.stdin, built.cwd
+        env.update(built.env)
 
-    status = _capture_to_file(command, env, out_path, timeout_sec)
+    status = _capture_to_file(command, env, out_path, timeout_sec, stdin, cwd)
     if status in _TIMEOUT_STATUSES:
         raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s")
     if status != 0:
