@@ -235,7 +235,9 @@ def _refusal(state: State, config: Config, question: str) -> str | None:  # noqa
     return None
 
 
-def _stage(attachments: list[tuple[Path, str]], question_file: Path, staging_dir: Path, *, phase: int, round_seq: int) -> tuple[list[Path], Path]:
+def _stage(
+    attachments: list[tuple[Path, str]], question_file: Path, staging_dir: Path, *, phase: int, round_seq: int
+) -> tuple[list[tuple[Path, str]], tuple[Path, str]]:
     """The staged ``(attachments, question)`` this clarify actually attaches.
 
     :func:`_bundle_attachments` proved those paths acceptable, but that proof is about the
@@ -258,8 +260,11 @@ def _stage(attachments: list[tuple[Path, str]], question_file: Path, staging_dir
     except (reviewer.BundleError, OSError) as exc:
         log(f"clarify: an attachment could not be staged: {exc}")
         raise commands.Refused(_BUNDLE_GONE.format(phase=phase, seq=f"{round_seq:03d}")) from exc
-    # `run_clarify` builds its argv from plain paths; the digests were the staging check's.
-    return [path for path, _digest in staged[:-1]], staged[-1][0]
+    # The digests travel on rather than stopping here. An argv-based harness has no use for
+    # them -- OpenCode opens the pathname itself -- but one that inlines the bytes reads them
+    # in-process and hashes what it actually sends, which is the only way the staging check
+    # can be made to cover the delivery. See :class:`ocrl.harness.Attachment`.
+    return staged[:-1], staged[-1]
 
 
 def _write_question(act_dir: Path, seq: int, question: str, config: Config) -> Path:

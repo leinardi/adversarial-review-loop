@@ -2179,6 +2179,36 @@ def _strip_ansi(path: Path) -> None:
         _write_private(path, cleaned)
 
 
+#: What the CLI's own output is kept as when a harness reduced it to a transcript. Beside the
+#: transcript rather than instead of it: the reduction is a derivation, and the bytes it was
+#: derived from are what an operator needs to check it against -- the denied tool calls, the
+#: cost, the session the CLI says it actually used. Never read by the gate.
+_ENVELOPE_SUFFIX: Final = ".envelope"
+
+
+def _reduce_transcript(implementation: harness.Harness, out_path: Path) -> None:
+    """Replace the reviewer's own output at ``out_path`` with the answer text :func:`parse` reads.
+
+    A no-op for a harness whose CLI writes the answer and nothing around it -- the bytes are
+    unchanged, so nothing is rewritten and no envelope is left behind. For one that wraps the
+    answer in a report of its own, the wrapper moves to ``<out_path>.envelope`` and the answer
+    takes its place, which is what lets :func:`parse` stay unaware that more than one output
+    shape exists.
+
+    **Only on the success path.** A run that already failed keeps its output exactly as the CLI
+    wrote it, because that is what :func:`_classify_op_failure` reads to tell a rate limit from
+    a bad model name, and a wrapper this function could not parse is itself the diagnosis.
+    """
+    raw = read_verified_file(out_path, root=state_root())
+    if raw is None:
+        raise ReviewerFailed(f"the reviewer's output at {out_path} could not be read back")
+    reduced = implementation.transcript(raw)
+    if reduced == raw:
+        return
+    _write_private(out_path.with_name(out_path.name + _ENVELOPE_SUFFIX), raw)
+    _write_private(out_path, reduced)
+
+
 def _confirm_staged_unchanged(attachments: Sequence[tuple[Path, str]]) -> None:
     """Refuse if a staged attachment no longer holds the bytes it was staged with.
 
@@ -2235,12 +2265,21 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
             bundle_dir=run.bundle_dir,
             act_dir=_act_dir_of(run.bundle_dir),
             config=config,
-            attachments=tuple(path for path, _digest in run.attachments),
+            # The digests come along, not just the paths: a harness that *inlines* its
+            # attachments reads them in this process and can therefore make the check above
+            # cover the bytes it actually sends. See `ocrl.harness.Attachment`.
+            attachments=tuple(harness.Attachment(path, digest) for path, digest in run.attachments),
             session_id=run.session_id,
             new_session_id=run.new_session_id,
             cold=run.cold,
         )
-        built = _harness(config).review_command(spec)
+        try:
+            built = _harness(config).review_command(spec)
+        except harness.PayloadError as exc:
+            # Composing the command failed, so nothing was launched -- the same standing as a
+            # staged attachment that moved, and reported through the same class so
+            # `_run_invocation` reads it as "nothing ran" rather than as a reviewer failure.
+            raise BundleError(str(exc)) from exc
         command, stdin, cwd = built.argv, built.stdin, built.cwd
         env.update(built.env)
 
@@ -2249,6 +2288,14 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
         raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s", status=status)
     if status != 0:
         raise ReviewerFailed(f"the reviewer exited with status {status}", status=status)
+    if not reviewer_cmd:
+        try:
+            _reduce_transcript(_harness(config), run.out_path)
+        except harness.TranscriptError as exc:
+            # A zero exit the harness refuses to read as an answer. `status=0` keeps
+            # `_classify_op_failure` on its "operational" path, which is what this is: the
+            # reviewer reported something about its own run that no verdict may be read past.
+            raise ReviewerFailed(str(exc)) from exc
 
 
 #: The clarify argv, likewise moved to :mod:`ocrl.harness.opencode`.
@@ -2258,8 +2305,8 @@ clarify_argv = opencode_harness.clarify_argv
 def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invocation, exactly as review_argv notes
     repo: str,
     bundle_dir: Path,
-    attachments: list[Path],
-    question_file: Path,
+    attachments: Sequence[tuple[Path, str]],
+    question_file: tuple[Path, str],
     *,
     prompt_file: Path,
     title: str,
@@ -2272,7 +2319,9 @@ def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invoc
     Cold and session-less, like :func:`_confirm_cold`: no ``-s``, the bundle-scoped
     ``permission`` document, and the ``context/`` question is the only model-derived text in
     the call. ``bundle_dir`` scopes the permission document; ``attachments`` is the exact,
-    manifest-validated ``-f`` list (see :func:`clarify_argv`). **No ``VERDICT`` is parsed** --
+    manifest-validated list, **each with the digest it was staged under** -- carried through
+    rather than dropped so a harness that inlines them can hash what it actually sends (see
+    :class:`ocrl.harness.Attachment`). **No ``VERDICT`` is parsed** --
     the caller prints the prose reply verbatim and the gate never reads an approval out of
     it. Raises :class:`ReviewerFailed` on a timeout or a non-zero exit, exactly as
     :func:`invoke` does, so a failed clarify is reported, not silently empty.
@@ -2288,7 +2337,7 @@ def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invoc
     cwd: str | None = None
     if reviewer_cmd:
         env["OCRL_BUNDLE_DIR"] = str(bundle_dir)
-        env["OCRL_QUESTION_FILE"] = str(question_file)
+        env["OCRL_QUESTION_FILE"] = str(question_file[0])
         command = [reviewer_cmd, str(bundle_dir), str(prompt_file)]
     else:
         message = _decode(prompt_file.read_bytes()).rstrip("\n")
@@ -2299,10 +2348,15 @@ def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invoc
             bundle_dir=bundle_dir,
             act_dir=_act_dir_of(bundle_dir),
             config=config,
-            attachments=tuple(attachments),
-            question_file=question_file,
+            attachments=tuple(harness.Attachment(path, digest) for path, digest in attachments),
+            question_file=harness.Attachment(*question_file),
         )
-        built = _harness(config).clarify_command(spec)
+        try:
+            built = _harness(config).clarify_command(spec)
+        except harness.PayloadError as exc:
+            # Nothing ran. `commands/clarify.py` reports a `ReviewerFailed` to the user; a
+            # clarify has no bundle-failure path of its own, and either way no reply is printed.
+            raise ReviewerFailed(str(exc)) from exc
         command, stdin, cwd = built.argv, built.stdin, built.cwd
         env.update(built.env)
 
@@ -2311,6 +2365,11 @@ def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invoc
         raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s")
     if status != 0:
         raise ReviewerFailed(f"the reviewer exited with status {status}")
+    if not reviewer_cmd:
+        try:
+            _reduce_transcript(_harness(config), out_path)
+        except harness.TranscriptError as exc:
+            raise ReviewerFailed(str(exc)) from exc
     return _decode(out_path.read_bytes())
 
 

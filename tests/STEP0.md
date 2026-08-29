@@ -240,6 +240,11 @@ The handlers look idempotent by inspection: a second `confirm-commit` firing on 
 | 13 | `{"decision":"block"}` takes effect on `PostToolUse` | **open** |
 | 14 | `{"decision":"block"}` takes effect on `PostToolUseFailure` | **open** |
 | 15 | hooks registered twice in one session (`implement` then same-session `resume`) | **open** |
+| 16 | `--safe-mode` really suppresses plugins, skills and slash commands | **pass** (2026-08-29) |
+| 17 | `--tools` alone does **not** bound the tool set | **fail — MCP tools survive it** (2026-08-29) |
+| 18 | the file tools are confined to cwd + `--add-dir` in `-p` mode | **pass** (2026-08-29) |
+| 19 | a stdin payload at `chunk_diff_bytes` (400KB) and above arrives intact | **open** (byte-perfect to 170KB) |
+| 20 | no review session appears in the reviewed repository's own `/resume` picker | **open** |
 
 ### Isolation, 2026-08-20
 
@@ -270,6 +275,20 @@ Inducing the condition needed more care than expected, and the detours are worth
 - **A failed arm never reaches Claude.** When the `` !`…` `` command exits non-zero, Claude Code aborts the skill invocation and Claude gets no turn at all — so no Stop hook fires, and `stop_blocks` stays at 0. That is benign (nothing runs), but it means the `ARM_FAILED` Stop branch is unreachable from a *fresh* failed arm. It is reachable only once Claude already has turns: a re-arm that fails, or the dispatcher recording an arm that never executed.
 - **`ARMED` is not a stable blocking state**, because the block message tells Claude to run `set-phases`, which it then does — that is progress, and the counter resets by design.
 - **`STALE` is the reliable lever.** Nothing Claude can do resolves it, since only the user can re-arm. Arm normally, then from a *second terminal* (the session must stay open) backdate the activation with `jq '.armed_at = 1'`, and every subsequent turn end blocks with no progress in between.
+
+### The Claude Code harness, 2026-08-29
+
+Probed against `claude` 2.1.251, before `scripts/ocrl/harness/claudecode.py` was written. Three of the four things that module depends on are not what the flag help implies, and each one changed the design.
+
+- **`--tools` bounds the built-in tool set only.** A run given exactly `--tools "Read,Grep,Glob"` still listed every connected MCP server's tools in its init event — Gmail, Drive and a code-editing server among them. `--strict-mcp-config` is what removes them (`mcp_servers: []`), so the harness passes it **unconditionally** rather than under `pure`: it is that harness's share of the `"*": "deny"` at the head of OpenCode's permission document, not of `--pure`.
+- **`--safe-mode --strict-mcp-config --disable-slash-commands` does isolate.** `skills` and `slash_commands` both came back empty. `plugins` still *listed* the installed plugins, including this one — that listing is inert metadata, not a live surface, which settles the question the plan raised. Note that `--restricted` is **not** equivalent: it drops MCP servers but left 15 skills and 45 slash commands loaded.
+- **The file tools are confined to cwd + each `--add-dir`, with no `--restricted` needed.** A `Read` of an absolute path outside both was refused with no prompt and recorded in `permission_denials`. This is what makes the working directory a read boundary — and therefore why the harness runs from an empty `<act_dir>/cwd` rather than from the activation directory, which holds `context/`.
+- **A denial does not fail the run.** That probe exited `0` with `is_error: false` and a plausible answer. Only `permission_denials` said anything had gone wrong, which is why `claudecode.transcript` refuses on it (Rule 1).
+- **`--output-format json` emits a JSON *list* of events**, not a single object; the last is the `result`. 43 events for a one-tool run, 17 for a no-tool one.
+- **Sessions round-trip.** `--session-id <uuid>` was echoed back unchanged in the result event, and `--resume <uuid>` recalled the previous turn's tool use. A `--resume` of an id the store no longer holds exits `1` with an empty stdout — which would reach the gate as a blocking `OP_FAILURE` on every retry, so `AssignedSessions.verify` checks the store first and drops continuity instead.
+- **Sessions persist under `~/.claude/projects/<cwd slug>/<uuid>.jsonl`**, and that bucket is what the interactive `/resume` picker lists. Repeating `--add-dir` accumulates rather than replaces.
+
+Items 19 and 20 still need a real session: a payload at the plugin's chunk ceilings, and a confirmation that the reviewed repository's own `/resume` list stays clean across a run.
 
 ## If A1 fails
 

@@ -8,6 +8,7 @@ cannot be added without meeting them.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import time
 from pathlib import Path
 
@@ -31,6 +32,20 @@ def every_harness() -> list[harness.Harness]:
     return [harness.get(name) for name in harness.names()]
 
 
+def written(path: Path, text: str = "evidence\n") -> harness.Attachment:
+    """An attachment that exists on disk, with the digest the gate would have staged it under.
+
+    A harness may *name* its attachments in the argv (OpenCode's ``-f``) or **inline** them
+    into the payload it composes (Claude Code's stdin), and the second kind reads every one of
+    them -- and re-hashes them -- while building the command. A fixture that only invented
+    pathnames would therefore pass for one harness and fail for the other, which is precisely
+    the drift these parametrised tests exist to catch.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return harness.Attachment(path, hashlib.sha256(path.read_bytes()).hexdigest())
+
+
 def spec_for(implementation: harness.Harness, tmp_path: Path, *, cold: bool = False) -> harness.ReviewSpec:
     del implementation
     return harness.ReviewSpec(
@@ -40,7 +55,7 @@ def spec_for(implementation: harness.Harness, tmp_path: Path, *, cold: bool = Fa
         bundle_dir=tmp_path / "bundles" / "001",
         act_dir=tmp_path,
         config=config_with(),
-        attachments=(tmp_path / "bundles" / "001" / "range.txt",),
+        attachments=(written(tmp_path / "bundles" / "001" / "range.txt"),),
         cold=cold,
     )
 
@@ -173,8 +188,8 @@ def test_a_clarify_command_never_carries_a_session(implementation: harness.Harne
             bundle_dir=tmp_path / "bundles" / "001",
             act_dir=tmp_path,
             config=config_with(),
-            question_file=tmp_path / "q.txt",
-            attachments=(tmp_path / "bundles" / "001" / "range.txt",),
+            question_file=written(tmp_path / "q.txt", "why?\n"),
+            attachments=(written(tmp_path / "bundles" / "001" / "range.txt"),),
         )
     )
     assert "-s" not in built.argv

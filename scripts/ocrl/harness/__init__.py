@@ -25,24 +25,49 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from ocrl.errors import OcrlError
+
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from collections.abc import Mapping
 
     from ocrl.config import Config
 
 __all__ = [
+    "Attachment",
     "CaptureSpec",
     "Captured",
     "ClarifySpec",
     "Command",
     "Harness",
+    "PayloadError",
     "ReviewSpec",
     "SessionStrategy",
+    "TranscriptError",
     "UnknownHarness",
     "get",
     "names",
     "strategies",
 ]
+
+
+class PayloadError(OcrlError):
+    """A command could not be composed, so **nothing ran**.
+
+    Raised while building a :class:`Command` -- an attachment that cannot be read back for
+    inlining, a working directory that cannot be created. :mod:`ocrl.reviewer` turns it into
+    the same blocking bundle failure as a staged attachment that changed underneath: no
+    reviewer was launched, so there is no transcript to parse and no session to release.
+    """
+
+
+class TranscriptError(OcrlError):
+    """The reviewer ran, but its output could not be reduced to an answer (Rule 1).
+
+    Raised by :meth:`Harness.transcript` for anything the exit status does not already
+    report -- a CLI that framed a failed turn as a successful process, a tool call that was
+    denied, output that is not the shape the flags promised. Every one of them reaches the
+    gate as an ``OP_FAILURE`` and blocks; none of them may become "no findings".
+    """
 
 
 class UnknownHarness(Exception):
@@ -78,6 +103,28 @@ class Command:
     cwd: str | None = None
 
 
+@dataclass(frozen=True)
+class Attachment:
+    """One thing the reviewer is given, and the bytes it is required to be.
+
+    **The digest travels with the path because the two delivery styles differ in who opens
+    the file.** A harness that names the attachment in an argv hands the pathname to another
+    process, which opens it later -- the gate's own check can only be moved close to that
+    open, never made to cover it (see ``ocrl.reviewer.stage_attachments``). A harness that
+    *inlines* the attachment reads it in this process, which means the gap between the check
+    and the read is one this code can close outright -- but only if it knows what the bytes
+    were supposed to be. Carrying the path alone would silently leave the second kind as
+    exposed as the first, while looking safer.
+
+    ``digest`` is the sha256 hex of the bytes the gate staged and verified. It is required
+    rather than defaulted: an attachment nobody vouched for is exactly the case that must be
+    impossible to construct by accident.
+    """
+
+    path: Path
+    digest: str
+
+
 @dataclass(frozen=True, kw_only=True)
 class ReviewSpec:
     """Everything one review invocation needs, in harness-neutral terms.
@@ -105,7 +152,7 @@ class ReviewSpec:
     #: somewhere outside the repository under review (Rule 3) without deriving paths itself.
     act_dir: Path
     config: Config
-    attachments: tuple[Path, ...] = ()
+    attachments: tuple[Attachment, ...] = ()
     session_id: str = ""
     new_session_id: str = ""
     cold: bool = False
@@ -127,8 +174,8 @@ class ClarifySpec:
     #: See :attr:`ReviewSpec.act_dir`.
     act_dir: Path
     config: Config
-    question_file: Path
-    attachments: tuple[Path, ...] = ()
+    question_file: Attachment
+    attachments: tuple[Attachment, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -261,6 +308,21 @@ class Harness(Protocol):
     def sessions(self) -> SessionStrategy:
         """How this harness's sessions are named, minted and found again."""
 
+    def transcript(self, raw: bytes) -> bytes:
+        """The reviewer's answer, extracted from whatever its CLI actually wrote.
+
+        The gate parses **one** thing -- the ``FINDING``/``VERDICT`` contract -- and it parses
+        it out of prose. A CLI that answers in prose returns ``raw`` unchanged; one that wraps
+        the answer in a report of its own unwraps it here, so
+        :func:`ocrl.reviewer.parse` never learns that more than one shape exists.
+
+        **This is also where a run that "succeeded" is refused.** Some CLIs report a failed
+        turn, or a tool call they denied, in that wrapper while still exiting ``0`` -- measured
+        on Claude Code. Anything of that kind raises :class:`TranscriptError` rather than
+        returning text, because a review of less evidence than the gate believes it sent must
+        never reach the parser as a verdict (Rule 1).
+        """
+
     def probe_models(self, timeout: float) -> list[str] | None:
         """The models this reviewer reports, or ``None`` when it cannot enumerate them.
 
@@ -276,9 +338,9 @@ class Harness(Protocol):
 def _registry() -> dict[str, Harness]:
     # Imported inside the function, not at module scope: an implementation module imports
     # this one for `Command`/`ReviewSpec`, so a module-scope import here would be a cycle.
-    from ocrl.harness import opencode  # noqa: PLC0415 - see comment above
+    from ocrl.harness import claudecode, opencode  # noqa: PLC0415 - see comment above
 
-    return {opencode.HARNESS.name: opencode.HARNESS}
+    return {implementation.name: implementation for implementation in (opencode.HARNESS, claudecode.HARNESS)}
 
 
 def names() -> list[str]:

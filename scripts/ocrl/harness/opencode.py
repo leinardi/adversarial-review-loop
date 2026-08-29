@@ -362,7 +362,17 @@ class OpenCodeHarness:
                 self.binary,
                 "run",
                 spec.prompt_text,
-                *review_argv(spec.repo, spec.title, config=spec.config, session_id=spec.session_id, attachments=spec.attachments),
+                # Paths only: ``-f`` hands OpenCode a pathname it opens for itself, so the
+                # digests are the staging check's and there is nothing here that could act on
+                # them -- see :class:`ocrl.harness.Attachment`, and `reviewer.invoke`'s
+                # launch-time re-check, which is as close to that open as this process gets.
+                *review_argv(
+                    spec.repo,
+                    spec.title,
+                    config=spec.config,
+                    session_id=spec.session_id,
+                    attachments=[attachment.path for attachment in spec.attachments],
+                ),
             ],
             env=isolation_env(spec.config, {"OPENCODE_PERMISSION": permission(spec.bundle_dir, cold=spec.cold)}),
         )
@@ -374,7 +384,13 @@ class OpenCodeHarness:
                 self.binary,
                 "run",
                 spec.prompt_text,
-                *clarify_argv(spec.repo, spec.attachments, spec.question_file, spec.title, config=spec.config),
+                *clarify_argv(
+                    spec.repo,
+                    [attachment.path for attachment in spec.attachments],
+                    spec.question_file.path,
+                    spec.title,
+                    config=spec.config,
+                ),
             ],
             env=isolation_env(spec.config, {"OPENCODE_PERMISSION": permission(spec.bundle_dir, cold=True)}),
         )
@@ -386,6 +402,15 @@ class OpenCodeHarness:
     def probe_models(self, timeout: float) -> list[str] | None:
         """``opencode models``. Raises ``reviewer_probe.ProbeFailed`` if it does not answer."""
         return reviewer_probe.list_models(timeout)
+
+    def transcript(self, raw: bytes) -> bytes:
+        """``raw``, unchanged: ``opencode run`` writes the answer and nothing around it.
+
+        There is no wrapper to unwrap and no second channel of failure to inspect -- what this
+        CLI reports about the run, it reports through its exit status, which
+        :func:`ocrl.reviewer.invoke` has already checked by the time this is called.
+        """
+        return raw
 
 
 #: The single instance the registry hands out. Stateless, so one is enough.
