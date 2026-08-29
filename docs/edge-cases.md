@@ -163,11 +163,25 @@ recovery is a fresh `implement`.
 ## A phase that never converges
 
 There is no cap on how many rounds one phase may take. A phase escalates to `needs-human`
-only on evidence it is genuinely stuck: `stall_rounds` (default `2`) consecutive rounds
+only on evidence it is genuinely stuck: `stall_rounds` (default `3`) consecutive rounds
 raising the same finding, unchanged, or a finding that reappears after being absent, or is
-reversed (`SUPERSEDES`) more than once. Either signal, and the next commit attempt (or Stop
-gate sweep) does not call the reviewer at all — it escalates straight away, with the
-persisting or oscillating findings quoted verbatim.
+reversed (`SUPERSEDES`) in two or more separate rounds. Either signal, and the next commit
+attempt (or Stop gate sweep) does not call the reviewer at all — it escalates straight away,
+with the persisting or oscillating findings quoted verbatim.
+
+**A reversal the reviewer declares is believed.** `SUPERSEDES round=N file=F` retires the
+round-`N` finding whose location is exactly `F`, and a retired finding is not "raised" for
+either check — so a round that retracts a finding and raises a genuinely different one in the
+same file is converging, not stuck, whether it does so in the next round or three rounds
+later. This cannot be used to dodge the check: a proper retraction counts towards the
+reversal signal instead (reversing one file in two separate rounds escalates on its own),
+and a finding dropped *silently* and raised again later still counts as a reappearance. Retirement is deliberately strict about what
+it will believe: a round number that names no earlier round, a location matching no finding
+of that round, a location matching *two* of them (which was reversed is unknowable), and a
+reversal already claimed by an earlier round all retire nothing. Every one of those was
+observed as a false escalation before the rule existed — most often the last one, since
+`prior-rounds.txt` keeps showing a reversal the reviewer already made, and restating it is
+not a second change of mind.
 
 **Accepted consequence:** a reviewer that raises a genuinely new, non-repeating objection
 every round never trips this. Nothing here distinguishes real, ongoing progress from an

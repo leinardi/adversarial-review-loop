@@ -1871,13 +1871,14 @@ _STUCK = "Same problem again.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium
 
 
 def test_a_persisting_anchor_escalates_without_invoking_the_reviewer(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
-    """Two consecutive rounds raising the same anchor (``stall_rounds`` default 2) trips the
-    check on the third attempt -- and the reviewer must never run for it: pointing
+    """Three consecutive rounds raising the same anchor (``stall_rounds`` default 3) trips the
+    check on the fourth attempt -- and the reviewer must never run for it: pointing
     ``OCRL_REVIEWER_CMD`` at a nonexistent binary is what proves that, not merely a verdict."""
     _run_scripted(activation, git_repo, tmp_path, "round1", _STUCK)
     _run_scripted(activation, git_repo, tmp_path, "round2", _STUCK)
+    _run_scripted(activation, git_repo, tmp_path, "round3", _STUCK)
     before_seq = activation.get_int("report_seq")
-    assert before_seq == 2
+    assert before_seq == 3
 
     os.environ["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
     review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
@@ -1886,9 +1887,10 @@ def test_a_persisting_anchor_escalates_without_invoking_the_reviewer(activation:
     assert "stuck.py" in review.error
     assert "seq 1" in review.error
     assert "seq 2" in review.error
+    assert "seq 3" in review.error
     assert activation.get_int("report_seq") == before_seq, "a stalled round reserves no report sequence"
-    assert len(activation.get_array_of_dicts("round_history")) == 2, "a stalled round appends nothing"
-    assert not (activation.act_dir / "bundles" / "003").exists(), "no bundle was ever built"
+    assert len(activation.get_array_of_dicts("round_history")) == 3, "a stalled round appends nothing"
+    assert not (activation.act_dir / "bundles" / "004").exists(), "no bundle was ever built"
 
 
 def test_a_concurrently_completed_round_overrides_this_invocations_own_approval(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
@@ -1934,7 +1936,9 @@ def test_a_concurrently_completed_round_overrides_this_invocations_own_approval(
     script.chmod(0o755)
     os.environ["OCRL_REVIEWER_CMD"] = str(script)
 
-    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+    # `stall_rounds` pinned to 2 so round 1 plus the concurrently injected round are a stall
+    # on their own: what is under test is the race, not where the threshold happens to sit.
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with(stall_rounds=2))
 
     assert review.verdict == "NEEDS_HUMAN", "the concurrent stall must override this invocation's own APPROVED"
     assert "stuck.py" in review.error
@@ -2003,7 +2007,9 @@ def test_the_stored_report_reflects_the_override_even_when_only_the_late_authori
     script.chmod(0o755)
     os.environ["OCRL_REVIEWER_CMD"] = str(script)
 
-    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+    # Pinned to 2 for the same reason as the lock-free variant above: round 1 plus the
+    # injected round are the stall, and the threshold is not what is under test.
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with(stall_rounds=2))
 
     assert review.verdict == "NEEDS_HUMAN", "the late, in-lock check still must have overridden the APPROVED"
     assert review.report, "a report was still stored"
@@ -2161,7 +2167,9 @@ def test_two_reviews_that_both_finish_before_either_finalizes_do_not_both_author
     assert activation.get_int("report_seq") == 1
 
     target = target_for(git_repo)
-    config = config_with()
+    # Pinned to 2: round 1 plus round A are the stall this exercises, and the threshold is not
+    # what is under test -- `_publish`'s in-lock recheck is.
+    config = config_with(stall_rounds=2)
     expected = hooks.activation(activation, config)
 
     def review_run(label: str) -> reviewer._ReviewRun:

@@ -802,24 +802,23 @@ if start 'incremental diff: round 2 attaches it, round 1 does not'; then
     assert_contains 'and names the changed file' "$(cat "$act/bundles/002/incremental.diff" 2>/dev/null)" 'a.txt'
 fi
 
-if start 'stall detection: two rounds of the same finding escalate without invoking the reviewer'; then
+if start 'stall detection: three rounds of the same finding escalate without invoking the reviewer'; then
     new_case
     arm_ok && phases_ok
 
-    printf 'r1\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
-
-    printf 'r2\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+    for r in r1 r2 r3; do
+        printf '%s\n' "$r" >"$REPO/a.txt"
+        with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+    done
 
     before=$(sget report_seq)
-    assert_eq 'two ordinary rounds ran, each reaching the reviewer' "$before" '2'
+    assert_eq 'three ordinary rounds ran, each reaching the reviewer' "$before" '3'
 
-    # A reviewer command that does not exist is what proves the third attempt never calls it:
+    # A reviewer command that does not exist is what proves the fourth attempt never calls it:
     # the escalation is a static decision over round_history, not merely another denial.
-    printf 'r3\n' >"$REPO/a.txt"
+    printf 'r4\n' >"$REPO/a.txt"
     d=$(with_env OCRL_REVIEWER_CMD=/nonexistent/reviewer-must-not-run pre Bash 'git add -A && git commit -m x')
-    assert_eq 'the third attempt still denies' "$d" 'deny'
+    assert_eq 'the fourth attempt still denies' "$d" 'deny'
     assert_contains 'as an escalation to NEEDS_HUMAN' "$(pre_reason)" 'NEEDS_HUMAN'
     assert_contains 'naming the persisting anchor' "$(pre_reason)" 'a.txt'
     assert_eq 'status escalated' "$(sget status)" 'NEEDS_HUMAN'

@@ -56,7 +56,7 @@ DEFAULTS: Final[dict[str, Any]] = {
     "max_findings": 200,
     "max_findings_bytes": 65536,
     "max_clarifications": 2,
-    "stall_rounds": 2,
+    "stall_rounds": 3,
     "allow_dirty": False,
     "ttl_hours": 24,
     "ignore_globs": [],

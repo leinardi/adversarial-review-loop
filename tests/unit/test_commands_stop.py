@@ -219,16 +219,15 @@ def test_a_stalled_phase_escalates_through_the_sweep_without_invoking_the_review
     env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env)
 
-    (git_repo / "unreviewed.txt").write_text("round 1\n")
-    blocked(stop(git_repo, env))
-    (git_repo / "unreviewed.txt").write_text("round 2\n")
-    blocked(stop(git_repo, env))
+    for round_number in (1, 2, 3):
+        (git_repo / "unreviewed.txt").write_text(f"round {round_number}\n")
+        blocked(stop(git_repo, env))
 
     before_seq = read_state(env, git_repo, SESSION)["report_seq"]
-    assert before_seq == 2, "two ordinary sweep rounds ran"
+    assert before_seq == 3, "three ordinary sweep rounds ran (`stall_rounds` default 3)"
 
     env["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
-    (git_repo / "unreviewed.txt").write_text("round 3\n")
+    (git_repo / "unreviewed.txt").write_text("round 4\n")
     response = stop(git_repo, env)
 
     assert "decision" not in response, response

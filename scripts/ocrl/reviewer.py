@@ -3299,7 +3299,7 @@ def _stall_review(state: State, target: Target, config: Config) -> Review | None
     with ``verdict="NEEDS_HUMAN"`` instead of ``None`` -- :func:`execute` never builds a
     bundle or invokes the reviewer for it.
 
-    ``stall_rounds <= 0`` (the config default is ``2``) disables the check entirely: every
+    ``stall_rounds <= 0`` (the config default is ``3``) disables the check entirely: every
     call answers ``None``, whatever ``round_history`` holds. Called only for
     ``target.is_phase`` -- ``final`` is cumulative and reached once, with no phase of its own
     to stall on -- and only from inside the same ``state.transaction()`` that reserves the

@@ -110,7 +110,7 @@ def test_a_persisting_anchor_reversed_twice_via_supersedes_is_flagged_even_thoug
     point = points[0]
     assert point.anchor == Anchor(file="loop.py", severity="medium")
     assert point.reappeared is False, "it was raised every round -- there was never a gap"
-    assert point.supersedes_count == 2
+    assert point.supersedes_rounds == 2
     assert point.seqs == (1, 2, 3)
 
 
@@ -120,6 +120,239 @@ def test_one_supersedes_line_alone_does_not_flag_a_persisting_anchor() -> None:
         entry(2, findings=[finding(file="loop.py")], supersedes=[supersedes_line(round_=1, file="loop.py")]),
     ]
     assert reversals(history, "phase1") == []
+
+
+def test_two_supersedes_lines_inside_one_round_are_two_fixes_not_a_flip_flop() -> None:
+    """The counted unit is a *round* that reversed something, not a ``SUPERSEDES`` line. A
+    round that retires two separate findings in one file has changed its mind once about each,
+    which is what convergence looks like -- counting lines flagged it as oscillating and sent a
+    converging phase to NEEDS_HUMAN."""
+    history = [
+        entry(1, findings=[finding(file="dup.py:10", detail="first"), finding(file="dup.py:20", detail="second")]),
+        entry(
+            2,
+            findings=[finding(file="dup.py:30", detail="something else")],
+            supersedes=[supersedes_line(round_=1, file="dup.py:10"), supersedes_line(round_=1, file="dup.py:20")],
+        ),
+    ]
+    assert reversals(history, "phase1") == []
+
+
+def test_the_same_reversal_restated_in_a_later_round_is_still_one_reversal() -> None:
+    """Retirement is consumptive. ``prior-rounds.txt`` keeps showing a reversal the reviewer
+    already made, so restating it is not a second change of mind -- counting it as one turned
+    an ordinary two-round disagreement into an escalation."""
+    claim = supersedes_line(round_=1, file="a.py")
+    history = [
+        entry(1, findings=[finding(file="a.py")]),
+        entry(2, findings=[finding(file="a.py")], supersedes=[claim]),
+        entry(3, findings=[finding(file="a.py")], supersedes=[claim]),
+    ]
+    assert reversals(history, "phase1") == []
+
+
+def test_retirements_in_two_distinct_rounds_do_flag() -> None:
+    """The counterpart to the two tests above: one retirement each in two different rounds is
+    the genuine flip-flop signal, and must survive the stricter counting."""
+    history = [
+        entry(1, findings=[finding(file="dup.py:10")]),
+        entry(2, findings=[finding(file="dup.py:20")], supersedes=[supersedes_line(round_=1, file="dup.py:10")]),
+        entry(3, findings=[finding(file="dup.py:30")], supersedes=[supersedes_line(round_=2, file="dup.py:20")]),
+    ]
+    points = reversals(history, "phase1")
+    assert len(points) == 1
+    assert points[0].supersedes_rounds == 2
+
+
+# --------------------------------------------------------------------------
+# what a SUPERSEDES line may and may not retire
+# --------------------------------------------------------------------------
+
+
+def test_a_retracted_finding_is_not_a_persisting_one() -> None:
+    """The false escalation this rule exists for: the reviewer says outright that its earlier
+    finding no longer stands and raises a different one at the same file. Anchors are
+    line-stripped, so both rounds "raise ``x.py``" -- but only one position was ever held."""
+    history = [
+        entry(1, findings=[finding(file="x.py:10", detail="clock skew")]),
+        entry(
+            2,
+            findings=[finding(file="x.py:10", detail="a different defect entirely")],
+            supersedes=[supersedes_line(round_=1, file="x.py:10")],
+        ),
+    ]
+    assert persisting(history, "phase1", 2) == []
+
+
+def test_only_the_exactly_matching_finding_is_retired() -> None:
+    """Two findings in one file are two positions. Retiring the one at line 10 must leave the
+    one at line 20 standing -- a file-level rule silenced both and hid a real stall."""
+    history = [
+        entry(1, findings=[finding(file="service.py:10", detail="A"), finding(file="service.py:20", detail="B")]),
+        entry(2, findings=[finding(file="service.py:20", detail="B again")], supersedes=[supersedes_line(round_=1, file="service.py:10")]),
+    ]
+    points = persisting(history, "phase1", 2)
+    assert len(points) == 1
+    assert points[0].anchor == Anchor(file="service.py", severity="medium")
+    assert [line for _seq, line in points[0].lines] == [
+        finding(file="service.py:20", detail="B"),
+        finding(file="service.py:20", detail="B again"),
+    ], "only B survived retirement, in both rounds"
+
+
+def test_an_ambiguous_supersedes_retires_neither_finding() -> None:
+    """Two findings share a location: which one was reversed is unknowable, so neither is
+    treated as reversed."""
+    history = [
+        entry(1, findings=[finding(file="x.py:20", detail="first"), finding(file="x.py:20", detail="second")]),
+        entry(2, findings=[finding(file="x.py:20", detail="still")], supersedes=[supersedes_line(round_=1, file="x.py:20")]),
+    ]
+    assert persisting(history, "phase1", 2) != []
+
+
+def test_a_supersedes_naming_a_different_location_retires_nothing() -> None:
+    history = [
+        entry(1, findings=[finding(file="a.py:10")]),
+        entry(2, findings=[finding(file="a.py:10")], supersedes=[supersedes_line(round_=1, file="a.py:99")]),
+    ]
+    assert persisting(history, "phase1", 2) != []
+
+
+def test_a_supersedes_naming_no_earlier_round_retires_nothing() -> None:
+    """Round 0 does not exist, a round cannot reverse itself, and it cannot reverse a round
+    that has not happened."""
+    history = [
+        entry(1, findings=[finding(file="a.py")]),
+        entry(
+            2,
+            findings=[finding(file="a.py")],
+            supersedes=[
+                supersedes_line(round_=0, file="a.py"),
+                supersedes_line(round_=2, file="a.py"),
+                supersedes_line(round_=9, file="a.py"),
+            ],
+        ),
+    ]
+    assert persisting(history, "phase1", 2) != []
+
+
+def test_a_supersedes_with_no_location_retires_nothing() -> None:
+    history = [
+        entry(1, findings=[finding(file="a.py")]),
+        entry(2, findings=[finding(file="a.py")], supersedes=[supersedes_line(round_=1, file="-")]),
+    ]
+    assert persisting(history, "phase1", 2) != []
+
+
+def test_a_retirement_inside_the_window_is_applied_there() -> None:
+    """Round 3 retires round 2's finding; rounds 2 and 3 are the whole window, so the anchor
+    is raised in only one of them once the retraction is honoured."""
+    history = [
+        entry(1, findings=[finding(file="a.py")]),
+        entry(2, findings=[finding(file="a.py")]),
+        entry(3, findings=[finding(file="a.py")], supersedes=[supersedes_line(round_=2, file="a.py")]),
+    ]
+    assert persisting(history, "phase1", 2) == []
+
+
+def test_round_numbers_are_ordinals_not_report_sequences() -> None:
+    """``round=1`` means "the first round of this phase", exactly as ``prior-rounds.txt``
+    numbers it for the reviewer -- not ``seq``, which is the activation-wide report counter and
+    is 44 for a first round on a long run."""
+    history = [
+        entry(44, findings=[finding(file="a.py:1")]),
+        entry(45, findings=[finding(file="a.py:1")], supersedes=[supersedes_line(round_=1, file="a.py:1")]),
+    ]
+    assert persisting(history, "phase1", 2) == []
+
+
+def test_a_retracted_finding_re_raised_later_at_another_line_is_not_a_reappearance() -> None:
+    """Replay of runhold phase 6: round 1 flags ``services.go:180``, round 2 says outright it
+    is fixed, and round 4 flags ``services.go:226`` -- an unrelated defect that happens to
+    share the file. Anchors are line-stripped, so raw presence reads "raised, gone, raised
+    again" and escalated a phase that was converging."""
+    history = [
+        entry(1, findings=[finding(file="services.go:180", severity="high", detail="network targets misclassified")], generation=1),
+        entry(2, findings=[finding(file="evidence_test.go:292")], supersedes=[supersedes_line(round_=1, file="services.go:180")]),
+        entry(3, findings=[finding(file="containers.sql:58")]),
+        entry(4, findings=[finding(file="services.go:226", severity="high", detail="PreviousSpec refs ignored")]),
+    ]
+    assert reversals(history, "phase1") == []
+
+
+def test_a_silently_dropped_finding_raised_again_is_still_a_reappearance() -> None:
+    """The other half of the rule above, and what stops it from being a way out: dropping a
+    finding *without* a SUPERSEDES line and raising it again later is exactly the moving target
+    the check exists for -- and exactly what ``prompts/reviewer-phase.md`` calls a contract
+    violation."""
+    history = [
+        entry(1, findings=[finding(file="services.go:180", severity="high")]),
+        entry(2, findings=[finding(file="other.go:1")]),
+        entry(3, findings=[finding(file="services.go:190", severity="high")]),
+    ]
+    points = reversals(history, "phase1")
+    assert len(points) == 1
+    assert points[0].reappeared is True
+
+
+def test_seqs_report_every_round_that_raised_the_anchor_including_retracted_ones() -> None:
+    """``seqs`` is the evidence line a human reads, not the decision input: the anchor really
+    was raised in all three rounds, and saying so stays true even though two were retracted."""
+    history = [
+        entry(1, findings=[finding(file="loop.py", detail="needs warn-before")]),
+        entry(2, findings=[finding(file="loop.py", detail="needs warn-after")], supersedes=[supersedes_line(round_=1, file="loop.py")]),
+        entry(3, findings=[finding(file="loop.py", detail="needs both")], supersedes=[supersedes_line(round_=2, file="loop.py")]),
+    ]
+    points = reversals(history, "phase1")
+    assert len(points) == 1
+    assert points[0].seqs == (1, 2, 3)
+    assert points[0].supersedes_rounds == 2
+
+
+def test_an_anchor_no_round_still_stands_behind_is_not_reported() -> None:
+    """Reversed twice, but retracted for good by the last round that mentioned it: nothing is
+    blocking on it, so there is no standing disagreement for a human to break."""
+    history = [
+        entry(1, findings=[finding(file="x.py:10")]),
+        entry(2, findings=[finding(file="y.py:1")], supersedes=[supersedes_line(round_=1, file="x.py:10")]),
+        entry(3, findings=[finding(file="x.py:20")]),
+        entry(4, findings=[finding(file="z.py:1")], supersedes=[supersedes_line(round_=3, file="x.py:20")]),
+    ]
+    assert [p.anchor.file for p in reversals(history, "phase1")] == []
+
+
+def test_the_runhold_phase7_history_is_not_a_stall() -> None:
+    """Replay of the real escalation this rule was written for (reports 044/045): round 2
+    retires all five of round 1's findings by location and raises two new ones, one of them in
+    a file round 1 had also flagged. Both signals fired on it; neither may now."""
+    history = [
+        entry(
+            44,
+            findings=[
+                finding(file="internal/consumers/consumers.go:191", severity="high", detail="verdictFor returns in-use under failed coverage"),
+                finding(file="internal/consumers/consumers.go:223", detail="all networks use fleet-wide plus leader coverage"),
+                finding(file="internal/consumers/coverage.go:137", detail="one leaderEvidence flag requires every source"),
+                finding(file="internal/consumers/snapshot.go:228", detail="departed node rows keep swarmPresent true"),
+                finding(file="internal/transport/hub/hub.go:1827", detail="collected_at can backdate last_seen_used_at"),
+            ],
+        ),
+        entry(
+            45,
+            findings=[
+                finding(file="internal/consumers/snapshot.go:220", detail="swarmPresent conflates absent evidence with confirmed non-Swarm"),
+                finding(file="internal/consumers/coverage.go:137", detail="future collected_at passes the freshness check"),
+            ],
+            supersedes=[
+                supersedes_line(round_=1, file="internal/consumers/consumers.go:191", why="coverage now gates positive evidence"),
+                supersedes_line(round_=1, file="internal/consumers/consumers.go:223", why="local networks now use owning-agent coverage"),
+                supersedes_line(round_=1, file="internal/consumers/coverage.go:137", why="tracked per kind now; this line is a different finding"),
+                supersedes_line(round_=1, file="internal/consumers/snapshot.go:228", why="departed rows no longer establish presence"),
+                supersedes_line(round_=1, file="internal/transport/hub/hub.go:1827", why="stamps now use controller time"),
+            ],
+        ),
+    ]
+    assert persisting(history, "phase1", 2) == [], "every round-1 finding was explicitly retracted"
+    assert reversals(history, "phase1") == [], "five retirements in one round are five fixes, not five flip-flops"
 
 
 # --------------------------------------------------------------------------
@@ -204,18 +437,68 @@ def test_a_supersedes_line_that_does_not_match_the_grammar_is_ignored() -> None:
     assert reversals(history, "phase1") == []
 
 
-def test_seq_ordering_is_by_seq_not_list_position() -> None:
-    """State is not a trust boundary: a record out of list order is still read in the order
-    it was actually produced."""
+def test_rounds_are_read_in_stored_order_not_resorted_by_seq() -> None:
+    """``round_history`` is append-only and ``prior-rounds.txt`` numbers it in stored order,
+    so stored order *is* the chronology the reviewer was shown. Re-deriving one from ``seq``
+    -- an untrusted integer -- recovers nothing and hands a doctored document a lever to
+    reorder rounds under claims written against the numbering on screen. Read in stored order,
+    ``warn.py`` is raised twice running and never disappears, so nothing is flagged; sorting
+    by ``seq`` would interpose the empty round and manufacture a reappearance."""
     history = [
         entry(3, findings=[finding(file="warn.py")]),
         entry(1, findings=[finding(file="warn.py")]),
         entry(2, findings=[]),
     ]
-    points = reversals(history, "phase1")
-    assert len(points) == 1
-    assert points[0].seqs == (1, 3)
-    assert points[0].reappeared is True
+    assert reversals(history, "phase1") == []
+
+
+def test_a_reordered_seq_cannot_manufacture_a_reversal() -> None:
+    """Regression, reproduced against the seq-sorting implementation. Numbered as
+    ``prior-rounds.txt`` shows them (stored order A, B, C), *neither* SUPERSEDES is valid: A's
+    names round 1, which is A itself, and C's names round 2 == B, whose only finding is at
+    another line. Sorting by ``seq`` renumbered A to round 2 and validated both, reporting
+    ``supersedes_rounds == 2`` -- a NEEDS_HUMAN invented out of a history with no reversal in
+    it at all."""
+    a = entry(2, findings=[finding(file="x.py:2")], supersedes=[supersedes_line(round_=1, file="x.py:1")])
+    b = entry(1, findings=[finding(file="x.py:1")])
+    c = entry(3, findings=[finding(file="x.py:9")], supersedes=[supersedes_line(round_=2, file="x.py:2")])
+    assert reversals([a, b, c], "phase1") == []
+
+
+def test_a_history_whose_numbering_cannot_be_trusted_retires_nothing() -> None:
+    """A duplicate ``seq`` means the document was not written by an append-only gate, so the
+    ordinal a ``SUPERSEDES`` names cannot be matched to the one the reviewer saw. The retirement
+    is refused rather than guessed at -- here the finding stays live and keeps persisting."""
+    history = [
+        entry(1, findings=[finding(file="a.py")]),
+        entry(1, findings=[finding(file="a.py")], supersedes=[supersedes_line(round_=1, file="a.py")]),
+    ]
+    assert persisting(history, "phase1", 2) != [], "the retraction must not be honoured"
+
+
+def test_a_dropped_round_makes_the_numbering_untrustworthy() -> None:
+    """An entry with a tampered ``seq`` is dropped here but still numbered by
+    ``prior-rounds.txt``, so every later ordinal disagrees with the screen. No SUPERSEDES in
+    such a history is interpreted."""
+    history: list[Mapping[str, object]] = [
+        {"seq": "not-an-int", "label": "phase1", "findings": [finding(file="a.py")], "supersedes": []},
+        entry(2, findings=[finding(file="a.py")]),
+        entry(3, findings=[finding(file="a.py")], supersedes=[supersedes_line(round_=2, file="a.py")]),
+    ]
+    assert persisting(history, "phase1", 2) != [], "the retraction must not be honoured"
+
+
+def test_two_rounds_sharing_a_seq_are_still_two_rounds() -> None:
+    """Retiring rounds are counted by identity, not by ``seq``: were they keyed on ``seq``, a
+    duplicated one would collapse two retiring rounds into one and undercount. (The duplicate
+    also makes the numbering untrustworthy, so nothing is retired here either -- both rules
+    point the same way, and this pins the counting one against a future change to the other.)"""
+    history = [
+        entry(1, findings=[finding(file="dup.py:10")]),
+        entry(2, findings=[finding(file="dup.py:20")], supersedes=[supersedes_line(round_=1, file="dup.py:10")]),
+        entry(2, findings=[finding(file="dup.py:30")], supersedes=[supersedes_line(round_=2, file="dup.py:20")]),
+    ]
+    assert reversals(history, "phase1") == []
 
 
 # --------------------------------------------------------------------------
@@ -299,6 +582,15 @@ def test_render_names_the_file_severity_and_reason() -> None:
     assert "severity high" in text
     assert "reappeared" in text
     assert "seq 1, 3" in text
+
+
+def test_render_counts_reversals_in_rounds() -> None:
+    history = [
+        entry(1, findings=[finding(file="loop.py")]),
+        entry(2, findings=[finding(file="loop.py")], supersedes=[supersedes_line(round_=1, file="loop.py")]),
+        entry(3, findings=[finding(file="loop.py")], supersedes=[supersedes_line(round_=2, file="loop.py")]),
+    ]
+    assert "reversed via SUPERSEDES in 2 round(s)" in oscillation.render(reversals(history, "phase1"))
 
 
 # --------------------------------------------------------------------------
