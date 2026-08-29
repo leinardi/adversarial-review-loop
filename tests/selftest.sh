@@ -841,6 +841,15 @@ if start 'incremental diff: round 2 attaches it, round 1 does not'; then
     fi
     assert_contains 'range.txt discloses the changed paths' "$(cat "$act/bundles/002/range.txt" 2>/dev/null)" 'Changed since round 1'
     assert_contains 'and names the changed file' "$(cat "$act/bundles/002/incremental.diff" 2>/dev/null)" 'a.txt'
+
+    # The manifest section: the reviewer is told what this bundle holds, so a missing file is
+    # never something to go looking for by path (26 permission errors in a real run were that).
+    r2=$(cat "$act/bundles/002/range.txt" 2>/dev/null)
+    assert_contains 'range.txt lists the bundle contents' "$r2" '## Bundle contents'
+    assert_contains 'naming the incremental diff round 2 actually has' "$r2" '- incremental.diff'
+    assert_contains 'and stating that verify.txt is absent rather than withheld' "$r2" 'no verify_cmd configured'
+    assert_eq 'round 1 named no incremental.diff' \
+        "$(grep -c -- '- incremental.diff' "$act/bundles/001/range.txt" 2>/dev/null)" '0'
 fi
 
 if start 'stall detection: three rounds of the same finding escalate without invoking the reviewer'; then

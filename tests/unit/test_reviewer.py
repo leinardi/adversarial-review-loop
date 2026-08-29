@@ -375,6 +375,86 @@ def test_the_plan_excerpt_is_capped(activation: state.State, git_repo: Path) -> 
 
 
 # --------------------------------------------------------------------------
+# range.txt: Bundle contents
+# --------------------------------------------------------------------------
+
+
+def bundle_contents(dest: Path) -> str:
+    """``range.txt``'s ``## Bundle contents`` section, on its own."""
+    return (dest / "range.txt").read_text().split("## Bundle contents\n\n", 1)[1].split("\n## ", 1)[0]
+
+
+def test_the_bundle_lists_its_own_files_so_nothing_has_to_be_looked_up_by_path(activation: state.State, git_repo: Path) -> None:
+    """26 permission errors across 24 real transcripts came from globbing `context/.staged-*`
+    for files that were already inline. The section names what exists instead."""
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+
+    section = bundle_contents(dest)
+    assert "- range.txt (this file)\n" in section
+    assert "- changes.00.diff (the complete diff, one chunk)\n" in section
+    assert "- plan.rev0.md\n" in section
+    assert "none of these is a path to open" in section
+    assert "incremental.diff" not in section, "round 1 has none, and naming an absent file is what sends the reviewer looking"
+
+
+def test_a_missing_verify_txt_is_named_as_missing_rather_than_left_out(activation: state.State, git_repo: Path) -> None:
+    """The absence is the fact worth stating: "no verify_cmd is configured" is a different
+    conclusion from "the command ran and its output is being withheld"."""
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+    assert "- verify.txt: not in this bundle -- no verify_cmd configured\n" in bundle_contents(dest)
+
+    other = activation.act_dir / "bundles" / "002"
+    build(activation, git_repo, other, config_with(verify_cmd="true"))
+    assert "- verify.txt\n" in bundle_contents(other)
+
+
+def test_the_chunk_range_agrees_with_the_files_actually_written(activation: state.State, git_repo: Path) -> None:
+    """The count comes from ``_write_chunks``' return value, not a second derivation of its
+    rule -- a bundle whose diff needed several attachments must name every one of them."""
+    (git_repo / "big.txt").write_text("".join(f"line {i}\n" for i in range(4000)))
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest, config_with(chunk_diff_bytes=4096))
+
+    chunks = sorted(dest.glob("changes.*.diff"))
+    assert len(chunks) > 1
+    assert f"- changes.00.diff through changes.{len(chunks) - 1:02d}.diff (the complete diff, {len(chunks)} chunks)\n" in bundle_contents(dest)
+
+
+def test_every_plan_revision_is_named_in_the_contents(activation: state.State, git_repo: Path) -> None:
+    add_revision(activation, 0, "revision zero\n")
+    add_revision(activation, 1, "revision one\n")
+    dest = activation.act_dir / "bundles" / "001"
+    build(activation, git_repo, dest)
+
+    assert "- plan.rev0.md through plan.rev1.md\n" in bundle_contents(dest)
+    assert (dest / "plan.rev1.md").is_file()
+
+
+def test_round_two_names_the_incremental_diff_in_the_contents(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")
+    execute_fake(activation, git_repo, "changes")
+
+    section = bundle_contents(activation.act_dir / "bundles" / "002")
+    assert "- incremental.diff\n" in section
+
+
+def test_the_contents_section_names_exactly_what_the_manifest_hashes(activation: state.State, git_repo: Path) -> None:
+    """The two are built from different sources -- the section from the counts, the manifest
+    from the paths -- so they can drift. For a bundle's own files they must not."""
+    execute_fake(activation, git_repo, "changes")
+    execute_fake(activation, git_repo, "changes")
+    dest = activation.act_dir / "bundles" / "002"
+
+    section = bundle_contents(dest)
+    hashed = {name for _digest, kind, name in reviewer._parse_manifest((dest / "manifest").read_bytes()) if kind == "bundle"}
+    for name in hashed:
+        assert name in section, f"{name} is hashed into the manifest but not named in Bundle contents"
+    assert hashed == {path.name for path in dest.iterdir() if path.name not in ("manifest", "chunks")}
+
+
+# --------------------------------------------------------------------------
 # Plan revisions
 # --------------------------------------------------------------------------
 
@@ -3146,6 +3226,96 @@ def test_session_ref_falls_back_to_fresh_when_the_listing_is_unavailable(activat
     ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
     assert ref.session_id == ""
     assert ref.capturable is True
+
+
+# -- session_ref: the round cap ----------------------------------------------
+
+
+def counting_session_list(tmp_path: Path, rows: list[dict[str, object]], marker: Path) -> Path:
+    """``session_list_script`` that also records that it ran, so a test can prove the listing
+    verify was *skipped* rather than merely unhelpful."""
+    script = tmp_path / "counting-session-list.sh"
+    script.write_text(f"#!/usr/bin/env bash\ntouch {str(marker)!r}\ncat <<'JSON'\n{json.dumps(rows)}\nJSON\n")
+    script.chmod(0o755)
+    return script
+
+
+def test_session_ref_starts_fresh_once_the_round_cap_is_reached(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """A session that keeps growing gets compacted by the provider, and a compaction landing
+    mid-review has twice cost a whole round to a malformed findings block."""
+    pointer = stored_pointer(round_number=3)
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    marker = tmp_path / "listing-ran"
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(counting_session_list(tmp_path, [matching_row(pointer, git_repo)], marker))
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(max_session_rounds=3))
+
+    assert ref.session_id == ""
+    assert ref.capturable is True
+    assert ref.round == 1
+    assert not marker.exists(), "a session this call will not continue is not worth an opencode session list"
+
+
+def test_session_ref_still_continues_below_the_round_cap(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    pointer = stored_pointer(round_number=2)
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(max_session_rounds=3))
+
+    assert ref.session_id == pointer["id"]
+    assert ref.round == 3
+
+
+def test_a_round_cap_of_zero_never_resets(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    pointer = stored_pointer(round_number=99)
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(max_session_rounds=0))
+
+    assert ref.session_id == pointer["id"]
+    assert ref.round == 100
+
+
+def test_the_round_cap_still_refuses_to_capture_over_a_live_claim(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
+    """The cap returns before ``_try_claim``, so it has to make ``_try_claim``'s busy decision
+    itself: a fresh *capturable* ref here would let this call overwrite a pointer another
+    review is mid-conversation with."""
+    pointer = stored_pointer(round_number=3, claimed_at=ocrl_now(), claim_id="owner-token")
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(max_session_rounds=3))
+
+    assert ref.session_id == ""
+    assert ref.capturable is False
+    assert activation.data["reviewer_session"]["claim_id"] == "owner-token"
+
+
+@pytest.mark.parametrize("stored", ["lots", -1_000_000, -1, None])
+def test_a_tampered_round_counter_cannot_extend_the_cap(activation: state.State, git_repo: Path, tmp_path: Path, stored: object) -> None:
+    """``round`` is arithmetic on both sides of the cap and comes out of ``state.json``, which
+    is not a trust boundary. Unparseable reads as 0; a **negative** would otherwise sit below
+    every cap *and* increment back to a negative, so one edited integer would keep a session
+    -- and the compaction-prone context the cap exists to shed -- alive for a million rounds.
+    Clamped, every one of these lands in the "no round recorded yet" case: the session
+    continues, and the round after it is 1, so the cap fires two rounds later as usual."""
+    pointer = stored_pointer()
+    pointer["round"] = stored
+    activation.data["reviewer_session"] = pointer
+    activation.save()
+    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(max_session_rounds=3))
+
+    assert ref.session_id == pointer["id"]
+    assert ref.round == 1, "the claim must not write the tampered value back for the next round to read"
+    assert activation.data["reviewer_session"]["round"] == stored, "the claim records the round it will use, not a rewrite of the pointer"
 
 
 # -- the atomic claim ---------------------------------------------------------

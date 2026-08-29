@@ -1167,6 +1167,44 @@ def _blocking_rules_section(target: Target, config: Config, *, previous_round_nu
     return "".join(out)
 
 
+def _bundle_contents_section(*, chunks: int, revisions: int, incremental: bool, verify: bool) -> str:
+    """``## Bundle contents`` -- the files that exist in this bundle directory, named exactly.
+
+    Deliberately a statement about the *directory*, never about the invocation: the primary
+    call, a cold confirmation, a repair and a ``clarify`` are each handed a different subset
+    (a clarify gets ``range.txt`` and the diff chunks and nothing else), so a list claiming
+    "these were attached" would be false for three of the four. What the reviewer needs from
+    it is the negative: 26 permission errors across 24 real transcripts came from globbing
+    and reading ``context/.staged-*`` for a ``verify.txt``/``prior-rounds.txt`` that either
+    never existed or was already inline. The prompts carry the matching rule -- everything
+    you were given arrived inline, do not go looking for it by path.
+
+    ``verify.txt`` is named even when absent, because its absence is the fact worth stating:
+    a reviewer that cannot find it should conclude "no ``verify_cmd`` is configured", not
+    "the command ran and its output is being withheld".
+    """
+    out = ["\n## Bundle contents\n\n"]
+    out.append(
+        "The files in this bundle directory. Which of them a given call was handed varies with the call, "
+        "so this is not a list of your attachments -- it is what exists. Everything you were given arrived "
+        "inline; none of these is a path to open, and prior-rounds.txt, when you have it, is attached the "
+        "same way from outside this directory.\n\n"
+    )
+    out.append("- range.txt (this file)\n")
+    if chunks == 1:
+        out.append("- changes.00.diff (the complete diff, one chunk)\n")
+    else:
+        out.append(f"- changes.00.diff through changes.{chunks - 1:02d}.diff (the complete diff, {chunks} chunks)\n")
+    if incremental:
+        out.append("- incremental.diff\n")
+    if revisions == 1:
+        out.append("- plan.rev0.md\n")
+    elif revisions > 1:
+        out.append(f"- plan.rev0.md through plan.rev{revisions - 1}.md\n")
+    out.append("- verify.txt\n" if verify else "- verify.txt: not in this bundle -- no verify_cmd configured\n")
+    return "".join(out)
+
+
 def _range_text(  # noqa: PLR0913 - one independently meaningful piece of evidence per param; bundling them would be an artificial object
     target: Target,
     *,
@@ -1179,6 +1217,7 @@ def _range_text(  # noqa: PLR0913 - one independently meaningful piece of eviden
     previous_round_number: int = 0,
     incremental_omitted: bool = False,
     scope: LateScope | None = None,
+    chunks: int = 1,
 ) -> str:
     """The bundle's ``range.txt``: what is under review, and what is *not* represented."""
     repo, base, head = target.repo, target.base, target.head
@@ -1190,6 +1229,15 @@ def _range_text(  # noqa: PLR0913 - one independently meaningful piece of eviden
     out.append(f"base_tree: {base}\n")
     out.append(f"head_tree: {head}\n")
     out.append(f"repository: {repo}\n")
+
+    out.append(
+        _bundle_contents_section(
+            chunks=chunks,
+            revisions=len(revisions),
+            incremental=bool(previous_tree),
+            verify=bool(config.as_str("verify_cmd")),
+        )
+    )
 
     out.append(_blocking_rules_section(target, config, previous_round_number=previous_round_number, scope=scope))
 
@@ -1537,6 +1585,16 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
         elif incremental_size == 0:
             _write_private(incremental_path, b"(no change since the previous round)\n")
 
+    # Chunked before `range.txt` is written, not after: `range.txt`'s "Bundle contents"
+    # section names `changes.00.diff` through `changes.<total-1>.diff` individually, and the
+    # count is only knowable once `_write_chunks` has applied its own fallbacks (an empty
+    # diff, and a diff needing more than `MAX_CHUNKS` files, both collapse to one). Deriving
+    # it a second time here would be a second implementation of that rule, free to disagree
+    # with the files actually on disk.
+    total = _write_chunks(dest, diff, config.as_int("chunk_diff_bytes"))
+    diff_file.unlink(missing_ok=True)
+    _write_private(dest / "chunks", _encode(str(total)))
+
     range_text = _range_text(
         target,
         state=state,
@@ -1548,6 +1606,7 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
         previous_round_number=previous_round_number,
         incremental_omitted=incremental_omitted,
         scope=scope,
+        chunks=total,
     )
     _write_private(dest / "range.txt", _encode(range_text))
 
@@ -1571,11 +1630,6 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
     # way an unbounded `plan.frozen.md` would, which is why that one was always capped.
     for index, (_entry, content) in enumerate(revisions):
         _write_private(dest / f"plan.rev{index}.md", content[:PLAN_EXCERPT_BYTES])
-
-    total = _write_chunks(dest, diff, config.as_int("chunk_diff_bytes"))
-    diff_file.unlink(missing_ok=True)
-
-    _write_private(dest / "chunks", _encode(str(total)))
 
     # **Sealed before `verify_cmd` runs, and re-checked after.** `verify_cmd` is
     # repository-controlled configuration executed through a login shell (`_run_verify`), so it
@@ -2501,6 +2555,24 @@ def _as_int(value: object) -> int:
         return 0
 
 
+def _pointer_round(pointer: dict[str, Any], /) -> int:
+    """The pointer's ``round`` as a **count**, which is never negative.
+
+    ``state.json`` is not a trust boundary and this field is arithmetic on both sides of the
+    cap: ``session_ref`` compares it against ``max_session_rounds`` and :func:`_try_claim`
+    adds one to it. Passed through raw, ``round: -1000000`` is below every cap and increments
+    back to ``-999999``, so one session carries a million more rounds than the cap allows --
+    the compaction-prone context the cap exists to shed, kept indefinitely by a single edited
+    integer. Clamped, a negative folds into the case a missing or unparseable ``round``
+    already lands in (0, i.e. "no round recorded yet"), which the cap and the claim have
+    always handled: the session continues, and the round after it is 1.
+
+    Both readers must use this, not ``_as_int``: clamping only the cap check would leave
+    ``_try_claim`` writing the negative straight back for the next round to read.
+    """
+    return max(_as_int(pointer.get("round")), 0)
+
+
 def _reclaim_after(config: Config) -> int:
     """How long a claim is honoured before it is considered abandoned.
 
@@ -2680,7 +2752,7 @@ def _try_claim(state: State, *, target: Target, session_id: str, config: Config)
                 claimed = ""
                 raise _TransactionAborted
             claimed = secrets.token_hex(8)
-            round_number = _as_int(current.get("round")) + 1
+            round_number = _pointer_round(current) + 1
             current["claimed_at"] = now()
             current["claim_id"] = claimed
             # Recorded by the owner, honoured by every later reader -- see `_claim_is_live`.
@@ -2691,7 +2763,9 @@ def _try_claim(state: State, *, target: Target, session_id: str, config: Config)
     return claimed, round_number
 
 
-def session_ref(state: State, target: Target, *, config: Config) -> SessionRef:
+def session_ref(  # noqa: PLR0911 - one return per distinguishable fall-back reason, which is exactly what the docstring below commits to; merging any two would merge their log lines with them
+    state: State, target: Target, *, config: Config
+) -> SessionRef:
     """Decide whether this review continues a remembered session. Never raises.
 
     Two phases, deliberately: the listing verify below can take up to
@@ -2705,6 +2779,9 @@ def session_ref(state: State, target: Target, *, config: Config) -> SessionRef:
     document the caller already validated with an empty one -- turning a caller's guarantee
     into corruption for the rest of this review. ``execute`` requires an already-loaded
     ``state``, same as every other reviewer entry point.
+
+    ``max_session_rounds`` (default 3, ``0`` unlimited) caps how many rounds one session may
+    carry before continuity is dropped deliberately -- see the comment on the check itself.
 
     These checks catch a stale id, an accidental collision and a wrong-project match, which
     are the failures that will actually happen -- but they are **not** what makes continuity
@@ -2734,6 +2811,34 @@ def session_ref(state: State, target: Target, *, config: Config) -> SessionRef:
         return SessionRef(session_id="", claim_id="", capturable=True, round=1)
 
     session_id = str(pointer["id"])
+
+    # The round cap, checked before the (slow) listing verify: a session this call is not
+    # going to continue is not worth an `opencode session list` to verify. Capping is always
+    # safe in the direction it points -- a fresh session carries *less* model-influenced
+    # context into the review, never more -- and the memory it drops is not actually lost:
+    # `prior-rounds.txt` and `incremental.diff` carry the earlier rounds forward as bounded,
+    # gate-rendered evidence. What it buys is the failure mode it removes: a long-running
+    # session gets compacted by the provider, and a compaction that lands mid-review has
+    # twice produced a contract failure (a JSON block in place of the markers, a
+    # `severity=P1 location=` line) that cost a whole round and a `failures` budget slot.
+    #
+    # **Not capturable when a live claim holds the pointer.** Skipping `_try_claim` also skips
+    # its busy check, and a fresh `SessionRef` with `capturable=True` would let this call's
+    # `capture_session` overwrite a pointer another review is mid-conversation with -- the
+    # exact corruption the claim exists to prevent, arriving through the one path that does
+    # not take the claim. `capture_session` re-checks under its own transaction, so this is
+    # belt and braces, but the two must agree here rather than rely on that.
+    cap = config.as_int("max_session_rounds")
+    stored_round = _pointer_round(pointer)
+    if cap > 0 and stored_round >= cap:
+        busy = _claim_is_live(pointer, _reclaim_after(config))
+        log(
+            f"session continuity: {session_id} for {target.label} is at round {stored_round} of a "
+            f"max_session_rounds cap of {cap}; starting fresh"
+            f"{', and this round will not capture -- another review holds the pointer' if busy else ''}"
+        )
+        return SessionRef(session_id="", claim_id="", capturable=not busy, round=1)
+
     rows = _list_sessions(target, config=config, act_dir=state.act_dir, seq=f"verify-{secrets.token_hex(4)}")
     if rows is None:
         # `_list_sessions` already logged *why* the call failed; this adds the consequence,

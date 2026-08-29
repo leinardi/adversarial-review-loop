@@ -181,6 +181,12 @@ def test_a_non_numeric_integer_override_is_skipped_not_zeroed(layers: dict[str, 
     assert config.load("", layers).as_int("timeout_sec") == 111
 
 
+def test_max_session_rounds_defaults_to_three_and_takes_an_integer_override(layers: dict[str, str]) -> None:
+    assert config.load("", layers).as_int("max_session_rounds") == 3
+    layers["OCRL_MAX_SESSION_ROUNDS"] = "0"
+    assert config.load("", layers).as_int("max_session_rounds") == 0, "0 disables the cap; it must not be read as unset"
+
+
 def test_ignore_globs_is_comma_separated_in_the_environment(layers: dict[str, str]) -> None:
     layers["OCRL_IGNORE_GLOBS"] = "a/*,,b/**,"
     assert config.load("", layers).as_list("ignore_globs") == ["a/*", "b/**"]

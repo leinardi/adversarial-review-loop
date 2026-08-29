@@ -178,6 +178,17 @@ below turns on it.
   influenced by content the gate cannot enumerate, including content from a diff that this
   round's own bundle no longer contains.
 
+**`max_session_rounds` bounds the second channel in the one dimension that was unbounded.**
+A session carries at most `max_session_rounds` rounds (default `3`); the round after that
+starts fresh, so the conversation `-s` hands the reviewer is at most two earlier rounds deep
+rather than however many the phase needed. It was added for throughput — a long session gets
+compacted by the provider, and a compaction landing mid-review has twice returned a malformed
+findings block — and the security effect is a side benefit, not a guarantee: within the cap the
+channel is exactly as unbounded and as uninspectable as described above, and a phase still runs
+as many rounds as it takes, just across several sessions. `0` disables the cap. Do not quote it
+as a mitigation for injection persistence; the label-keyed reset and `cold_confirm` are what
+that argument rests on.
+
 What is true of both channels, and is doing the real work: neither is an approval path on its
 own. A verdict comes back only through the same contract parse, an actionable finding at or
 above `block_severity` blocks whatever the reviewer concluded, no operational failure becomes an

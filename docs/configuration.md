@@ -50,6 +50,7 @@ guessing.
 | `max_findings_bytes` | `65536` | same cap, measured by size instead of count |
 | `max_clarifications` | `2` | `clarify` questions per run before it points at `accept` |
 | `stall_rounds` | `3` | consecutive rounds a finding must persist before `needs-human`; `0` disables |
+| `max_session_rounds` | `3` | rounds one OpenCode review session may carry before the next round starts a fresh one; `0` never resets |
 | `allow_dirty` | `false` | alternative to passing `--allow-dirty` every time |
 | `ttl_hours` | `24` | after this, gates block and ask for a re-arm — `resume` is usually the right fix, not a fresh `implement` |
 | `ignore_globs` | `[]` | paths whose sole change skips a review entirely |

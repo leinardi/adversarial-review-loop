@@ -60,6 +60,7 @@ DEFAULTS: Final[dict[str, Any]] = {
     "max_findings_bytes": 65536,
     "max_clarifications": 2,
     "stall_rounds": 3,
+    "max_session_rounds": 3,
     "allow_dirty": False,
     "ttl_hours": 24,
     "ignore_globs": [],
@@ -83,6 +84,7 @@ INT_KEYS: Final = (
     "max_findings_bytes",
     "max_clarifications",
     "stall_rounds",
+    "max_session_rounds",
     "ttl_hours",
 )
 
