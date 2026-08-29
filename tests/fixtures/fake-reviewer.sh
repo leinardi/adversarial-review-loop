@@ -7,6 +7,7 @@
 set -uo pipefail
 
 bundle=${1:-}
+prompt=${2:-}
 mode=${OCRL_FAKE_MODE:-approve}
 
 case "$mode" in
@@ -52,6 +53,81 @@ case "$mode" in
         printf 'FINDING severity=medium actionable=yes file=%s | Medium problem in %s\n' "$f" "$f"
         printf 'VERDICT APPROVED\n'
         printf '<<<OCRL-END>>>\n'
+        ;;
+    contract-repair)
+        # A primary call that runs to completion and then writes a block the gate cannot
+        # parse (`severity=P1 location=` -- the real shape seen after an OpenCode context
+        # compaction), plus a repair call whose behaviour OCRL_FAKE_REPAIR chooses. The two
+        # are told apart by the prompt file the gate hands over, which is the only thing that
+        # distinguishes them from the reviewer's side.
+        case "$prompt" in
+            */reviewer-repair.md)
+                case "${OCRL_FAKE_REPAIR:-ok}" in
+                    ok)
+                        printf '<<<OCRL-FINDINGS>>>\n'
+                        printf 'FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n'
+                        printf 'VERDICT CHANGES_REQUIRED\n'
+                        printf '<<<OCRL-END>>>\n'
+                        ;;
+                    approve)
+                        # Rule: no approval may ever originate from a repair. Discarded.
+                        printf '<<<OCRL-FINDINGS>>>\n'
+                        printf 'VERDICT APPROVED\n'
+                        printf '<<<OCRL-END>>>\n'
+                        ;;
+                    no-findings)
+                        # A blocking verdict with nothing blocking in it. Also discarded: the
+                        # tail may simply have been cut above the findings.
+                        printf '<<<OCRL-FINDINGS>>>\n'
+                        printf 'VERDICT CHANGES_REQUIRED\n'
+                        printf '<<<OCRL-END>>>\n'
+                        ;;
+                    supersedes)
+                        # A valid blocking block with one reversal bolted on. The repair has
+                        # no earlier round to reverse -- it sees a truncated tail -- so this
+                        # must fail the contract rather than record fabricated reversal
+                        # evidence that `oscillation` would later count towards a stall.
+                        printf '<<<OCRL-FINDINGS>>>\n'
+                        printf 'FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n'
+                        printf 'SUPERSEDES round=1 file=a.txt:9 | on reflection the earlier round was wrong\n'
+                        printf 'VERDICT CHANGES_REQUIRED\n'
+                        printf '<<<OCRL-END>>>\n'
+                        ;;
+                    malformed)
+                        printf 'I re-read it and it still seems fine to me.\n'
+                        ;;
+                    slow)
+                        sleep "${OCRL_FAKE_REPAIR_SLEEP:-30}"
+                        ;;
+                    nonzero)
+                        printf 'boom\n' >&2
+                        exit 3
+                        ;;
+                    echo-attachments)
+                        # Names every -f attachment the repair call was launched with, so a
+                        # test can assert it is shown range.txt and the fenced tail, nothing
+                        # else. Still a valid blocking block so the round is recovered.
+                        printf 'attachments:\n'
+                        printf '%s\n' "${OCRL_CONTEXT_FILES:-(none)}"
+                        printf '<<<OCRL-FINDINGS>>>\n'
+                        printf 'FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n'
+                        printf 'VERDICT CHANGES_REQUIRED\n'
+                        printf '<<<OCRL-END>>>\n'
+                        ;;
+                    *)
+                        printf 'unknown OCRL_FAKE_REPAIR: %s\n' "${OCRL_FAKE_REPAIR:-}" >&2
+                        exit 2
+                        ;;
+                esac
+                ;;
+            *)
+                printf 'The error path is wrong, and the lookup on line 1 returns success.\n\n'
+                printf '<<<OCRL-FINDINGS>>>\n'
+                printf 'FINDING severity=P1 location=a.txt:1 | Returns success on a failed lookup\n'
+                printf 'VERDICT CHANGES_REQUIRED\n'
+                printf '<<<OCRL-END>>>\n'
+                ;;
+        esac
         ;;
     approve-with-critical)
         # A reviewer that contradicts itself: the gate must recompute and block.

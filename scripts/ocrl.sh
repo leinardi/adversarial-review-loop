@@ -88,7 +88,15 @@ ocrl_hook_run() {
 
     # Command substitution captures stdout only; stderr is inherited
     # untouched, exactly the split this contract needs.
-    out=$(timeout "$timeout_s" python3 -I "$OCRL_BOOTSTRAP" "$@")
+    #
+    # OCRL_HOOK_DEADLINE_SEC is the same number `timeout` is given, handed to
+    # the gate so it can tell how much of the hook's whole budget is left
+    # before deciding to start further work (`reviewer.remaining_budget`).
+    # Passed here rather than re-derived inside, so a shrunk test timeout
+    # shrinks both together and the two can never disagree; the Python side
+    # still clamps it to the same ceiling, since an environment variable is
+    # not a trust boundary.
+    out=$(OCRL_HOOK_DEADLINE_SEC="$timeout_s" timeout "$timeout_s" python3 -I "$OCRL_BOOTSTRAP" "$@")
     rc=$?
 
     if [ "$rc" -eq 0 ]; then

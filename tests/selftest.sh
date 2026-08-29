@@ -657,6 +657,47 @@ if start 'commit gate: a block the contract does not allow never approves'; then
     done
 fi
 
+if start 'contract repair: a malformed block is re-emitted instead of costing the round'; then
+    new_case
+    arm_ok && phases_ok
+    printf 'x\n' >"$REPO/a.txt"
+    d=$(with_env OCRL_FAKE_MODE=contract-repair pre Bash 'git add -A && git commit -m x')
+    assert_eq 'the commit is still denied' "$d" 'deny'
+    assert_contains 'with the findings the malformed block had stated' "$(pre_reason)" 'Returns success on a failed lookup'
+    assert_contains 'and says the block was re-emitted' "$(pre_reason)" 're-emitted by a repair call'
+    act=$(dirname "$(state_file)")
+    if [ -f "$act/raw/001-phase1.out" ]; then ok 'the malformed transcript is kept'; else bad 'the malformed transcript is kept'; fi
+    if [ -f "$act/raw/001-phase1-repair.out" ]; then ok 'and the repair call has its own'; else bad 'and the repair call has its own'; fi
+    if [ -f "$act/context/001-repair.txt" ]; then ok 'the fenced tail is under context/, beside bundles/'; else bad 'the fenced tail is under context/, beside bundles/'; fi
+    assert_eq 'the recovered round counts as a round' "$(jq '.round_history | length' "$(state_file)")" '1'
+    assert_eq 'and spends no failure budget' "$(sget failures)" '0'
+fi
+
+if start 'contract repair: a repair that approves is discarded, and the failure stands'; then
+    new_case
+    arm_ok && phases_ok
+    printf 'x\n' >"$REPO/a.txt"
+    d=$(with_env OCRL_FAKE_MODE=contract-repair OCRL_FAKE_REPAIR=approve pre Bash 'git add -A && git commit -m x')
+    assert_eq 'denied' "$d" 'deny'
+    assert_contains 'and says a failed review is not an approval' "$(pre_reason)" 'never an approval'
+    assert_eq 'no round was recorded' "$(jq '.round_history | length' "$(state_file)")" '0'
+    assert_eq 'and the ordinary failure budget was spent' "$(sget failures)" '1'
+fi
+
+if start 'contract repair: skipped when the hook has no budget left to finish it'; then
+    # The whole-hook deadline, end to end: the shim passes its own `timeout` value as
+    # OCRL_HOOK_DEADLINE_SEC, so shrinking the timeout shrinks the gate's own budget and the
+    # repair -- which needs REPAIR_TIMEOUT_SEC plus SETTLE_MARGIN_SEC -- is never launched.
+    new_case
+    arm_ok && phases_ok
+    printf 'x\n' >"$REPO/a.txt"
+    d=$(with_env OCRL_FAKE_MODE=contract-repair OCRL_SHIM_TIMEOUT_PRETOOL=100 pre Bash 'git add -A && git commit -m x')
+    assert_eq 'denied' "$d" 'deny'
+    act=$(dirname "$(state_file)")
+    if [ -f "$act/raw/001-phase1-repair.out" ]; then bad 'no repair call was launched'; else ok 'no repair call was launched'; fi
+    assert_eq 'and the contract failure stands' "$(sget failures)" '1'
+fi
+
 if start 'commit gate: repeated failures escalate to needs-human'; then
     new_case
     arm_ok && phases_ok

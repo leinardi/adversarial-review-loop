@@ -99,6 +99,19 @@ def _findings_and_raw(review: Review, *, heading_level: str = "##") -> str:
     out.append("````\n")
     out.append(_raw_text(review.raw))
     out.append("\n````\n")
+    if review.repaired:
+        # Both transcripts, because neither is the whole story on its own: the block above was
+        # re-emitted by the repair call, and the review it describes -- the prose, the
+        # reasoning, everything written before the malformed block -- is only in this one.
+        out.append(f"\n{heading_level} Malformed primary transcript\n\n")
+        out.append(
+            "The reviewer ran to completion and then wrote a findings block the gate could not parse. The block "
+            "above was re-emitted by a separate repair call, which is shown as the raw output; this is the review "
+            "it was re-emitted from, and it is the one to read for what the reviewer actually said.\n\n"
+        )
+        out.append("````\n")
+        out.append(_raw_text(review.repaired))
+        out.append("\n````\n")
     return "".join(out)
 
 
@@ -143,6 +156,8 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
     if target.is_phase:
         out.append(f"- late_block_severity: `{config.as_str('late_block_severity')}`\n")
     out.append(f"- generated: {_timestamp()}\n")
+    if review.repaired:
+        out.append(f"- findings block: re-emitted by a repair call; the primary transcript is `{review.repaired}`\n")
     if review.confirmed is None:
         out.append(_session_line(review))
     if review.error:
@@ -282,6 +297,11 @@ def reason(review: Review, headline: str, *, config: Config) -> str:
     out: list[str] = [f"{headline}\n"]
     if review.error:
         out.append(f"\nGate note: {review.error}\n")
+    if review.repaired:
+        out.append(
+            "\nGate note: the reviewer's findings block was malformed, so the findings below were re-emitted by a "
+            f"repair call against the same transcript. The review itself is at {review.repaired}.\n"
+        )
     if review.findings:
         out.append(f"\nBlocking findings (actionable, severity >= {config.as_str('block_severity')}) -- every one must be resolved:\n\n")
         out.append(review.findings)

@@ -179,9 +179,11 @@ $XDG_STATE_HOME/opencode-review-loop/
         ├── phases.frozen            the split phase list
         ├── reports/NNN-*.md         every review, in full, never deleted
         ├── raw/NNN-<label>[-cold].out  the reviewer's own transcript for report NNN — never inside bundles/
+        ├── raw/NNN-<label>-repair.out  a contract-repair call's transcript, when the review's own block was malformed
         ├── raw/NNN-clarify.out      a clarify exchange's transcript (NNN is clarify_seq, not report_seq)
         ├── context/NNN-prior-rounds.txt  earlier rounds' verdicts+findings for report NNN — a sibling of bundles/, passed with -f and never re-openable by path; omitted from a cold confirmation
         ├── context/NNN-question.txt  a Claude-composed clarify question (NNN is clarify_seq) — same sibling directory, same -f-only channel
+        ├── context/NNN-repair.txt   the fenced tail of a malformed transcript, the only thing a repair call is shown besides range.txt
         └── bundles/NNN/             gate-generated evidence shown to the reviewer for report NNN — no model output, ever
 ```
 
