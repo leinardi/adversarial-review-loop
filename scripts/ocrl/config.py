@@ -45,8 +45,13 @@ __all__ = [
 #: per-harness (``ocrl.harness.Harness.default_model``) and is resolved through
 #: ``ocrl.harness.model``, the one reader every command shares. An empty ``model`` therefore
 #: means "whatever this harness calls its default", never "no model".
+#:
+#: ``harness`` defaults to ``claude-code``: the gate runs as a Claude Code plugin, so that is
+#: the one reviewer CLI every user of it already has installed. ``opencode`` -- which the
+#: project is named after and which is still fully supported -- is one config key away, and
+#: the name never falls back: see ``ocrl.harness.UnknownHarness``.
 DEFAULTS: Final[dict[str, Any]] = {
-    "harness": "opencode",
+    "harness": "claude-code",
     "model": "",
     "variant": "",
     "block_severity": "medium",

@@ -16,7 +16,8 @@ import sys
 from pathlib import Path
 
 from conftest import SCRIPTS_DIR, run_bootstrap
-from test_commands_arm import _path_without_opencode, armed_env
+from test_commands_arm import _path_without_opencode, armed_env, probe_env
+from test_commands_dryrun import argv_of
 
 from ocrl import config as config_module
 from ocrl import harness
@@ -239,7 +240,7 @@ def test_model_probe_is_skipped_under_the_reviewer_seam(git_repo: Path, clean_en
 
 
 def test_model_probe_warns_but_does_not_refuse_when_opencode_is_unreachable(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = {**clean_env, "PATH": _path_without_opencode(tmp_path)}
+    env = probe_env(clean_env, _path_without_opencode(tmp_path))
     proc = run_bootstrap(["config", "model", "vendor/whatever"], cwd=git_repo, env=env)
 
     assert proc.returncode == 0, proc.stderr
@@ -253,7 +254,7 @@ def test_model_probe_refuses_a_name_the_reviewer_does_not_report(git_repo: Path,
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/other-model\\n'\n")
     fake.chmod(0o755)
-    env = {**clean_env, "PATH": str(bindir)}
+    env = probe_env(clean_env, bindir)
 
     proc = run_bootstrap(["config", "model", "vendor/wanted-model"], cwd=git_repo, env=env)
 
@@ -273,7 +274,7 @@ def test_model_probe_warns_rather_than_trusts_a_non_zero_exit(git_repo: Path, tm
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/wanted-model\\n'\nexit 1\n")
     fake.chmod(0o755)
-    env = {**clean_env, "PATH": str(bindir)}
+    env = probe_env(clean_env, bindir)
 
     proc = run_bootstrap(["config", "model", "vendor/wanted-model"], cwd=git_repo, env=env)
 
@@ -287,7 +288,7 @@ def test_model_force_skips_the_probe_entirely(git_repo: Path, tmp_path: Path, cl
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/other-model\\n'\n")
     fake.chmod(0o755)
-    env = {**clean_env, "PATH": str(bindir)}
+    env = probe_env(clean_env, bindir)
 
     proc = run_bootstrap(["config", "model", "vendor/wanted-model", "--force"], cwd=git_repo, env=env)
 
@@ -313,10 +314,9 @@ def test_a_configured_model_reaches_the_dry_run_argv(git_repo: Path, tmp_path: P
     proc = run_bootstrap(["dry-run"], cwd=git_repo, env=env)
 
     assert proc.returncode == 0, proc.stderr
-    argv_block = proc.stdout.split("# argv (one element per line)\n", 1)[1].split("\n# the prompt argument\n", 1)[0]
-    argv = argv_block.splitlines()
-    assert "-m" in argv
-    assert argv[argv.index("-m") + 1] == "vendor/configured-model"
+    # Harness-neutral: which flag carries the model is that harness's business, and the thing
+    # under test is that the *configured* value reached the composed command at all.
+    assert "vendor/configured-model" in argv_of(proc.stdout)
 
 
 # --------------------------------------------------------------------------
@@ -500,19 +500,19 @@ def test_show_names_the_harness_whose_default_model_it_prints(git_repo: Path, cl
     lines = proc.stdout.splitlines()
     harness_line = next(line for line in lines if line.startswith("harness"))
     model_line = next(line for line in lines if line.startswith("model"))
-    assert "opencode" in harness_line and "(default)" in harness_line
-    assert harness.get("opencode").default_model in model_line
-    assert "(default: opencode)" in model_line
+    assert "claude-code" in harness_line and "(default)" in harness_line
+    assert harness.get("claude-code").default_model in model_line
+    assert "(default: claude-code)" in model_line
 
 
 def test_show_follows_the_configured_harness_for_the_model_default(git_repo: Path, clean_env: dict[str, str]) -> None:
-    env = {**clean_env, "OCRL_HARNESS": "claude-code"}
+    env = {**clean_env, "OCRL_HARNESS": "opencode"}
 
     proc = run_bootstrap(["config"], cwd=git_repo, env=env)
 
     model_line = next(line for line in proc.stdout.splitlines() if line.startswith("model"))
-    assert harness.get("claude-code").default_model in model_line
-    assert "(default: claude-code)" in model_line
+    assert harness.get("opencode").default_model in model_line
+    assert "(default: opencode)" in model_line
 
 
 def test_show_flags_a_harness_this_build_does_not_implement(git_repo: Path, clean_env: dict[str, str]) -> None:
@@ -528,7 +528,7 @@ def test_show_flags_a_harness_this_build_does_not_implement(git_repo: Path, clea
     model_line = next(line for line in lines if line.startswith("model"))
     assert "not implemented by this build" in harness_line
     assert harness.UNIMPLEMENTED_MODEL in model_line
-    assert harness.get("opencode").default_model not in model_line
+    assert harness.get("claude-code").default_model not in model_line
 
 
 def test_setting_an_unimplemented_harness_is_refused_and_writes_nothing(git_repo: Path, clean_env: dict[str, str]) -> None:
@@ -576,9 +576,9 @@ def test_show_credits_the_harness_when_a_layer_sets_an_empty_model(git_repo: Pat
 
     assert proc.returncode == 0, proc.stderr
     model_line = next(line for line in proc.stdout.splitlines() if line.startswith("model"))
-    assert harness.get("opencode").default_model in model_line
+    assert harness.get("claude-code").default_model in model_line
     assert "(env)" in model_line, "the layer that set it is still a real fact about the configuration"
-    assert "set to empty; showing opencode's own default" in model_line
+    assert "set to empty; showing claude-code's own default" in model_line
 
 
 def test_show_credits_the_layer_alone_when_it_names_a_real_model(git_repo: Path, clean_env: dict[str, str]) -> None:

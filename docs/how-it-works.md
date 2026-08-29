@@ -21,8 +21,8 @@ about to be saved and said yes.
 
 Think of it like a strict editor at a newspaper who has to sign off on a story before it
 goes to print. The reporter (Claude) can write and rewrite freely. But the presses
-(`git commit`) don't run until the editor (OpenCode, a separate AI, invoked fresh with no
-memory of the conversation) has read the exact copy and approved it. If the editor finds a
+(`git commit`) don't run until the editor — a separate AI, invoked fresh with no memory of the
+conversation — has read the exact copy and approved it. If the editor finds a
 problem, the story is bounced back — not published, not partially published — and the
 reporter tries again.
 

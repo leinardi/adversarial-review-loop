@@ -34,11 +34,13 @@ def write_repo_config(repo: Path, values: object) -> None:
 
 def test_defaults_stand_when_nothing_else_exists(layers: dict[str, str], tmp_path: Path) -> None:
     cfg = config.load(str(tmp_path / "repo"), layers)
-    assert cfg.as_str("harness") == "opencode"
+    # The gate ships as a Claude Code plugin, so the reviewer every user already has installed
+    # is the one it defaults to; `opencode` stays one config key away.
+    assert cfg.as_str("harness") == "claude-code"
     # Empty, not a model name: `model`'s real default is the selected harness's own, resolved
     # through `harness.model` -- see `test_harness.py` for that half of the contract.
     assert cfg.as_str("model") == ""
-    assert harness.model(cfg) == "openai/gpt-5.6-sol"
+    assert harness.model(cfg) == "opus"
     assert cfg.as_int("ttl_hours") == 24
     assert cfg.as_bool("pure") is True
     assert cfg.as_bool("final_review") is False

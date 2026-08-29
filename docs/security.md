@@ -145,8 +145,8 @@ different file.
 ## Reviewer session continuity does not widen what `state.json` can do
 
 Within one review label (`phase3`, or `final`) consecutive reviews continue the same
-OpenCode session where one can be safely found and claimed, rather than starting cold every
-round — the `reviewer_session` pointer that makes this possible is itself a value read out of
+reviewer session where one can be safely established and claimed, rather than starting cold
+every round — the `reviewer_session` pointer that makes this possible is itself a value read out of
 `state.json`, which the previous section already establishes is not a trust boundary. So the
 pointer is held to the same standard: it is never trusted to *authorize* anything. It cannot
 be: it selects which conversation a review continues, and nothing more. A review's verdict
@@ -166,15 +166,16 @@ below turns on it.
   rendered, out of entries whose `verdict`, `seq` and `tree` are each type-checked on the way
   out; the section is bounded by `max_findings` lines and `max_findings_bytes` encoded bytes, so
   a tampered history degrades to a *shorter* attachment rather than to smuggled prose. It
-  reaches OpenCode through `-f`, inlined, from a directory outside the invocation's own
-  permission allow-list, so it cannot be re-opened by path.
-- **A continued session (`-s`) — unbounded, and the gate never sees it.** This one has no such
-  story and it would be dishonest to give it one. `-s` hands the reviewer the entire earlier
-  conversation: every earlier round's attachments, the repository content inside those diffs
+  reaches the reviewer *inlined*, under either harness — through `-f` on OpenCode, in the stdin
+  payload on Claude Code — from a directory outside the invocation's own read grants, so it
+  cannot be re-opened by path.
+- **A continued session (`-s`, or `--resume`) — unbounded, and the gate never sees it.** This
+  one has no such story and it would be dishonest to give it one. Continuing a session hands the
+  reviewer the entire earlier conversation: every earlier round's attachments, the repository content inside those diffs
   (which is where an injection would live), and the reviewer's own free prose across all of
   them. None of it is re-read, re-validated or size-bounded by the gate at the point it
-  influences the next round — it lives in OpenCode, which may also compact it into a lossy
-  summary the gate cannot inspect either. A continued round's verdict can therefore be
+  influences the next round — it lives in the reviewer CLI's own session store, which may also
+  compact it into a lossy summary the gate cannot inspect either. A continued round's verdict can therefore be
   influenced by content the gate cannot enumerate, including content from a diff that this
   round's own bundle no longer contains.
 
@@ -262,15 +263,15 @@ re-attachment is deliberate and load-bearing, not an oversight to optimise away:
 tells the reviewer that `incremental.diff` "does not replace `changes.NN.diff`, which is still the
 complete diff and still what your verdict is judged against", and to re-derive its findings "not
 from memory of an earlier round's diff". Attaching only the incremental diff would move the
-verdict's evidence into session memory, which OpenCode may compact into a lossy summary — trading
+verdict's evidence into session memory, which the reviewer may compact into a lossy summary — trading
 a few percent of tokens for exactly the kind of unverifiable, model-held context this whole
 section exists to keep out of an approval. Continuity earns its place by keeping the reviewer
 *oriented* across rounds, not by being cheap.
 
 ### What is attached to a reviewer call, and the window that cannot be closed
 
-Every path the gate hands OpenCode through `-f` is validated for containment before it reaches
-the argv: components checked, parents opened `O_NOFOLLOW` one level at a time, the leaf
+Every path the gate hands the reviewer is validated for containment before it reaches the argv
+(or, on a harness that inlines from this process, before it is read): components checked, parents opened `O_NOFOLLOW` one level at a time, the leaf
 `lstat`-ed rather than `stat`-ed (`atomic.verified_file`). That refuses a planted symlink at
 any component, including the directory plant a per-file check cannot see — a symlinked
 `bundles/<seq>/` leaves ordinary regular files beneath it.
@@ -373,6 +374,56 @@ that does not go through the gate — a build script, a test, an MCP server — 
 class AGENTS.md already records under "Known environment hazards". A third, quieter gain from
 staging: the staged bytes are the ones the gate already bounded by `max_findings_bytes`, so a
 swap cannot turn a capped attachment into an unbounded one.
+
+### The two harnesses, and which of these arguments is per-harness
+
+The reviewer CLI is configurable (`harness`: `claude-code` by default, `opencode`). Most of
+this page does not depend on which one runs — the contract parse, `block_severity`, the
+cold-approval invariant, `confirm-commit`, the deny-list and `pretool` are all upstream of the
+choice. Three things are per-harness, and each was measured rather than assumed
+(`tests/STEP0.md` records the probes):
+
+- **The evidence boundary holds under both, by the same mechanism.** Both inline every
+  attachment: OpenCode through `-f`, Claude Code by concatenating them into the payload it
+  writes to the child's stdin. So under both, a `context/` file exists only as bytes inside one
+  invocation, never at a path the reviewer can re-open — which is what makes a cold
+  confirmation, handed none of them, structurally unable to have seen model-authored prose.
+  A path-based delivery channel would break that argument, and must not be introduced without
+  replacing it. On Claude Code the read grants say the same thing a second way: `--add-dir`
+  covers the repository and the bundles root, and `context/` is a sibling of `bundles/`,
+  outside both.
+
+- **Read coverage needs no verification, because delivery is complete.** The gate never has to
+  establish that the reviewer opened a file it named: every byte was handed over. What
+  *is* checked is the reverse — that the bytes handed over are the bytes that were staged.
+  Inlining makes that check strictly stronger than the pathname case: `harness.claudecode.payload`
+  re-reads each attachment through the same descriptor walk that validated it and compares a
+  SHA-256 against the digest staging recorded, refusing the whole invocation on a mismatch.
+  That closes, for this harness, the gap the section above describes as narrowed-not-closed —
+  the check and the read are one operation in one process, so there is no window for a
+  same-user process to swap a staged file in between. It closes it for the *attachments*; the
+  `-f` case is unchanged, and remains a known limit.
+
+- **A run that "succeeded" is not automatically an answer.** Measured on Claude Code: a turn
+  whose tool call was denied still exits `0`, reports `is_error: false`, and produces a
+  plausible-looking review — of less evidence than the gate believes it sent.
+  `harness.claudecode.transcript` therefore requires the result event to state, positively,
+  that nothing was denied (`permission_denials: []`) and that the turn was clean
+  (`is_error: false`); a missing field is a refusal, not a pass. Each of these reaches the gate
+  as an `OP_FAILURE`, which blocks (Rule 1). The reviewer's own isolation is the other half:
+  `--tools Read,Grep,Glob` with `--strict-mcp-config` unconditionally — measured, `--tools`
+  alone still left every connected MCP server's write-capable tools in the session — and
+  `--safe-mode --disable-slash-commands` when `pure` is on.
+
+One further consequence worth stating because it is a boundary rather than housekeeping: the
+Claude Code harness runs from an **empty** directory it creates under the activation
+(`<act_dir>/cwd`), not from the repository and not from the activation directory. In `-p` mode
+the file tools are confined to the working directory plus each `--add-dir`, so whatever sits in
+that directory is readable by the reviewer; pointing it at the activation directory would put
+`context/` inside its reach at a stable path. Running from the repository instead would be safe
+but rude — `claude -p` persists each session into a bucket keyed by its cwd, and that bucket is
+what the interactive `/resume` picker lists, so every review round would land in the user's own
+picker for the repository they are working in.
 
 ## Repo config is attacker-controlled input, full stop
 

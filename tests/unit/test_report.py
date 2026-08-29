@@ -103,7 +103,7 @@ def test_the_report_records_what_decided_it(act_dir: Path) -> None:
     assert "- verdict (recomputed by the gate): **CHANGES_REQUIRED**\n" in text
     assert "- base tree: `basetree`\n" in text
     assert "- head tree: `headtree`\n" in text
-    assert "- model: `openai/gpt-5.6-sol` (variant `thinking`)\n" in text
+    assert "- model: `opus` (variant `thinking`)\n" in text
     assert "- block_severity: `medium`\n" in text
     assert "- gate note: the reviewer timed out after 900s\n" in text
     assert "Returns success on a failed lookup" in text

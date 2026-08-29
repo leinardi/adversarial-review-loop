@@ -653,9 +653,9 @@ def test_concurrent_resumes_never_store_an_overlay_neither_of_them_probed(git_re
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
     assert proc.returncode == 0, proc.stdout
     set_phases(git_repo, env, "one")
-    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "opencode"}
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "claude-code"}
 
-    switch = ["resume", "--session", "s1", "--args", "--harness claude-code"]
+    switch = ["resume", "--session", "s1", "--args", "--harness opencode"]
     remodel = ["resume", "--session", "s1", "--args", "--model vendor/other"]
     with activation_lock(env, git_repo):
         workers = [spawn(switch if index % 2 == 0 else remodel, cwd=git_repo, env=env) for index in range(8)]
@@ -669,9 +669,9 @@ def test_concurrent_resumes_never_store_an_overlay_neither_of_them_probed(git_re
             assert "the live activation was left untouched" in out, "a refused resume must write nothing"
 
     overrides = read_state(env, git_repo, "s1")["overrides"]
-    # Exactly one call's overlay -- never {"harness": "claude-code", "model": "vendor/other"},
+    # Exactly one call's overlay -- never {"harness": "opencode", "model": "vendor/other"},
     # the combination that would have reached the reviewer unvalidated.
-    assert overrides in ({"harness": "claude-code"}, {"harness": "opencode", "model": "vendor/other"}), overrides
+    assert overrides in ({"harness": "opencode"}, {"harness": "claude-code", "model": "vendor/other"}), overrides
 
 
 def test_a_refused_concurrent_resume_succeeds_when_run_again(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

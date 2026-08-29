@@ -429,6 +429,26 @@ def test_a_run_that_did_not_persist_stores_no_pointer(tmp_path: Path, monkeypatc
     assert not captured
 
 
+def test_the_reviewer_seam_skips_the_store_lookup_entirely(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under ``OCRL_REVIEWER_CMD`` no ``claude`` ran, so there is no session to find.
+
+    Skipped rather than merely quiet, and asserted because the difference is visible: without
+    it every round of ``tests/selftest.sh`` logs a missing session it was never going to have,
+    which is the kind of routine noise that trains a reader to ignore the line that matters.
+    Same short-circuit ``opencode._list_sessions`` makes, for the same reason.
+    """
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("OCRL_REVIEWER_CMD", "/bin/true")
+    minted = claudecode.SESSIONS.mint()
+    store_session(tmp_path / "config", minted)
+
+    captured = claudecode.SESSIONS.capture(
+        harness.CaptureSpec(repo="/repo", title="t", act_dir=tmp_path, seq="001", started_ms=0, config=config_with(), new_session_id=minted)
+    )
+
+    assert not captured, "a session the stub reviewer cannot have created is never captured, even if the id happens to be in the store"
+
+
 def test_the_config_dir_is_the_whole_environment_value(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``CLAUDE_CONFIG_DIR`` names one directory, and a colon is legal in a path.
 

@@ -1,7 +1,7 @@
 ---
 name: implement
 description: Implement an agreed plan with an enforced OpenCode adversarial review loop. Every phase commit is gated on an external review that must pass before the commit proceeds.
-argument-hint: "<path-to-plan.md> [--allow-dirty]"
+argument-hint: "<path-to-plan.md> [--allow-dirty] [--until N] [--harness H] [--model X] [--variant V]"
 disable-model-invocation: true
 user-invocable: true
 hooks:

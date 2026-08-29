@@ -67,7 +67,7 @@ test-filter: ## Run only the selftest sections matching FILTER=<substring>, seri
 	@$(REPO_ROOT)/tests/selftest.sh "$(FILTER)"
 
 .PHONY: dry-run
-dry-run: ## Print the exact opencode invocation for the current worktree, without calling it
+dry-run: ## Print the exact reviewer invocation for the current worktree, without calling it
 	@$(REPO_ROOT)/scripts/ocrl.sh dry-run
 
 endif

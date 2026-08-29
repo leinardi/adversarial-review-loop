@@ -30,8 +30,8 @@ guessing.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `harness` | `opencode` | which reviewer CLI runs the review — `opencode` or `claude-code`. An unimplemented name is refused when you arm, never quietly replaced with the default |
-| `model` | the harness's own (`openai/gpt-5.6-sol` for `opencode`, `opus` for `claude-code`) | probed for reachability at arm time, for a harness that can enumerate its models |
+| `harness` | `claude-code` | which reviewer CLI runs the review — `claude-code` or `opencode`. It defaults to Claude Code because that is the CLI this plugin already runs inside; an unimplemented name is refused when you arm, never quietly replaced with the default |
+| `model` | the harness's own (`opus` for `claude-code`, `openai/gpt-5.6-sol` for `opencode`) | probed for reachability at arm time, for a harness that can enumerate its models |
 | `variant` | unset | reasoning effort — `--variant` on OpenCode, `--effort` (`low`…`max`) on Claude Code |
 | `block_severity` | `medium` | blocks when `actionable=yes AND severity >= this` |
 | `late_block_severity` | `high` | from round 2 of a phase on, a new finding outside the paths changed since the previous round blocks only at or above this; never below `block_severity` |
@@ -70,8 +70,8 @@ this — their values are already the right type.
 
 ```console
 $ /opencode-review-loop:config
-harness                  opencode             (default)
-model                    openai/gpt-5.6-sol   (default: opencode)
+harness                  claude-code          (default)
+model                    opus                 (default: claude-code)
 variant                                       (default)
 block_severity           medium               (default)
 ...
@@ -135,8 +135,8 @@ switched *to*. Continuity does not carry across a switch: a session pointer mint
 harness is not presentable to another, so the next review simply starts fresh.
 
 What gets pinned is the harness that was actually **probed**, not the one you typed. Since
-`OCRL_HARNESS` outranks the overlay, `OCRL_HARNESS=opencode … --harness claude-code` checks
-*opencode* — so opencode is what is recorded, and the armed banner says so. Recording the
+`OCRL_HARNESS` outranks the overlay, `OCRL_HARNESS=claude-code … --harness opencode` checks
+*claude-code* — so claude-code is what is recorded, and the armed banner says so. Recording the
 flag instead would pin a reviewer nothing verified, and the activation would start running
 it the moment the variable left your environment.
 

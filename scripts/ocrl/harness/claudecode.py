@@ -462,6 +462,13 @@ class AssignedSessions:
         Never raises: a miss is a log line and a falsy :class:`~ocrl.harness.Captured`, which
         the caller reads as "no continuity to offer", never as an error.
         """
+        if os.environ.get("OCRL_REVIEWER_CMD", ""):
+            # Under the test seam no `claude` ran, so there is no transcript to find and the
+            # lookup below would report a missing session on every round of `tests/selftest.sh`.
+            # Skipped rather than merely un-logged, and skipped here rather than in
+            # `_session_file`, for the same reason `opencode._list_sessions` short-circuits: a
+            # reviewer-adjacent call has no business running when the reviewer itself did not.
+            return Captured()
         session_id = spec.new_session_id
         if not self.is_session_id(session_id):
             log(f"capture_session: {session_id!r} is not a session id this harness minted; not storing a pointer")

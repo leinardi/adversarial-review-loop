@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from conftest import git, run_bootstrap, run_hook
-from test_commands_arm import _path_without_opencode, plan_file, read_state, state_dir
+from test_commands_arm import _path_without_opencode, plan_file, probe_env, read_state, state_dir
 from test_commands_posttool import COMMIT, confirm
 from test_commands_pretool import armed, patch_state, payload, pretool
 from test_commands_stop import ended, stop
@@ -364,7 +364,7 @@ def test_a_same_session_failure_leaves_the_live_document_untouched(git_repo: Pat
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/stored\\n'\n")
     fake.chmod(0o755)
-    env = {**clean_env, "PATH": str(bindir)}
+    env = probe_env(clean_env, bindir)
     active(git_repo, tmp_path, env, extra_args="--model vendor/stored")
     before = (state_dir(env, git_repo, S1) / "state.json").read_bytes()
 
@@ -566,7 +566,7 @@ def test_a_model_override_is_probed_instead_of_the_stored_default(git_repo: Path
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/stored\\n'\n")
     fake.chmod(0o755)
-    env = {**clean_env, "PATH": str(bindir)}
+    env = probe_env(clean_env, bindir)
     active(git_repo, tmp_path, env, extra_args="--model vendor/stored")
     assert read_state(env, git_repo, S1)["overrides"] == {"harness": "opencode", "model": "vendor/stored"}
 
@@ -581,12 +581,12 @@ def test_a_model_override_is_probed_instead_of_the_stored_default(git_repo: Path
 def test_model_and_variant_overrides_are_persisted_and_merged_over_the_stored_ones(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed(clean_env)
     active(git_repo, tmp_path, env, extra_args="--model vendor/original")
-    assert read_state(env, git_repo, S1)["overrides"] == {"harness": "opencode", "model": "vendor/original"}
+    assert read_state(env, git_repo, S1)["overrides"] == {"harness": "claude-code", "model": "vendor/original"}
 
     code, _ = resume_argv(git_repo, env, S2, ["--variant", "fast"])
 
     assert code == 0
-    assert read_state(env, git_repo, S2)["overrides"] == {"harness": "opencode", "model": "vendor/original", "variant": "fast"}
+    assert read_state(env, git_repo, S2)["overrides"] == {"harness": "claude-code", "model": "vendor/original", "variant": "fast"}
 
 
 # --------------------------------------------------------------------------

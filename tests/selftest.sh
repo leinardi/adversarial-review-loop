@@ -362,10 +362,20 @@ if start 'arm: rejects a bad second argument and a missing plan'; then
     ocrl arm --session "$SESSION" --plan "$CASE_DIR/a plan.md" >/dev/null 2>&1
     assert_eq 'a plan path with a space is accepted' "$(sget status)" 'ARMED'
 
+    # Pinned to `opencode`: the model probe is a real `opencode models` call, and it is the
+    # only harness that has one -- `claude` cannot enumerate its models, so under the default
+    # harness a bad name is caught at review time (a non-zero exit, an OP_FAILURE) rather than
+    # at arm time, and this case would pass while probing nothing.
     new_case
-    with_env OCRL_MODEL='provider/does-not-exist' OCRL_REVIEWER_CMD='' \
+    with_env OCRL_HARNESS=opencode OCRL_MODEL='provider/does-not-exist' OCRL_REVIEWER_CMD='' \
         ocrl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
     assert_eq 'an unreachable model fails closed' "$(sget status)" 'ARM_FAILED'
+
+    new_case
+    with_env OCRL_HARNESS='not-a-harness' OCRL_REVIEWER_CMD='' \
+        ocrl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
+    assert_eq 'an unimplemented harness fails closed' "$(sget status)" 'ARM_FAILED'
+    assert_contains 'and says which are implemented' "$(sget reason)" 'claude-code, opencode'
 fi
 
 if start 'arm: --args parsing, as the slash command actually delivers it'; then
@@ -1581,11 +1591,26 @@ if start 'dry-run prints the exact invocation without calling the reviewer'; the
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
+    # `dry-run` composes the invocation through the harness itself, so it is the one command
+    # here that steps outside the OCRL_REVIEWER_CMD seam -- and therefore the only place this
+    # script sees a real harness's argv at all. Nothing is executed: no reviewer binary has to
+    # exist for either half of this case.
     out=$(ocrl dry-run 2>&1)
-    assert_contains 'the model flag is shown' "$out" '-m'
+    assert_contains 'the default harness is named' "$out" '# harness: claude-code'
+    assert_contains 'the model flag is shown' "$out" '--model'
+    assert_contains 'the repository is granted by path' "$out" '--add-dir'
+    assert_contains 'the tool set is bounded' "$out" 'Read,Grep,Glob'
+    assert_contains 'the attachments are inlined on stdin' "$out" 'BEGIN ATTACHMENT'
     assert_contains 'the bundle is attached' "$out" 'range.txt'
+    assert_contains 'the prompt is shown' "$out" 'adversarial code reviewer'
+
+    out=$(with_env OCRL_HARNESS=opencode ocrl dry-run 2>&1)
+    assert_contains 'the selected harness is named' "$out" '# harness: opencode'
+    assert_contains 'the model flag is shown' "$out" '-m'
+    assert_contains 'the bundle is attached by path' "$out" 'range.txt'
     assert_contains 'the permission object is shown' "$out" 'external_directory'
     assert_contains 'the prompt is shown' "$out" 'adversarial code reviewer'
+    assert_contains 'and nothing is fed on stdin' "$out" '# stdin: nothing'
 fi
 
 # --------------------------------------------------------------------------

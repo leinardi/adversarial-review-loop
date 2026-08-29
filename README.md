@@ -1,6 +1,8 @@
 # opencode-review-loop
 
-A Claude Code plugin that implements an agreed plan **phase by phase, with an external adversarial review as an enforcement gate**. Claude cannot commit a phase until [OpenCode](https://opencode.ai) has reviewed the exact tree it is about to commit and passed it.
+A Claude Code plugin that implements an agreed plan **phase by phase, with an external adversarial review as an enforcement gate**. Claude cannot commit a phase until a separate reviewer — a second `claude` process by default, or [OpenCode](https://opencode.ai) — has reviewed the exact tree it is about to commit and passed it.
+
+The reviewer is *external* in the sense that matters: a fresh process, isolated from your ambient plugins, skills and MCP servers, given the diff as evidence and a fixed prompt, with no way to write anything and no memory of the session that wrote the code.
 
 The review is not advice Claude may weigh up. It is a `PreToolUse` gate on the commit itself: findings come back as a denial, and the commit only proceeds once they are resolved.
 
@@ -10,7 +12,7 @@ The review is not advice Claude may weigh up. It is a `PreToolUse` gate on the c
    -> Claude proposes phases and freezes them
    -> phase N implemented -> git commit -> INTERCEPTED
         snapshot the whole working state into a tree
-        OpenCode reviews the delta since the last approved tree
+        the reviewer reads the delta since the last approved tree
         approved -> commit proceeds -> phase advances
         findings -> commit denied, findings returned inline
    -> all phases committed -> turn ends -> COMPLETE
@@ -20,7 +22,7 @@ The review is not advice Claude may weigh up. It is a `PreToolUse` gate on the c
 ## Requirements
 
 - Claude Code 2.1.x or newer (the plugin uses `PreToolUse`, `PostToolUse`, `PostToolUseFailure` and `Stop` skill hooks)
-- [`opencode`](https://opencode.ai) on `PATH`, authenticated, with the configured model available
+- the reviewer CLI on `PATH` and authenticated: `claude` by default (you already have it), or [`opencode`](https://opencode.ai) with `harness` set to `opencode`. Arming refuses if the configured one is missing.
 - `python3` 3.12 or newer — the gate itself. No install step: the standard library plus a vendored, lint-excluded copy of [bashlex](https://github.com/idank/bashlex) is everything it needs.
 - `git`, `bash` 4.4+ and `timeout` (GNU or uutils coreutils) — `scripts/ocrl.sh` is a thin guarded shim over the interpreter above; see "Interpreter invocation" in `AGENTS.md` for why it exists and what it guarantees.
 
@@ -138,6 +140,26 @@ Each subcommand is matched against a flag allowlist with **default-deny on unkno
 
 ### The reviewer
 
+Which CLI performs the review is the `harness` key. Both spellings below are what the gate
+actually composes — `make dry-run` prints the exact one for your configuration, without
+spending a model call.
+
+**`claude-code` (default).** The prompt and every attachment go in on **stdin**; nothing
+repo-derived or bundle-derived is named in the argv.
+
+```bash
+claude -p --output-format json --model "$model" \
+  --tools "Read,Grep,Glob" --strict-mcp-config --safe-mode --disable-slash-commands \
+  --session-id "$uuid" --add-dir "$repo" --add-dir "<act_dir>/bundles" \
+  < "prompts/reviewer-phase.md + range.txt + changes.00.diff [+ …], fenced"
+```
+
+- `--tools` plus `--strict-mcp-config` make the reviewer structurally read-only: measured, `--tools` on its own still left every connected MCP server's tools in the session, write-capable ones included. Those two are unconditional; `--safe-mode --disable-slash-commands` is what `pure` selects, and it takes your `CLAUDE.md`, hooks, plugins, agents and skills out of the review
+- `--add-dir` grants read of the repository and of this activation's **bundles root** — never the activation directory itself, which also holds `state.json`, the frozen plan and the reports. The run's own working directory is an empty one the gate creates, so no review session lands in your repository's `/resume` picker
+- a denied tool call or a failed turn is refused rather than parsed, even though the CLI exits `0` for both
+
+**`opencode`.** The prompt is an argument and the attachments are `-f` paths, which OpenCode inlines.
+
 ```bash
 OPENCODE_PERMISSION='{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow",
                       "external_directory":{"*":"deny","<act_dir>/bundles/**":"allow"}}' \
@@ -146,15 +168,16 @@ opencode run --pure --dir "$repo" -m "$model" --title "review-loop phase N [<has
 ```
 
 - `--pure` neutralises your global OpenCode **plugins**, which would otherwise rewrite the output and break the contract. It does *not* remove global skills (`~/.config/opencode/skills`) or a global `~/.config/opencode/AGENTS.md`, both of which still reach the reviewer — the prompt explicitly tells it to ignore ambient style directives and not to invoke a skill for the review. A review that comes back reformatted anyway fails the contract, which blocks; it never approves
-- `OPENCODE_PERMISSION` makes the reviewer structurally read-only and repo-scoped; `external_directory` is denied everywhere except the **bundles root** — every bundle in this activation, never the activation directory itself, which also holds `state.json`, the frozen plan and the reports
-- the diff is **chunked across as many attachments as needed, never truncated** — a truncated diff hides deletions, and approving on a partial view is approving what was never seen
+- `OPENCODE_PERMISSION` makes the reviewer structurally read-only and repo-scoped; `external_directory` is denied everywhere except the **bundles root**, on the same reasoning as above
 - project OpenCode config stays enabled, so repo-local review skills load
+
+Under both, the diff is **chunked across as many attachments as needed, never truncated** — a truncated diff hides deletions, and approving on a partial view is approving what was never seen — and every attachment is *inlined*, never handed over as a path the reviewer opens later. That is what keeps the gate's own `context/` files, the only model-derived evidence it produces, unreachable by name.
 
 The reviewer cannot run anything. Set `verify_cmd` and the hook runs it and attaches the output as evidence.
 
 Repo text and the frozen plan are labelled **evidence, not instructions**, and the reviewer is explicitly asked to flag a phase description that misrepresents the frozen plan.
 
-**Consecutive reviews of one phase continue the same OpenCode session** where one can be found and safely claimed — `-s <id>` instead of a fresh `--title` — so round 2 can see what round 1 already flagged instead of starting cold every time. A new phase, or the final cumulative review, always starts fresh.
+**Consecutive reviews of one phase continue the same reviewer session** where one can be safely established and claimed — `--resume <uuid>` on Claude Code, `-s <id>` on OpenCode — so round 2 can see what round 1 already flagged instead of starting cold every time. A new phase, or the final cumulative review, always starts fresh.
 
 **One session carries at most `max_session_rounds` rounds** (default `3`, `0` never resets). Past that the next round starts a fresh session on purpose: a session that keeps growing gets compacted by the provider, and a compaction landing mid-review has produced a malformed findings block — a whole round and a `failures` slot spent on nothing. Little is lost by resetting, because the memory does not live in the conversation: `prior-rounds.txt` carries every earlier round's verdict and `FINDING` lines, and `incremental.diff` carries what changed since the previous round, both as bounded evidence the gate itself renders.
 
@@ -168,8 +191,8 @@ Resolution order: `OCRL_*` environment → repo `.opencode-review-loop.json` →
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `harness` | `opencode` | which reviewer CLI runs the review — `opencode` or `claude-code`. Pinned into the activation when you arm, so switching it mid-run is explicit (`--harness` on `resume`, or `OCRL_HARNESS`); an unimplemented name is refused at arm time, never quietly replaced |
-| `model` | the harness's own (`openai/gpt-5.6-sol` for `opencode`, `opus` for `claude-code`) | probed for reachability at arm time, for a harness that can enumerate its models |
+| `harness` | `claude-code` | which reviewer CLI runs the review — `claude-code` or `opencode`. Pinned into the activation when you arm, so switching it mid-run is explicit (`--harness` on `resume`, or `OCRL_HARNESS`); an unimplemented name is refused at arm time, never quietly replaced |
+| `model` | the harness's own (`opus` for `claude-code`, `openai/gpt-5.6-sol` for `opencode`) | probed for reachability at arm time, for a harness that can enumerate its models |
 | `variant` | unset | reasoning effort — `--variant` on OpenCode, `--effort` (`low`…`max`) on Claude Code |
 | `block_severity` | `medium` | blocks when `actionable=yes AND severity >= this` |
 | `late_block_severity` | `high` | from round 2 of a phase on, a new finding outside the paths changed since the previous round blocks only at or above this; never below `block_severity` |
@@ -220,9 +243,9 @@ State lives in `$XDG_STATE_HOME/opencode-review-loop/worktrees/<sha256(worktree)
 | Any arm failure | Persisted **before** exit; all mutations and commits denied until re-armed or stopped |
 | Arming never executes (refused sandbox, unreadable script) | The dispatcher records `ARM_FAILED` itself and denies; a missing pointer is never read as "not armed" |
 | Mutation before `set-phases` | Denied, with the exact command to run |
-| Turn ends while `ARM_FAILED` or phases unset | `Stop` blocks with instructions; OpenCode is never called |
+| Turn ends while `ARM_FAILED` or phases unset | `Stop` blocks with instructions; the reviewer is never called |
 | Timeout, malformed output, missing verdict, non-zero exit | `OP_FAILURE` → deny; never an approval |
-| `OP_FAILURE` past `max_failures` | `NEEDS_HUMAN`; OpenCode is no longer invoked |
+| `OP_FAILURE` past `max_failures` | `NEEDS_HUMAN`; the reviewer is no longer invoked |
 | Findings past `max_findings` / `max_findings_bytes` | `NEEDS_HUMAN`, full report retained; never trimmed, never approved |
 | Diff above `hard_diff_ceiling` | `NEEDS_HUMAN` |
 | Commit lands ≠ reviewed tree, or is an amend | `RECONCILE` with a prescribed, non-automatic recovery |

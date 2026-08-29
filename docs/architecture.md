@@ -31,9 +31,11 @@ as it stands; it doesn't repeat the reasoning behind every design choice.
                        │                                │                                │
                        └────────────────┬───────────────┴────────────────┬───────────────┘
                                          ▼                                ▼
-                                   gitsnap.py                       reviewer.py
-                              (throwaway-index                (bundle building, OpenCode
-                               tree snapshot)                   invocation, contract parsing)
+                                   gitsnap.py                       reviewer.py ──▶ harness/
+                              (throwaway-index                (bundle building,     (which reviewer CLI,
+                               tree snapshot)                   running the           and how its command
+                                                                reviewer,             is spelled)
+                                                                contract parsing)
                                          │                                │
                                          └──────────────┬─────────────────┘
                                                          ▼
@@ -138,7 +140,8 @@ and a final review writes none.
        committed + staged + unstaged + non-ignored untracked, real index untouched
      - same tree as the last approval? → allow immediately, no review (cache hit)
      - otherwise: build a review bundle (diff chunks, the frozen plan, prior
-       revisions, verify output) and invoke OpenCode (reviewer.py)
+       revisions, verify output) and run the reviewer (reviewer.py,
+       through the configured harness)
      - reviewer approves → record `pending_approved_tree`, allow the commit
      - reviewer finds something, or the run fails operationally → deny,
        findings (or the operational reason) go back to Claude inline
@@ -153,6 +156,38 @@ and a final review writes none.
    pending approval instead of leaving it around for a different commit to
    consume.)
 ```
+
+## The reviewer harness
+
+Which CLI actually performs the review is a seam, not a hard-coded name. `harness/__init__.py`
+holds the `Harness` and `SessionStrategy` protocols and a registry keyed by the `harness`
+config value; `harness/opencode.py` and `harness/claudecode.py` are the two implementations.
+The default is `claude-code` — the gate ships as a Claude Code plugin, so that is the reviewer
+every user already has — and `opencode` is one config key away.
+
+Everything that decides an *outcome* stays in `reviewer.py` and never learns which CLI ran:
+bundle building, staging and manifest verification, the `FINDING`/`VERDICT` contract, the
+cold-approval invariant, `round_history`, the retry classes. A harness answers with a
+`Command` — argv, environment *overrides*, optional stdin, optional working directory — and
+`reviewer.py` runs it. It reads no verdict and writes no state.
+
+The two implementations differ in three visible ways, and each difference is measured rather
+than assumed (`tests/STEP0.md`):
+
+|  | OpenCode | Claude Code |
+| --- | --- | --- |
+| prompt and attachments | one argv element, attachments inlined by `-f` | one payload on stdin, attachments inlined between per-run fences |
+| read access | `OPENCODE_PERMISSION`, `--dir <repo>` | `--tools Read,Grep,Glob`, `--strict-mcp-config`, `--add-dir <repo>` |
+| sessions | *discovered* after the run, by matching a unique `--title` in `session list` | *assigned* before it, `--session-id` / `--resume` |
+
+**Both inline their attachments, and that is load-bearing rather than incidental.** It is what
+keeps `context/` — the only model-derived evidence the gate ever produces — from existing at a
+path the reviewer could re-open, which is what makes a cold confirmation structurally unable to
+have seen model-authored prose. See [security.md](security.md).
+
+`make dry-run` prints the composed command for the configured harness — argv, env overrides,
+cwd and stdin — without spending a model call, and is the cheapest way to inspect a change to
+any of them.
 
 ## Resume and plan revision
 
@@ -216,8 +251,9 @@ and exactly what does and doesn't cross it.
 | `scripts/ocrl/gitsnap.py` | the throwaway-index tree snapshot, oversized-file guard, submodule detection |
 | `scripts/ocrl/cmdshape.py` | deny-list plus a real bash parser (vendored bashlex) deciding whether a commit command may run |
 | `scripts/ocrl/globmatch.py` | glob matching for `ignore_globs`, reimplemented rather than shelled out |
-| `scripts/ocrl/reviewer.py` | bundle building, the OpenCode invocation, output-contract parsing |
-| `scripts/ocrl/reviewer_probe.py` | the `opencode models` reachability probe, shared by `arm`, `resume` and `config` |
+| `scripts/ocrl/reviewer.py` | bundle building, staging, running the reviewer command, output-contract parsing |
+| `scripts/ocrl/harness/` | the reviewer-CLI seam — the `Harness`/`SessionStrategy` protocols and the registry, plus one module per implementation (`opencode.py`, `claudecode.py`) |
+| `scripts/ocrl/reviewer_probe.py` | the `opencode models` reachability probe, reached through the OpenCode harness; a CLI that cannot enumerate its models has none |
 | `scripts/ocrl/planrev.py` | plan-revision bookkeeping — backfilling revision 0, path/hash verification, the active revision |
 | `scripts/ocrl/report.py` | report storage; the text Claude actually sees |
 | `scripts/ocrl/commands/` | one module per subcommand — `arm`, `resume`, `phases`, `session`, `configcmd`, `completion`, `dryrun`, plus the four hook entrypoints |

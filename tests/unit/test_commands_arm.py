@@ -426,13 +426,42 @@ def _path_without_opencode(tmp_path: Path) -> str:
     return str(bindir)
 
 
+def probe_env(clean_env: dict[str, str], bindir: str | Path, **extra: str) -> dict[str, str]:
+    """A clean environment on ``bindir`` alone, pinned to the harness that *has* a model probe.
+
+    ``OCRL_HARNESS`` is pinned rather than left at its default because every caller is about
+    the **model list**, and only OpenCode can produce one: ``claude`` has no ``models``
+    subcommand, so ``probe_models`` answers ``None`` and the callers check for the binary and
+    stop. Left on the default these tests would still pass -- against a code path that never
+    reaches the fake ``opencode`` they went to the trouble of installing, which is the kind of
+    green that means nothing. What the default harness does with an absent binary has its own
+    test (``test_arming_without_the_default_harnesss_binary_is_refused``).
+    """
+    return {**clean_env, "PATH": str(bindir), "OCRL_HARNESS": "opencode", **extra}
+
+
 def test_arming_without_opencode_is_refused(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Arming with an unreachable reviewer would make every commit fail for the wrong reason."""
-    env = {**clean_env, "PATH": _path_without_opencode(tmp_path)}
+    env = probe_env(clean_env, _path_without_opencode(tmp_path))
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
     assert proc.returncode == 1
     assert "the `opencode` binary is not on PATH" in proc.stdout
+    assert read_state(env, git_repo, "s1")["status"] == "ARM_FAILED"
+
+
+def test_arming_without_the_default_harnesss_binary_is_refused(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The same refusal, for the harness a user who configures nothing actually gets.
+
+    It reports the binary **that harness** runs, not a name inherited from the project's own:
+    the two differ, and a message naming the wrong executable sends the user to install the
+    wrong thing. Nothing here pins ``OCRL_HARNESS`` -- that is the point.
+    """
+    env = {**clean_env, "PATH": _path_without_opencode(tmp_path)}
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+
+    assert proc.returncode == 1
+    assert f"the `{harness.get('claude-code').binary}` binary is not on PATH" in proc.stdout
     assert read_state(env, git_repo, "s1")["status"] == "ARM_FAILED"
 
 
@@ -441,7 +470,7 @@ def test_a_model_opencode_does_not_report_is_refused(git_repo: Path, tmp_path: P
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/other-model\\n'\n")
     fake.chmod(0o755)
-    env = {**clean_env, "PATH": str(bindir), "OCRL_MODEL": "vendor/wanted-model"}
+    env = probe_env(clean_env, bindir, OCRL_MODEL="vendor/wanted-model")
 
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
@@ -456,7 +485,7 @@ def test_a_silent_opencode_is_refused(git_repo: Path, tmp_path: Path, clean_env:
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nexit 0\n")
     fake.chmod(0o755)
-    env = {**clean_env, "PATH": str(bindir)}
+    env = probe_env(clean_env, bindir)
 
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
@@ -470,7 +499,7 @@ def test_a_reported_model_is_accepted(git_repo: Path, tmp_path: Path, clean_env:
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/other\\nvendor/wanted\\n'\n")
     fake.chmod(0o755)
-    env = {**clean_env, "PATH": str(bindir), "OCRL_MODEL": "vendor/wanted"}
+    env = probe_env(clean_env, bindir, OCRL_MODEL="vendor/wanted")
 
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
@@ -599,7 +628,7 @@ def test_the_armed_banner_reflects_the_environment_not_the_override_alone(
     assert "vendor/env-wins" in proc.stdout
     assert "vendor/flag-loses" not in proc.stdout
     # The override is still recorded in state -- it is only not what actually runs here.
-    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "opencode", "model": "vendor/flag-loses"}
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "claude-code", "model": "vendor/flag-loses"}
 
 
 def test_an_out_of_range_until_is_clamped_with_a_warning_once_phases_are_frozen(
@@ -629,7 +658,7 @@ def test_model_and_variant_are_persisted_as_overrides(git_repo: Path, tmp_path: 
     )
 
     assert proc.returncode == 0, proc.stdout
-    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "opencode", "model": "vendor/x", "variant": "fast"}
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "claude-code", "model": "vendor/x", "variant": "fast"}
     assert "vendor/x" in proc.stdout
     assert "fast" in proc.stdout
 
@@ -642,7 +671,7 @@ def test_no_model_or_variant_flag_leaves_only_the_pinned_harness(git_repo: Path,
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
     assert proc.returncode == 0, proc.stdout
-    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "opencode"}
+    assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "claude-code"}
 
 
 def test_a_model_override_is_probed_instead_of_the_stored_default(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -661,7 +690,7 @@ def test_a_model_override_is_probed_instead_of_the_stored_default(git_repo: Path
     (git_repo / ".opencode-review-loop.json").write_text('{"model": "vendor/stored"}')
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "repo config")
-    env = {**clean_env, "PATH": str(bindir)}
+    env = probe_env(clean_env, bindir)
 
     proc = run_bootstrap(
         ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --model vendor/not-reported"],
@@ -684,7 +713,7 @@ def test_a_model_override_that_is_reported_arms(git_repo: Path, tmp_path: Path, 
     (git_repo / ".opencode-review-loop.json").write_text('{"model": "vendor/stored"}')
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "repo config")
-    env = {**clean_env, "PATH": str(bindir)}
+    env = probe_env(clean_env, bindir)
 
     proc = run_bootstrap(
         ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --model vendor/override"],

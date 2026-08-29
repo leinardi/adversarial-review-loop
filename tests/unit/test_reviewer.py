@@ -111,6 +111,20 @@ def config_with(**overrides: object) -> Config:
     return Config({**ocrl_config.DEFAULTS, **overrides})
 
 
+def discovery_config(**overrides: object) -> Config:
+    """:func:`config_with`, pinned to the harness whose sessions are *discovered*.
+
+    Every test that drives ``OCRL_SESSION_LIST_CMD``, plants a ``ses_…`` pointer or asserts on
+    a listing is exercising ``ocrl.harness.opencode.DiscoveredSessions`` in particular, not
+    whichever harness ``config.DEFAULTS`` happens to name -- the other strategy pre-assigns its
+    ids and makes no listing call at all, so those tests would be asserting on a code path that
+    never runs. Pinning it here is what keeps them about the strategy, and what lets the default
+    harness move without rewriting them; ``AssignedSessions`` has its own coverage in
+    ``test_harness_claudecode.py``.
+    """
+    return config_with(harness=opencode_harness.HARNESS.name, **overrides)
+
+
 @pytest.fixture
 def activation(review_env: dict[str, str], git_repo: Path) -> state.State:
     """An armed activation for the scratch repository, with two frozen phases."""
@@ -1685,7 +1699,7 @@ def test_the_cold_confirmation_verdict_is_the_one_recorded(activation: state.Sta
     """When ``cold_confirm`` overrides a continued APPROVED, the cold verdict is what lands in
     round_history -- not the continued one. Mirrors
     ``test_capture_and_reuse_a_session_across_rounds``."""
-    cold_config = config_with(cold_confirm=True)
+    cold_config = discovery_config(cold_confirm=True)
     target = target_for(git_repo)
     label = f"{activation.get_int('report_seq') + 1:03d}"
     title = reviewer._unique_title(activation, target, label)
@@ -1732,8 +1746,8 @@ def test_by_default_a_warm_approval_is_acted_on_without_a_second_call(
 
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
 
-    reviewer.execute(target, state=activation, config=config_with())
-    second = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+    reviewer.execute(target, state=activation, config=discovery_config())
+    second = reviewer.execute(target_for(git_repo), state=activation, config=discovery_config())
 
     assert second.verdict == "APPROVED", "the warm verdict is the one acted on"
     assert second.confirmed is None
@@ -2443,7 +2457,7 @@ def test_confirm_cold_runs_a_context_free_bundle_scoped_invocation(
     activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The cold confirmation receives none of the model-authored ``context/`` attachments."""
-    cold_config = config_with(cold_confirm=True)
+    cold_config = discovery_config(cold_confirm=True)
     target = target_for(git_repo)
     label = f"{activation.get_int('report_seq') + 1:03d}"
     title = reviewer._unique_title(activation, target, label)
@@ -3269,14 +3283,14 @@ def test_session_ref_accepts_a_symlinked_directory_and_rejects_a_different_repo(
     symlinked.symlink_to(git_repo)
     row = matching_row(pointer, symlinked)
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
-    accepted = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+    accepted = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config())
     assert accepted.session_id == pointer["id"]
 
     other_repo = tmp_path / "genuinely-different"
     other_repo.mkdir()
     row_wrong = matching_row(pointer, other_repo)
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row_wrong], name="session-list-2.sh"))
-    rejected = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+    rejected = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config())
     assert rejected.session_id == ""
 
 
@@ -3329,7 +3343,7 @@ def test_session_ref_still_continues_below_the_round_cap(activation: state.State
     activation.save()
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
-    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(max_session_rounds=3))
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config(max_session_rounds=3))
 
     assert ref.session_id == pointer["id"]
     assert ref.round == 3
@@ -3341,7 +3355,7 @@ def test_a_round_cap_of_zero_never_resets(activation: state.State, git_repo: Pat
     activation.save()
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
-    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(max_session_rounds=0))
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config(max_session_rounds=0))
 
     assert ref.session_id == pointer["id"]
     assert ref.round == 100
@@ -3356,7 +3370,7 @@ def test_the_round_cap_still_refuses_to_capture_over_a_live_claim(activation: st
     activation.save()
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
-    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(max_session_rounds=3))
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config(max_session_rounds=3))
 
     assert ref.session_id == ""
     assert ref.capturable is False
@@ -3377,7 +3391,7 @@ def test_a_tampered_round_counter_cannot_extend_the_cap(activation: state.State,
     activation.save()
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
-    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(max_session_rounds=3))
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config(max_session_rounds=3))
 
     assert ref.session_id == pointer["id"]
     assert ref.round == 1, "the claim must not write the tampered value back for the next round to read"
@@ -3393,7 +3407,7 @@ def test_session_ref_claims_an_unclaimed_pointer(activation: state.State, git_re
     activation.save()
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
-    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config())
 
     assert ref.session_id == pointer["id"]
     assert ref.claim_id != ""
@@ -3409,7 +3423,7 @@ def test_session_ref_treats_a_live_claim_as_busy(activation: state.State, git_re
     activation.save()
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
-    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config())
 
     assert ref.session_id == ""
     assert ref.capturable is False
@@ -3423,7 +3437,7 @@ def test_session_ref_reclaims_an_expired_claim(activation: state.State, git_repo
     activation.save()
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
-    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(timeout_sec=1))
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config(timeout_sec=1))
 
     assert ref.session_id == pointer["id"]
     assert ref.claim_id not in ("", "dead-token")
@@ -3461,22 +3475,22 @@ def test_capture_session_requires_exactly_one_match(activation: state.State, git
 
     # None at all.
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [], name="none.sh"))
-    assert not reviewer.capture_session(ctx, config=config_with(), act_dir=act_dir, seq="001", started_ms=started_ms)
+    assert not reviewer.capture_session(ctx, config=discovery_config(), act_dir=act_dir, seq="001", started_ms=started_ms)
 
     # Two rows carrying the title -- not a guess at which is ours.
     row = {"id": "ses_aaaaaaaa", "title": ctx.title, "created": _future_ms(), "directory": str(git_repo)}
     row2 = {**row, "id": "ses_bbbbbbbb"}
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row, row2], name="two.sh"))
-    assert not reviewer.capture_session(ctx, config=config_with(), act_dir=act_dir, seq="002", started_ms=started_ms)
+    assert not reviewer.capture_session(ctx, config=discovery_config(), act_dir=act_dir, seq="002", started_ms=started_ms)
 
     # A row that predates the run.
     stale = {**row, "created": started_ms - 1}
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [stale], name="stale.sh"))
-    assert not reviewer.capture_session(ctx, config=config_with(), act_dir=act_dir, seq="003", started_ms=started_ms)
+    assert not reviewer.capture_session(ctx, config=discovery_config(), act_dir=act_dir, seq="003", started_ms=started_ms)
 
     # Exactly one, valid, in-window match.
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row], name="one.sh"))
-    captured = reviewer.capture_session(ctx, config=config_with(), act_dir=act_dir, seq="004", started_ms=started_ms)
+    captured = reviewer.capture_session(ctx, config=discovery_config(), act_dir=act_dir, seq="004", started_ms=started_ms)
     assert captured.session_id == "ses_aaaaaaaa"
     assert bool(captured) is True
 
@@ -3497,7 +3511,7 @@ def test_capture_session_survives_a_non_json_listing(activation: state.State, gi
 
 def test_capture_and_reuse_a_session_across_rounds(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
     """``cold_confirm`` on: capture, continue, and then override the continued approval."""
-    cold_config = config_with(cold_confirm=True)
+    cold_config = discovery_config(cold_confirm=True)
     target = target_for(git_repo)
     label = f"{activation.get_int('report_seq') + 1:03d}"
     title = reviewer._unique_title(activation, target, label)
@@ -3546,7 +3560,7 @@ def test_capture_and_reuse_a_session_across_rounds(activation: state.State, git_
 
 def test_a_continued_changes_required_triggers_no_cold_call(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
     """Even with ``cold_confirm`` on: only an approval is worth a second read."""
-    cold_config = config_with(cold_confirm=True)
+    cold_config = discovery_config(cold_confirm=True)
     target = target_for(git_repo)
     label = f"{activation.get_int('report_seq') + 1:03d}"
     title = reviewer._unique_title(activation, target, label)
@@ -4011,11 +4025,11 @@ def test_the_range_text_discloses_the_round(activation: state.State, git_repo: P
     os.environ["OCRL_FAKE_MODE"] = "changes"
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
-    reviewer.execute(target, state=activation, config=config_with())
+    reviewer.execute(target, state=activation, config=discovery_config())
     bundle_dir = activation.act_dir / "bundles" / "001"
     assert "round: 1\n" in (bundle_dir / "range.txt").read_text()
 
-    reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+    reviewer.execute(target_for(git_repo), state=activation, config=discovery_config())
     second_bundle_dir = activation.act_dir / "bundles" / "002"
     assert "round: 2\n" in (second_bundle_dir / "range.txt").read_text()
 
@@ -4062,14 +4076,14 @@ def test_session_ref_reads_state_as_the_caller_loaded_it(activation: state.State
     pointer = stored_pointer()
     activation.data["reviewer_session"] = pointer
     target = target_for(git_repo)
-    assert reviewer._pointer_structurally_usable(pointer, activation, target, config=config_with()) is True
+    assert reviewer._pointer_structurally_usable(pointer, activation, target, config=discovery_config()) is True
 
     # Persisting only now is what lets the (legitimate, atomic) claim step below succeed --
     # it always reloads under its own lock, by design; only the earlier structural read must
     # not.
     activation.save()
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
-    ref = reviewer.session_ref(activation, target, config=config_with())
+    ref = reviewer.session_ref(activation, target, config=discovery_config())
     assert ref.session_id == pointer["id"]
 
 
@@ -4146,14 +4160,14 @@ def test_a_failed_invocation_releases_its_claim_so_a_retry_can_continue_it(activ
     os.environ["OCRL_REVIEWER_CMD"] = str(failing_then_working_reviewer(tmp_path))
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
-    first = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+    first = reviewer.execute(target_for(git_repo), state=activation, config=discovery_config())
     assert first.verdict == "OP_FAILURE"
     stored = activation.data["reviewer_session"]
     assert stored["claim_id"] == ""
     assert stored["claimed_at"] == ""
     assert stored["round"] == 1
 
-    second = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+    second = reviewer.execute(target_for(git_repo), state=activation, config=discovery_config())
     assert (tmp_path / "seen-session-id").read_text().strip() == pointer["id"]
     assert second.session == pointer["id"]
 
@@ -4178,7 +4192,7 @@ def test_a_benign_round_advance_is_not_treated_as_a_moved_pointer(activation: st
     activation.data["reviewer_session"] = dict(pointer, round=5)
     activation.save()
 
-    claim_id, round_number = reviewer._try_claim(activation, target=target, session_id=str(pointer["id"]), config=config_with())
+    claim_id, round_number = reviewer._try_claim(activation, target=target, session_id=str(pointer["id"]), config=discovery_config())
 
     assert claim_id not in (None, "")
     assert round_number == 6  # built on the completed round, not discarded
@@ -4208,9 +4222,9 @@ def test_reconfirm_claim_detects_a_reclaim_before_invoking(activation: state.Sta
     target = target_for(git_repo)
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
-    ref = reviewer.session_ref(activation, target, config=config_with())
+    ref = reviewer.session_ref(activation, target, config=discovery_config())
     assert ref.session_id == pointer["id"]
-    assert reviewer._reconfirm_claim(activation, ref, config=config_with()) is True
+    assert reviewer._reconfirm_claim(activation, ref, config=discovery_config()) is True
 
     # Someone else reclaims the pointer -- our claim id no longer matches.
     stored = activation.data["reviewer_session"]
@@ -4218,7 +4232,7 @@ def test_reconfirm_claim_detects_a_reclaim_before_invoking(activation: state.Sta
     activation.data["reviewer_session"] = stored
     activation.save()
 
-    assert reviewer._reconfirm_claim(activation, ref, config=config_with()) is False
+    assert reviewer._reconfirm_claim(activation, ref, config=discovery_config()) is False
 
 
 def test_execute_falls_back_to_fresh_when_the_claim_is_lost_before_invoking(
@@ -4308,7 +4322,7 @@ def test_session_ref_logs_when_the_listing_cannot_verify_the_pointer(
     os.environ.pop("OCRL_SESSION_LIST_CMD", None)
     os.environ["OCRL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
 
-    assert reviewer.session_ref(activation, target_for(git_repo), config=config_with()).session_id == ""
+    assert reviewer.session_ref(activation, target_for(git_repo), config=discovery_config()).session_id == ""
 
     assert f"session continuity: could not verify {pointer['id']} for phase1" in capsys.readouterr().err
 
@@ -4325,7 +4339,7 @@ def test_session_ref_distinguishes_a_gone_session_from_a_saturated_listing(
     other = dict(matching_row(pointer, git_repo), id="ses_somethingelse1")
 
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [other]))
-    assert reviewer.session_ref(activation, target_for(git_repo), config=config_with()).session_id == ""
+    assert reviewer.session_ref(activation, target_for(git_repo), config=discovery_config()).session_id == ""
     short = capsys.readouterr().err
     assert "did not match exactly one listed session" in short
     assert f"could not verify {pointer['id']} for phase1" in short
@@ -4334,7 +4348,7 @@ def test_session_ref_distinguishes_a_gone_session_from_a_saturated_listing(
 
     rows = [dict(other, id=f"ses_filler{index:08d}") for index in range(opencode_harness.SESSION_LIST_MAX)]
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, rows, name="session-list-full.sh"))
-    assert reviewer.session_ref(activation, target_for(git_repo), config=config_with()).session_id == ""
+    assert reviewer.session_ref(activation, target_for(git_repo), config=discovery_config()).session_id == ""
     full = capsys.readouterr().err
     assert f"{opencode_harness.SESSION_LIST_MAX} rows returned" in full
     assert "the listing is saturated" in full
@@ -4350,7 +4364,7 @@ def test_session_ref_logs_a_pointer_another_review_is_holding(
     activation.save()
     os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
-    ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
+    ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config())
 
     assert (ref.session_id, ref.capturable) == ("", False)
     assert "another review holds the pointer for phase1" in capsys.readouterr().err
@@ -4366,7 +4380,7 @@ def test_continuity_summary_names_the_session_in_full(activation: state.State) -
     ``opencode session delete``, and a truncated one cannot be used for anything."""
     activation.data["reviewer_session"] = stored_pointer(session_id="ses_fb7592bccffeVl5WXE354RQsD9", label="phase6", round_number=3)
 
-    assert reviewer.continuity_summary(activation, config_with()) == "ses_fb7592bccffeVl5WXE354RQsD9 (phase6, round 3)"
+    assert reviewer.continuity_summary(activation, discovery_config()) == "ses_fb7592bccffeVl5WXE354RQsD9 (phase6, round 3)"
 
 
 def test_continuity_summary_marks_a_pointer_a_live_review_is_using(activation: state.State) -> None:
@@ -4439,7 +4453,7 @@ def test_a_pointer_minted_under_another_harness_is_never_continued(activation: s
     or ``revisions`` bump.
     """
     target = target_for(git_repo)
-    config = config_with()
+    config = discovery_config()
 
     foreign = stored_pointer(harness="some-other-harness")
     assert reviewer._pointer_structurally_usable(foreign, activation, target, config=config) is False
@@ -4454,7 +4468,7 @@ def test_a_pointer_minted_under_another_harness_is_never_continued(activation: s
 def test_a_captured_pointer_records_the_harness_that_minted_it(activation: state.State, git_repo: Path) -> None:
     """The check above can only work if the write puts the field there in the first place."""
     target = target_for(git_repo)
-    config = config_with()
+    config = discovery_config()
     ctx = reviewer._CaptureContext(target=target, title="t", round_number=1)
     captured = harness.Captured(session_id="ses_freshcapture1", created=1)
 

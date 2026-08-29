@@ -167,8 +167,9 @@ The `PreToolUse` dispatcher runs on **every** tool call, so cost there is multip
 | `scripts/ocrl/gitsnap.py` | temp-index snapshot, oversized guard, submodule detection |
 | `scripts/ocrl/cmdshape.py` | deny-list plus bashlex AST walk deciding whether a commit command may run |
 | `scripts/ocrl/globmatch.py` | `[[ $path == $glob ]]` semantics, reimplemented rather than shelled out to |
-| `scripts/ocrl/reviewer.py` | bundle building, OpenCode invocation, contract parsing |
-| `scripts/ocrl/reviewer_probe.py` | the `opencode models` reachability probe shared by `arm`, `resume` and `config` |
+| `scripts/ocrl/reviewer.py` | bundle building, staging, running the reviewer command, contract parsing — everything that decides an outcome, and nothing that names a CLI |
+| `scripts/ocrl/harness/` | the reviewer-CLI seam: the `Harness`/`SessionStrategy` protocols and the registry in `__init__.py`, one module per implementation (`opencode.py`, `claudecode.py`) — see "Adding a harness" |
+| `scripts/ocrl/reviewer_probe.py` | the `opencode models` reachability probe, reached through `opencode.probe_models`; a harness that cannot enumerate its models answers `None` instead |
 | `scripts/ocrl/planrev.py` | plan-revision bookkeeping: backfilling revision 0, path/hash verification, the active revision |
 | `scripts/ocrl/report.py` | report storage and the text Claude actually sees |
 | `scripts/ocrl/commands/` | one module per subcommand group — `arm`, `resume`, `phases`, `session`, `configcmd`, `completion`, `dryrun`, `accept`, `clarify`, and the four hook entrypoints in `pretool.py`, `posttool.py`, `stop.py`, `hooks.py` |
@@ -189,7 +190,8 @@ make test-unit               # the pytest half only
 make test-accept             # tests/selftest.sh only
 make test-filter FILTER=stop # one selftest section
 make check                   # pre-commit: shellcheck, markdownlint, yamllint, actionlint, ruff, mypy
-make dry-run                 # print the exact opencode argv and prompt without invoking it
+make dry-run                 # print the exact reviewer command and prompt without invoking it
+OCRL_HARNESS=opencode make dry-run   # the same, for the other harness
 ```
 
 `make test` needs pytest, which is pinned in `requirements-dev.txt` and installed by `make dev-deps`;
@@ -245,6 +247,50 @@ Repository config may set it, like every other key, and that is deliberate rathe
 **`max_session_rounds` (default `3`, `0` unlimited) is the one key here that only ever removes context.** `reviewer.session_ref` drops continuity once the stored pointer's `round` reaches it, before the strategy's verify — there is no point paying `SessionStrategy.capture_timeout_sec` to verify a session this call will not continue. It is not a gate-weakening key in either direction: a fresh session carries strictly *less* model-influenced input into the review, and nothing the cap discards is actually lost, because the round-to-round memory the loop depends on is `prior-rounds.txt` and `incremental.diff` — gate-rendered, validated, size-bounded — not the conversation. What it buys is the compaction failure it removes: two of the real run's contract failures (a JSON block for the markers, a `severity=P1 location=` line) landed immediately after OpenCode dumped an `## Objective / Work State` summary into a long session, each costing a whole round and a `failures` slot. **`round` is read through `_pointer_round`, not `_as_int`, in both readers**: it is arithmetic on both sides of the cap (`session_ref` compares it, `_try_claim` adds one to it), so a raw `round: -1000000` out of `state.json` sits below every cap *and* increments back to a negative — one edited integer keeping a session, and the compaction-prone context the cap exists to shed, alive for a million rounds. Clamped at 0 it folds into the case an unparseable or missing `round` already lands in. Clamping only the cap check would leave `_try_claim` writing the negative straight back for the next round to read. **The other thing the check must keep doing is honouring a live claim**: it returns early past `_try_claim`, so it re-runs `_claim_is_live` itself and returns `capturable=False` when another review holds the pointer — a fresh-and-capturable ref there would let `capture_session` overwrite a pointer someone else is mid-conversation with, which is the corruption the claim exists to prevent, arriving through the one path that does not take the claim.
 
 A change that re-couples the two — making the cold path unconditional again, or making its absence widen what a warm verdict may authorise — has to answer that measurement, not just restate the invariant. And keep the two directions of the argument together in `docs/security.md`, per channel rather than averaged: a reader deciding whether to turn the key on needs the guarantee, the thing the default gives up, and the observed price on the same page.
+
+### Adding a harness
+
+A new reviewer CLI is a new module under `scripts/ocrl/harness/` plus one line in
+`harness._registry`. Nothing else in the gate learns its name — that is the property the seam
+exists to keep, and the tests below are what stop it eroding.
+
+**A harness composes a command; it never decides anything.** It answers with a `Command`
+(argv, env *overrides*, optional stdin, optional cwd) and a `SessionStrategy`, and
+`reviewer.py` runs it. Nothing in `harness/` may read a verdict, touch `state.json`, or turn a
+failure into an approval. The two places that look like exceptions are not: `transcript()`
+*refuses* a run whose own report says a tool was denied or a turn failed — refusing is always
+allowed — and `probe_models()` answers `None` for a CLI with no model-list subcommand, which
+makes the callers check binary presence only rather than inventing a list.
+
+What a new module has to settle, in the order the existing two settled it:
+
+1. **How the prompt and attachments are delivered.** Both current harnesses inline every
+   attachment: OpenCode through `-f`, Claude Code by concatenating them into the payload it
+   writes to stdin. That is not a style choice — it is what keeps `context/` from existing at
+   a path the reviewer can re-open, which is the whole cold-approval argument in
+   `docs/security.md`. A path-based channel is measurably *worse* on tokens as well (the
+   benchmark is in the harness split plan), so a third harness that wants one owes both
+   arguments. If it inlines, it must verify each attachment's digest as it reads it
+   (`Attachment` carries one for exactly this) and raise `PayloadError` on a mismatch — the
+   gate's launch-time re-check ends at a pathname and cannot cover bytes this process reads.
+2. **How its sessions come into existence.** `DiscoveredSessions` (list-and-match a unique
+   title afterwards) and `AssignedSessions` (mint a uuid up front) are the two shapes so far.
+   `capture_timeout_sec` must be honest: the gate sizes its claim leases and its
+   repair-budget reserve from it, and `_MAX_LEASE_SEC` is the ceiling across *all* registered
+   harnesses, so an inflated value there loosens a check for everyone.
+3. **What isolation its CLI actually gives, measured rather than read off the flag help.**
+   `tests/STEP0.md` records what each probe found; three of the four things the Claude Code
+   harness relies on were not what the help implied. Split the flags the way that module does:
+   what makes the reviewer read-only is unconditional, and only the *ambient instruction*
+   isolation is what `pure` selects.
+
+Then: `tests/unit/test_harness.py` is parametrised over the registry and will pick the new
+module up for free (protocol, binary-first argv, no session on a cold or clarify call,
+`is_session_id` strictness, the lease ceiling); add a `test_harness_<name>.py` for its own argv
+and output shapes, and a `--harness <name>` dry-run block in `tests/selftest.sh`. `make
+dry-run` prints whatever `review_command` composed, generically, so there is no rendering to
+add — if the new harness's argv looks right there and its stdin carries every attachment
+between its fences, the seam is wired.
 
 ### Commits
 

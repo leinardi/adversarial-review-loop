@@ -224,8 +224,12 @@ def test_status_shows_an_active_retry_backoff(git_repo: Path, tmp_path: Path, cl
 def test_status_shows_the_stored_reviewer_session(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Continuity is otherwise invisible: a fresh review looks the same whether it was correct
     (a new phase) or a silent loss, and the difference is worth real tokens per round. The id is
-    shown in full because it is what a human pastes into `opencode session delete`."""
-    env = armed_env(clean_env)
+    shown in full because it is what a human pastes into `opencode session delete`.
+
+    Pinned to `opencode`: the stored id is a `ses_…`, and `continuity_summary` shows a pointer
+    only when the *configured* harness recognises the shape -- which is the same check that
+    stops one harness offering another's session as resumable."""
+    env = armed_env(clean_env, OCRL_HARNESS="opencode")
     arm(git_repo, tmp_path, env)
     set_phases(git_repo, env, "first thing")
 

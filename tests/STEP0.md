@@ -222,6 +222,18 @@ The handlers look idempotent by inspection: a second `confirm-commit` firing on 
 
 **If it fires once per registration**: latency roughly doubles on every gated tool call for the rest of the session, which is wasteful but not unsafe given the handlers above — confirm that reasoning holds under an actual double firing rather than assuming it, and record whatever is found here.
 
+## Session G — the Claude Code harness end to end (items 19, 20)
+
+`claude-code` is now the **default** harness, so an ordinary run of `tests/step0-fixture.sh` exercises it without any configuration. Everything the harness module depends on was probed in isolation (see "The Claude Code harness, 2026-08-29" below); what a real run adds is the two things a probe cannot reach — a payload at the plugin's chunk ceilings, and the state of the user's own `/resume` picker afterwards.
+
+1. `make dry-run` in the fixture first, before any model call. Confirm the argv is the one below, and confirm the `# stdin` section carries **every** attachment, each between a matching `BEGIN`/`END` fence with the same per-run identifier, and no `context/` file named as a path anywhere in the argv. This is the cheapest check and it catches most wiring mistakes.
+2. Arm, freeze phases, and run a phase whose diff is large enough to chunk — over `chunk_diff_bytes` (400KB), so the payload is several attachments and comfortably past the 170KB that has already been verified byte-perfect. A generated file is fine; the point is the size, not the content.
+3. **Item 19 expects**: the review completes normally. A payload truncated on the way in would show up as a reviewer that discusses only part of the diff, or as a contract failure — not as an error from the CLI, which is why this needs a real run rather than a byte count.
+4. **Item 20**: with the run finished, open `claude` *in the fixture repository* and run `/resume`. Expect the picker to list only your own sessions, none of the review rounds — the harness runs from an empty `<act_dir>/cwd`, and `claude -p` buckets its session store by cwd. Then confirm the sessions do exist under `~/.claude/projects/<slug of act_dir/cwd>/`, or continuity is silently dropping every round (which costs tokens, not correctness — `AssignedSessions.capture` logs it).
+5. **If item 20 fails** — review sessions do appear in the repository's picker — the cwd is not being honoured, and the fix is in `harness.claudecode.session_cwd`, not in the gate. Do not "fix" it with `--no-session-persistence`: that would take `--resume` continuity with it.
+
+Run the OpenCode side at least once too (`OCRL_HARNESS=opencode`), since a default that changed is exactly when the other path stops getting exercised by accident.
+
 ## Record the outcome
 
 | Item | Check | Result |
@@ -288,7 +300,7 @@ Probed against `claude` 2.1.251, before `scripts/ocrl/harness/claudecode.py` was
 - **Sessions round-trip.** `--session-id <uuid>` was echoed back unchanged in the result event, and `--resume <uuid>` recalled the previous turn's tool use. A `--resume` of an id the store no longer holds exits `1` with an empty stdout — which would reach the gate as a blocking `OP_FAILURE` on every retry, so `AssignedSessions.verify` checks the store first and drops continuity instead.
 - **Sessions persist under `~/.claude/projects/<cwd slug>/<uuid>.jsonl`**, and that bucket is what the interactive `/resume` picker lists. Repeating `--add-dir` accumulates rather than replaces.
 
-Items 19 and 20 still need a real session: a payload at the plugin's chunk ceilings, and a confirmation that the reviewed repository's own `/resume` list stays clean across a run.
+Items 19 and 20 still need a real session: a payload at the plugin's chunk ceilings, and a confirmation that the reviewed repository's own `/resume` list stays clean across a run. Session G above is the runbook for both.
 
 ## If A1 fails
 
