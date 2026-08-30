@@ -50,9 +50,10 @@ finish, and deny or permit accordingly, *before Claude gets a turn at all*.
 
 ## The hook lifecycle
 
-Four Claude Code hook events are registered, identically, by both `skills/implement/SKILL.md`
-and `skills/resume/SKILL.md` (this duplication is deliberate — see
-[edge-cases.md](edge-cases.md#hooks-registering-twice)):
+Six Claude Code hook events are registered by `hooks/hooks.json`, at plugin load, in every
+Claude Code process the plugin is enabled in — deliberately *not* by the skills, whose hooks
+would register per process and vanish on `claude --resume` (see
+[edge-cases.md](edge-cases.md#hooks-are-plugin-level-not-skill-level)):
 
 | Event | Subcommand | Fires on | Can deny? |
 | --- | --- | --- | --- |
@@ -60,6 +61,8 @@ and `skills/resume/SKILL.md` (this duplication is deliberate — see
 | `PostToolUse` | `confirm-commit` | after a `Bash` call returns | no — the tool already ran; it reports |
 | `PostToolUseFailure` | `posttool-failure` | after a failed `Bash` call | no — it only clears stale pending state |
 | `Stop` | `gate-stop` | when Claude tries to end its turn | yes — blocks the turn from ending |
+| `SessionStart` | `reorient` | after a compaction or a resume | no — plain-text context for Claude, never a decision |
+| `UserPromptSubmit` | `intent` | every prompt, before any skill expands | only an arming prompt whose request could not be recorded |
 
 A single phase's commit touches three of these in order: `pretool` reviews and
 conditionally allows the `git commit` to run; `confirm-commit` (or `posttool-failure`, if

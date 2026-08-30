@@ -7,7 +7,7 @@ what state it is enforcing, has nothing to say except "no".
 
 from __future__ import annotations
 
-__all__ = ["OcrlError", "StateLoadError", "UnsafePathError"]
+__all__ = ["OcrlError", "RepoResolutionError", "StateLoadError", "UnsafePathError"]
 
 
 class OcrlError(Exception):
@@ -28,4 +28,13 @@ class StateLoadError(OcrlError):
     Distinct from "no activation exists": callers that legitimately create state say so
     explicitly. Everything else denies rather than publishing a document built on top of
     one that could not be parsed.
+    """
+
+
+class RepoResolutionError(OcrlError):
+    """Git could not say which repository a directory belongs to.
+
+    Distinct from "not a repository", which is an answer. This is the absence of one: no
+    ``git`` on the hook's PATH, a directory that does not exist, a timeout, an unexpected exit.
+    A gate that cannot tell what worktree a call is about cannot tell whether it is guarded.
     """

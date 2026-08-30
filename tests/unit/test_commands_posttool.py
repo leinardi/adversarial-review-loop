@@ -45,6 +45,40 @@ def gated_commit(repo: Path, env: dict[str, str], text: str = "work\n") -> None:
 
 
 # --------------------------------------------------------------------------
+# Scoping has to be proven
+# --------------------------------------------------------------------------
+
+
+def test_confirm_reports_rather_than_verifying_when_git_cannot_place_the_call(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    sub = git_repo / "sub"
+    sub.mkdir()
+    env = {**env, "PATH": str(Path(clean_env["HOME"]) / "empty-path")}
+
+    proc = run_hook("confirm-commit", {**payload(git_repo, command=COMMIT), "cwd": str(sub)}, cwd=sub, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    message = context(proc.stdout)
+    assert "NOT confirmed" in message
+    assert "could not tell which repository" in message
+
+
+def test_posttool_failure_stays_silent_when_git_cannot_place_the_call(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Its only job is clearing a pending approval; leaving one stale denies more, never less."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    sub = git_repo / "sub"
+    sub.mkdir()
+    env = {**env, "PATH": str(Path(clean_env["HOME"]) / "empty-path")}
+
+    proc = run_hook("posttool-failure", {**payload(git_repo, command=COMMIT), "cwd": str(sub)}, cwd=sub, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+
+
+# --------------------------------------------------------------------------
 # The happy path
 # --------------------------------------------------------------------------
 

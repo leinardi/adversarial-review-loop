@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from ocrl import paths
+from ocrl.errors import RepoResolutionError
 
 
 def sha256sum_of(text: str) -> str:
@@ -85,6 +86,24 @@ def test_repo_root_is_empty_outside_a_repository(tmp_path: Path) -> None:
 
 def test_repo_root_is_empty_for_a_missing_directory(tmp_path: Path) -> None:
     assert paths.repo_root(str(tmp_path / "nope")) == ""
+
+
+def test_repo_root_or_raise_answers_not_a_repository_with_empty(tmp_path: Path) -> None:
+    assert paths.repo_root_or_raise(str(tmp_path)) == ""
+
+
+def test_repo_root_or_raise_refuses_a_missing_directory(tmp_path: Path) -> None:
+    with pytest.raises(RepoResolutionError, match="not a directory"):
+        paths.repo_root_or_raise(str(tmp_path / "nope"))
+
+
+def test_repo_root_or_raise_refuses_when_git_cannot_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one failure the unbound-session check exists to tell apart from "no repository"."""
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    with pytest.raises(RepoResolutionError, match="git could not be run"):
+        paths.repo_root_or_raise(str(tmp_path))
+    # And the lenient wrapper still folds it into "", for callers that may treat unknown as none.
+    assert paths.repo_root(str(tmp_path)) == ""
 
 
 def test_have_finds_a_real_binary() -> None:

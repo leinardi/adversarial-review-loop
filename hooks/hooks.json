@@ -1,0 +1,76 @@
+{
+  "description": "opencode-review-loop review gate. Registered at plugin load so the gate exists in every Claude Code process, not only the one that invoked /opencode-review-loop:implement. A session that never armed pays one silent, sub-second pass-through per tool call.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh pretool",
+            "timeout": 1200,
+            "statusMessage": "OpenCode review gate"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh confirm-commit",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh posttool-failure",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh gate-stop",
+            "timeout": 1800,
+            "statusMessage": "OpenCode review loop: end-of-turn gate"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh intent",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh reorient",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

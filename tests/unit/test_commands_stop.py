@@ -58,6 +58,13 @@ def ended(response: dict[str, object]) -> str:
     return str(response.get("systemMessage", ""))
 
 
+def record_intent(repo: Path, env: dict[str, str]) -> None:
+    """What ``UserPromptSubmit`` leaves behind when the user submits an arming command."""
+    payload = {"session_id": SESSION, "cwd": str(repo), "prompt": "/opencode-review-loop:implement plan.md"}
+    proc = run_hook("intent", payload, cwd=repo, env=env)
+    assert proc.returncode == 0, proc.stderr
+
+
 def committed_phase(repo: Path, env: dict[str, str], text: str = "work\n") -> None:
     """One whole phase: gate, commit, confirm."""
     gated_commit(repo, env, text)
@@ -78,22 +85,68 @@ def test_no_session_id_ends_the_turn_saying_nothing_was_reviewed(git_repo: Path,
     assert "not an approval" in message
 
 
-def test_no_pointer_records_arm_failed_and_blocks(git_repo: Path, clean_env: dict[str, str]) -> None:
-    reason = blocked(stop(git_repo, clean_env))
+def test_no_pointer_in_a_worktree_nobody_armed_says_nothing(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """The hooks register at plugin load, so a session that never armed must end its turns silently."""
+    assert stop(git_repo, clean_env) == {}
+    assert not list((Path(clean_env["XDG_STATE_HOME"]) / "opencode-review-loop").rglob("state.json"))
+
+
+def test_intent_with_no_pointer_records_arm_failed_and_blocks(git_repo: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    record_intent(git_repo, env)
+
+    reason = blocked(stop(git_repo, env))
 
     assert "arming never ran" in reason
-    assert read_state(clean_env, git_repo, SESSION)["status"] == "ARM_FAILED"
+    assert read_state(env, git_repo, SESSION)["status"] == "ARM_FAILED"
 
 
 def test_the_unstarted_arm_block_is_counted_rather_than_endless(git_repo: Path, clean_env: dict[str, str]) -> None:
     """Without counting, the same message repeats on every turn end until the host cap hits."""
-    env = {**clean_env, "OCRL_MAX_STOP_BLOCKS": "1"}
+    env = {**armed_env(clean_env), "OCRL_MAX_STOP_BLOCKS": "1"}
+    record_intent(git_repo, env)
     blocked(stop(git_repo, env))
 
     message = ended(stop(git_repo, env))
 
     assert "STALLED" in message
     assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
+
+
+def test_intent_outranks_a_terminal_pointer_at_turn_end(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status="DISARMED")
+    record_intent(git_repo, env)
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "arming never ran" in reason
+    assert read_state(env, git_repo, SESSION)["status"] == "ARM_FAILED"
+
+
+def test_no_pointer_with_git_unavailable_ends_the_turn_unapproved(git_repo: Path, clean_env: dict[str, str]) -> None:
+    env = {**clean_env, "PATH": str(Path(clean_env["HOME"]) / "empty-path")}
+
+    message = ended(stop(git_repo, env))
+
+    assert "could not tell which repository" in message
+    assert "not an approval" in message
+
+
+def test_no_pointer_in_a_worktree_armed_by_another_session_ends_the_turn_unapproved(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str]
+) -> None:
+    """Nothing to hold the turn open for -- ``pretool`` denied every mutation -- and only the user can bind it."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    message = ended(stop(git_repo, env, session="s2"))
+
+    assert "not bound to it" in message
+    assert "/opencode-review-loop:resume" in message
+    assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
+    assert read_state(env, git_repo, SESSION)["stop_blocks"] == 0
 
 
 # --------------------------------------------------------------------------
@@ -152,10 +205,11 @@ def test_an_expired_activation_blocks_rather_than_disarming(git_repo: Path, tmp_
     assert "past ttl_hours" in reason
 
 
-def test_arm_failed_blocks_and_names_the_reason(git_repo: Path, clean_env: dict[str, str]) -> None:
+def test_arm_failed_blocks_and_names_the_reason(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed_env(clean_env)
-    proc = run_hook("gate-stop", payload(git_repo), cwd=git_repo, env=env)
-    assert proc.returncode == 0
+    proc = run_bootstrap(["arm", "--session", SESSION, "--plan", str(tmp_path / "missing.md")], cwd=git_repo, env=env)
+    assert proc.returncode != 0
+    assert read_state(env, git_repo, SESSION)["status"] == "ARM_FAILED"
     patch_state(env, git_repo, reason="the plan path does not resolve")
 
     reason = blocked(stop(git_repo, env))

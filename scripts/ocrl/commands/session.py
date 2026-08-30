@@ -8,8 +8,8 @@ here is reachable by Claude: the skills carry ``disable-model-invocation: true``
 ``pretool`` denies the Bash route to both. What that means for this module is that its
 output is written for a human -- it is the last thing said before the mode ends.
 
-:func:`reorient` is the exception on both counts: it is a ``SessionStart(compact)`` hook
-rather than a user command, and its reader is Claude rather than a human. It lives here
+:func:`reorient` is the exception on both counts: it is a ``SessionStart`` hook (compaction and
+resume) rather than a user command, and its reader is Claude rather than a human. It lives here
 because it is a *report* on the activation, assembled from the same fields :func:`status`
 prints -- and because, like everything else in this module, it decides nothing.
 """
@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Final
 
-from ocrl import commands, gitsnap, harness, hookio, oscillation, planrev, report, reviewer
+from ocrl import commands, gitsnap, harness, hookio, oscillation, paths, planrev, report, reviewer
 from ocrl.commands import completion, hooks
 from ocrl.commands.completion import Completion
 from ocrl.config import Config
@@ -400,6 +400,37 @@ def finish(argv: list[str]) -> int:
 # --------------------------------------------------------------------------
 
 
+def _session_arg(argv: list[str]) -> str:
+    """The ``--session <id>`` the ``stop`` skill passes, or ``""``."""
+    for index, arg in enumerate(argv):
+        if arg == "--session" and index + 1 < len(argv):
+            return argv[index + 1]
+    return ""
+
+
+def _discard_intent(session: str) -> str:
+    """Discard the session's intent marker, if any. Returns a line for the user, or ``""``.
+
+    This is the **only** path that removes a marker the gate could not scope, and it is a
+    user action -- ``/opencode-review-loop:stop`` -- which is exactly the recovery the gate
+    names when it denies on one. A marker the pointer already acknowledges is cleaned up here
+    too; that one was inert anyway.
+    """
+    if not session or not paths.is_safe_component(session):
+        return ""
+    marker = paths.intent_path(session)
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        return (
+            f"opencode-review-loop: an enforcement request for this session is recorded at {marker} and could not be "
+            f"removed ({exc}); every mutation stays denied until it is.\n"
+        )
+    return "opencode-review-loop: discarded this session's pending enforcement request (an arm that never completed).\n"
+
+
 def deactivate(argv: list[str]) -> int:
     """Leave the mode. Nothing is reverted and nothing is deleted.
 
@@ -408,11 +439,12 @@ def deactivate(argv: list[str]) -> int:
     would turn every later tool call into a denial. ``DISARMED`` is what makes the gates pass
     through.
     """
-    del argv
+    discarded = _discard_intent(_session_arg(argv))
     activation = commands.resolve_local_activation()
     if activation is None:
-        sys.stdout.write("opencode-review-loop: not armed in this worktree, so there is nothing to stop.\n")
+        sys.stdout.write(discarded + "opencode-review-loop: not armed in this worktree, so there is nothing to stop.\n")
         return 0
+    sys.stdout.write(discarded)
 
     state = activation.state
     with state.transaction():
@@ -458,8 +490,8 @@ def _reorient_text(activation: commands.Activation) -> str:
     total = state.phase_count()
     root = commands.plugin_root()
     head = [
-        f"opencode-review-loop: this session was compacted while the review loop is {status} in {state.get('worktree')}.",
-        "Re-orienting you, because the loop is still enforced and the compacted context may no longer carry it.",
+        f"opencode-review-loop: this session was compacted or resumed while the review loop is {status} in {state.get('worktree')}.",
+        "Re-orienting you, because the loop is still enforced and the current context may no longer carry it.",
         "",
     ]
 
@@ -529,7 +561,7 @@ def _last_round_line(state: State, config: Config, phase: int) -> str:
 
 
 def reorient(argv: list[str]) -> int:
-    """``SessionStart(compact)``: re-inject the loop's own state after a compaction.
+    """``SessionStart(compact|resume)``: re-inject the loop's own state after a compaction or a resume.
 
     **Plain text on stdout, never JSON.** ``SessionStart`` is one of the few events whose
     plain stdout Claude Code adds to the context, which is the entire mechanism here; a JSON

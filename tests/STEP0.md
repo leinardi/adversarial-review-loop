@@ -49,7 +49,7 @@ This is **item 2, and it is load-bearing.** It is the one result that can invali
 **Settled 2026-08-19: it passes.** The expansion ran, `${CLAUDE_PLUGIN_ROOT}` resolved, and `${CLAUDE_SESSION_ID}` interpolated to a real session id. The evidence came from a *failure* of the arm command rather than a success: the error quoted the fully-substituted command back, which is itself proof the expansion happened. The architecture holds; re-check only if the harness changes.
 
 - **Literal `` !`…` `` text appears instead** → expansion does not run in skill bodies. Stop the runbook and see "If A1 fails" below.
-- **Nothing appears and Claude immediately can't do anything** → same conclusion. Arming did not run, but the hooks did register, so the dispatcher denies everything. That is the fail-closed design behaving correctly, not a bug.
+- **Nothing appears and Claude immediately can't do anything** → same conclusion. Arming did not run, but the `UserPromptSubmit` hook recorded that it was asked for, so the dispatcher denies everything. That is the fail-closed design behaving correctly, not a bug.
 
 Confirm the state landed:
 
@@ -251,7 +251,7 @@ Run the OpenCode side at least once too (`OCRL_HARNESS=opencode`), since a defau
 | 12 | `systemMessage` from a Stop hook reaches the user | **open** |
 | 13 | `{"decision":"block"}` takes effect on `PostToolUse` | **open** |
 | 14 | `{"decision":"block"}` takes effect on `PostToolUseFailure` | **open** |
-| 15 | hooks registered twice in one session (`implement` then same-session `resume`) | **open** |
+| 15 | hooks registered twice in one session (`implement` then same-session `resume`) | **closed** — moot, hooks moved to `hooks/hooks.json` (2026-08-30) |
 | 16 | `--safe-mode` really suppresses plugins, skills and slash commands | **pass** (2026-08-29) |
 | 17 | `--tools` alone does **not** bound the tool set | **fail — MCP tools survive it** (2026-08-29) |
 | 18 | the file tools are confined to cwd + `--add-dir` in `-p` mode | **pass** (2026-08-29) |
@@ -262,7 +262,49 @@ Run the OpenCode side at least once too (`OCRL_HARNESS=opencode`), since a defau
 
 With the fixture armed, a separate session in an unrelated repository edited a file with no gate activity at all — no denial, no status message, no added latency.
 
-Note precisely what that establishes. A second session has no `ocrl` hooks registered, because skill hooks register on invocation rather than at plugin load, so the dispatcher never runs there. That is the property that matters day to day: **installing the plugin does not tax or gate sessions that never armed it.** The narrower branch — same session, different worktree, where the dispatcher *does* run and compares the pointer against the repo root — is covered by the `scoping` cases in `selftest.sh` rather than here.
+*(Superseded 2026-08-30 — see "Plugin-level hooks" below. The property held; it was also the hole.)* Note precisely what that establishes. A second session has no `ocrl` hooks registered, because skill hooks register on invocation rather than at plugin load, so the dispatcher never runs there. That is the property that matters day to day: **installing the plugin does not tax or gate sessions that never armed it.** The narrower branch — same session, different worktree, where the dispatcher *does* run and compares the pointer against the repo root — is covered by the `scoping` cases in `selftest.sh` rather than here.
+
+### Plugin-level hooks, 2026-08-30
+
+The isolation property above turned out to be the hole. A real run (44 phases, `claude-code` harness) was interrupted at phase 13 with Esc, the session quit and the machine shut down. The next day `claude --resume` brought the same session id back, `/opencode-review-loop:status` reported `ACTIVE`, phase 14 of 44, and Claude was told to `continue`. Phase 14 was implemented and committed with no gate at all: no review, no `pretool` denial, `last_approved_tree` still phase 13's, `rounds this phase: 0`. `/reload-plugins` in that session reported `0 hooks`, and `ocrl.sh selftest` passed 399/399 — the code was fine, the registration was gone. Skill hooks register per process, on invocation; nothing in the resumed process had invoked `implement` or `resume`, and the state file cannot tell whether hooks exist.
+
+The fix moves every hook into `hooks/hooks.json`, registered at plugin load. Consequences, all deliberate:
+
+- The dispatcher runs in every session the plugin is enabled in. Unarmed sessions pay a silent pass (~0.1s, no writes). "Installing the plugin does not gate sessions that never armed it" still holds; "does not tax" now means one interpreter start per tool call.
+- **Rule 0 changed shape.** "No pointer means `arm` never executed" no longer follows, since the dispatcher running no longer proves the skill was invoked. No pointer now means "this session never bound". In a worktree whose `latest` activation is live, that session is denied every mutation until `resume` binds it; anywhere else it passes — *provided* the worktree could be resolved at all. `paths.repo_root_or_raise` tells git's "not a repository" apart from a git that cannot run, a vanished `cwd` or a timeout; only the first passes. Adversarial review of the first draft caught the alternative: with `repo_root()` folding every failure into `""`, dropping `git` from the hook's PATH would have turned the gate off.
+- **An `arm` that never started is still caught, by a different witness.** The same review caught the first draft's claim that `implement`'s banner covers it — this file already records ("A failed arm never reaches Claude", below) that a failed expansion aborts the skill and Claude gets no turn. So `commands/intent.py` now runs on `UserPromptSubmit` and records a marker when the prompt *starts with* `/opencode-review-loop:implement` or `:resume`, before anything expands; `pointer_write` clears it. A marker with no pointer is the old "arming never ran" branch, `ARM_FAILED` recorded by the dispatcher, message and counting unchanged.
+- A `SessionStart` hook now also fires on `resume`, so a resumed session is re-oriented by the plugin rather than by whatever the transcript happened to carry.
+- Item 15 closes: one registration per process, nothing to double.
+
+Not yet measured against a live session: that the `resume` matcher fires on `claude --resume` the way `compact` fires on compaction; that `UserPromptSubmit` fires **before** the skill's `` !`…` `` expansion (if it fired after, the marker would land after `arm` had already written the pointer — harmless, `pointer_write` and the pointer-first check make it inert — but the failed-expansion case would then go unrecorded, and this design would need the marker written from a different event); and that the hook's `prompt` field carries the slash command verbatim rather than its expansion.
+
+### The gate enforcing a half-applied edit, 2026-08-30
+
+Worth recording because it is a property of the new design, not an accident. With hooks
+registered at plugin load, `${CLAUDE_PLUGIN_ROOT}` resolves to the **live plugin repository**
+— so a session editing this plugin is gated by the code it is editing, mid-edit.
+
+Mid-refactor, `hooks.pending_intent` had been changed to return an `IntentCheck` dataclass
+while its two callers still read `if hooks.pending_intent(...)`. A dataclass instance is
+always truthy, so every mutating tool call in *every* session took the "arming never ran"
+branch: denied, with `record_unstarted_arm` writing an `ARM_FAILED` activation for whatever
+repository the call was in. The session could no longer edit the file that would fix it —
+`Edit`, `Write` and `Bash` are all denied, and only read-only tools survive — and the Stop
+gate blocked the turn until `max_stop_blocks` escalated it to `NEEDS_HUMAN`.
+
+Recovery took two user actions, in order: a shell command (typed by the user, outside the
+model's tool loop) to make the truthiness correct, then `/opencode-review-loop:stop` to clear
+the `ARM_FAILED` state the bug had recorded. Note that `stop` alone was not enough — the
+broken check ran *before* any status was read — and neither was reverting the code alone,
+since the recorded state outlived it.
+
+Three things to carry forward. **Any change to the Rule 0 pre-checks is self-gating**: land
+the check and its callers in one write, or expect to be locked out. **Never let a gate
+decision rest on the truthiness of a rich object** — `IntentCheck` now has no `__bool__` and
+the callers read `.pending` / `.unscopable` explicitly. And **a denial path that runs before
+the status check cannot be turned off by `stop`**, which is why the unscopable-marker branch
+is the one place a deny points at `stop` and `deactivate --session` actually removes the
+thing being complained about.
 
 ### The first clean end-to-end run, 2026-08-20
 

@@ -24,6 +24,7 @@ from ocrl import commands
 from ocrl import config as config_module
 from ocrl.commands import hooks
 from ocrl.config import Config
+from ocrl.errors import RepoResolutionError
 from ocrl.hookio import Hook, HookInput, read_hook_input
 from ocrl.state import State, pointer_read
 
@@ -163,12 +164,25 @@ class _Check:
     expected: hooks.Activation
 
 
-def _bind(hook: Hook, payload: HookInput) -> tuple[State, Config, str]:
+UNRESOLVABLE_CONTEXT: Final = (
+    "opencode-review-loop: the gate could not tell which repository this command ran in ({detail}), so the commit was NOT "
+    "confirmed against the approved tree -- this is not a verification. git must be runnable from the hook's PATH and the "
+    "working directory must exist. Run /opencode-review-loop:status."
+)
+
+
+def _bind(hook: Hook, payload: HookInput, *, report_unresolvable: bool) -> tuple[State, Config, str]:
     """Resolve the payload onto a loaded activation, or emit nothing and exit 0.
 
     Every "not ours" answer goes through ``hook.pass_()``: zero bytes, exit 0. A post-hook
     has nothing to decide, and emitting a ``PreToolUse`` field here would be protocol
     corruption rather than a denial.
+
+    "Not ours" has to be *proven*, though: when git cannot say which repository the call was
+    about, ``confirm-commit`` reports that the commit was not confirmed
+    (``report_unresolvable=True``), since silence there would read as a verification.
+    ``posttool-failure`` stays silent -- its only job is clearing a pending approval, and
+    leaving one stale denies more, never less.
     """
     worktree = pointer_read(payload.session_id)
     if not worktree:
@@ -176,8 +190,14 @@ def _bind(hook: Hook, payload: HookInput) -> tuple[State, Config, str]:
 
     cwd = payload.cwd or os.getcwd()
     # No fallback to cwd, unlike `pretool`: a payload from outside any repository is simply
-    # not about the armed worktree.
-    if hooks.resolve_repo(cwd, worktree) != worktree:
+    # not about the armed worktree -- once git has *said* so.
+    try:
+        repo = hooks.resolve_repo(cwd, worktree)
+    except RepoResolutionError as exc:
+        if report_unresolvable:
+            hook.posttool_context(UNRESOLVABLE_CONTEXT.format(detail=exc))
+        hook.pass_()
+    if repo != worktree:
         hook.pass_()
 
     state = State(worktree, payload.session_id)
@@ -225,7 +245,7 @@ def _confirm_commit(hook: Hook) -> None:
     payload = read_hook_input()
     if payload.tool_name != "Bash":
         hook.pass_()
-    state, config, repo = _bind(hook, payload)
+    state, config, repo = _bind(hook, payload, report_unresolvable=True)
     check = _Check(hook=hook, state=state, config=config, repo=repo, expected=hooks.activation(state, config))
 
     pending = state.get("pending_approved_tree")
@@ -454,7 +474,7 @@ def _posttool_failure(hook: Hook) -> None:
     payload = read_hook_input()
     # Deliberately no `tool_name` filter, matching the shell: a pending approval belongs to
     # the turn, and any failed call in the armed worktree invalidates it.
-    state, _config, _repo = _bind(hook, payload)
+    state, _config, _repo = _bind(hook, payload, report_unresolvable=False)
     if not state.get("pending_approved_tree"):
         hook.pass_()
     # No activation guard here, and none is needed: clearing a pending approval can only ever

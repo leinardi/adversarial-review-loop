@@ -97,6 +97,8 @@ class HookInput(NamedTuple):
     #: The file an editing tool is about to write. ``Write`` and ``Edit`` call it
     #: ``file_path``, ``NotebookEdit`` calls it ``notebook_path``; both land here.
     path: str = ""
+    #: ``UserPromptSubmit`` only: the prompt as the user typed it.
+    prompt: str = ""
     raw: str = "{}"
 
 
@@ -138,6 +140,7 @@ def parse_hook_input(raw: str) -> HookInput:
     session_id = _as_str(payload.get("session_id"))
     cwd = _as_str(payload.get("cwd"))
     tool_name = _as_str(payload.get("tool_name"))
+    prompt = _as_str(payload.get("prompt"))
 
     tool_input = payload.get("tool_input")
     if isinstance(tool_input, dict):
@@ -150,7 +153,7 @@ def parse_hook_input(raw: str) -> HookInput:
         # three already-emitted ones are not.
         command = path = ""
 
-    return HookInput(session_id=session_id, cwd=cwd, tool_name=tool_name, command=command, path=path, raw=raw)
+    return HookInput(session_id=session_id, cwd=cwd, tool_name=tool_name, command=command, path=path, prompt=prompt, raw=raw)
 
 
 def read_hook_input(stream: TextIO | None = None) -> HookInput:
@@ -289,6 +292,11 @@ class Hook:
                 }
             }
         )
+
+    # -- UserPromptSubmit ------------------------------------------------
+
+    def prompt_block(self, reason: str) -> NoReturn:
+        self._write({"decision": "block", "reason": reason})
 
     # -- Stop ------------------------------------------------------------
 

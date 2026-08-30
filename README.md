@@ -21,7 +21,7 @@ The review is not advice Claude may weigh up. It is a `PreToolUse` gate on the c
 
 ## Requirements
 
-- Claude Code 2.1.x or newer (the plugin uses `PreToolUse`, `PostToolUse`, `PostToolUseFailure` and `Stop` skill hooks)
+- Claude Code 2.1.x or newer (the plugin registers `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `SessionStart` and `UserPromptSubmit` hooks in `hooks/hooks.json`)
 - the reviewer CLI on `PATH` and authenticated: `claude` by default (you already have it), or [`opencode`](https://opencode.ai) with `harness` set to `opencode`. Arming refuses if the configured one is missing.
 - `python3` 3.12 or newer — the gate itself. No install step: the standard library plus a vendored, lint-excluded copy of [bashlex](https://github.com/idank/bashlex) is everything it needs.
 - `git`, `bash` 4.4+ and `timeout` (GNU or uutils coreutils) — `scripts/ocrl.sh` is a thin guarded shim over the interpreter above; see "Interpreter invocation" in `AGENTS.md` for why it exists and what it guarantees.
@@ -243,7 +243,9 @@ State lives in `$XDG_STATE_HOME/opencode-review-loop/worktrees/<sha256(worktree)
 | Dirty worktree at arm time | `ARM_FAILED`; `--allow-dirty` folds the dirt into phase 1's review |
 | `opencode` missing or model unreachable | `ARM_FAILED`, naming the failure |
 | Any arm failure | Persisted **before** exit; all mutations and commits denied until re-armed or stopped |
-| Arming never executes (refused sandbox, unreadable script) | The dispatcher records `ARM_FAILED` itself and denies; a missing pointer is never read as "not armed" |
+| Arming never executes (refused sandbox, unreadable script) | The `UserPromptSubmit` hook recorded that arming was asked for; the next hook call records `ARM_FAILED` itself and denies |
+| Git cannot be run from the hook, or the working directory is gone | Denied: the gate cannot tell whether an armed worktree guards the call, and does not guess |
+| A session that never ran `implement`/`resume` opens an armed worktree (a fresh `claude`, a resumed session under a new id) | Every mutation and commit is denied until `/opencode-review-loop:resume` binds the session; the other session's activation is left untouched |
 | Mutation before `set-phases` | Denied, with the exact command to run |
 | Turn ends while `ARM_FAILED` or phases unset | `Stop` blocks with instructions; the reviewer is never called |
 | Timeout, malformed output, missing verdict, non-zero exit | `OP_FAILURE` → deny; never an approval |

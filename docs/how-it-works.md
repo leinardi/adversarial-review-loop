@@ -89,8 +89,8 @@ descriptions and the loop's own instructions are exactly the sort of thing it dr
 
 **The plugin cannot compact or clear the session for you.** No hook or plugin API can trigger
 either — a hook can only be told one happened. What the plugin does instead is notice: a
-`SessionStart` hook fires after every compaction, and it re-injects the things a compacted
-session needs to carry on —
+`SessionStart` hook fires after every compaction (and after a `claude --resume`), and it
+re-injects the things a compacted session needs to carry on —
 
 - which phase is in progress and its frozen description,
 - the path to the frozen plan, with an instruction to re-read the relevant part,

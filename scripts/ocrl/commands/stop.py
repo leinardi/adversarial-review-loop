@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Final, NoReturn
 from ocrl import commands, planrev
 from ocrl import config as config_module
 from ocrl.commands import completion, hooks
+from ocrl.errors import RepoResolutionError
 from ocrl.hookio import Hook, read_hook_input
 from ocrl.state import State, pointer_read
 
@@ -64,10 +65,34 @@ NO_SESSION: Final = (
 )
 
 UNSTARTED_ARM: Final = (
-    "opencode-review-loop: arming never ran, so nothing was frozen and nothing has been reviewed. The hooks registered but "
-    "ocrl.sh arm did not execute at prompt-expansion time. Tell the user what the slash command reported; they can fix the "
-    "cause and re-run /opencode-review-loop:implement <plan.md>, or leave the mode with /opencode-review-loop:stop. "
-    "Do not implement the plan."
+    "opencode-review-loop: arming never ran, so nothing was frozen and nothing has been reviewed. "
+    "/opencode-review-loop:implement or :resume was submitted but ocrl.sh arm did not execute at prompt-expansion time. "
+    "Tell the user what the slash command reported; they can fix the cause and re-run /opencode-review-loop:implement <plan.md>, "
+    "or leave the mode with /opencode-review-loop:stop. Do not implement the plan."
+)
+
+UNRESOLVABLE: Final = (
+    "opencode-review-loop: the gate could not tell which repository this turn was about ({detail}), so it cannot tell "
+    "whether an armed worktree guards it. Every mutation was denied on the same grounds; nothing was reviewed and this is "
+    "not an approval. git must be runnable from the hook's PATH and the working directory must exist."
+)
+
+UNSCOPABLE_INTENT: Final = (
+    "opencode-review-loop: this session asked for enforcement but its request marker {detail}, so the gate cannot tell "
+    "which repository it was for. Every mutation was denied and nothing was reviewed; this is not an approval. "
+    "Run /opencode-review-loop:stop to discard the request, then arm again from the intended repository."
+)
+
+UNRESOLVABLE_BLOCK: Final = (
+    "opencode-review-loop: this session asked for enforcement and the gate could not tell which repository this turn was "
+    "about ({detail}), so it cannot tell whether that request was answered. Nothing was reviewed. git must be runnable from "
+    "the hook's PATH and the working directory must exist; tell the user."
+)
+
+UNBOUND: Final = (
+    "opencode-review-loop: this worktree is armed (activation {session}, status {status}) but this session is not bound to it, "
+    "so nothing in this turn was reviewed and every mutation was denied. Run /opencode-review-loop:resume to continue the "
+    "plan in this session, or /opencode-review-loop:stop to leave the mode."
 )
 
 MISSING_STATE_REASON: Final = "the activation state for this session could not be read, so the gate cannot tell what has been reviewed"
@@ -248,6 +273,20 @@ def _gate_stop(hook: Hook) -> None:
     payload = read_hook_input()
     cwd = payload.cwd or os.getcwd()
 
+    # Same precedence as ``pretool``: an unanswered arming request for this worktree outranks
+    # a pointer the session held from before it.
+    try:
+        intent = hooks.pending_intent(payload.session_id, cwd)
+    except RepoResolutionError as exc:
+        hook.stop_block(UNRESOLVABLE_BLOCK.format(detail=exc))
+    if intent.unscopable:
+        # Ends the turn rather than blocking: nothing was mutated (pretool denied everything),
+        # there is deliberately no document to count a block in, and only the user's
+        # /opencode-review-loop:stop can resolve it.
+        hook.stop_ok(UNSCOPABLE_INTENT.format(detail=intent.unscopable))
+    if intent.pending:
+        _unstarted_arm(hook, session=payload.session_id, cwd=cwd)
+
     worktree = pointer_read(payload.session_id)
     if not worktree:
         _no_pointer(hook, session=payload.session_id, cwd=cwd)
@@ -284,16 +323,36 @@ def _no_state(hook: Hook, state: State) -> NoReturn:
     hook.stop_block(MISSING_STATE.rstrip("\n"))
 
 
-def _no_pointer(hook: Hook, *, session: str, cwd: str) -> NoReturn:
-    """Same reasoning as ``pretool``: no pointer means arming never ran (**Rule 0**)."""
+def _unstarted_arm(hook: Hook, *, session: str, cwd: str) -> NoReturn:
+    """The session asked for enforcement of this worktree and its ``arm`` never ran (**Rule 0**).
+
+    Recorded as ``ARM_FAILED`` and blocked -- counted, so the same message does not repeat
+    until the host's own cap intervenes.
+    """
     recorded = hooks.record_unstarted_arm(session, cwd)
     if recorded is None:
         hook.stop_ok(NO_SESSION)
     state, config = recorded
-    # Counted, not unconditional: without this the same message repeats on every turn end
-    # until the host's own block cap intervenes.
     gate = _Gate(hook=hook, state=state, config=config, worktree=state.worktree, expected=hooks.activation(state, config))
     _block_counted(gate, UNSTARTED_ARM)
+
+
+def _no_pointer(hook: Hook, *, session: str, cwd: str) -> NoReturn:
+    """Same reasoning as ``pretool``: no pointer means this session never bound (**Rule 0**).
+
+    An unbound session ends its turn: it mutated nothing,
+    because ``pretool`` denied every attempt, so there is no unreviewed work to hold the turn
+    open for, and the one thing that can fix it, a slash command, is the user's to run, not
+    Claude's. Nothing is written for those: the only document belongs to another session.
+    """
+    if not session:
+        hook.stop_ok(NO_SESSION)
+    unbound = hooks.unbound_activation(cwd)
+    if unbound is None:
+        hook.stop_ok()
+    if not unbound.session:
+        hook.stop_ok(UNRESOLVABLE.format(detail=unbound.status))
+    hook.stop_ok(UNBOUND.format(session=unbound.session, status=unbound.status))
 
 
 class _Terminal(Exception):

@@ -15,11 +15,14 @@ Nothing is ever written inside the repository under review (Rule 3).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
@@ -151,15 +154,95 @@ def new_state_document() -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
+#: An intent token: what ``intent`` mints per arming prompt and the pointer acknowledges.
+INTENT_TOKEN_RE: Final = re.compile(r"\A[0-9a-f]{16}\Z")
+
+
+@dataclass(frozen=True)
+class IntentMarker:
+    """One parsed intent marker. ``problem`` is empty when the marker can be trusted.
+
+    A marker with a ``problem`` may still carry a ``token`` (a corrupt worktree line, say);
+    that token is what lets a later ``pointer_write`` acknowledge it. It never carries a
+    usable ``worktree`` -- that is what "cannot be scoped" means.
+    """
+
+    worktree: str
+    token: str
+    problem: str
+
+
+def intent_read(session: str) -> IntentMarker | None:
+    """The session's intent marker, parsed; ``None`` only when it is provably absent.
+
+    Format: line 1 the worktree the arming prompt was submitted from, line 2 ``intent=<token>``.
+    Anything else -- unreadable, empty, a relative worktree, a missing or malformed token --
+    comes back with ``problem`` set rather than as ``None``: an arming request the gate cannot
+    scope is still an arming request.
+    """
+    path = paths.intent_path(session)
+    try:
+        with path.open(encoding="utf-8", errors="surrogateescape") as handle:
+            lines = handle.read().split("\n")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return IntentMarker(worktree="", token="", problem=f"cannot be read: {exc}")
+    worktree = lines[0] if lines else ""
+    token = ""
+    if len(lines) > 1 and lines[1].startswith("intent="):
+        candidate = lines[1].removeprefix("intent=")
+        if INTENT_TOKEN_RE.match(candidate):
+            token = candidate
+    problems = []
+    if not worktree or not os.path.isabs(worktree) or "\0" in worktree:
+        problems.append(f"names no worktree ({worktree!r})")
+    if not token:
+        problems.append("carries no valid token")
+    return IntentMarker(worktree=worktree if not problems else "", token=token, problem="; ".join(problems))
+
+
 def pointer_write(session: str, worktree: str) -> None:
-    """Record which worktree a session armed.
+    """Record which worktree a session armed, acknowledging the intent that asked for it.
 
     Written atomically for the same reason ``state.json`` is: the shell redirected straight
     onto the destination, so an interrupted write left an empty pointer -- which Rule 0
     then reads as "arming never executed", denying every subsequent tool call.
+
+    **The pointer is the acknowledgement, and it is published first.** The intent marker
+    outranks the pointer (``hooks.pending_intent`` runs before ``pointer_read``), so the two
+    have to be bound rather than ordered: the pointer carries the marker's token on its second
+    line, and a marker whose token the pointer already carries is *answered*, whatever else
+    is on disk. That closes both crash windows at once. Die after this write: the marker is
+    left behind, but acknowledged -- inert, cleaned up by the next ``pending_intent``. Die
+    before it: no pointer, marker still pending, the next mutation records ``ARM_FAILED``.
+    Unlinking first would have opened a window with *nothing* on disk -- no marker, no
+    pointer, no ``latest`` -- in which a saved ``ACTIVE`` activation went ungated.
+
+    The unlink afterwards is best-effort cleanup, nothing more.
     """
     root = paths.state_root()
-    write_private_atomic(paths.session_pointer_path(session), f"{worktree}\n", root=root)
+    marker = intent_read(session)
+    token = marker.token if marker is not None else ""
+    text = f"{worktree}\n" + (f"intent={token}\n" if token else "")
+    write_private_atomic(paths.session_pointer_path(session), text, root=root)
+    if token:
+        with contextlib.suppress(OSError):
+            paths.intent_path(session).unlink()
+
+
+def pointer_ack(session: str) -> str:
+    """The intent token the session pointer acknowledges, or ``""``."""
+    if not paths.is_safe_component(session):
+        return ""
+    try:
+        with (paths.sessions_dir() / session).open(encoding="utf-8") as handle:
+            lines = handle.read().split("\n")
+    except OSError:
+        return ""
+    if len(lines) > 1 and lines[1].startswith("intent="):
+        return lines[1].removeprefix("intent=")
+    return ""
 
 
 def pointer_read(session: str) -> str | None:

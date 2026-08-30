@@ -4,42 +4,6 @@ description: Continue an already-armed opencode-review-loop plan in a new sessio
 argument-hint: "[--until N] [--plan <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]"
 disable-model-invocation: true
 user-invocable: true
-hooks:
-  PreToolUse:
-    - hooks:
-        - type: command
-          command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
-          args: ["pretool"]
-          timeout: 1200
-          statusMessage: "OpenCode review gate"
-  PostToolUse:
-    - matcher: "Bash"
-      hooks:
-        - type: command
-          command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
-          args: ["confirm-commit"]
-          timeout: 60
-  PostToolUseFailure:
-    - matcher: "Bash"
-      hooks:
-        - type: command
-          command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
-          args: ["posttool-failure"]
-          timeout: 30
-  Stop:
-    - hooks:
-        - type: command
-          command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
-          args: ["gate-stop"]
-          timeout: 1800
-          statusMessage: "OpenCode review loop: end-of-turn gate"
-  SessionStart:
-    - matcher: "compact"
-      hooks:
-        - type: command
-          command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
-          args: ["reorient"]
-          timeout: 30
 ---
 
 # Resume the review loop
@@ -52,7 +16,7 @@ The block above is the output of resuming, which ran **before you had a turn**. 
 
 **If it says resume failed, stop.** Every file mutation and every commit in this worktree is denied until the reason is resolved. Report it to the user; do not implement anything.
 
-Hooks identical to `/opencode-review-loop:implement` are registered for this session the moment this skill runs, whether or not the resume itself succeeds — the gate is enforcing from your very first tool call either way.
+The gate's hooks are registered by the plugin itself, in every Claude Code session, whether or not the resume succeeds — a failed resume leaves this worktree denied, it never leaves it ungated.
 
 ## Your job, in order
 

@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import Final
 
-from ocrl.errors import UnsafePathError
+from ocrl.errors import RepoResolutionError, UnsafePathError
 
 __all__ = [
     "activation_dir",
@@ -106,25 +106,61 @@ def latest_pointer_path(worktree: str) -> Path:
     return _worktree_dir(worktree) / "latest"
 
 
+#: ``git rev-parse`` answering "not a git repository" exits with this status.
+_GIT_NOT_A_REPO_STATUS: Final = 128
+#: Generous: ``rev-parse --show-toplevel`` touches no objects, but a hung network filesystem
+#: must land in a denial rather than hold the hook until the shim's own timeout does.
+GIT_TIMEOUT_SECONDS: Final = 30
+
+
+def intent_path(session: str) -> Path:
+    """Marker that a session asked for enforcement before its ``arm`` could persist anything."""
+    return state_root() / "intents" / validate_component(session, what="session id")
+
+
 def have(command: str) -> bool:
     return shutil.which(command) is not None
 
 
 def repo_root(directory: str) -> str:
-    """Resolve the git worktree root of ``directory``. Empty string on any failure."""
-    if not os.path.isdir(directory):
+    """Resolve the git worktree root of ``directory``. Empty string on any failure.
+
+    For callers that can treat "unknown" as "none". The gate's unbound-session check cannot
+    -- see :func:`repo_root_or_raise`.
+    """
+    try:
+        return repo_root_or_raise(directory)
+    except RepoResolutionError:
         return ""
+
+
+def repo_root_or_raise(directory: str) -> str:
+    """Resolve the git worktree root of ``directory``, or raise when git cannot answer.
+
+    Empty string means git *answered* "not a repository" (exit 128 with its own message).
+    Anything else -- no ``git`` on PATH, a directory that does not exist, a timeout, any other
+    exit status -- raises :class:`RepoResolutionError`, so a caller that must know whether a
+    directory is guarded cannot mistake "could not ask" for "nothing here".
+    """
+    if not os.path.isdir(directory):
+        raise RepoResolutionError(f"not a directory: {directory!r}")
     try:
         proc = subprocess.run(
             ["git", "-C", directory, "rev-parse", "--show-toplevel"],
             check=False,
             capture_output=True,
             text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+            # The "not a git repository" answer is matched on git's own text, which is
+            # localised; pin the locale so the match holds on a machine that is not.
+            env={**os.environ, "LC_ALL": "C", "LANGUAGE": "C"},
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RepoResolutionError(f"git could not be run: {exc}") from exc
+    if proc.returncode == _GIT_NOT_A_REPO_STATUS and "not a git repository" in proc.stderr:
         return ""
     if proc.returncode != 0:
-        return ""
+        raise RepoResolutionError(f"git rev-parse exited {proc.returncode}: {proc.stderr.strip()}")
     # Command substitution strips trailing newlines and nothing else; a path may
     # legitimately end in a space.
     return proc.stdout.rstrip("\n")

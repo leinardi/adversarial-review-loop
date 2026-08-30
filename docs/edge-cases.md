@@ -256,17 +256,68 @@ The gate is session-scoped: a crash, `/clear`, or simply closing the terminal le
 gone. The fix is the same as any other interruption — `resume` in the new session, which
 picks the activation back up rather than starting over.
 
-## Hooks registering twice
+## Hooks are plugin-level, not skill-level
 
-`implement` and `resume` both carry the identical hook-registration block — necessary so
-that resuming in a session where `implement` never ran still enforces the gate from the
-first tool call. If both happen to run in the *same* session (arm, then later
-same-session `resume`), Claude Code registers the same four hooks a second time. The
-handlers themselves look idempotent on inspection — a second `confirm-commit` firing on an
-already-verified commit has nothing to do, a second `pretool` firing on an already-approved
-tree takes the cache-hit path — but whether Claude Code actually *calls* a doubly-registered
-hook twice per tool call, rather than once, is an open question tracked in
-[`tests/STEP0.md`](../tests/STEP0.md) (item 15) rather than assumed safe.
+Every hook is registered by `hooks/hooks.json` at plugin load, so the gate exists in every
+Claude Code process the plugin is enabled in. The original design registered them from the
+`implement` and `resume` skills' frontmatter instead, and that had a hole: skill hooks
+register *per process*, on invocation. Interrupt a run, quit, `claude --resume` the next
+day, type `continue` — the resumed process has the same session id, `state.json` says
+`ACTIVE`, `/opencode-review-loop:status` agrees, and not one `ocrl` hook is registered.
+Every commit lands ungated while the state claims enforcement (measured 2026-08-30; see
+`tests/STEP0.md`).
+
+The cost is that the dispatcher now runs in sessions that never armed anything. That path is
+deliberately cheap and silent: no session pointer, no live activation for the worktree the
+call is about, nothing written, exit 0 in well under a second. The path that is *not* silent
+is a session with no pointer in a worktree whose `latest` activation is still live — a fresh
+`claude` opened there, or a resumed session that came back under a new id. That session is
+**unbound**: every mutation is denied, naming the activation and telling the user to run
+`/opencode-review-loop:resume`, which binds the session and keeps every approval. The other
+session's document is never touched.
+
+Two more things are needed for that to be fail-closed rather than merely convenient. First,
+"nothing to enforce" is proven, not defaulted to: the worktree is resolved with a git call
+that distinguishes "not a repository" from "git could not be run", and only the former
+passes — a `git` missing from the hook's PATH denies. Second, an `arm` that never started
+is still caught. The skills arm from a prompt-expansion line, and when that line cannot
+run, Claude Code aborts the skill and Claude gets no turn — the skill body's own warning
+never reaches it, and nothing has been persisted for the gate to find. So a
+`UserPromptSubmit` hook (`intent`) records a marker the moment a prompt *starting with*
+`/opencode-review-loop:implement` or `:resume` is submitted, before any expansion, naming
+the worktree it was submitted from. A successful (or failed-but-recorded) arm supersedes it
+by writing the session pointer, which carries the marker's own token; an *unanswered* marker is read as "arming never ran"
+*whatever pointer the session held before* — an earlier activation that ended is still a
+pointer, and a re-arm whose expansion failed must not hide behind it — so it is checked
+ahead of the pointer, recorded as `ARM_FAILED` for the worktree it names, and denied until
+the user re-arms or stops. Calls from any other repository leave it untouched. Prose that
+merely mentions the command records nothing.
+
+Because the marker outranks the pointer, the two are *bound* rather than ordered: `intent`
+mints a token, `pointer_write` publishes the pointer carrying that token, and a marker whose
+token the pointer already names is answered — inert, cleaned up on the next check. Publishing
+first is what closes both crash windows: die after it and the leftover marker is harmless;
+die before it and the request is still pending, so the next mutation records `ARM_FAILED`.
+Unlinking first would have opened a window with nothing on disk at all — no marker, no
+pointer, no `latest` — in which a saved `ACTIVE` activation went ungated.
+
+A marker that exists but cannot be read, names no absolute worktree, or carries no valid
+token is never "no intent" — but neither is it assigned to whatever repository the call
+happens to be in. It denies *everywhere*, records nothing and consumes nothing, and only
+`/opencode-review-loop:stop` (which now passes `--session`) discards it. Otherwise a
+corrupted marker for repository A would be consumed by a call in repository B, and A would
+go ungated.
+
+"Proven" cuts the other way too. A bound session whose call comes from a *subdirectory* of
+the armed worktree needs git to place it; if git cannot run from the hook's PATH, the old
+lenient resolution read that as "another repository" and passed the call — including a
+commit run through an absolute `/usr/bin/git`. Every hook now treats an unanswerable
+resolution as a denial (`pretool`), a block (`gate-stop`) or an explicit "NOT confirmed"
+(`confirm-commit`); only git's own "not a repository" is a pass.
+
+It also closes what used to be item 15 in `tests/STEP0.md`: with one registration per
+process there is nothing left to register twice when `implement` and a same-session
+`resume` both run.
 
 ## What isn't settled without a live session
 

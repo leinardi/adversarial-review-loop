@@ -32,8 +32,8 @@
 # Non-hook subcommands (arm, status, report, ...) are not part of this
 # contract: they stream directly, and a missing interpreter or a crash there
 # is an ordinary shell/CLI failure. Rule 0 already covers an `arm` that never
-# ran -- the next hook call finds no session pointer and records ARM_FAILED
-# itself.
+# ran -- the `intent` hook recorded that it was asked for, and the next hook
+# call finds that marker with no session pointer and records ARM_FAILED itself.
 
 set -uo pipefail
 
@@ -70,6 +70,13 @@ ocrl_hook_fallback() {
             # Silent, matching the entrypoint's own behaviour: its only job is
             # clearing a pending approval, and a crash here leaves that pending
             # tree stale rather than granting anything.
+            ;;
+        intent)
+            # Silent. UserPromptSubmit could block the prompt, but the shim cannot
+            # tell an arming prompt from any other without parsing the payload, and
+            # blocking every prompt because the interpreter is missing would wedge
+            # the whole session. The loss is bounded: if the interpreter cannot run
+            # here it cannot run for pretool either, whose fallback denies everything.
             ;;
         reorient)
             # Silent, and it must be. SessionStart reads a hook's plain stdout as
@@ -178,6 +185,7 @@ case "${1:-}" in
     posttool-failure) ocrl_hook_run posttool-failure "$(ocrl_bounded_timeout 20 "${OCRL_SHIM_TIMEOUT_POSTTOOL_FAILURE:-}")" "$@" ;;
     gate-stop) ocrl_hook_run gate-stop "$(ocrl_bounded_timeout 1750 "${OCRL_SHIM_TIMEOUT_GATE_STOP:-}")" "$@" ;;
     reorient) ocrl_hook_run reorient "$(ocrl_bounded_timeout 25 "${OCRL_SHIM_TIMEOUT_REORIENT:-}")" "$@" ;;
+    intent) ocrl_hook_run intent "$(ocrl_bounded_timeout 8 "${OCRL_SHIM_TIMEOUT_INTENT:-}")" "$@" ;;
     *)
         if ! command -v python3 >/dev/null 2>&1; then
             printf 'opencode-review-loop: python3 is not on PATH.\n' >&2

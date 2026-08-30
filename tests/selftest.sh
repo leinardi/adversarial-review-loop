@@ -210,6 +210,13 @@ sget_for() {
         else "" end' "$(state_file_for "$1")"
 }
 
+# intent_ok <prompt> -- what UserPromptSubmit records before a skill expands.
+intent_ok() {
+    jq -nc --arg s "$SESSION" --arg c "$REPO" --arg p "$1" \
+        '{session_id:$s,cwd:$c,hook_event_name:"UserPromptSubmit",prompt:$p}' |
+        (cd "$REPO" && "$OCRL" intent) >/dev/null
+}
+
 arm_ok() {
     ocrl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
 }
@@ -452,13 +459,25 @@ if start 'fail-closed: missing state denies mutations'; then
     assert_eq 'Read still allowed' "$(pre Read)" 'pass'
 fi
 
-if start 'fail-closed: an arm that never executed still denies'; then
-    # The hooks register when the skill is invoked, so a dispatcher running
-    # with no session pointer means `ocrl arm` never started -- a denied
-    # sandbox, an unreadable script, an unresolved plugin root. cmd_arm cannot
-    # persist a failure to start, so the dispatcher has to.
+if start 'rule 0: a session that never armed is not gated'; then
+    # The hooks register at plugin load, so the dispatcher runs in every
+    # session -- most of which never armed anything. With no session pointer
+    # and no activation for this worktree there is nothing to enforce, and
+    # nothing may be written: an unarmed session must not leave state behind.
     new_case
-    # Deliberately no arm_ok here: this is the "expansion never ran" case.
+    assert_eq 'Edit passes' "$(pre Edit)" 'pass'
+    assert_eq 'Bash passes' "$(pre Bash 'git add -A && git commit -m x')" 'pass'
+    assert_eq 'the turn ends cleanly' "$(stop_decision)" 'ok'
+    assert_eq 'and no state was written' "$(find "$OCRL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+fi
+
+if start 'rule 0: an arm that never executed still denies'; then
+    # The user submitted the arming command, so UserPromptSubmit recorded the
+    # intent -- and then the expansion never ran: a denied sandbox, an
+    # unreadable script, an unresolved plugin root. cmd_arm cannot persist a
+    # failure to start, so the next hook call has to.
+    new_case
+    intent_ok '/opencode-review-loop:implement plan.md'
     assert_eq 'no state exists yet' "$(find "$OCRL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
 
     assert_eq 'Edit is denied rather than silently passing' "$(pre Edit)" 'deny'
@@ -471,21 +490,118 @@ if start 'fail-closed: an arm that never executed still denies'; then
     # Now that it is recorded, the ordinary ARM_FAILED path takes over.
     assert_eq 'Write stays denied' "$(pre Write)" 'deny'
     assert_eq 'Bash stays denied' "$(pre Bash 'git add -A && git commit -m x')" 'deny'
-    assert_eq 'an MCP mutation stays denied' "$(pre mcp__serena__replace_content)" 'deny'
     assert_eq 'Read is still allowed' "$(pre Read)" 'pass'
     assert_eq 'the turn cannot end quietly' "$(stop_decision)" 'block'
 fi
 
-if start 'fail-closed: a turn ending before any tool call still blocks'; then
+if start 'rule 0: a turn ending before any tool call still blocks an unstarted arm'; then
     new_case
+    intent_ok '/opencode-review-loop:resume'
     out=$(stop_gate)
     assert_contains 'the Stop gate blocks' "$out" 'arming never ran'
     assert_eq 'and records it' "$(sget status)" 'ARM_FAILED'
 fi
 
-if start 'stop: disarming survives the unstarted-arm guard'; then
-    # Regression: deactivate used to delete the session pointer, which the new
-    # guard would then read as "arming never ran" and deny on every call.
+if start 'rule 0: a failed re-arm does not hide behind a pointer that already ended'; then
+    new_case
+    arm_ok && phases_ok
+    ocrl deactivate >/dev/null 2>&1
+    assert_eq 'DISARMED passes a commit' "$(pre Bash 'git add -A && git commit -m x')" 'pass'
+    intent_ok '/opencode-review-loop:implement plan.md'
+    assert_eq 'after an unanswered re-arm the commit is denied' "$(pre Bash 'git add -A && git commit -m x')" 'deny'
+    assert_contains 'as arming never ran' "$(pre_reason)" 'Arming never ran'
+    assert_eq 'and it is recorded' "$(sget status)" 'ARM_FAILED'
+fi
+
+if start 'rule 0: an intent is scoped to the worktree it was submitted from'; then
+    new_case
+    intent_ok '/opencode-review-loop:implement plan.md'
+    other="$CASE_DIR/other"
+    mkdir -p "$other"
+    git -C "$other" init -q -b main
+    assert_eq 'a mutation in another repo passes' "$(pre_at "$other" Edit)" 'pass'
+    assert_eq 'and records nothing' "$(find "$OCRL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+    assert_eq 'the armed repo is still denied' "$(pre Edit)" 'deny'
+    assert_eq 'and now recorded' "$(sget status)" 'ARM_FAILED'
+fi
+
+if start 'rule 0: a bound session cannot be scoped out by a git that cannot run'; then
+    # cwd is a subdirectory of the armed worktree, so placing it needs git. With
+    # git off the hook's PATH the old lenient resolution read "unknown" as
+    # "another repository" and passed a commit run with an absolute git path.
+    new_case
+    arm_ok && phases_ok
+    mkdir -p "$REPO/sub"
+    nogit="$CASE_DIR/no-git-path"
+    mkdir -p "$nogit"
+    for b in bash sh cat printf timeout env python3 grep sed cut mktemp true false ls find head tr; do
+        p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$nogit/$b"
+    done
+    out=$(jq -nc --arg s "$SESSION" --arg c "$REPO/sub" \
+        '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"/usr/bin/git add -A && /usr/bin/git commit -m x"}}' |
+        (cd "$REPO/sub" && PATH="$nogit" "$OCRL" pretool))
+    assert_eq 'the commit is denied' "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
+    assert_contains 'because the repository could not be resolved' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')" 'could not tell which repository'
+    out=$(jq -nc --arg s "$SESSION" --arg c "$REPO/sub" \
+        '{session_id:$s,cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"git add -A && git commit -m x"},tool_response:{exit_code:0}}' |
+        (cd "$REPO/sub" && PATH="$nogit" "$OCRL" confirm-commit))
+    assert_contains 'and confirm-commit reports rather than verifying' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""')" 'NOT confirmed'
+fi
+
+if start 'rule 0: a marker that cannot be scoped denies without being consumed'; then
+    new_case
+    intent_ok '/opencode-review-loop:implement plan.md'
+    printf '' >"$OCRL_STATE_DIR/intents/$SESSION"
+    assert_eq 'Edit is denied' "$(pre Edit)" 'deny'
+    assert_contains 'because the request cannot be scoped' "$(pre_reason)" 'cannot tell which repository'
+    assert_eq 'nothing was recorded against this repo' "$(find "$OCRL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+    assert_eq 'and the marker is still there' "$(test -f "$OCRL_STATE_DIR/intents/$SESSION" && echo yes)" 'yes'
+    assert_eq 'Read is still allowed' "$(pre Read)" 'pass'
+
+    ocrl deactivate --session "$SESSION" >/dev/null 2>&1
+    assert_eq 'stop discards it' "$(test -f "$OCRL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
+    assert_eq 'and mutations pass again' "$(pre Edit)" 'pass'
+fi
+
+if start 'rule 0: prose mentioning the command is not an intent'; then
+    new_case
+    intent_ok 'yesterday /opencode-review-loop:implement worked fine, continue'
+    assert_eq 'Edit still passes' "$(pre Edit)" 'pass'
+    assert_eq 'and nothing was recorded' "$(find "$OCRL_STATE_DIR" -type f 2>/dev/null | wc -l)" '0'
+fi
+
+if start 'rule 0: an unbound session in an armed worktree is denied'; then
+    # A second Claude Code process opening a worktree that another session
+    # armed -- a fresh `claude`, or a resumed one under a new id -- carries no
+    # pointer. The worktree's `latest` activation is live, so every mutation
+    # is denied until /opencode-review-loop:resume binds this session to it.
+    new_case
+    arm_ok && phases_ok
+    assert_eq 'the bound session edits freely' "$(pre Edit)" 'pass'
+
+    assert_eq 'an unbound session is denied an Edit' "$(SESSION=unbound-session pre Edit)" 'deny'
+    assert_contains 'and told it is not bound' "$(pre_reason)" 'not bound to it'
+    assert_contains 'naming the live activation' "$(pre_reason)" "activation $SESSION, status ACTIVE"
+    assert_contains 'and how to bind' "$(pre_reason)" '/opencode-review-loop:resume'
+    assert_eq 'a commit is denied' "$(SESSION=unbound-session pre Bash 'git add -A && git commit -m x')" 'deny'
+    assert_eq 'an MCP mutation is denied' "$(SESSION=unbound-session pre mcp__serena__replace_content)" 'deny'
+    assert_eq 'Read is still allowed' "$(SESSION=unbound-session pre Read)" 'pass'
+
+    out=$(SESSION=unbound-session stop_gate)
+    assert_contains 'the turn ends with a warning, not a block' "$out" 'systemMessage'
+    assert_contains 'that names resume' "$out" '/opencode-review-loop:resume'
+    assert_eq 'the other activation is untouched' "$(sget status)" 'ACTIVE'
+    assert_eq 'and the unbound session recorded nothing' "$(find "$OCRL_STATE_DIR" -path '*unbound-session*' 2>/dev/null | wc -l)" '0'
+
+    ocrl deactivate >/dev/null 2>&1
+    assert_eq 'once the loop ends, the unbound session passes' "$(SESSION=unbound-session pre Edit)" 'pass'
+fi
+
+if start 'stop: disarming survives the unbound-session guard'; then
+    # Regression: deactivate used to delete the session pointer, which the
+    # guard would then read as "never bound" and deny on every call.
     new_case
     arm_ok && phases_ok
     ocrl deactivate >/dev/null 2>&1
@@ -1080,16 +1196,16 @@ if start 'scoping: another repository in the same session is untouched'; then
     assert_eq 'while the armed repo still gates' "$(pre Edit)" 'deny'
 fi
 
-if start 'scoping: a session with no pointer fails closed, it does not opt out'; then
+if start 'scoping: a session with no pointer in an armed worktree fails closed, it does not opt out'; then
     # This asserted "pass" until the guard landed, which encoded the fail-open
-    # hole: the dispatcher only runs in a session where implement was invoked,
-    # so an unrecognised session id means arming never completed, not that the
-    # session is uninvolved. Worktree scoping is the test above; this is not it.
+    # hole: an unrecognised session id in a worktree with a live activation is
+    # a session that never bound to it -- not one that is uninvolved. Worktree
+    # scoping is the test above; this is not it.
     new_case
     arm_ok
     SESSION='some-other-session'
     assert_eq 'an unrecognised session denies rather than passing' "$(pre Edit)" 'deny'
-    assert_contains 'and explains why' "$(pre_reason)" 'Arming never ran'
+    assert_contains 'and explains why' "$(pre_reason)" 'not bound to it'
 fi
 
 # --------------------------------------------------------------------------

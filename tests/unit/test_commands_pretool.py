@@ -83,7 +83,7 @@ def patch_state(env: dict[str, str], repo: Path, **values: object) -> None:
 
 
 # --------------------------------------------------------------------------
-# Rule 0: no pointer means arming never executed
+# Rule 0: no pointer means this session never bound to an activation
 # --------------------------------------------------------------------------
 
 
@@ -95,14 +95,145 @@ def test_a_payload_with_no_session_id_denies(git_repo: Path, clean_env: dict[str
     assert "carried no session id" in reason
 
 
-def test_no_pointer_records_arm_failed_and_denies(git_repo: Path, clean_env: dict[str, str]) -> None:
-    verdict, reason = pretool(git_repo, clean_env, tool="Write")
+def test_no_pointer_in_a_worktree_nobody_armed_passes(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """The hooks register at plugin load, so this is every session that never armed: silent."""
+    proc = run_hook("pretool", payload(git_repo, tool="Write"), cwd=git_repo, env=clean_env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert not list((Path(clean_env["XDG_STATE_HOME"]) / "opencode-review-loop").rglob("state.json"))
+
+
+def test_no_pointer_in_a_worktree_armed_by_another_session_denies(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A second session in an armed worktree is unbound: denied until ``resume`` binds it."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, tool="Write", session="s2")
 
     assert verdict == "deny"
-    assert "Arming never ran" in reason
-    document = read_state(clean_env, git_repo, SESSION)
-    assert document["status"] == "ARM_FAILED"
-    assert "arming never executed" in str(document["reason"])
+    assert "not bound to it" in reason
+    assert f"activation {SESSION}, status ACTIVE" in reason
+    assert "/opencode-review-loop:resume" in reason
+    assert "Do not implement the plan" in reason
+    # Nothing was written: the activation belongs to the other session.
+    assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
+    assert not (state_dir(env, git_repo, "s2")).exists()
+
+
+@pytest.mark.parametrize("status", ["COMPLETE", "DISARMED"])
+def test_no_pointer_passes_once_the_other_activation_ended(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str) -> None:
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status=status)
+
+    proc = run_hook("pretool", payload(git_repo, tool="Write", session="s2"), cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+
+
+@pytest.mark.parametrize("status", ["ARMED", "ARM_FAILED", "NEEDS_HUMAN", "STALE", "RESUMED"])
+def test_no_pointer_denies_under_every_other_status(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str) -> None:
+    """Only a loop that ended releases an unbound session; anything else still guards the tree."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status=status)
+
+    verdict, reason = pretool(git_repo, env, tool="Write", session="s2")
+
+    assert verdict == "deny"
+    assert f"status {status}" in reason
+
+
+def test_no_pointer_denies_when_the_latest_activation_has_no_document(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``latest`` says the worktree was armed and nothing says it stopped: fail closed."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    (state_dir(env, git_repo, SESSION) / "state.json").unlink()
+
+    verdict, reason = pretool(git_repo, env, tool="Write", session="s2")
+
+    assert verdict == "deny"
+    assert "status unreadable" in reason
+
+
+def test_no_pointer_with_git_unavailable_denies(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """ "Nothing to enforce" must be proven: a git that cannot run is a denial, never a pass."""
+    env = {**clean_env, "PATH": str(Path(clean_env["HOME"]) / "empty-path")}
+
+    verdict, reason = pretool(git_repo, env, tool="Write", session="s2")
+
+    assert verdict == "deny"
+    assert "could not tell which repository" in reason
+    assert "git could not be run" in reason
+    assert not list((Path(env["XDG_STATE_HOME"]) / "opencode-review-loop").rglob("state.json"))
+
+
+def test_no_pointer_with_a_vanished_cwd_denies(git_repo: Path, clean_env: dict[str, str]) -> None:
+    proc = run_hook("pretool", {**payload(git_repo, tool="Write", session="s2"), "cwd": str(git_repo / "gone")}, cwd=git_repo, env=clean_env)
+    assert proc.returncode == 0, proc.stderr
+
+    verdict, reason = decision(proc)
+
+    assert verdict == "deny"
+    assert "not a directory" in reason
+
+
+def test_a_bound_session_denies_when_git_cannot_place_a_subdirectory(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """ "Somewhere else" must be proven: with git off PATH, a subdirectory of the armed worktree is not "another repository"."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    sub = git_repo / "sub"
+    sub.mkdir()
+    env = {**env, "PATH": str(Path(clean_env["HOME"]) / "empty-path")}
+
+    proc = run_hook(
+        "pretool", {**payload(git_repo, tool="Bash", command="/usr/bin/git add -A && /usr/bin/git commit -m x"), "cwd": str(sub)}, cwd=sub, env=env
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    verdict, reason = decision(proc)
+    assert verdict == "deny"
+    assert "could not tell which repository" in reason
+
+
+def test_a_bound_session_denies_when_its_cwd_is_gone(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    proc = run_hook("pretool", {**payload(git_repo, tool="Write"), "cwd": str(git_repo / "gone")}, cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stderr
+
+    verdict, reason = decision(proc)
+    assert verdict == "deny"
+    assert "not a directory" in reason
+
+
+def test_a_bound_session_still_passes_a_proven_other_repository(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    other = tmp_path / "plain"
+    other.mkdir()
+
+    proc = run_hook("pretool", {**payload(git_repo, tool="Write"), "cwd": str(other)}, cwd=other, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+
+
+def test_no_pointer_in_another_worktree_of_the_same_session_passes(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The unbound check is per worktree: an unrelated repository is not guarded by this one."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    other = tmp_path / "other"
+    other.mkdir()
+    git(other, "init", "-q")
+
+    proc = run_hook("pretool", payload(other, tool="Write", session="s2"), cwd=other, env=env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
 
 
 def test_no_pointer_still_lets_a_read_through(git_repo: Path, clean_env: dict[str, str]) -> None:
@@ -114,13 +245,22 @@ def test_no_pointer_still_lets_a_read_through(git_repo: Path, clean_env: dict[st
     assert not (state_dir(clean_env, git_repo, SESSION) / "state.json").exists()
 
 
-def test_an_unusable_session_id_is_not_turned_into_a_state_path(git_repo: Path, clean_env: dict[str, str]) -> None:
-    """A traversing id names no activation; it must deny without composing a path from it."""
-    verdict, reason = pretool(git_repo, clean_env, tool="Write", session="../escape")
+def test_an_unusable_session_id_is_not_turned_into_a_state_path(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A traversing id names no activation, so it is unbound like any other; no path is ever composed from it."""
+    proc = run_hook("pretool", payload(git_repo, tool="Write", session="../escape"), cwd=git_repo, env=clean_env)
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    root = Path(clean_env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    assert not (root / "worktrees" / "escape").exists()
+    assert not list(root.rglob("escape*"))
+
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    verdict, reason = pretool(git_repo, env, tool="Write", session="../escape")
 
     assert verdict == "deny"
-    assert "Arming never ran" in reason
-    assert not (Path(clean_env["XDG_STATE_HOME"]) / "opencode-review-loop" / "worktrees" / "escape").exists()
+    assert "not bound to it" in reason
+    assert not list(root.rglob("escape*"))
 
 
 def test_missing_state_denies_rather_than_passing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

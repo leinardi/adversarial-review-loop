@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Final, NoReturn
 from ocrl import commands, paths
 from ocrl import config as config_module
 from ocrl.commands import hooks
+from ocrl.errors import RepoResolutionError
 from ocrl.hookio import Hook, read_hook_input
 from ocrl.state import State, pointer_read
 from ocrl.util import now
@@ -43,8 +44,8 @@ UNSTARTED_ARM: Final = """\
 Arming never ran, so nothing was frozen, nothing is being reviewed, and this
 mutation is denied.
 
-The hooks registered, which means /opencode-review-loop:implement was invoked,
-but the arm command itself never executed. The usual causes are a sandbox that
+/opencode-review-loop:implement or :resume was submitted in this session, but
+the arm command itself never executed. The usual causes are a sandbox that
 refused to run it, an unreadable or non-executable scripts/ocrl.sh, or a
 missing interpreter.
 
@@ -53,6 +54,26 @@ cause and run /opencode-review-loop:implement <plan.md> again, or leave the
 mode with /opencode-review-loop:stop.
 
 Do not implement the plan: enforcement was requested and is not running.
+"""
+
+UNSCOPABLE_INTENT: Final = """\
+This session asked for enforcement (/opencode-review-loop:implement or :resume was submitted), but the request marker {path} {detail}, so the gate cannot tell which repository it was for. Every mutation in this session is denied until it is resolved, and nothing has been recorded against this repository.
+
+Tell the user. /opencode-review-loop:stop discards the request; they can then arm again from the intended repository.
+"""
+
+UNRESOLVABLE: Final = """\
+The gate could not tell which repository this call is about ({detail}), so it cannot tell whether an armed worktree guards it. Denying rather than guessing.
+
+This is an integration fault, not a review finding: git must be runnable from the hook's PATH and the working directory must exist. Tell the user.
+"""
+
+UNBOUND: Final = """\
+This worktree is armed by opencode-review-loop (activation {session}, status {status}), but this session is not bound to it: neither /opencode-review-loop:implement nor /opencode-review-loop:resume ran in this Claude Code process.
+
+Every mutation and commit here is denied until the loop is bound to this session. Tell the user: /opencode-review-loop:resume continues the plan in this session with every approval kept; /opencode-review-loop:stop leaves the mode.
+
+Do not implement the plan in the meantime: enforcement was requested and is not bound to this session.
 """
 
 MISSING_STATE: Final = """\
@@ -360,14 +381,36 @@ def _pretool(hook: Hook) -> None:
     cwd = payload.cwd or os.getcwd()
     tool = payload.tool_name
 
-    # No pointer for this session -> arming never executed. Fail closed (Rule 0).
-    worktree = pointer_read(payload.session_id)
-    if not worktree:
-        _no_pointer(hook, session=payload.session_id, cwd=cwd, tool=tool)
+    # An arming request this worktree has no answer to yet outranks whatever pointer the
+    # session holds from before it: an earlier activation that ended is still a pointer, and
+    # a re-arm whose expansion failed must not hide behind it (Rule 0).
+    try:
+        intent = hooks.pending_intent(payload.session_id, cwd)
+        if intent.unscopable:
+            # Not consumed and not recorded: either would assign the request to whatever
+            # repository this call happens to be in. Read-only tools still pass.
+            if hooks.tool_is_readonly(tool):
+                hook.pass_()
+            hooks.deny(hook, UNSCOPABLE_INTENT.format(detail=intent.unscopable, path=paths.intent_path(payload.session_id)))
+        if intent.pending:
+            if hooks.tool_is_readonly(tool):
+                hook.pass_()
+            hooks.record_unstarted_arm(payload.session_id, cwd)
+            hooks.deny(hook, UNSTARTED_ARM)
 
-    repo = hooks.resolve_repo(cwd, worktree) or cwd
+        # No pointer for this session -> it never bound to an activation. Fail closed (Rule 0).
+        worktree = pointer_read(payload.session_id)
+        if not worktree:
+            _no_pointer(hook, session=payload.session_id, cwd=cwd, tool=tool)
+
+        repo = hooks.resolve_repo(cwd, worktree)
+    except RepoResolutionError as exc:
+        # "Somewhere else" has to be proven. A git that cannot run from a subdirectory of the
+        # armed worktree would otherwise read as another repository -- and pass a commit.
+        hooks.deny(hook, UNRESOLVABLE.format(detail=exc))
     if repo != worktree:
-        # Work outside the armed worktree in the same session is untouched.
+        # Work outside the armed worktree in the same session is untouched. `repo` is empty
+        # only when git answered "not a repository", which is proof enough.
         hook.pass_()
 
     # A read-only tool is permitted in *every* state -- each branch below would end up
@@ -392,16 +435,28 @@ def _pretool(hook: Hook) -> None:
 
 
 def _no_pointer(hook: Hook, *, session: str, cwd: str, tool: str) -> NoReturn:
-    """No session pointer: either the payload is unusable, or arming never ran."""
+    """No session pointer: this session never bound to an activation (**Rule 0**).
+
+    The hooks register at plugin load, so this is the ordinary case for every session that
+    never ran ``implement`` or ``resume`` -- and the hot path for all of them. Two things can
+    still deny, in this order: the repository this call is about cannot be resolved at all;
+    or it is guarded by a live activation of *another* session, until ``resume`` binds this
+    one. (The third, an arming request this worktree has no answer to, is checked by the
+    caller ahead of the pointer, since it applies with a stale pointer as much as without.)
+    """
     if not session:
         # The gate cannot identify what it is protecting, so it denies rather than guessing.
         hooks.deny(hook, NO_SESSION)
-    # This one is *not* the hoist below -- it is reached before it, and it is what keeps a
-    # session whose arming never started from denying every Read as well.
+    # This one is *not* the hoist below -- it is reached before it, and it is what keeps an
+    # unbound session from paying a git process for every Read.
     if hooks.tool_is_readonly(tool):
         hook.pass_()
-    hooks.record_unstarted_arm(session, cwd)
-    hooks.deny(hook, UNSTARTED_ARM)
+    unbound = hooks.unbound_activation(cwd)
+    if unbound is None:
+        hook.pass_()
+    if not unbound.session:
+        hooks.deny(hook, UNRESOLVABLE.format(detail=unbound.status))
+    hooks.deny(hook, UNBOUND.format(session=unbound.session, status=unbound.status))
 
 
 def _gate_terminal_status(hook: Hook, *, state: State, config: Config, status: str) -> None:

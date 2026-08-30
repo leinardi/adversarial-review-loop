@@ -2,8 +2,8 @@
 
 What lives here is what more than one of ``pretool``, ``confirm-commit``,
 ``posttool-failure`` and ``gate-stop`` needs: the read-only tool table, the denial preamble,
-resolving the payload's ``cwd`` onto the armed worktree, and **Rule 0** -- recording that
-arming never executed.
+resolving the payload's ``cwd`` onto the armed worktree, and **Rule 0** -- finding the
+activation that guards a worktree when the calling session never bound to one.
 
 Imports are kept to what the ``PreToolUse`` hot path already pays for. ``pretool`` runs on
 every single tool call, so ``gitsnap``, ``cmdshape``, ``reviewer`` and ``report`` are
@@ -12,30 +12,37 @@ imported inside the functions that need them rather than at module scope.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import Final, NoReturn
 
 from ocrl import commands, paths
 from ocrl import config as config_module
 from ocrl.config import Config
+from ocrl.errors import RepoResolutionError, UnsafePathError
 from ocrl.hookio import Hook
-from ocrl.state import State, pointer_write
+from ocrl.state import State, intent_read, pointer_ack, pointer_write
 from ocrl.util import log, now
 
 __all__ = [
     "DENY_PREAMBLE",
     "READONLY_TOOLS",
+    "UNBOUND_PASS_STATUSES",
     "UNSTARTED_ARM_REASON",
     "Activation",
+    "IntentCheck",
+    "Unbound",
     "activation",
     "deny",
     "describe_move",
     "escalate",
     "find_abandoned_marker_commit",
+    "pending_intent",
     "record_unstarted_arm",
     "resolve_abandoned_marker",
     "resolve_repo",
     "tool_is_readonly",
+    "unbound_activation",
 ]
 
 #: Tools that cannot change the repository. Everything else is treated as a mutation, so an
@@ -66,9 +73,13 @@ READONLY_TOOLS: Final = frozenset(
 DENY_PREAMBLE: Final = "opencode-review-loop is enforcing an external review gate in this worktree.\n\n"
 
 UNSTARTED_ARM_REASON: Final = (
-    "arming never executed: the hooks registered, but ocrl.sh arm did not run at "
-    "prompt-expansion time. Nothing was frozen and nothing has been reviewed."
+    "arming never executed: enforcement was requested (/opencode-review-loop:implement or :resume), "
+    "but ocrl.sh arm did not run at prompt-expansion time. Nothing was frozen and nothing has been reviewed."
 )
+
+#: The statuses under which a worktree's most recent activation guards nothing: the loop
+#: ended there, so a session that never bound to it has nothing to be denied for.
+UNBOUND_PASS_STATUSES: Final = frozenset({"COMPLETE", "DISARMED"})
 
 
 def tool_is_readonly(tool: str) -> bool:
@@ -280,26 +291,154 @@ def resolve_repo(cwd: str, worktree: str) -> str:
 
     The overwhelmingly common case is ``cwd`` already being the armed worktree root, and that
     needs no git process to establish -- which matters, because this is on the path of every
-    tool call. Empty when ``cwd`` is not inside a repository at all; callers decide what that
-    means for them.
+    tool call. Empty when git *answers* that ``cwd`` is not inside a repository; callers
+    decide what that means for them. Raises :class:`RepoResolutionError` when git could not
+    answer -- not on PATH, ``cwd`` gone, a timeout -- because every caller is about to decide
+    whether this call is *about the armed worktree*, and "could not tell" read as "somewhere
+    else" is a pass for a commit run from a subdirectory with git off the hook's PATH.
     """
     if cwd == worktree:
         return worktree
-    return paths.repo_root(cwd)
+    return paths.repo_root_or_raise(cwd)
+
+
+@dataclass(frozen=True)
+class Unbound:
+    """The activation a session with no pointer ran into: which one, and in what state.
+
+    ``status`` is the activation's own status, or ``"unreadable"`` when ``latest`` names an
+    activation whose document cannot be read -- which still denies, since a pointer that says
+    the worktree was armed with no document to say it stopped is the fail-open case.
+
+    ``session`` is empty when the worktree itself could not be resolved: git could not be
+    run, or the directory is gone. ``status`` then carries the detail. That denies too -- a
+    gate that cannot tell what worktree a call is about cannot tell whether it is guarded.
+    """
+
+    repo: str
+    session: str
+    status: str
+
+
+def unbound_activation(cwd: str) -> Unbound | None:
+    """The live activation guarding ``cwd``'s repository, for a session with no pointer (**Rule 0**).
+
+    The hooks register at plugin load, so a hook entrypoint runs in *every* session -- the
+    ones that armed a loop and the ones that never did. A session with no pointer is one that
+    never ran ``implement`` or ``resume``: a fresh ``claude`` in an armed worktree, a session
+    that opened it by accident, or any session in a repository nobody ever armed. The
+    worktree's ``latest`` pointer is what tells those apart. It names the activation a
+    shell-run ``status`` or ``resume`` would pick up; if that one is still live, this session
+    must not mutate the worktree it guards until ``resume`` binds it. If there is none, or it
+    ended (:data:`UNBOUND_PASS_STATUSES`), there is nothing to enforce and the call passes.
+
+    "Nothing to enforce" has to be *proven*, not defaulted to: the repository is resolved
+    with :func:`paths.repo_root_or_raise`, so a ``git`` missing from the hook's PATH or a
+    vanished ``cwd`` is a denial, never a pass. Only git itself saying "not a repository" is.
+
+    ``None`` means "nothing to enforce". Anything else is a reason to deny, and nothing is
+    written: the activation belongs to another session, and its document is not this
+    session's to touch.
+    """
+    try:
+        repo = paths.repo_root_or_raise(cwd)
+    except RepoResolutionError as exc:
+        return Unbound(repo=cwd, session="", status=f"unresolvable ({exc})")
+    if not repo:
+        return None
+    session = commands.latest_session(repo)
+    if not session:
+        return None
+    status = _latest_status(repo, session)
+    if status in UNBOUND_PASS_STATUSES:
+        return None
+    return Unbound(repo=repo, session=session, status=status)
+
+
+def _latest_status(repo: str, session: str) -> str:
+    """The status of the worktree's ``latest`` activation, or ``"unreadable"``."""
+    try:
+        state = State(repo, session)
+    except UnsafePathError:
+        return "unreadable"
+    if not state.load():
+        return "unreadable"
+    return str(state.get("status") or "")
+
+
+@dataclass(frozen=True)
+class IntentCheck:
+    """What the session's intent marker means for one call.
+
+    ``pending``: this session asked for enforcement of the call's worktree and no ``arm`` has
+    answered -- record ``ARM_FAILED`` and deny. ``unscopable``: a marker exists that the gate
+    cannot read or that names no worktree, so it cannot tell *which* repository was asked for
+    -- deny everywhere, record nothing, consume nothing; only ``deactivate --session`` (the
+    user's ``/opencode-review-loop:stop``) discards it. Neither: nothing to do for this call.
+    """
+
+    pending: bool = False
+    unscopable: str = ""
+
+
+NO_INTENT: Final = IntentCheck()
+
+
+def pending_intent(session: str, cwd: str) -> IntentCheck:
+    """Whether this session asked for enforcement of ``cwd``'s worktree and no ``arm`` answered.
+
+    The marker is written by the ``intent`` entrypoint (``UserPromptSubmit``) when the prompt
+    *is* an ``implement`` or ``resume`` command, before the skill expands. It is answered by
+    ``pointer_write`` copying its token onto the pointer -- so the check is the token, not the
+    file's presence: a marker the pointer acknowledges is done (and cleaned up here, best
+    effort), whatever pointer the session held *before* the request is irrelevant, and that
+    is why the callers run this ahead of ``pointer_read``. A session whose earlier activation
+    ended (``DISARMED``, ``COMPLETE``) still has a pointer, and a re-arm whose expansion
+    failed must not hide behind it.
+
+    Scoped to the worktree the marker names. A call from another repository leaves the
+    marker untouched and takes its own path; consuming it there would record ``ARM_FAILED``
+    for the wrong repository and let the one that was asked for go ungated. For the same
+    reason a marker that *cannot* be scoped -- unreadable, or naming no worktree -- is never
+    consumed against whatever repository the call happens to be in: it is reported as
+    ``unscopable``, denied everywhere, and left for the user to discard explicitly.
+
+    An unsafe session id has no marker, the same way it has no pointer. Propagates
+    :class:`RepoResolutionError` from the scoping itself; the callers deny on it.
+    """
+    if not paths.is_safe_component(session):
+        return NO_INTENT
+    marker = intent_read(session)
+    if marker is None:
+        return NO_INTENT
+    if marker.token and pointer_ack(session) == marker.token:
+        # Answered. The pointer was published; the marker is leftover from a cleanup that did
+        # not get to run, and this is the retry.
+        with contextlib.suppress(OSError):
+            paths.intent_path(session).unlink()
+        return NO_INTENT
+    if marker.problem:
+        log(f"intent marker for {session!r} {marker.problem}; denying without consuming it")
+        return IntentCheck(unscopable=marker.problem)
+    if resolve_repo(cwd, marker.worktree) != marker.worktree:
+        return NO_INTENT
+    return IntentCheck(pending=True)
 
 
 def record_unstarted_arm(session: str, cwd: str) -> tuple[State, Config] | None:
     """Persist ``ARM_FAILED`` for an activation whose ``arm`` never ran (**Rule 0**).
 
-    A hook entrypoint only runs because the ``implement`` skill was invoked in this session
-    -- that is what registers the hooks. So reaching one with no session pointer means
-    ``ocrl arm`` never executed at all: a denied sandbox, a missing interpreter, an unreadable
+    Reached only when :func:`pending_intent` says this session asked for enforcement of this
+    worktree and no ``arm`` answered: the ``implement``/``resume`` prompt went in, but ``ocrl.sh arm`` never
+    executed at expansion time -- a denied sandbox, a missing interpreter, an unreadable
     script, a ``${CLAUDE_PLUGIN_ROOT}`` that did not resolve. ``arm`` persists ``ARM_FAILED``
-    for every failure it can observe, but it cannot persist a failure to start.
+    for every failure it can observe, but it cannot persist a failure to start; and a failed
+    expansion gives Claude no turn, so nothing the skill body says ever reaches it.
 
     Recording it here means the very next call takes the ordinary ``ARM_FAILED`` path, with
-    all of its counting and messaging. Enforcement was requested and is not running; passing
-    would be the one outcome the design exists to prevent.
+    all of its counting and messaging, and ``/opencode-review-loop:stop`` has a document to
+    disarm. Enforcement was requested and is not running; passing would be the one outcome
+    the design exists to prevent.
 
     ``None`` when nothing could be recorded, which the caller reports as an integration
     fault. That happens when the session id is not usable as a key: an empty one lands the

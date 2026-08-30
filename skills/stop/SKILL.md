@@ -7,7 +7,7 @@ user-invocable: true
 
 # Stop the review loop
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh deactivate`
+!`${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh deactivate --session "${CLAUDE_SESSION_ID}"`
 
 The review loop has been switched off for this worktree, or was not active to begin with — the block above says which.
 

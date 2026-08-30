@@ -4,42 +4,6 @@ description: Implement an agreed plan with an enforced OpenCode adversarial revi
 argument-hint: "<path-to-plan.md> [--allow-dirty] [--until N] [--harness H] [--model X] [--variant V]"
 disable-model-invocation: true
 user-invocable: true
-hooks:
-  PreToolUse:
-    - hooks:
-        - type: command
-          command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
-          args: ["pretool"]
-          timeout: 1200
-          statusMessage: "OpenCode review gate"
-  PostToolUse:
-    - matcher: "Bash"
-      hooks:
-        - type: command
-          command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
-          args: ["confirm-commit"]
-          timeout: 60
-  PostToolUseFailure:
-    - matcher: "Bash"
-      hooks:
-        - type: command
-          command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
-          args: ["posttool-failure"]
-          timeout: 30
-  Stop:
-    - hooks:
-        - type: command
-          command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
-          args: ["gate-stop"]
-          timeout: 1800
-          statusMessage: "OpenCode review loop: end-of-turn gate"
-  SessionStart:
-    - matcher: "compact"
-      hooks:
-        - type: command
-          command: "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh"
-          args: ["reorient"]
-          timeout: 30
 ---
 
 # Implement with an enforced review loop
