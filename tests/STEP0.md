@@ -276,7 +276,15 @@ The fix moves every hook into `hooks/hooks.json`, registered at plugin load. Con
 - A `SessionStart` hook now also fires on `resume`, so a resumed session is re-oriented by the plugin rather than by whatever the transcript happened to carry.
 - Item 15 closes: one registration per process, nothing to double.
 
-Not yet measured against a live session: that the `resume` matcher fires on `claude --resume` the way `compact` fires on compaction; that `UserPromptSubmit` fires **before** the skill's `` !`…` `` expansion (if it fired after, the marker would land after `arm` had already written the pointer — harmless, `pointer_write` and the pointer-first check make it inert — but the failed-expansion case would then go unrecorded, and this design would need the marker written from a different event); and that the hook's `prompt` field carries the slash command verbatim rather than its expansion.
+Not yet measured against a live session: that the `resume` matcher fires on `claude --resume` the way `compact` fires on compaction. **Measured 2026-08-30** (the hard way, below): `UserPromptSubmit` does fire before the skill's `` !`…` `` expansion, and its `prompt` field carries the slash command verbatim.
+
+### The unanswered marker, 2026-08-30
+
+First live run of the intent design, against the same 44-phase activation: `claude --resume`, then `/opencode-review-loop:resume --allow-dirty`. The `UserPromptSubmit` hook recorded the marker (proving the two open items above), the resume **succeeded** and printed its banner — and the very next tool call was denied with "Arming never ran", after which the Stop-block stall escalated the live activation to `NEEDS_HUMAN`.
+
+The hole: only three arming paths wrote a pointer — first arm, arm failure, cross-session takeover — and a *same-session* resume is deliberately none of them (it has a valid pointer already and "a same-session failure writes nothing"). So the marker outlived a successful resume, and `record_unstarted_arm` then overwrote the live `ACTIVE` document with `ARM_FAILED`. The state survived otherwise (phases, approvals and `phase_commits` are merged over, not wiped), and `stop` → `resume` recovers it, since `DISARMED` is resumable and `NEEDS_HUMAN` is not.
+
+The fix sharpens what the marker means: it guards an expansion that **never started**, nothing else. `arm.run` and `resume.run` therefore answer it at entry — republishing the session's existing pointer with the marker's token — whenever a pointer already exists. A first arm still keeps its marker until its own success or failure record writes the pointer, so a hard crash mid-first-arm still reads as "arming never ran". A failed same-session resume request (a bad flag) now leaves the previous activation enforcing, exactly as before the intent design existed.
 
 ### The gate enforcing a half-applied edit, 2026-08-30
 

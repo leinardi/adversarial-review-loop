@@ -550,6 +550,33 @@ if start 'rule 0: a bound session cannot be scoped out by a git that cannot run'
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""')" 'NOT confirmed'
 fi
 
+if start 'rule 0: a same-session resume that runs answers the intent marker'; then
+    # The exact failure measured on a real 44-phase run: resume succeeded, wrote
+    # no new pointer, the marker outlived it, and the next mutation overwrote
+    # the live activation with ARM_FAILED.
+    new_case
+    arm_ok && phases_ok
+    intent_ok '/opencode-review-loop:resume --allow-dirty'
+    ocrl resume --session "$SESSION" --args '--allow-dirty' >/dev/null 2>&1
+    assert_eq 'the marker is answered' "$(test -f "$OCRL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
+    assert_eq 'the loop is still ACTIVE' "$(sget status)" 'ACTIVE'
+    assert_eq 'an edit passes as mid-phase work' "$(pre Edit)" 'pass'
+fi
+
+if start 'rule 0: a same-session resume that fails does not brick the live loop'; then
+    # A failed resume *request* (a bad flag, say) is not a failed arm: the
+    # command ran, observed the failure, and the previous activation is still
+    # enforcing. The marker must not convert the typo into ARM_FAILED.
+    new_case
+    arm_ok && phases_ok
+    intent_ok '/opencode-review-loop:resume --no-such-flag'
+    ocrl resume --session "$SESSION" --args '--no-such-flag' >/dev/null 2>&1
+    assert_eq 'the marker is answered' "$(test -f "$OCRL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
+    assert_eq 'the loop is still ACTIVE' "$(sget status)" 'ACTIVE'
+    assert_eq 'and still gating (an unshaped command is refused)' "$(pre Bash 'git commit --amend -m x')" 'deny'
+    assert_eq 'while an edit still passes' "$(pre Edit)" 'pass'
+fi
+
 if start 'rule 0: a marker that cannot be scoped denies without being consumed'; then
     new_case
     intent_ok '/opencode-review-loop:implement plan.md'

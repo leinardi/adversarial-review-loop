@@ -48,7 +48,7 @@ from ocrl import config as config_module
 from ocrl.atomic import DIR_MODE, FILE_MODE, ensure_private_dir, write_private_atomic
 from ocrl.commands import arm
 from ocrl.errors import StateLoadError
-from ocrl.state import State, pointer_write
+from ocrl.state import State, pointer_read, pointer_write
 from ocrl.util import now
 
 __all__ = ["run"]
@@ -481,6 +481,7 @@ def run(argv: list[str]) -> int:
     if not session:
         sys.stdout.write(f"{NO_SESSION_MESSAGE}\n")
         return 1
+    _ack_intent(session)
 
     prev_session = commands.latest_session(repo)
     same_session = bool(prev_session) and session == prev_session
@@ -515,6 +516,27 @@ def run(argv: list[str]) -> int:
 
     sys.stdout.write(message)
     return 0
+
+
+def _ack_intent(session: str) -> None:
+    """Answer the session's intent marker: the arming command it asked for is now *running*.
+
+    Rule 0's marker guards exactly one thing -- an expansion that never started. Once this
+    command is executing it can observe and record its own failures, so the marker's job is
+    done, and leaving it unanswered is not conservative: a *successful* same-session resume
+    writes no new pointer, the marker would outlive it, and the very next mutation would
+    overwrite the live activation with ``ARM_FAILED`` (measured against a real 44-phase run,
+    2026-08-30 -- see ``tests/STEP0.md``). The ack is the pointer republished with the
+    marker's token (``pointer_write`` reads it itself), which is durable, atomic, and exactly
+    the ack every other arming path already produces.
+
+    Only when this session already *has* a pointer: a first arm keeps its marker until its
+    own success or failure record writes one, so a hard crash mid-arm still reads as "arming
+    never ran" rather than as an unarmed worktree.
+    """
+    existing = pointer_read(session)
+    if existing:
+        pointer_write(session, existing)
 
 
 def _fail(*, session: str, repo: str, reason: str, same_session: bool, retired: bool) -> int:

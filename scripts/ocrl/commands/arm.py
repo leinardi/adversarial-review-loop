@@ -32,7 +32,7 @@ from ocrl import commands, gitsnap, harness, paths, planrev, reviewer_probe
 from ocrl import config as config_module
 from ocrl.atomic import ensure_private_dir, locked, write_private_atomic
 from ocrl.config import Config
-from ocrl.state import State, pointer_write
+from ocrl.state import State, pointer_read, pointer_write
 from ocrl.util import now
 
 __all__ = ["flag_bool", "flag_str", "parse_flag_tokens", "run", "split_args"]
@@ -472,6 +472,13 @@ def run(argv: list[str]) -> int:
         # under -- so this one failure is reported and nothing else.
         sys.stdout.write(f"{NO_SESSION_MESSAGE}\n")
         return 1
+    # Answer the session's intent marker: the arming command is running, which is the one
+    # thing the marker exists to prove. Only when a pointer already exists -- a re-arm; a
+    # first arm keeps its marker until its own success/failure record writes the pointer, so
+    # a hard crash mid-arm still reads as "arming never ran". See resume._ack_intent.
+    existing_pointer = pointer_read(session)
+    if existing_pointer:
+        pointer_write(session, existing_pointer)
 
     state = State(repo, session)
     if not state.load() and state.version_conflict:

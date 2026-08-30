@@ -219,6 +219,35 @@ def test_a_marker_whose_cleanup_fails_does_not_fail_the_arm(git_repo: Path, tmp_
     assert "set-phases" in pretool(git_repo, env, tool="Write")[1]
 
 
+def test_a_same_session_resume_answers_the_marker_even_though_it_writes_no_pointer(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The measured runhold failure: successful resume, unanswered marker, live loop bricked."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    intent(git_repo, env, "/opencode-review-loop:resume --allow-dirty")
+
+    proc = run_bootstrap(["resume", "--session", SESSION, "--args", "--allow-dirty"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert not marker(env).exists()
+    assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
+    # And the next tool call gates normally instead of recording ARM_FAILED.
+    proc = run_hook("pretool", {"session_id": SESSION, "cwd": str(git_repo), "tool_name": "Write", "tool_input": {}}, cwd=git_repo, env=env)
+    assert proc.stdout == ""
+    assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
+
+
+def test_a_failed_same_session_resume_does_not_brick_the_live_loop(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    intent(git_repo, env, "/opencode-review-loop:resume --no-such-flag")
+
+    proc = run_bootstrap(["resume", "--session", SESSION, "--args", "--no-such-flag"], cwd=git_repo, env=env)
+
+    assert proc.returncode != 0
+    assert not marker(env).exists()
+    assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
+
+
 def test_intent_with_no_pointer_is_an_arm_that_never_ran(git_repo: Path, clean_env: dict[str, str]) -> None:
     """The expansion never executed: the very next mutation records ARM_FAILED and denies."""
     env = armed_env(clean_env)
