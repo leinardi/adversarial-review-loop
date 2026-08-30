@@ -93,8 +93,8 @@ def test_arming_clears_the_marker(git_repo: Path, tmp_path: Path, clean_env: dic
     assert (Path(env["XDG_STATE_HOME"]) / "opencode-review-loop" / "sessions" / SESSION).is_file()
 
 
-@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "ACTIVE"])
-def test_intent_outranks_a_pointer_the_session_already_held(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str) -> None:
+@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE"])
+def test_intent_outranks_a_pointer_whose_activation_ended(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str) -> None:
     """A re-arm whose expansion failed must not hide behind an earlier activation's pointer."""
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
@@ -217,6 +217,27 @@ def test_a_marker_whose_cleanup_fails_does_not_fail_the_arm(git_repo: Path, tmp_
     verdict, _ = pretool(git_repo, env, tool="Write")
     assert verdict == "deny"  # ARMED: phases not frozen yet -- not an unstarted arm
     assert "set-phases" in pretool(git_repo, env, tool="Write")[1]
+
+
+@pytest.mark.parametrize("status", ["ACTIVE", "ARMED", "RECONCILE"])
+def test_a_marker_landing_after_the_arm_is_answered_by_the_live_loop(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str) -> None:
+    """Measured live, twice: UserPromptSubmit can write its marker *after* the expansion ran.
+
+    The arming command succeeds, the loop is gating, and only then does the request marker
+    appear. It must be read as answered -- not as "arming never ran" -- or it overwrites the
+    freshly armed activation with ARM_FAILED (which is exactly what it did to a real
+    44-phase run, twice).
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status=status)
+    intent(git_repo, env, "/opencode-review-loop:resume --allow-dirty")  # the late marker
+
+    proc = run_hook("pretool", {"session_id": SESSION, "cwd": str(git_repo), "tool_name": "Write", "tool_input": {}}, cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert read_state(env, git_repo, SESSION)["status"] == status  # untouched, still gating
+    assert not marker(env).exists()  # answered and cleaned up
 
 
 def test_a_same_session_resume_answers_the_marker_even_though_it_writes_no_pointer(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

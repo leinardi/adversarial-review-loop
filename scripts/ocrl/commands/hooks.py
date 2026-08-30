@@ -21,7 +21,7 @@ from ocrl import config as config_module
 from ocrl.config import Config
 from ocrl.errors import RepoResolutionError, UnsafePathError
 from ocrl.hookio import Hook
-from ocrl.state import State, intent_read, pointer_ack, pointer_write
+from ocrl.state import State, intent_read, pointer_ack, pointer_read, pointer_write
 from ocrl.util import log, now
 
 __all__ = [
@@ -371,7 +371,8 @@ class IntentCheck:
     """What the session's intent marker means for one call.
 
     ``pending``: this session asked for enforcement of the call's worktree and no ``arm`` has
-    answered -- record ``ARM_FAILED`` and deny. ``unscopable``: a marker exists that the gate
+    answered *and the worktree is not already being gated* -- record ``ARM_FAILED`` and deny.
+    ``unscopable``: a marker exists that the gate
     cannot read or that names no worktree, so it cannot tell *which* repository was asked for
     -- deny everywhere, record nothing, consume nothing; only ``deactivate --session`` (the
     user's ``/opencode-review-loop:stop``) discards it. Neither: nothing to do for this call.
@@ -406,10 +407,7 @@ def pending_intent(session: str, cwd: str) -> IntentCheck:
     An unsafe session id has no marker, the same way it has no pointer. Propagates
     :class:`RepoResolutionError` from the scoping itself; the callers deny on it.
     """
-    if not paths.is_safe_component(session):
-        return NO_INTENT
-    marker = intent_read(session)
-    if marker is None:
+    if not paths.is_safe_component(session) or (marker := intent_read(session)) is None:
         return NO_INTENT
     if marker.token and pointer_ack(session) == marker.token:
         # Answered. The pointer was published; the marker is leftover from a cleanup that did
@@ -422,7 +420,37 @@ def pending_intent(session: str, cwd: str) -> IntentCheck:
         return IntentCheck(unscopable=marker.problem)
     if resolve_repo(cwd, marker.worktree) != marker.worktree:
         return NO_INTENT
+    if _answered_by_live_activation(session, marker.worktree):
+        # **The marker's write order is not guaranteed.** Measured live (2026-08-30, twice):
+        # the `UserPromptSubmit` marker can land *after* the skill expansion has already run
+        # -- so an arming command can succeed, leave the loop ACTIVE, and only then have its
+        # own request marker appear. Treating that marker as "arming never ran" overwrote a
+        # freshly resumed activation with ARM_FAILED. A marker whose worktree already has a
+        # live, *gating* activation bound to this session is answered whichever side wrote
+        # last: either the arm it asked for ran, or an earlier activation is still enforcing
+        # -- the gate is on in both worlds, which is all the marker exists to guarantee.
+        pointer_write(session, marker.worktree)
+        return NO_INTENT
     return IntentCheck(pending=True)
+
+
+#: The statuses under which the gate is actively enforcing: an intent marker finding one of
+#: these bound to its own session and worktree is answered, not pending. Terminal and failed
+#: statuses stay out -- they are exactly the pointers a failed re-arm must not hide behind.
+_GATING_STATUSES: Final = frozenset({"ACTIVE", "ARMED", "RECONCILE"})
+
+
+def _answered_by_live_activation(session: str, worktree: str) -> bool:
+    """Whether this session is bound to a live, gating activation of ``worktree``."""
+    if pointer_read(session) != worktree:
+        return False
+    try:
+        state = State(worktree, session)
+    except UnsafePathError:
+        return False
+    if not state.load():
+        return False
+    return str(state.get("status") or "") in _GATING_STATUSES
 
 
 def record_unstarted_arm(session: str, cwd: str) -> tuple[State, Config] | None:

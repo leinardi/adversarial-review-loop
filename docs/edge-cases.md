@@ -301,6 +301,11 @@ die before it and the request is still pending, so the next mutation records `AR
 Unlinking first would have opened a window with nothing on disk at all — no marker, no
 pointer, no `latest` — in which a saved `ACTIVE` activation went ungated.
 
+The marker's write order is not guaranteed either way — measured live, it can land *after*
+the expansion it announces has already completed — so a marker whose worktree already has a
+live, gating activation bound to the same session is also read as answered, never as a
+failed arm: whichever side wrote last, the gate is enforcing.
+
 A marker that exists but cannot be read, names no absolute worktree, or carries no valid
 token is never "no intent" — but neither is it assigned to whatever repository the call
 happens to be in. It denies *everywhere*, records nothing and consumes nothing, and only

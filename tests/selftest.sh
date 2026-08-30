@@ -550,6 +550,18 @@ if start 'rule 0: a bound session cannot be scoped out by a git that cannot run'
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""')" 'NOT confirmed'
 fi
 
+if start 'rule 0: a marker landing after the arm is answered by the live loop'; then
+    # Measured live, twice: UserPromptSubmit can write its marker after the
+    # skill expansion already armed. A live gating activation for the marker's
+    # own worktree and session answers it; ARM_FAILED must not overwrite it.
+    new_case
+    arm_ok && phases_ok
+    intent_ok '/opencode-review-loop:resume --allow-dirty'
+    assert_eq 'the next edit passes' "$(pre Edit)" 'pass'
+    assert_eq 'the loop is still ACTIVE' "$(sget status)" 'ACTIVE'
+    assert_eq 'and the marker was answered' "$(test -f "$OCRL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
+fi
+
 if start 'rule 0: a same-session resume that runs answers the intent marker'; then
     # The exact failure measured on a real 44-phase run: resume succeeded, wrote
     # no new pointer, the marker outlived it, and the next mutation overwrote
