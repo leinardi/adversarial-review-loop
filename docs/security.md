@@ -110,6 +110,25 @@ did. **Narrowing that check did not move the deny-list**: on the commit path `$`
 "$(x)"` is denied exactly as before, and a heredoc whose body contains the words `git commit`
 is still detected and refused as a commit shape.
 
+### The accepted shapes
+
+A snapshot taken before a compound command is meaningless if the command then changes files,
+so classification inspects **arguments**, not just the executable:
+
+| Accepted | Denied |
+| --- | --- |
+| `git commit -m "…"` | `make build && git commit -m x` (mutates after the snapshot) |
+| `git add -A && git commit -m "…"` | `git rm f && git commit -m x` (deletes from the worktree) |
+| `git add -A && git status && git commit -m "…"` | `git diff --output=… && git commit -m x` (writes files) |
+| `git commit -am "…"` | `git commit --amend`, `--only`, `--include`, pathspecs |
+|  | `git -C … commit`, `$(…)`, backticks, pipes, redirection |
+
+Each subcommand is matched against a flag allowlist with **default-deny on unknown
+options**. Run builds, tests and `git rm` as their own Bash calls; the next snapshot picks up
+the result.
+
+### Why a bypass is not catastrophic
+
 Two things make a bypass here recoverable rather than catastrophic — but
 only the first of them is unconditional:
 
@@ -134,8 +153,8 @@ only the first of them is unconditional:
   lowering `ttl_hours` between the gate and the commit makes the activation `STALE` — so
   detection is unconditional, recovery is not.
 - The final cumulative review covers the whole activation's end state regardless of what
-  happened per commit — **when `final_review` is enabled, which since 0.6.0 it is not by
-  default.** On a default install, the deny-list plus `PostToolUse` verification is the
+  happened per commit — **when `final_review` is enabled, which by default it is not.** On a
+  default install, the deny-list plus `PostToolUse` verification is the
   whole of the Stop path's protection, and the end-state pass exists only if someone asks
   for it: `final_review true`, or `/adversarial-review-loop:finish`. `finish` ignores
   `final_review` — but only that key; it still has to pass the ordinary finishability

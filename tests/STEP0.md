@@ -108,7 +108,7 @@ Watch for two specific things:
   default `false` no cumulative review runs — with a clean worktree the sweep has nothing to
   review either, so expect no reviewer call at all; check `status` and expect the `reason` to
   say the review was skipped. Run this item with `ARL_FINAL_REVIEW=true` if you want to
-  exercise the cumulative review instead, which is the path 0.5.x always took.
+  exercise the cumulative-review path instead.
 
 Expect the reviewer to be strict. In my own end-to-end run it rejected two successive attempts on scope grounds before approving, which is the gate working, not a malfunction.
 

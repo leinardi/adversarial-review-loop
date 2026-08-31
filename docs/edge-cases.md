@@ -4,6 +4,36 @@ What happens when things aren't the straightforward case, and why it happens tha
 Every behaviour here is deliberate — if one of these looks like a bug, it's very likely the
 gate working as designed against a scenario worth understanding before you hit it live.
 
+## At a glance
+
+| Condition | Behaviour |
+| --- | --- |
+| Dirty worktree at arm time | `ARM_FAILED`; `--allow-dirty` folds the dirt into phase 1's review |
+| `opencode` missing or model unreachable | `ARM_FAILED`, naming the failure |
+| Any arm failure | Persisted **before** exit; all mutations and commits denied until re-armed or stopped |
+| Arming never executes (refused sandbox, unreadable script) | The `UserPromptSubmit` hook recorded that arming was asked for; the next hook call records `ARM_FAILED` itself and denies |
+| Git cannot be run from the hook, or the working directory is gone | Denied: the gate cannot tell whether an armed worktree guards the call, and does not guess |
+| A session that never ran `implement`/`resume` opens an armed worktree (a fresh `claude`, a resumed session under a new id) | Every mutation and commit is denied until `/adversarial-review-loop:resume` binds the session; the other session's activation is left untouched |
+| Mutation before `set-phases` | Denied, with the exact command to run |
+| Turn ends while `ARM_FAILED` or phases unset | `Stop` blocks with instructions; the reviewer is never called |
+| Timeout, malformed output, missing verdict, non-zero exit | `OP_FAILURE` → deny; never an approval |
+| `OP_FAILURE` past `max_failures` | `NEEDS_HUMAN`; the reviewer is no longer invoked |
+| Findings past `max_findings` / `max_findings_bytes` | `NEEDS_HUMAN`, full report retained; never trimmed, never approved |
+| Diff above `hard_diff_ceiling` | `NEEDS_HUMAN` |
+| Commit lands ≠ reviewed tree, or is an amend | `RECONCILE` with a prescribed, non-automatic recovery |
+| `git reset --soft` before the activation commit | Denied (equal to it is allowed — that is the phase-1 recovery) |
+| Activation older than `ttl_hours` | `STALE`: gates block and ask for a re-arm. **Never a silent disarm** |
+| No-progress `Stop` blocks past `max_stop_blocks` | `NEEDS_HUMAN`, loud system message. **Not** an approval |
+| Claude tries `arl finish` / `deactivate` / `resume` / `config` via Bash | Denied — user-only |
+| Any mutation against a `RESUMED` activation | Denied, naming the session that took over; re-arm with `implement` is the only way out |
+| A resume retires its predecessor, then fails before publishing the successor | No automatic rollback: predecessor stays `RESUMED`, successor is `ARM_FAILED` — both deny, and the recovery is `implement` |
+| `resume` with an approval still pending confirmation | Refused, unless `--abandon-pending` |
+| `resume` after history was rewritten (the activation commit is no longer an ancestor of `HEAD`) | Refused; re-arm |
+| A decided plan revision, or `--replan`, on a dirty worktree | Refused — **not** waived by `--allow-dirty` |
+| `--replan` before the phase list has ever been frozen | Refused; there is nothing yet to replan |
+| A `state.json` predating the plan-revision feature | Migrated on first resume; `ARM_FAILED` (not a crash) if its `plan.frozen.md` is missing |
+| A recorded plan revision whose file fails a path or hash check | `NEEDS_HUMAN` — never attached to a review, never silently skipped |
+
 ## A stale activation
 
 Every activation has `armed_at`. Once `ttl_hours` (default 24) has passed, every gate
@@ -49,8 +79,28 @@ going anyway, nothing stops it. The gate on every commit is exactly as strict ei
 of the pause target; only the Stop-hook's insistence on outstanding phases changes.
 
 `/adversarial-review-loop:pause` names the same target mid-flight, and writes nothing else.
-Because it grants nothing it needs no clean worktree, unlike `resume --until N`. Two
-consequences of it being that small are worth knowing. It does **not** bump
+That is the one you want when you decide partway through a long plan that you'd like to shut
+the machine down, or upgrade the plugin, at a clean boundary rather than mid-phase:
+
+```console
+  … Claude is halfway through phase 3 of 9 …
+Esc
+$ /adversarial-review-loop:pause                  # pause after phase 3
+$ continue
+  … phase 3 is finished, reviewed, committed; the turn ends paused …
+```
+
+With no argument it targets the phase in flight; `N` targets phase `N` (clamped to the last
+phase); `0` or `all` clears the target. Continue whenever you like with
+`/adversarial-review-loop:resume --until 0`.
+
+Telling Claude "pause after this phase" in plain prose does **not** work: the target is
+user-only, Claude has no route to it, and the Stop gate will keep sending it back into the
+next phase. This command is that route.
+
+Because it grants nothing it needs no clean worktree, unlike `resume --until N` — there is
+no uncommitted work for it to fold into a review. Two consequences of it being that small
+are worth knowing. It does **not** bump
 `activation_generation`, deliberately: that bump exists to invalidate a decision whose
 evidence moved underneath a long review, and a pause target is not evidence — bumping it
 would land an in-flight final review as `SUPERSEDED` and discard a real verdict for nothing.
@@ -135,8 +185,8 @@ moved underneath it, the TTL shrank mid-turn, the recorded phase evidence doesn'
 that becomes a counted no-progress block. With the review enabled there was a minutes-long
 reviewer call between attempts; without it, a worktree something else is rewriting can burn
 through `max_stop_blocks` in seconds and escalate to `NEEDS_HUMAN`. That escalation is the
-fail-closed direction and is working as intended — but it arrives sooner than the 0.5.x
-timings would suggest.
+fail-closed direction and is working as intended — but it arrives sooner than it would with
+the cumulative review enabled.
 
 ## The phase cap
 
@@ -148,6 +198,17 @@ where grouping them is clearly the right call. A `--replan` counts the same way:
 immutable committed prefix plus the new tail must together stay at or under the cap.
 
 ## Resume, retirement, and "which session is live"
+
+`implement` always starts fresh: a new baseline, an empty phase list, no approvals carried
+over. Right for a new plan, wrong for picking an old one back up tomorrow — and the 24-hour
+`ttl_hours` default makes that happen sooner than you'd think. `resume` is the second arming
+path for exactly that: it continues the *same* activation, in a new session or the current
+one, without moving the baseline or losing anything already approved. The baseline tree and
+every approved tree carry forward untouched, so a final cumulative review — if one runs at
+all — still covers the whole plan from its *original* baseline, not from wherever the most
+recent resume happened to start. A commit that landed since the last approval but was never
+reviewed is not silently treated as approved either: resume warns, and folds it into the next
+review.
 
 Exactly one activation may be live per worktree. When you `resume` in a *new* session, the
 previous one is retired into a blocking `RESUMED` status before the new one exists — any
@@ -209,6 +270,45 @@ approves the current tree without another review and continues, regardless of ho
 rounds ran or what they disagreed about. If a phase is taking an unreasonable number of
 rounds, that is the exit, not a config knob to make the reviewer stop trying.
 
+### `accept` is the middle option, and it is recorded
+
+`/adversarial-review-loop:stop` gets you out of a stuck phase too, but it turns enforcement
+off for the rest of the session; `/adversarial-review-loop:finish` runs a review that is just
+as likely to keep finding things. `accept [reason]` sits between them: it puts the current
+working tree — exactly as it stands — into the set of approved trees, the same record a
+passing review would have written. Nothing else changes. The phase does not advance, the
+activation does not complete, and any further edit changes the tree hash and puts the commit
+right back under review. It also clears a `NEEDS_HUMAN` escalation, which is otherwise
+something only a human can do — `resume` deliberately refuses to.
+
+Every acceptance is recorded: in `/adversarial-review-loop:status`, as its own numbered
+report visible through `/adversarial-review-loop:report`, and in a
+`## Manually accepted phases` section shown to every later review of that activation — including the final
+cumulative one — so nothing downstream mistakes an accepted phase for one that actually
+passed a gate.
+
+Before accepting, though: when a finding is just *unclear*, or two rounds seem to contradict
+each other, Claude can run `arl.sh clarify --question "…"` to get one prose answer about the
+review that already ran, with no new commit attempt and no new round. It is not a slash
+command (Claude invokes it directly), it changes nothing, and it is capped at
+`max_clarifications` per run. A genuine standing disagreement still ends at `accept`.
+
+### Transient failures are counted and paced separately
+
+A timeout or a rate limit is not the same failure as a missing binary. `max_failures`
+governs every operational, contract or bundle failure, with no pacing — retrying immediately
+is the right move for those. A timeout, a matched rate/usage-limit signal, or contention with
+another review of the same phase already in flight is counted separately, against
+`max_transient_failures` (default `5`), and paced with backoff (`30s`, doubling, capped at
+`300s`): the next commit attempt is denied with the remaining wait rather than spending
+another provider call on a limit that has not reset yet.
+
+Both counters run independently and neither resets the other, so they bound the *total*
+number of failing attempts since the last approval, not strictly-consecutive runs of one
+kind — a stuck phase alternating between the two still escalates, just possibly after
+`max_failures + max_transient_failures` attempts rather than either limit alone. Both
+budgets, exhausted, escalate to `NEEDS_HUMAN` the same way.
+
 The check applies to phase reviews only — a `final` cumulative review has no `round_history`
 label of its own to stall on. Set `stall_rounds` to `0` to disable the check entirely and
 fall back to no automatic bound at all beyond `accept`.
@@ -260,6 +360,10 @@ still exhaust the host's cap purely on volume. Raise
 `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` in `settings.json` (see the top-level README) to give a
 long loop headroom; this residual gap is documented, not fixed, because it isn't something
 this plugin can control from inside a hook.
+
+The variable is read at process start, so Claude Code has to be restarted after setting it.
+The number is how many consecutive blocks are *tolerated* — the override fires on the next
+one after that, verified against a cap of `3`, which overrode on the fourth block.
 
 ## Submodules aren't diffed
 
@@ -338,9 +442,8 @@ commit run through an absolute `/usr/bin/git`. Every hook now treats an unanswer
 resolution as a denial (`pretool`), a block (`gate-stop`) or an explicit "NOT confirmed"
 (`confirm-commit`); only git's own "not a repository" is a pass.
 
-It also closes what used to be item 15 in `tests/STEP0.md`: with one registration per
-process there is nothing left to register twice when `implement` and a same-session
-`resume` both run.
+It also settles item 15 in `tests/STEP0.md`: with one registration per process there is
+nothing left to register twice when `implement` and a same-session `resume` both run.
 
 ## What isn't settled without a live session
 

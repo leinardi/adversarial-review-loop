@@ -1,14 +1,15 @@
 # Documentation
 
-The top-level [`README.md`](../README.md) is the quickstart: install, commands, a quick
-tour of how the gate behaves. The pages here go deeper, for anyone who needs more than the
-quickstart gives:
+The top-level [`README.md`](../README.md) is the landing page: what this is, how to install
+it, the commands, and the handful of settings most people touch. Everything deeper lives
+here:
 
 | Page | For | Covers |
 | --- | --- | --- |
 | [how-it-works.md](how-it-works.md) | anyone, no engineering background needed | What problem this solves and why, in plain language |
-| [architecture.md](architecture.md) | engineers working on or integrating with the plugin | Components, data flow, the state machine, on-disk layout |
-| [configuration.md](configuration.md) | anyone running the loop day to day | Every setting, precedence, examples |
+| [faq.md](faq.md) | anyone using it day to day | The questions that come up first, answered short |
+| [configuration.md](configuration.md) | anyone running the loop day to day | Every setting, precedence, cost, examples |
+| [architecture.md](architecture.md) | engineers working on or integrating with the plugin | Components, data flow, the state machine, what blocks, on-disk layout |
 | [edge-cases.md](edge-cases.md) | anyone debugging unexpected behaviour | What happens when things go sideways, and why |
 | [security.md](security.md) | anyone assessing whether this is safe to trust | The threat model, what is and is not enforced, and why |
 

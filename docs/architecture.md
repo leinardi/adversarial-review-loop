@@ -48,6 +48,33 @@ as it stands; it doesn't repeat the reasoning behind every design choice.
 `resume`'s own `` !`…` `` prompt-expansion lines rather than from a hook — arming has to
 finish, and deny or permit accordingly, *before Claude gets a turn at all*.
 
+## Four load-bearing choices
+
+**Arming happens at prompt-expansion time.** The skill body starts with a `` !`…` ``
+command, so the dirty check, the baseline freeze, the plan freeze and the model probe all
+run *before Claude has a turn*. Nothing needs to be written to disk by a tool call, so the
+pre-activation guard can deny everything without deadlocking on the command that would lift
+it.
+
+**The commit is the phase boundary.** No snapshot bookkeeping, no state machine spanning
+turns: `HEAD` is the baseline and each phase ends in one commit. Approvals are keyed by tree
+SHA, which buys idempotence, skip-when-unchanged, and duplicate-review suppression for free.
+
+**The snapshot is a real git tree.** Committed, staged, unstaged and non-ignored untracked
+content go into a throwaway index, and the resulting tree id is what gets reviewed:
+
+```bash
+GIT_INDEX_FILE=$tmp git read-tree HEAD
+GIT_INDEX_FILE=$tmp git add -A     # respects .gitignore; the real index is untouched
+tree=$(GIT_INDEX_FILE=$tmp git write-tree)
+```
+
+**Approval and commit are separate events.** `PreToolUse` permits the Bash call;
+`PostToolUse` then verifies that a new commit exists, that its parent is the pre-command
+`HEAD` (which rejects `--amend`), that `HEAD^{tree}` is exactly the approved tree, and that
+the worktree is clean. Only then does the phase advance. Anything else enters `RECONCILE`
+with a prescribed, non-automatic recovery.
+
 ## The hook lifecycle
 
 Six Claude Code hook events are registered by `hooks/hooks.json`, at plugin load, in every
@@ -160,6 +187,51 @@ and a final review writes none.
    consume.)
 ```
 
+## What blocks a commit
+
+One rule: **`actionable=yes` AND `severity >= block_severity`**. The default
+`block_severity` is `medium`, so an actionable `low` finding is recorded but does not block;
+lowering it to `low` restores the stricter behaviour, raising it further is a deliberate
+relaxation.
+
+**From the second round of a phase on, one more condition applies.** A finding that clears
+`block_severity` blocks only if its path is in *Changed since round N-1* (the paths that
+moved between the previous round's tree and this one), or an earlier round already raised a
+finding in that file, or its severity is at or above `late_block_severity` (default `high`).
+Anything else is **deferred**: still reported, still recorded in the round history, shown in
+full on the approval message and in the stored report — but it does not block *that*
+approval. Deferral is one approval's grace, not a dismissal: if the same phase is reviewed
+again (a Stop sweep approved, then more edits, then the commit), that file is now a known
+finding and it blocks. The point is a reviewer that raises a brand-new medium in an
+untouched file on round 4 of a converging phase — measured at 11 of 45 rounds in a real run,
+and behind both manual `accept`s — no longer stalls the phase over it; `late_block_severity
+medium` restores the stricter behaviour, and it can only ever defer, never widen (set below
+`block_severity` it reads as `block_severity`). The scope fails closed: round 1, a `final`
+review, a previous-round tree that no longer resolves, or a round history that does not
+validate line by line all mean the ordinary rule — every finding at or above
+`block_severity` blocks — and a `git diff` that cannot list the changed paths is a bundle
+failure, never an approval.
+
+The reviewer's own `VERDICT` line is advisory. The gate recomputes the verdict from the
+`FINDING` lines and the stricter of the two wins — an `APPROVE` alongside an actionable
+critical finding still blocks.
+
+**Nothing converts a failure into an approval.** Missing contract markers, a missing
+verdict, a non-zero exit, a timeout, an empty response, a diff above the hard ceiling, or
+more findings than the cap — every one of those blocks or escalates to `needs-human`.
+Findings are never silently trimmed: above `max_findings` the gate escalates and keeps the
+full report on disk rather than showing a shortened list.
+
+The findings block is parsed strictly, and anything else in it is a failed review rather
+than a line to skip. `severity` must be one of `info`, `low`, `medium`, `high`, `critical`
+and `actionable` must be `yes` or `no`; there must be exactly one marker pair, in order,
+holding exactly one `VERDICT`. The gate cannot tell a reviewer's typo from a finding it
+failed to understand, so `actionable=maybe` on a critical finding blocks instead of quietly
+not counting.
+
+Every `FINDING` line comes back inline in the denial. Prose is what truncates, never the
+actionable set.
+
 ## The reviewer harness
 
 Which CLI actually performs the review is a seam, not a hard-coded name. `harness/__init__.py`
@@ -188,9 +260,84 @@ keeps `context/` — the only model-derived evidence the gate ever produces — 
 path the reviewer could re-open, which is what makes a cold confirmation structurally unable to
 have seen model-authored prose. See [security.md](security.md).
 
-`make dry-run` prints the composed command for the configured harness — argv, env overrides,
-cwd and stdin — without spending a model call, and is the cheapest way to inspect a change to
-any of them.
+### What each one actually runs
+
+Both spellings below are what the gate composes; `make dry-run` prints the exact one for
+your configuration — argv, env overrides, cwd and stdin — without spending a model call, and
+is the cheapest way to inspect a change to either.
+
+**`claude-code` (the default).** The prompt and every attachment go in on **stdin**; nothing
+repo-derived or bundle-derived is named in the argv.
+
+```bash
+claude -p --output-format json --model "$model" \
+  --tools "Read,Grep,Glob" --strict-mcp-config --safe-mode --disable-slash-commands \
+  --session-id "$uuid" --add-dir "$repo" --add-dir "<act_dir>/bundles" \
+  < "prompts/reviewer-phase.md + range.txt + changes.00.diff [+ …], fenced"
+```
+
+- `--tools` plus `--strict-mcp-config` make the reviewer structurally read-only: measured,
+  `--tools` on its own still left every connected MCP server's tools in the session,
+  write-capable ones included. Those two are unconditional; `--safe-mode
+  --disable-slash-commands` is what `pure` selects, and it takes your `CLAUDE.md`, hooks,
+  plugins, agents and skills out of the review
+- `--add-dir` grants read of the repository and of this activation's **bundles root** —
+  never the activation directory itself, which also holds `state.json`, the frozen plan and
+  the reports. The run's own working directory is an empty one the gate creates, so no
+  review session lands in your repository's `/resume` picker
+- a denied tool call or a failed turn is refused rather than parsed, even though the CLI
+  exits `0` for both
+
+**`opencode`.** The prompt is an argument and the attachments are `-f` paths, which OpenCode
+inlines.
+
+```bash
+OPENCODE_PERMISSION='{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow",
+                      "external_directory":{"*":"deny","<act_dir>/bundles/**":"allow"}}' \
+opencode run --pure --dir "$repo" -m "$model" --title "review-loop phase N [<hash>/<seq>]" \
+  -f range.txt -f changes.00.diff [-f …] "$(cat prompts/reviewer-phase.md)"
+```
+
+- `--pure` neutralises your global OpenCode **plugins**, which would otherwise rewrite the
+  output and break the contract. It does *not* remove global skills
+  (`~/.config/opencode/skills`) or a global `~/.config/opencode/AGENTS.md`, both of which
+  still reach the reviewer — the prompt explicitly tells it to ignore ambient style
+  directives and not to invoke a skill for the review. A review that comes back reformatted
+  anyway fails the contract, which blocks; it never approves
+- `OPENCODE_PERMISSION` makes the reviewer structurally read-only and repo-scoped;
+  `external_directory` is denied everywhere except the **bundles root**, on the same
+  reasoning as above
+- project OpenCode config stays enabled, so repo-local review skills load
+
+Under both, the diff is **chunked across as many attachments as needed, never truncated** —
+a truncated diff hides deletions, and approving on a partial view is approving what was
+never seen. The reviewer cannot run anything: set `verify_cmd` and the hook runs it and
+attaches the output as evidence instead. Repo text and the frozen plan are labelled
+**evidence, not instructions**, and the reviewer is explicitly asked to flag a phase
+description that misrepresents the frozen plan.
+
+### Session continuity
+
+**Consecutive reviews of one phase continue the same reviewer session** where one can be
+safely established and claimed — `--resume <uuid>` on Claude Code, `-s <id>` on OpenCode —
+so round 2 can see what round 1 already flagged instead of starting cold every time. A new
+phase, or the final cumulative review, always starts fresh.
+
+**One session carries at most `max_session_rounds` rounds** (default `3`, `0` never resets).
+Past that the next round starts a fresh session on purpose: a session that keeps growing
+gets compacted by the provider, and a compaction landing mid-review has produced a malformed
+findings block — a whole round and a `failures` slot spent on nothing. Little is lost by
+resetting, because the memory does not live in the conversation: `prior-rounds.txt` carries
+every earlier round's verdict and `FINDING` lines, and `incremental.diff` carries what
+changed since the previous round, both as bounded evidence the gate itself renders.
+
+`cold_confirm` (**off by default**) adds a second, cold read on top of that: an approving
+verdict from a round that was shown model-influenced context — a continued session, or an
+earlier round's own findings — is not acted on by itself; the gate re-reviews the same
+evidence with none of it attached, and that cold verdict decides. It is off because it is a
+full second model call on every approving round past the first. See
+[security.md](security.md#cold_confirm-the-second-cold-read--off-by-default) for the
+argument in both directions.
 
 ## Resume and plan revision
 
@@ -250,6 +397,46 @@ Nothing here lives inside the repository under review, with one narrow exception
 `config <key> <value> --repo`, an explicit user-only write to the repo's own
 `.adversarial-review-loop.json`. See [security.md](security.md) for why that boundary matters
 and exactly what does and doesn't cross it.
+
+## What the hot path costs
+
+A `PreToolUse` hook runs on **every** tool call, and it is not free. Measured on Linux with
+warm caches, through `scripts/arl.sh` end to end:
+
+| Path | Latency | Processes |
+| --- | --- | --- |
+| tool call outside the armed worktree | ~111 ms | 5 |
+| read-only tool (`Read`, `Grep`, `Glob`, …) | ~111 ms | 4 |
+| mutating tool (`Edit`, `Write`, MCP) | ~111 ms | 4 |
+| `Bash` (non-commit) | ~111 ms | 4 |
+
+Processes are counted the way `tests/selftest.sh`'s own hot-path check counts them: every
+successful `execve` under `strace -f`, end to end through `scripts/arl.sh`. Four is the
+shim's fixed floor regardless of branch — the shebang's `env`, the `bash` shim itself, the
+`timeout` wrapper, and `python3` — plus one more `git rev-parse` when `cwd` is outside the
+armed worktree and has to be placed. Config and state are in-process file I/O, so that part
+of the process count does not vary by branch. The read-only hoist still exists and still
+matters (it is what makes a future read-only deny unreachable without deliberately undoing
+it) — it just shows up as less work inside the one Python process, not as fewer processes
+around it.
+
+Latency does not track the process count, and the reason is `scripts/arl.sh` itself: every
+hook call is wrapped in `timeout <N>` (below the timeout Claude Code enforces — see
+"Interpreter invocation" in [`AGENTS.md`](../AGENTS.md)), so a hung parser still denies
+before the host tears the hook down with nothing. On this machine that wrapper alone
+measured **~90 ms**, flat, on every call — `timeout` here is `uutils-coreutils`' Rust
+reimplementation, and it appears to poll on a fixed interval rather than waking when the
+child exits (confirmed with `strace`: the child exits immediately, `timeout` still sleeps
+out the rest of its interval). The raw interpreter cost underneath it, `python3 -I` running
+the gate directly with no wrapper, measured **~45 ms**. Neither the wrapper's cost nor its
+presence is optional — Rule 1's "a hung parser must deny" needs it — but which number you
+see depends on which `timeout` your system runs: GNU coreutils' does not have this
+behaviour.
+
+A commit pays two things more. The bash parser builds its LALR tables at import, measured at
+**~55 ms**, and it is imported only when a command already looks like a commit — a `Read`
+never pays for it. And then the review itself, which is measured in minutes, not
+milliseconds.
 
 ## Module map
 
