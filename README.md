@@ -106,7 +106,7 @@ Every key, the full precedence rules, and what a review actually costs are in [d
 
 - **How do I start?** Install, write a plan `.md`, run `/adversarial-review-loop:implement plan.md`.
 - **How do I pause a long plan?** <kbd>Esc</kbd>, then `/adversarial-review-loop:pause`, then `continue`. Asking in prose does not work.
-- **I quit with a dirty worktree — how do I pick it back up?** `/adversarial-review-loop:resume --allow-dirty`, which folds the uncommitted work into the next phase's review.
+- **I quit / rebooted / `/clear`ed mid-phase — how do I pick it back up?** Same session id (`claude --resume`, or `/resume` back to it): just `continue`. New session: `/adversarial-review-loop:resume --allow-dirty`. `/adversarial-review-loop:status` tells you which you're in — [the full table](docs/faq.md#picking-up-where-you-left-off).
 - **Can I implement only part of a plan?** `--until N` on `implement` or `resume`; carry on later with `resume --until 0`.
 - **How do I customise what the reviewer looks for?** `review_guide` — a Markdown file added to the reviewer's prompt. It cannot change the contract or what blocks.
 - **The reviewer keeps finding new things and the phase never converges.** `/adversarial-review-loop:accept [reason]` approves the current tree without another review, and records that it did.

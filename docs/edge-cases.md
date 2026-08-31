@@ -381,12 +381,41 @@ A change inside a submodule is detected and declared in the review's header, not
 missed — but its content isn't included in what the reviewer sees. Treat a submodule bump
 as something to check by hand.
 
-## `/clear` and crashes disarm the session, not the activation
+## `/clear`, crashes and quitting unbind a session, they do not disarm an activation
 
-The gate is session-scoped: a crash, `/clear`, or simply closing the terminal leaves the
-*state* exactly as it was (nothing reverts), but the *session* that was enforcing it is
-gone. The fix is the same as any other interruption — `resume` in the new session, which
-picks the activation back up rather than starting over.
+The gate is session-scoped: a crash, `/clear`, quitting, or simply closing the terminal
+leaves the *state* exactly as it was (nothing reverts), but the *session* that was enforcing
+it may no longer be the one you are in.
+
+The distinction that matters is **binding**, not arming. An activation is keyed by
+`(worktree, session id)`, and only four things change a binding: `stop`, `ttl_hours`
+expiring, a `resume` from a different session (which retires the predecessor to `RESUMED`),
+and an arm failure. Nothing you do to a *conversation* is on that list.
+
+So the question on coming back is only ever "am I under the same session id?":
+
+- **Yes** — `claude --resume`, or a `/resume` back to a session you left earlier. The session
+  pointer and the worktree's `latest` both still name it, so it is bound, the gate is live,
+  and the `SessionStart(compact|resume)` re-orientation fires. Nothing needs to be run:
+  telling Claude to continue is enough. Uncommitted work is simply the phase in progress, and
+  the snapshot at commit time picks it up.
+- **No** — a fresh `claude` in the worktree, or the new conversation `/clear` leaves you in.
+  That session is *unbound*: every mutation and commit is denied, naming the activation, until
+  `/adversarial-review-loop:resume` binds it. With uncommitted work in the tree that needs
+  `--allow-dirty`, which folds it into the next phase's review.
+
+An unbound session is only denied **in the worktree the live activation guards**. Working in
+another repository meanwhile is unaffected, and passes silently.
+
+**One irreversible case.** If a *second* session runs `resume` in that worktree while you are
+away, it takes ownership and retires the first to `RESUMED`. Returning to the original session
+then denies every mutation, naming the successor, and there is no route back into it — the
+work continues in the newer session. This is the "exactly one live activation per worktree"
+rule doing its job, not a failure, but it is the one interruption that cannot be undone by
+coming back.
+
+`/adversarial-review-loop:status` answers "bound or not" without changing anything, and is
+worth running before trusting either branch.
 
 ## Hooks are plugin-level, not skill-level
 

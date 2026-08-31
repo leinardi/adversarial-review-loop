@@ -65,7 +65,11 @@ reporter tries again.
   (`/adversarial-review-loop:pause`) — it finishes and commits what it's on, then stops. The
   loop won't push you into "just one more phase" on its own.
 - **You can pick it back up later**, even days later, in a brand-new conversation, without
-  losing any of the approvals already earned or restarting from scratch.
+  losing any of the approvals already earned or restarting from scratch. Quitting, rebooting,
+  `/clear`, a crash — none of them undo anything; the work lives on disk, not in the
+  conversation. If you come back to the *same* conversation, you just tell Claude to carry on;
+  in a new one you run `/adversarial-review-loop:resume` first, adding `--allow-dirty` if you
+  left work half-finished. [The FAQ](faq.md#picking-up-where-you-left-off) has the whole table.
 - **You can revise the plan partway through** if you realize phase 3 needs to change —
   but only for phases that haven't started yet. Whatever's already been built and approved
   stays exactly as it was reviewed.

@@ -33,6 +33,100 @@ No. `state.json`, the frozen plan, every stored report and every review bundle l
 exception is `/adversarial-review-loop:config <key> <value> --repo`, an explicit user-only
 write to the repository's own `.adversarial-review-loop.json`.
 
+## Picking up where you left off
+
+This is the part people get wrong, so read the table before reaching for a command.
+
+**Nothing you do to a *conversation* disarms the loop.** The activation lives on disk, keyed
+by *(worktree, session id)*, and survives Esc, quitting, `/clear`, a crash and a reboot.
+Exactly four things change a binding: `/adversarial-review-loop:stop`, `ttl_hours` expiring,
+a `resume` run from a *different* session (which retires yours), and an arm failure.
+
+What you need depends on one thing only — whether you come back under the **same session id**:
+
+| How you come back | Bound? | What to run |
+| --- | --- | --- |
+| `claude --resume` / `claude -c`, same session | yes | just `continue` |
+| `/clear`, then `/resume` back to the original session | yes | just `continue` |
+| a fresh `claude` in the worktree | no | `/adversarial-review-loop:resume --allow-dirty` |
+| any of the above, but more than `ttl_hours` (24h) elapsed | `STALE` | `/adversarial-review-loop:resume --allow-dirty` |
+| another session ran `resume` here while you were away | no, and permanently | carry on in *that* session; yours is `RESUMED` |
+
+**When in doubt, run `/adversarial-review-loop:status` first.** It is read-only, works in any
+session, and settles it: `ACTIVE` at the phase you expect means you are bound and can just
+continue. A denial naming another session means you are not, and resume is the fix.
+
+And never `implement` to pick something back up — it re-baselines from the current `HEAD` and
+discards the phase list and every approval already earned.
+
+### I quit Claude mid-phase with uncommitted work, and rebooted. Now what?
+
+Your work is untouched and the loop is still armed. Which command you need depends on how you
+restart:
+
+**`claude --resume` (same session id) — type `continue`, nothing else.** The session is still
+bound, and a `SessionStart` hook re-orients Claude automatically: which phase is in progress,
+its frozen description, the frozen plan path with an instruction to re-read the relevant part,
+what the last review of that phase concluded and the report number to read it, and the commit
+rules still in force.
+
+The dirty worktree needs no flag and no special handling. It *is* the phase in progress. The
+snapshot taken when Claude finally commits covers committed, staged, unstaged and non-ignored
+untracked content, so the work you left half-finished is reviewed as part of that phase's
+commit exactly as if you had never quit.
+
+**A fresh `claude` (new session id) — `/adversarial-review-loop:resume --allow-dirty`.** A
+session with no pointer is *unbound*: every mutation and every commit in that worktree is
+denied, naming the activation that holds it, until resume binds the session. `--allow-dirty`
+is required, because resume otherwise refuses a dirty worktree — with it, the uncommitted work
+is folded into the next phase's review rather than ignored. This retires the old session into
+`RESUMED`, which is expected, not an error.
+
+One thing `--allow-dirty` will *not* waive: a plan revision and `--replan` both require a
+genuinely clean worktree. Redescribing a phase while half-finished work for it sits in the
+tree is the exact failure that refusal exists to block.
+
+### I ran `/clear`, worked elsewhere, then `/resume`d back to the original session
+
+Just `continue`. You do not need `/adversarial-review-loop:resume`, and you do not need
+`--allow-dirty`.
+
+`/clear` starts a new conversation; it does not touch your activation, and no hook even fires
+on it. While you were in the cleared session, that session was unbound — which is why it would
+have denied any mutation *in the armed worktree* (working in a different repository is
+unaffected). Coming back restores the original session id, and both its own pointer and the
+worktree's `latest` still name it: bound, `ACTIVE`, gate live, with the same `SessionStart`
+re-orientation as above. Your uncommitted work is still the phase in progress.
+
+**The one way this breaks:** if the intervening session ran `/adversarial-review-loop:resume`
+in that same worktree, it took ownership and retired the original to `RESUMED`. Going back
+then denies everything, naming the session that took over, and there is no route back — you
+continue in the newer session instead. Working in a *different* repository in the meantime is
+always safe.
+
+### I ran `/clear` and I'm staying in the new session. Is my progress gone?
+
+No. The gate is session-scoped but the activation is not: it lives on disk, keyed by worktree,
+and nothing about it reverts. Run `/adversarial-review-loop:resume` in the new session — it
+binds it, keeps the original baseline and every approval already earned, and refreshes the
+TTL. Add `--allow-dirty` if you left uncommitted work.
+
+`/clear` between phases is in fact the recommended way to run a very long plan: pause at a
+phase boundary, clear, and resume with a fresh context rather than relying on compaction
+([how-it-works.md](how-it-works.md#long-plans-and-the-context-window)).
+
+### It says `STALE`. What happened?
+
+`ttl_hours` (default 24) elapsed since the activation was armed. It never silently disarms —
+it blocks and asks for a re-arm. The fix is `/adversarial-review-loop:resume`, which refreshes
+`armed_at`, **not** a fresh `implement`, which re-baselines from the current `HEAD` and throws
+away the phase list and every approval
+([edge-cases.md](edge-cases.md#a-stale-activation)).
+
+A `STALE` activation needs resume even under the same session id. If you come back with
+`claude --resume` after more than a day, the re-orientation hook notices and tells Claude to
+stop and hand it back to you rather than keep implementing.
+
 ## Running a long plan
 
 ### Can I implement only part of a plan?
@@ -57,27 +151,6 @@ To start again afterwards, clear the target: `/adversarial-review-loop:resume --
 reached target stays set, so a bare `resume` continues the activation but still ends every
 turn paused ([edge-cases.md](edge-cases.md#pausing-is-a-soft-target-not-a-fence)).
 
-### I quit the session with a dirty worktree. How do I pick it back up?
-
-`/adversarial-review-loop:resume --allow-dirty`. The uncommitted work is folded into the next
-phase's review rather than being ignored. Without the flag, resume refuses and tells you to
-commit or stash first.
-
-Two things it will not waive: a plan revision and `--replan` both require a genuinely clean
-worktree, `--allow-dirty` or not. Redescribing a phase while half-finished work for it sits
-in the tree is the exact failure that refusal exists to block.
-
-### I ran `/clear`, or Claude crashed. Is my progress gone?
-
-No. The gate is session-scoped but the activation is not: it lives on disk, keyed by
-worktree, and nothing about it reverts. Run `/adversarial-review-loop:resume` in the new
-session — it rebinds, keeps the original baseline and every approval already earned, and
-refreshes the TTL.
-
-`/clear` between phases is in fact the recommended way to run a very long plan: pause at a
-phase boundary, clear, and resume with a fresh context rather than relying on compaction
-([how-it-works.md](how-it-works.md#long-plans-and-the-context-window)).
-
 ### Can I change the plan partway through?
 
 Yes, for phases that have not started. Pass `--plan <path>` to `resume`, or just edit the
@@ -86,14 +159,6 @@ revision (`plan.rev<n>.md`) beside every earlier one; nothing already frozen is 
 Add `--replan` and phases from the current one onward may be redefined with `set-phases`.
 Committed phases are immutable: their descriptions were the evidence a review already ran
 against ([edge-cases.md](edge-cases.md#revising-the-plan-mid-run)).
-
-### It says `STALE`. What happened?
-
-`ttl_hours` (default 24) elapsed since the activation was armed. It never silently disarms —
-it blocks and asks for a re-arm. The fix is `/adversarial-review-loop:resume`, which
-refreshes `armed_at`, **not** a fresh `implement`, which re-baselines from the current `HEAD`
-and throws away the phase list and every approval
-([edge-cases.md](edge-cases.md#a-stale-activation)).
 
 ## When the review blocks you
 

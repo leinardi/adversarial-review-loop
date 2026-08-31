@@ -354,6 +354,31 @@ Probed against `claude` 2.1.251, before `scripts/arl/harness/claudecode.py` was 
 
 Items 19 and 20 still need a real session: a payload at the plugin's chunk ceilings, and a confirmation that the reviewed repository's own `/resume` list stays clean across a run. Session G above is the runbook for both.
 
+## Session H — session identity across `/clear` and `/resume` (documented ahead of measurement)
+
+`docs/faq.md` ("Picking up where you left off") and `docs/edge-cases.md` now answer the two commonest real-world interruptions, and both answers turn on one host behaviour nobody has measured: **which session id you come back under.** The plugin binds an activation to `(worktree, session id)`, so that single fact decides whether "just continue" is correct or whether the call is denied until `resume` binds the session. The docs assert the assumptions below; if a measurement contradicts one, the docs are what changes, not the gate.
+
+Two assumptions, both currently unverified:
+
+1. **`/clear` starts a new session id**, leaving the cleared conversation unbound in an armed worktree (so it is denied every mutation there until `resume`), while the pre-clear activation stays live and untouched.
+2. **`/resume` back to an earlier session restores that session's own id**, so a conversation returned to this way is bound again with no command needed — the same property `claude --resume` was measured to have on 2026-08-30 (the phase-13 incident above).
+
+The runbook:
+
+1. Arm the fixture, freeze phases, and get partway into a phase with **uncommitted work in the tree**. Note the session id (`/adversarial-review-loop:status` prints it).
+2. `/clear`. In the cleared conversation, run `status`: does it report the activation, or a denial naming the previous session? Then attempt an ordinary file edit **in the armed worktree**. **Expect** a denial naming the activation and pointing at `resume` — that is assumption 1 holding.
+3. Edit a file in an *unrelated* repository from the same cleared conversation. **Expect** a silent pass, no denial and no added latency.
+4. `/resume` back to the original session. Run `status` and compare the session id against step 1. **Expect** the same id, `ACTIVE`, and the phase you left.
+5. Tell Claude to continue, and let it finish and commit the phase. **Expect** a normal gated commit — one review, the uncommitted work from step 1 included in the reviewed tree — and **no** `resume` having been needed anywhere.
+
+**If step 2 passes instead of denying**, assumption 1 is wrong in the dangerous direction: a cleared conversation would be mutating an armed worktree ungated, which is the phase-13 shape again. Check `/hooks` first (registration), then `commands.latest_session` against the worktree.
+
+**If step 4 comes back under a *different* id**, assumption 2 is wrong and the docs' "just continue" advice for the `/clear` → `/resume` round trip is wrong with it: that case collapses into the ordinary unbound one, and the FAQ table's second row becomes `/adversarial-review-loop:resume --allow-dirty`.
+
+**If step 5 shows no review at all**, stop and treat it as the phase-13 incident recurring — a commit landing with `last_approved_tree` unmoved and `rounds this phase: 0` is the signature.
+
+---
+
 ## If A1 fails
 
 Expansion not running in skill bodies is the only outcome that forces a redesign. The fallback:
