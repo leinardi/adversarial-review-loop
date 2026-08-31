@@ -50,6 +50,11 @@ __all__ = [
 #: the one reviewer CLI every user of it already has installed. ``opencode`` -- which the
 #: project was originally named after and which is still fully supported -- is one config key
 #: away, and the name never falls back: see ``arl.harness.UnknownHarness``.
+#:
+#: ``review_guide`` defaults to ``""`` (off). It is the one key whose value names a file whose
+#: *content becomes instruction* rather than data, so it is resolved and frozen once, at arm --
+#: a later edit to the key, or to the file it named, changes nothing about a running
+#: activation. See ``arl.guide`` for what the framing around it allows and forbids.
 DEFAULTS: Final[dict[str, Any]] = {
     "harness": "claude-code",
     "model": "",
@@ -78,6 +83,7 @@ DEFAULTS: Final[dict[str, Any]] = {
     "ignore_globs": [],
     "final_review": False,
     "cold_confirm": False,
+    "review_guide": "",
 }
 
 BOOL_KEYS: Final = ("pure", "disable_project_config", "allow_dirty", "final_review", "cold_confirm")

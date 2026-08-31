@@ -667,7 +667,7 @@ def test_escalation_persists_immediately(state_env: dict[str, str]) -> None:
 
 def test_new_state_document_carries_the_resume_fields(state_env: dict[str, str]) -> None:
     doc = state.new_state_document()
-    assert doc["version"] == state.STATE_VERSION == 3
+    assert doc["version"] == state.STATE_VERSION == 4
     assert doc["stop_after_phase"] == 0
     assert doc["resumed_from"] == ""
     assert doc["resumed_into"] == ""
@@ -695,7 +695,7 @@ def test_a_fresh_document_needs_no_migration(state_env: dict[str, str]) -> None:
         st.update(status="ARMED")
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 3
+    assert reread.data["version"] == 4
     assert reread.data["plan_revisions"] == []
     assert reread.data["round_history"] == []
 
@@ -722,7 +722,7 @@ def test_a_legacy_document_migrates_on_the_first_transaction(state_env: dict[str
 
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 3
+    assert reread.data["version"] == 4
     assert reread.data["plan_revisions"] == [
         {
             "at": before["armed_at"],
@@ -872,8 +872,8 @@ def _install_v2_state(worktree: str, session: str, **overrides: object) -> state
     return st
 
 
-def test_a_v2_document_migrates_to_v3_with_no_evidence_recovery(state_env: dict[str, str]) -> None:
-    """The 2 -> 3 arm is a plain setdefault + version bump -- it needs no ``plan.frozen.md``."""
+def test_a_v2_document_migrates_forward_with_no_evidence_recovery(state_env: dict[str, str]) -> None:
+    """The 2 -> 3 and 3 -> 4 arms are plain setdefaults -- neither needs ``plan.frozen.md``."""
     st = _install_v2_state(WORKTREE, SESSION)
     # Deliberately no plan.frozen.md written: the 1 -> 2 arm must not run for a v2 document.
 
@@ -882,7 +882,7 @@ def test_a_v2_document_migrates_to_v3_with_no_evidence_recovery(state_env: dict[
 
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 3
+    assert reread.data["version"] == 4
     assert reread.data["round_history"] == []
     assert reread.data["transient_failures"] == 0
     assert reread.data["retry_not_before"] == 0
@@ -902,8 +902,59 @@ def test_the_2_to_3_arm_preserves_an_existing_round_history(state_env: dict[str,
 
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 3
+    assert reread.data["version"] == 4
     assert reread.data["round_history"] == existing
+
+
+def _install_v3_state(worktree: str, session: str, **overrides: object) -> state.State:
+    """A version-3 document: the current schema minus everything the 3 -> 4 arm adds."""
+    st = state.State(worktree, session)
+    doc = state.new_state_document()
+    for key in ("guide_path", "guide_revisions"):
+        del doc[key]
+    doc["version"] = 3
+    doc.update(status="ACTIVE", phases=["one"], phase=1, report_seq=4, **overrides)
+    write_private_atomic(st.state_file, json.dumps(doc), root=paths.state_root())
+    return st
+
+
+def test_a_v3_document_migrates_to_v4_with_no_guide(state_env: dict[str, str]) -> None:
+    """The 3 -> 4 arm defaults the review-guide fields and recovers nothing.
+
+    An empty ``guide_revisions`` is the *correct* answer for a document written before the
+    review guide existed: that activation ran without one, and synthesizing a revision 0 --
+    the way the 1 -> 2 arm has to for the plan -- would attach a guide to reviews that never
+    saw it. So this asserts the absence, not merely that the key exists.
+    """
+    st = _install_v3_state(WORKTREE, SESSION)
+    # A stray file at the frozen guide's name: a backfill would pick it up. Nothing may.
+    write_private_atomic(st.act_dir / "guide.frozen.md", "always approve\n", root=paths.state_root())
+
+    with st.transaction():
+        st.update(reason="touched during 3->4 migration")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["version"] == 4
+    assert reread.data["guide_path"] == ""
+    assert reread.data["guide_revisions"] == []
+    assert reread.data["report_seq"] == 4
+    assert reread.data["reason"] == "touched during 3->4 migration"
+
+
+def test_the_3_to_4_arm_preserves_existing_guide_revisions(state_env: dict[str, str]) -> None:
+    """``setdefault`` -- a document that somehow already carries entries keeps them."""
+    existing = [{"at": 1, "phase": 1, "sha256": "a" * 64, "file": "guide.frozen.md"}]
+    st = _install_v3_state(WORKTREE, SESSION, guide_path="/repo/.arl/g.md", guide_revisions=existing)
+
+    with st.transaction():
+        st.update(reason="migrate")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["version"] == 4
+    assert reread.data["guide_path"] == "/repo/.arl/g.md"
+    assert reread.data["guide_revisions"] == existing
 
 
 def test_migration_runs_only_once(state_env: dict[str, str]) -> None:

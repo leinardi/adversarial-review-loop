@@ -60,15 +60,19 @@ class EvidenceCorrupted(OcrlError):
     """
 
 
-def read_verified(act_dir: Path, filename: str, expected_sha256: str | None) -> bytes:
+def read_verified(act_dir: Path, filename: str, expected_sha256: str | None, *, what: str = "plan revision") -> bytes:
     """The bytes of ``filename`` inside ``act_dir``, checked before they are trusted.
 
     ``expected_sha256=None`` is reserved for synthesizing a brand-new revision 0 from
     scratch, where there is nothing yet to compare against. Every already-recorded entry
     must supply a real hash, checked by the caller before this is reached.
+
+    ``what`` names the kind of evidence being verified, for the messages only -- the checks
+    are identical whatever it says. ``arl.guide`` reuses this function for the frozen review
+    guide, and a failure there must not tell a human that a *plan* revision is corrupt.
     """
     if not paths.is_safe_component(filename):
-        raise EvidenceCorrupted(f'a plan revision names an unsafe file ("{filename}"); nothing was resumed.')
+        raise EvidenceCorrupted(f'a {what} names an unsafe file ("{filename}"); nothing was resumed.')
     candidate = act_dir / filename
     try:
         info = candidate.lstat()
@@ -76,17 +80,17 @@ def read_verified(act_dir: Path, filename: str, expected_sha256: str | None) -> 
         info = None
     if info is None or not stat.S_ISREG(info.st_mode):
         raise EvidenceCorrupted(
-            f"the plan revision file ({candidate}) is missing, is a symlink, or is not a plain file directly inside "
+            f"the {what} file ({candidate}) is missing, is a symlink, or is not a plain file directly inside "
             "the activation directory; it is evidence a review was run against, and it can no longer be verified as "
             "such. Nothing was resumed."
         )
     try:
         content = candidate.read_bytes()
     except OSError as exc:
-        raise EvidenceCorrupted(f"the plan revision file ({candidate}) could not be read ({exc}). Nothing was resumed.") from exc
+        raise EvidenceCorrupted(f"the {what} file ({candidate}) could not be read ({exc}). Nothing was resumed.") from exc
     if expected_sha256 is not None and hashlib.sha256(content).hexdigest() != expected_sha256:
         raise EvidenceCorrupted(
-            f"the plan revision file ({candidate}) no longer matches the hash recorded when it was written -- its "
+            f"the {what} file ({candidate}) no longer matches the hash recorded when it was written -- its "
             "content may have changed since. Nothing was resumed."
         )
     return content

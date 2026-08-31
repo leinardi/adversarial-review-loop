@@ -41,10 +41,11 @@ __all__ = ["STATE_VERSION", "State", "new_state_document", "pointer_clear", "poi
 _TTL_EXEMPT: Final = frozenset({"COMPLETE", "ARM_FAILED", "NEEDS_HUMAN", "RESUMED"})
 
 #: Version 2 adds resume, pause, plan revision and the config overlay's fields. Version 3
-#: adds ``round_history`` and the convergence counters. See ``State._migrate`` for the
-#: upgrade from any earlier (or unversioned) document -- a version-1 document reaches the
-#: current version in one pass.
-STATE_VERSION: Final = 3
+#: adds ``round_history`` and the convergence counters. Version 4 adds the repo-supplied
+#: review guide's fields (``guide_path``, ``guide_revisions``). See ``State._migrate`` for
+#: the upgrade from any earlier (or unversioned) document -- a version-1 document reaches
+#: the current version in one pass.
+STATE_VERSION: Final = 4
 
 #: The name ``arm`` freezes the plan under, and the name revision 0 always carries.
 _PLAN_FROZEN_NAME: Final = "plan.frozen.md"
@@ -88,6 +89,17 @@ def new_state_document() -> dict[str, Any]:
         "resumed_into": "",
         "resume_count": 0,
         "plan_revisions": [],
+        #: The ``review_guide`` path this activation resolved at arm (or at the last
+        #: ``resume --guide``), for disclosure only -- the source file is never read again.
+        #: Empty when no guide is in force.
+        "guide_path": "",
+        #: One ``{"at", "phase", "sha256", "file"}`` per frozen review guide, mirroring
+        #: ``plan_revisions``: revision 0 is ``guide.frozen.md``, every later one a
+        #: ``guide.rev<n>.md`` a ``resume --guide`` wrote. The **last** entry is the active
+        #: guide. Unlike ``plan_revisions`` there is no revision-0 backfill: an empty list
+        #: means "no guide", not "synthesize one from whatever is on disk" -- see
+        #: ``arl.guide.verified_active``.
+        "guide_revisions": [],
         "replan_pending": False,
         "overrides": {},
         "abandoned_pending_tree": "",
@@ -417,6 +429,12 @@ class State:
           correctly through the typed accessors (``get_int`` answers ``0``,
           ``get_array_of_dicts`` answers ``[]``), so a plain ``setdefault`` from
           :func:`new_state_document` is the whole arm.
+        * **3 -> 4** adds ``guide_path`` and ``guide_revisions``, and is a plain ``setdefault``
+          for the same reason -- with one property that matters more than it degrading safely:
+          an empty ``guide_revisions`` is the *correct* answer for every document written
+          before the review guide existed, because none of those activations had one. There is
+          nothing to recover here, and inventing a revision 0 (the way the 1 -> 2 arm has to
+          for the plan) would attach a guide to an activation that never ran under one.
 
         Most other fields this build added degrade correctly on their own too; the explicit
         arms exist for the ones that do not, and to make each upgrade a single recorded step
@@ -449,6 +467,10 @@ class State:
             for key in ("round_history", "transient_failures", "retry_not_before", "clarifications", "clarify_seq"):
                 self.data.setdefault(key, defaults[key])
             self.data["version"] = 3
+        if version < 4:
+            for key in ("guide_path", "guide_revisions"):
+                self.data.setdefault(key, defaults[key])
+            self.data["version"] = 4
 
     def _migrate_1_to_2(self, defaults: dict[str, Any]) -> None:
         """The 1 -> 2 arm of :meth:`_migrate`: synthesize revision 0, default the resume fields."""
