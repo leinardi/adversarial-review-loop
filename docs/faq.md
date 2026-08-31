@@ -137,15 +137,32 @@ on later with `/adversarial-review-loop:resume --until 0`, which clears the targ
 target is soft: it changes what the Stop gate insists on, not what the commit gate enforces
 ([edge-cases.md](edge-cases.md#pausing-is-a-soft-target-not-a-fence)).
 
-### How do I pause partway through a phase?
+### How do I stop partway through a plan?
 
-Interrupt with <kbd>Esc</kbd>, run `/adversarial-review-loop:pause`, then `continue`. The
-phase in flight is finished, reviewed and committed, and *then* the turn ends — a clean
-boundary to shut down or upgrade the plugin at.
+Two different things, and it matters which one you want:
 
-Telling Claude "pause after this phase" in prose does not work. The pause target is
-user-only, Claude has no route to it, and the Stop gate will send it straight back into the
-next phase.
+| Want | Do | Where it leaves you |
+| --- | --- | --- |
+| stop **now** | <kbd>Esc</kbd> | mid-phase: dirty worktree, phase uncommitted and unreviewed |
+| stop at a **clean boundary** | <kbd>Esc</kbd>, then `/adversarial-review-loop:pause`, then `continue` | phase finished, reviewed and committed; worktree clean; turn ends paused |
+
+**<kbd>Esc</kbd> on its own is already a pause.** The turn stops, nothing further runs, and
+none of the loop's state changes. Type `continue` whenever you like and it picks up where it
+was.
+
+**`/adversarial-review-loop:pause` does not stop anything.** It sets the pause target, so the
+loop stops *asking for the next phase* once the current one is committed. <kbd>Esc</kbd>
+appears in that recipe only because you need the prompt back to type a slash command — the
+`continue` afterwards is what lets Claude finish and commit the phase it was on.
+
+Prefer the second one before shutting the machine down, upgrading the plugin, or leaving it
+for a day: it is the difference between coming back to a half-written phase and coming back to
+a committed one. After a bare <kbd>Esc</kbd> the phase is uncommitted, so returning in a *new*
+session puts you in the `resume --allow-dirty` case above.
+
+Telling Claude "pause after this phase" in prose does **not** work, and never did. The pause
+target is user-only, Claude has no route to it, and the Stop gate will send it straight back
+into the next phase. The command is that route.
 
 To start again afterwards, clear the target: `/adversarial-review-loop:resume --until 0`. A
 reached target stays set, so a bare `resume` continues the activation but still ends every

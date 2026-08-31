@@ -122,10 +122,14 @@ $ /adversarial-review-loop:resume --until 10               # fresh context, same
 approval already earned is kept. Nothing is lost by clearing — the activation lives on disk,
 not in the conversation.
 
-**If you decide to stop partway through a phase, don't just say so.** The pause target is
-one of the user-only controls, so Claude has no way to move it, and asking in prose gets you
-a Stop gate that reports the remaining phases and sends it straight back to work. Interrupt
-and run the command instead:
+**If you decide to stop partway through a phase, decide which kind of stop you want.**
+<kbd>Esc</kbd> on its own stops the turn immediately — fine for a break, but it leaves the
+phase half-written and uncommitted. To stop at a clean boundary instead, so the phase is
+finished and committed first, use the pause command.
+
+Don't ask for that in prose. The pause target is one of the user-only controls, so Claude has
+no way to move it, and asking gets you a Stop gate that reports the remaining phases and sends
+it straight back to work. Interrupt and run the command instead:
 
 ```console
   … Claude is deep in phase 3 of 9 …

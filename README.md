@@ -104,21 +104,23 @@ Every key, the full precedence rules, and what a review actually costs are in [d
 
 ## FAQ
 
-- **How do I start?** Install, write a plan `.md`, run `/adversarial-review-loop:implement plan.md`.
-- **How do I pause a long plan?** <kbd>Esc</kbd>, then `/adversarial-review-loop:pause`, then `continue`. Asking in prose does not work.
-- **I quit / rebooted / `/clear`ed mid-phase — how do I pick it back up?** Same session id (`claude --resume`, or `/resume` back to it): just `continue`. New session: `/adversarial-review-loop:resume --allow-dirty`. `/adversarial-review-loop:status` tells you which you're in — [the full table](docs/faq.md#picking-up-where-you-left-off).
-- **Can I implement only part of a plan?** `--until N` on `implement` or `resume`; carry on later with `resume --until 0`.
-- **How do I customise what the reviewer looks for?** `review_guide` — a Markdown file added to the reviewer's prompt. It cannot change the contract or what blocks.
-- **The reviewer keeps finding new things and the phase never converges.** `/adversarial-review-loop:accept [reason]` approves the current tree without another review, and records that it did.
+Each question links to its full answer.
 
-Sixteen more, including `RECONCILE`, rate limits, cost and running your tests as evidence: [docs/faq.md](docs/faq.md).
+- **[How do I start?](docs/faq.md#how-do-i-start-using-the-plugin)** Install, write a plan `.md`, run `/adversarial-review-loop:implement plan.md`.
+- **[How do I stop partway through?](docs/faq.md#how-do-i-stop-partway-through-a-plan)** <kbd>Esc</kbd> stops the turn at once, mid-phase. To stop at a *clean* boundary instead — current phase finished, reviewed and committed — press <kbd>Esc</kbd>, run `/adversarial-review-loop:pause`, then `continue`.
+- **[I quit / rebooted / `/clear`ed mid-phase — how do I pick it back up?](docs/faq.md#picking-up-where-you-left-off)** Same session id (`claude --resume`, or `/resume` back to it): just `continue`. New session: `/adversarial-review-loop:resume --allow-dirty`. `/adversarial-review-loop:status` tells you which you're in.
+- **[Can I implement only part of a plan?](docs/faq.md#can-i-implement-only-part-of-a-plan)** `--until N` on `implement` or `resume`; carry on later with `resume --until 0`.
+- **[How do I customise what the reviewer looks for?](docs/faq.md#how-do-i-customise-what-the-reviewer-looks-for)** `review_guide` — a Markdown file added to the reviewer's prompt. It cannot change the contract or what blocks.
+- **[The reviewer keeps finding new things and the phase never converges.](docs/faq.md#the-reviewer-keeps-finding-new-things-and-the-phase-never-converges-what-now)** `/adversarial-review-loop:accept [reason]` approves the current tree without another review, and records that it did.
+
+More — `RECONCILE`, `NEEDS_HUMAN`, rate limits, cost, running your tests as evidence, revising a plan mid-run — in [docs/faq.md](docs/faq.md).
 
 ## Known limitations
 
 - **Honest-agent bar.** Claude could commit through a wrapper script, abuse `defer`, or edit `.adversarial-review-loop.json` directly — `disable-model-invocation` blocks the `config` *command*, not ordinary edits to the file it writes. Policy written there **can** weaken the gate silently: `ignore_globs: ["**"]` skips the reviewer call on every commit, a raised `block_severity` stops findings from blocking, and `final_review false` removes the cumulative backstop. None of these run unreviewed code; all of them change what the gate does. Nothing here defends against a deliberately hostile agent, and this design does not pretend to — see [security.md](docs/security.md).
 - **The Stop-block cap is residual.** Continuation pressure from `PostToolUse`, progress-aware counting and `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` mitigate it, but a run that repeatedly ends its turn without progress can still exhaust the cap — and exhaustion ends the turn.
 - **A hostile plan path can inject a shell command.** `$ARGUMENTS` is substituted into the skill body textually, without shell escaping, and the body is then `eval`ed — so a path like `x"; id; echo "` runs `id`. Confirmed empirically, and not fixable inside the plugin: the substitution happens before any shell sees it. What bounds it is that `implement` is `disable-model-invocation: true`, so only the person typing the slash command can supply the path. Do not paste plan paths from untrusted sources.
-- **Session-scoped.** `/clear` or a crash disarms the mode; state goes stale and blocks rather than vanishing. `resume` binds the new session and keeps every approval.
+- **Binding is session-scoped.** An activation belongs to one session at a time, so `/clear`, a crash, or a fresh `claude` leaves you in a session that is not bound to it. Nothing is disarmed and nothing is lost — the activation stays armed and enforcing, and the unbound session is simply denied every mutation *in that worktree* until `/adversarial-review-loop:resume` binds it, carrying the baseline and every approval across. Returning to the same session (`claude --resume`) needs no command at all. The cost is that a second session resuming the worktree retires the first for good — see [edge-cases.md](docs/edge-cases.md#clear-crashes-and-quitting-unbind-a-session-they-do-not-disarm-an-activation).
 - **Cost and latency.** Every phase costs at least one full-model review, and a denied commit blocks the session for the length of the review. The `PreToolUse` hook itself adds ~111 ms to *every* tool call — the measurements are in [architecture.md](docs/architecture.md#what-the-hot-path-costs).
 
 ## Documentation

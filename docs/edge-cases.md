@@ -79,8 +79,11 @@ going anyway, nothing stops it. The gate on every commit is exactly as strict ei
 of the pause target; only the Stop-hook's insistence on outstanding phases changes.
 
 `/adversarial-review-loop:pause` names the same target mid-flight, and writes nothing else.
-That is the one you want when you decide partway through a long plan that you'd like to shut
-the machine down, or upgrade the plugin, at a clean boundary rather than mid-phase:
+Note that it does not *stop* anything: <kbd>Esc</kbd> is the immediate stop, and it leaves the
+phase half-written. The command only moves the target, so what it buys is a stop at a clean
+boundary — the phase finished, reviewed and committed first. That is the one you want when you
+decide partway through a long plan that you'd like to shut the machine down, or upgrade the
+plugin, rather than leaving off mid-phase:
 
 ```console
   … Claude is halfway through phase 3 of 9 …
