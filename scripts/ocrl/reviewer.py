@@ -1103,13 +1103,21 @@ def _is_single_stored_line(value: object) -> bool:
     return isinstance(value, str) and value.splitlines()[0:1] == [value]
 
 
-def _oscillating_chunk(rounds: list[dict[str, object]], target: Target, *, total: int, max_lines: int, max_bytes: int) -> tuple[str, bool]:
+def _oscillating_chunk(rounds: list[dict[str, object]], target: Target, *, total: int, config: Config) -> tuple[str, bool]:
     """The ``## Oscillating points`` chunk of :func:`_prior_rounds_section`, and whether it
     was dropped for being past ``max_findings_bytes``. ``("", False)`` when there is simply
     nothing to say. Split out to keep ``_prior_rounds_section`` under the branch count ruff
     enforces; the byte check is the same accounting the rest of that function does inline.
+
+    Takes the whole ``Config`` rather than the two caps and the threshold separately -- it
+    needs ``max_findings``, ``max_findings_bytes`` and ``block_severity``, and its only caller
+    (:func:`_prior_rounds_section`) reads all three off the same object anyway.
+    ``block_severity`` matters because :func:`oscillation.reversals` raises an anchor only for
+    a finding that could block.
     """
-    points = oscillation.reversals(rounds, target.label)
+    max_lines = config.as_int("max_findings")
+    max_bytes = config.as_int("max_findings_bytes")
+    points = oscillation.reversals(rounds, target.label, block_severity=config.as_str("block_severity"))
     if not points:
         return "", False
     chunk = (
@@ -1206,7 +1214,7 @@ def _prior_rounds_section(state: State, target: Target, config: Config) -> str:
             break
 
     if not capped:
-        osc_chunk, osc_capped = _oscillating_chunk(rounds, target, total=total, max_lines=max_lines, max_bytes=max_bytes)
+        osc_chunk, osc_capped = _oscillating_chunk(rounds, target, total=total, config=config)
         if osc_chunk:
             out.append(osc_chunk)
             total += len(osc_chunk.encode("utf-8", "surrogateescape"))
@@ -4247,8 +4255,9 @@ def _stall_review(state: State, target: Target, config: Config) -> Review | None
     history = [
         entry for entry in state.get_array_of_dicts("round_history") if entry.get("label") == target.label and entry.get("generation") == generation
     ]
-    persisting_points = oscillation.persisting(history, target.label, stall_rounds)
-    oscillating_points = oscillation.reversals(history, target.label)
+    block_severity = config.as_str("block_severity")
+    persisting_points = oscillation.persisting(history, target.label, stall_rounds, block_severity=block_severity)
+    oscillating_points = oscillation.reversals(history, target.label, block_severity=block_severity)
     if not persisting_points and not oscillating_points:
         return None
 
@@ -4339,7 +4348,7 @@ def _render_oscillating(state: State, target: Target, config: Config) -> str:
         entry for entry in state.get_array_of_dicts("round_history") if entry.get("label") == target.label and entry.get("generation") == generation
     ]
     return oscillation.render(
-        oscillation.reversals(history, target.label),
+        oscillation.reversals(history, target.label, block_severity=config.as_str("block_severity")),
         max_points=config.as_int("max_findings"),
         max_bytes=config.as_int("max_findings_bytes"),
     )

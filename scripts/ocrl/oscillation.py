@@ -34,6 +34,28 @@ An anchor that no round still stands behind is dropped from the computation enti
 many times it was reversed: nothing is blocking on it, so there is nothing for a human to
 break a deadlock over.
 
+**Only a finding that can block raises an anchor at all.** Both signals exist to answer "is
+this loop stuck", and a loop can only be stuck on something that stops a commit: a finding is
+an anchor here exactly when it is ``actionable=yes`` **and** ranks at or above the caller's
+``block_severity`` -- the same test ``reviewer._interpret`` applies when it fills
+``review.findings``. Three rounds of ``severity=info actionable=no`` is a reviewer repeating a
+remark, not a standing disagreement, and escalating it to ``NEEDS_HUMAN`` spends a human
+interrupt on a phase that was never blocked (a live run did exactly that: a repeated
+non-actionable scope note, with the reviewer itself saying the extra work was necessary).
+``late_block_severity`` deliberately does not enter: the late-round rule only ever applies to a
+finding that is *new* this round, and neither signal here is about a new finding.
+
+The filter is applied where **anchors and the reversal count** are collected, never inside
+:func:`_parsed_findings`. Position in that list is the identity a retirement consumes
+(:func:`_retirements` matches a ``SUPERSEDES file=`` against it and treats two matches as
+ambiguous), so dropping entries there would silently change which ``SUPERSEDES`` lines
+validate -- a non-blocking finding must still be retirable, and consuming it must still stop a
+later claim from retiring it twice. But the ``supersedes_rounds`` count is a signal rather than
+an identity, and it is keyed on the line-stripped anchor file: counting a non-blocking
+retirement there would let two retracted remarks at ``a.py:20`` and ``a.py:30`` escalate a
+blocking ``a.py`` anchor nobody reversed. So retirement *identity* covers every finding while
+both *signals* count only blocking ones.
+
 **A ``SUPERSEDES`` line retires one specific earlier finding, and counting lines is not the
 same as counting reversals.** ``SUPERSEDES round=N file=F`` in round *r* retires the
 ``FINDING`` of round *N* -- the ordinal among this label's rounds, exactly as
@@ -101,6 +123,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
+from ocrl.config import severity_rank, threshold_rank
+
 __all__ = ["Anchor", "OscillationPoint", "PersistingPoint", "persisting", "render", "render_persisting", "reversals"]
 
 #: POSIX ``[[:space:]]`` in the C locale, spelled out rather than left to ``\s`` -- the same
@@ -120,7 +144,7 @@ _SPACE: Final = " \t\n\r\f\v"
 #: fabricating a reversal it was never validated as being.
 _FINDING_RE: Final = re.compile(
     r"^FINDING[ \t]+severity=(?P<severity>info|low|medium|high|critical)"
-    r"[ \t]+actionable=(?:yes|no)"
+    r"[ \t]+actionable=(?P<actionable>yes|no)"
     rf"[ \t]+file=(?P<file>[^|{_SPACE}](?:[^|]*[^|{_SPACE}])?)[ \t]*\|[ \t]*[^{_SPACE}]"
 )
 _SUPERSEDES_RE: Final = re.compile(
@@ -164,28 +188,40 @@ class Anchor:
 
 @dataclass(frozen=True)
 class _Parsed:
-    """One stored ``FINDING`` line that fully re-validated, kept three ways.
+    """One stored ``FINDING`` line that fully re-validated, kept four ways.
 
     ``file`` is the **exact** ``file=`` value, ``:line`` suffix and all -- what a
     ``SUPERSEDES`` line must match to retire this finding. ``anchor`` is the line-stripped
     subject two rounds are compared on. ``line`` is the verbatim record, which is what
-    :func:`persisting` quotes back.
+    :func:`persisting` quotes back. ``blocking`` is whether this finding could stop a commit
+    at the caller's ``block_severity`` -- ``actionable=yes`` and at or above that threshold --
+    and only a blocking finding raises an anchor (see the module docstring). It is carried
+    here rather than filtered out because retirement identity is this list's position.
     """
 
     line: str
     file: str
     anchor: Anchor
+    blocking: bool
 
 
-def _parsed_findings(entry: Mapping[str, object]) -> list[_Parsed]:
+def _parsed_findings(entry: Mapping[str, object], *, block_severity: str) -> list[_Parsed]:
     """Every ``FINDING`` line of one round that is a single line fully matching
     ``_FINDING_RE``, in stored order -- a tampered or malformed entry is silently excluded,
     never a crash and never smuggled text (see the module docstring).
 
     Position in this list is the identity a retirement consumes, so the order and the
     exclusions have to be the same for every caller: both :func:`reversals` and
-    :func:`persisting` index :func:`_retirements`' answer by it.
+    :func:`persisting` index :func:`_retirements`' answer by it. That is why a non-blocking
+    finding is kept here with ``blocking=False`` rather than dropped -- excluding it would
+    renumber the positions a ``SUPERSEDES`` line resolves against.
+
+    ``block_severity`` is ranked with ``config.threshold_rank`` and the finding's own label
+    with ``config.severity_rank``, exactly as ``reviewer._interpret`` ranks them: an
+    unrecognised *finding* severity must rank highest so it still blocks, while an
+    unrecognised *threshold* must rank lowest so a typo makes the gate stricter, not looser.
     """
+    threshold = threshold_rank(block_severity)
     stored = entry.get("findings")
     parsed: list[_Parsed] = []
     for line in stored if isinstance(stored, list) else []:
@@ -196,7 +232,15 @@ def _parsed_findings(entry: Mapping[str, object]) -> list[_Parsed]:
         if match is None:
             continue
         raw = match.group("file")
-        parsed.append(_Parsed(line=line, file=raw, anchor=Anchor(file=_anchor_file(raw), severity=match.group("severity"))))
+        severity = match.group("severity")
+        parsed.append(
+            _Parsed(
+                line=line,
+                file=raw,
+                anchor=Anchor(file=_anchor_file(raw), severity=severity),
+                blocking=match.group("actionable") == "yes" and severity_rank(severity) >= threshold,
+            )
+        )
     return parsed
 
 
@@ -286,8 +330,19 @@ def _retirements(
     Answers ``(retired, rounds_by_file)``: ``retired`` holds ``(round index, position in that
     round's :func:`_parsed_findings` list)`` for every finding a valid ``SUPERSEDES`` claimed,
     and ``rounds_by_file`` maps a retired finding's **anchor** file to the **index** of every
-    round that validly retired something there -- ``len`` of that set is
+    round that validly retired a **blocking** finding there -- ``len`` of that set is
     :attr:`OscillationPoint.supersedes_rounds`.
+
+    **The two answers are filtered differently, and have to be.** ``retired`` covers every
+    finding a valid claim named, blocking or not: retirement is consumptive and its identity is
+    a position in :func:`_parsed_findings`' list, so narrowing it would renumber the positions
+    later claims resolve against and would let a retired non-blocking finding be retired a
+    second time. ``rounds_by_file`` is a *signal*, not an identity, and it is keyed on the
+    line-stripped **anchor** file -- so retiring the non-blocking ``a.py:20`` in one round and
+    the non-blocking ``a.py:30`` in another would otherwise put two rounds under ``a.py`` and
+    hand ``supersedes_rounds >= 2`` to an unrelated blocking ``a.py`` anchor that no one ever
+    reversed. That is the same false escalation the blocking rule exists to stop, arriving
+    through the other signal, so only a blocking finding's retirement is counted here.
 
     The module docstring is the specification for "valid"; this is where it is enforced.
     ``rounds`` is walked in stored order and each round's ``supersedes`` list in stored order,
@@ -330,7 +385,9 @@ def _retirements(
             if claim in retired:
                 continue
             retired.add(claim)
-            rounds_by_file.setdefault(parsed[earlier][matches[0]].anchor.file, set()).add(index)
+            target_finding = parsed[earlier][matches[0]]
+            if target_finding.blocking:
+                rounds_by_file.setdefault(target_finding.anchor.file, set()).add(index)
     return retired, rounds_by_file
 
 
@@ -368,7 +425,7 @@ class OscillationPoint:
     seqs: tuple[int, ...]
 
 
-def reversals(history: Sequence[Mapping[str, object]], label: str) -> list[OscillationPoint]:
+def reversals(history: Sequence[Mapping[str, object]], label: str, *, block_severity: str) -> list[OscillationPoint]:
     """Anchors that reversed across ``history``: reappeared after disappearing, or were
     named by two or more ``SUPERSEDES`` lines.
 
@@ -397,9 +454,22 @@ def reversals(history: Sequence[Mapping[str, object]], label: str) -> list[Oscil
     so it cannot be reported however high ``supersedes_rounds`` climbs. That is intended -- the
     reviewer no longer stands behind any finding there, so there is no disagreement left to
     escalate.
+
+    **``block_severity`` narrows both signals, and neither narrowing touches retirement
+    identity.** Only a blocking finding (``actionable=yes``, at or above the threshold) enters
+    ``raised`` or ``live``, so a non-blocking remark can neither reappear nor hold an anchor
+    open; and only a blocking finding's retirement raises ``supersedes_rounds``, so flip-flops
+    confined to non-blocking remarks cannot escalate an unrelated blocking anchor that happens
+    to share their file. What a ``SUPERSEDES`` line *retires* is unchanged -- see
+    :func:`_retirements`.
+
+    Note, deliberately not fixed: the anchor is ``(file, severity)``, so a blocking finding
+    whose label wanders ``medium`` -> ``high`` between rounds still reads as two anchors and
+    escapes both signals. Dropping severity from the anchor would widen the documented
+    ``services.go:180`` vs ``:226`` false positive, so it stays.
     """
     rounds, trustworthy = _ordered_rounds(history, label)
-    parsed = [_parsed_findings(entry) for _seq, entry in rounds]
+    parsed = [_parsed_findings(entry, block_severity=block_severity) for _seq, entry in rounds]
     retired, rounds_by_file = _retirements(rounds, parsed, trustworthy=trustworthy)
 
     seqs_by_anchor: dict[Anchor, list[int]] = {}
@@ -409,6 +479,8 @@ def reversals(history: Sequence[Mapping[str, object]], label: str) -> list[Oscil
         raised: set[Anchor] = set()
         live: set[Anchor] = set()
         for position, item in enumerate(items):
+            if not item.blocking:
+                continue
             raised.add(item.anchor)
             if (index, position) not in retired:
                 live.add(item.anchor)
@@ -458,7 +530,7 @@ class PersistingPoint:
     lines: tuple[tuple[int, str], ...]
 
 
-def persisting(history: Sequence[Mapping[str, object]], label: str, stall_rounds: int) -> list[PersistingPoint]:
+def persisting(history: Sequence[Mapping[str, object]], label: str, stall_rounds: int, *, block_severity: str) -> list[PersistingPoint]:
     """Anchors raised in every one of the last ``stall_rounds`` consecutive rounds of
     ``history`` for ``label`` -- the same finding, round after round, with no sign of
     convergence.
@@ -481,13 +553,20 @@ def persisting(history: Sequence[Mapping[str, object]], label: str, stall_rounds
     many later findings land in the same file. Retirements are therefore computed over the
     **whole** history and only then sliced to the window; a claim in round 5 against round 3
     has to be seen even when the window is rounds 3-5.
+
+    **A finding that cannot block cannot stall.** Only a blocking finding
+    (``actionable=yes``, at or above ``block_severity``) raises an anchor here: a
+    ``severity=info actionable=no`` note repeated every round is a reviewer repeating itself,
+    not a phase stuck on a disagreement, and it must not escalate. Retirement identity is
+    computed over every parsed finding regardless, so a ``SUPERSEDES`` retiring a non-blocking
+    finding still validates. See the module docstring.
     """
     if stall_rounds <= 0:
         return []
     rounds, trustworthy = _ordered_rounds(history, label)
     if len(rounds) < stall_rounds:
         return []
-    parsed = [_parsed_findings(entry) for _seq, entry in rounds]
+    parsed = [_parsed_findings(entry, block_severity=block_severity) for _seq, entry in rounds]
     retired = _retirements(rounds, parsed, trustworthy=trustworthy)[0]
 
     start = len(rounds) - stall_rounds
@@ -497,7 +576,7 @@ def persisting(history: Sequence[Mapping[str, object]], label: str, stall_rounds
     for index in range(start, len(rounds)):
         by_anchor: dict[Anchor, list[str]] = {}
         for position, item in enumerate(parsed[index]):
-            if (index, position) in retired:
+            if not item.blocking or (index, position) in retired:
                 continue
             by_anchor.setdefault(item.anchor, []).append(item.line)
         lines_by_round.append(by_anchor)

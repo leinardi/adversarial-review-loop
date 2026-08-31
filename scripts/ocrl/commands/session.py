@@ -191,7 +191,9 @@ def status(argv: list[str]) -> int:
         entry for entry in state.get_array_of_dicts("round_history") if entry.get("label") == phase_label and entry.get("generation") == generation
     ]
     stall_rounds = config.as_int("stall_rounds")
-    persisting_points = oscillation.persisting(phase_history, phase_label, stall_rounds) if stall_rounds > 0 else []
+    persisting_points = (
+        oscillation.persisting(phase_history, phase_label, stall_rounds, block_severity=config.as_str("block_severity")) if stall_rounds > 0 else []
+    )
     persisting_line = f"persisting findings:  {', '.join(point.anchor.file for point in persisting_points)}\n" if persisting_points else ""
 
     # What this activation has spent, for a harness that reports it. Display only, and totalled

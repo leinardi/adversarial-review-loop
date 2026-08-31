@@ -164,10 +164,18 @@ recovery is a fresh `implement`.
 
 There is no cap on how many rounds one phase may take. A phase escalates to `needs-human`
 only on evidence it is genuinely stuck: `stall_rounds` (default `3`) consecutive rounds
-raising the same finding, unchanged, or a finding that reappears after being absent, or is
-reversed (`SUPERSEDES`) in two or more separate rounds. Either signal, and the next commit
-attempt (or Stop gate sweep) does not call the reviewer at all — it escalates straight away,
-with the persisting or oscillating findings quoted verbatim.
+raising the same **blocking** finding, unchanged, or a blocking finding that reappears after
+being absent, or is reversed (`SUPERSEDES`) in two or more separate rounds. Either signal, and
+the next commit attempt (or Stop gate sweep) does not call the reviewer at all — it escalates
+straight away, with the persisting or oscillating findings quoted verbatim.
+
+**Only a finding that could block counts.** Both signals ask whether the loop is stuck, and a
+loop can only be stuck on something that stops a commit — so a finding raises an anchor here
+exactly when it is `actionable=yes` *and* at or above `block_severity`, the same test that
+fills the blocking list. A `severity=info actionable=no` remark repeated every round, or a
+`low` note under the default threshold, is the reviewer restating itself, not a standing
+disagreement, and it does not spend a human interrupt. Retirement is unaffected: a
+`SUPERSEDES` still resolves against every finding of the round it names, blocking or not.
 
 **A reversal the reviewer declares is believed.** `SUPERSEDES round=N file=F` retires the
 round-`N` finding whose location is exactly `F`, and a retired finding is not "raised" for
