@@ -7,7 +7,7 @@ deeper.
 
 ### How do I start using the plugin?
 
-Install it (see the [README](../README.md#install)), write a plan as a Markdown file, and
+Install it (see the [README](../README.md#-install)), write a plan as a Markdown file, and
 run `/adversarial-review-loop:implement plan.md`. Arming runs *before* Claude gets a turn:
 it freezes the baseline commit and a copy of the plan, and checks the reviewer CLI is
 reachable. Claude then proposes a phase split, freezes it, and starts implementing — every
