@@ -1,13 +1,13 @@
 ---
 name: stop
-description: Leave the OpenCode review loop for this worktree. Commits and file changes stop being gated. Nothing is reverted.
+description: Leave the review loop for this worktree. Commits and file changes stop being gated. Nothing is reverted.
 disable-model-invocation: true
 user-invocable: true
 ---
 
 # Stop the review loop
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh deactivate --session "${CLAUDE_SESSION_ID}"`
+!`${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh deactivate --session "${CLAUDE_SESSION_ID}"`
 
 The review loop has been switched off for this worktree, or was not active to begin with — the block above says which.
 

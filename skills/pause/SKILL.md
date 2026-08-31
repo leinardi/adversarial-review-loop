@@ -1,6 +1,6 @@
 ---
 name: pause
-description: Move the OpenCode review loop's pause target. With no argument the phase in flight is finished and committed as usual, then the turn ends instead of continuing into the next phase.
+description: Move the review loop's pause target. With no argument the phase in flight is finished and committed as usual, then the turn ends instead of continuing into the next phase.
 argument-hint: "[N | 0 | all]"
 disable-model-invocation: true
 user-invocable: true
@@ -8,7 +8,7 @@ user-invocable: true
 
 # Pause at the end of a phase
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh pause --args "$ARGUMENTS"`
+!`${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh pause --args "$ARGUMENTS"`
 
 The block above moved the pause target, which is the only thing this command does. With no argument it is the phase currently in flight; `N` sets it to phase `N`; `0` or `all` clears it so the loop runs to the end of the plan.
 
@@ -39,10 +39,10 @@ Match the block to one of these, in order — the first that applies wins.
 
 Once a commit is verified the gate tells you what to do next, and **that message decides, not this file** — it knows which phase just landed and where the target is; a pause may have been set on the phase you were already finishing, so the very next commit can be the one that reaches it.
 
-- **It says the pause target was reached** → end your turn. That is the signal to stop, and it is not an approval of the whole plan; the Stop gate ends the turn with a `paused` message. Tell the user which phase was committed, which is next, and that continuing is theirs to start with `/opencode-review-loop:resume --until 0` (or `--until M` for a further target).
+- **It says the pause target was reached** → end your turn. That is the signal to stop, and it is not an approval of the whole plan; the Stop gate ends the turn with a `paused` message. Tell the user which phase was committed, which is next, and that continuing is theirs to start with `/adversarial-review-loop:resume --until 0` (or `--until M` for a further target).
 - **It tells you to continue straight into the next phase** → do that, without ending your turn. The target is further ahead than the phase that just landed.
 - **It says every phase is committed** → end your turn; the activation completes as usual, with no pause involved.
 
 Do not run `pause` yourself — the Bash route to it is denied, as it is for every other user-only command.
 
-Check state at any time with `/opencode-review-loop:status`, which prints the current `pause target`.
+Check state at any time with `/adversarial-review-loop:status`, which prints the current `pause target`.

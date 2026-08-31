@@ -19,4 +19,4 @@ Keep it short. One or two paragraphs is usually enough. Do not re-review the pha
 
 ## Output
 
-Prose only. **Do not emit `<<<OCRL-FINDINGS>>>`, `<<<OCRL-END>>>`, a `FINDING` line, a `SUPERSEDES` line or a `VERDICT`.** This exchange records nothing and decides nothing — it is a clarification, not a round of review. The verdict from the review you already gave still stands exactly as it was.
+Prose only. **Do not emit `<<<ARL-FINDINGS>>>`, `<<<ARL-END>>>`, a `FINDING` line, a `SUPERSEDES` line or a `VERDICT`.** This exchange records nothing and decides nothing — it is a clarification, not a round of review. The verdict from the review you already gave still stands exactly as it was.

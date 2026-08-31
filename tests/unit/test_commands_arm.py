@@ -1,6 +1,6 @@
 """``arm`` is where Rule 0 is established: a gate that cannot prove it is running denies.
 
-Every test here drives the real CLI through ``scripts/ocrl-bootstrap.py``, because the thing
+Every test here drives the real CLI through ``scripts/arl-bootstrap.py``, because the thing
 under test is not "does the function return the right value" but "does an activation exist on
 disk afterwards, and does it say the right thing". A failure that is not persisted is
 indistinguishable from a session that was never armed, and the hooks would then deny with the
@@ -18,24 +18,24 @@ from pathlib import Path
 import pytest
 from conftest import FAKE_REVIEWER, git, run_bootstrap
 
-from ocrl import harness, paths
-from ocrl.atomic import locked as _real_locked
-from ocrl.commands import arm
+from arl import harness, paths
+from arl.atomic import locked as _real_locked
+from arl.commands import arm
 
 
 def armed_env(clean_env: dict[str, str], **extra: str) -> dict[str, str]:
     """A clean environment with the reviewer seam in place.
 
-    ``OCRL_REVIEWER_CMD`` is what stops ``arm`` probing a real ``opencode``; the probe itself
+    ``ARL_REVIEWER_CMD`` is what stops ``arm`` probing a real ``opencode``; the probe itself
     is tested separately, with the seam deliberately absent.
     """
-    env = {**clean_env, "OCRL_REVIEWER_CMD": str(FAKE_REVIEWER)}
+    env = {**clean_env, "ARL_REVIEWER_CMD": str(FAKE_REVIEWER)}
     env.update(extra)
     return env
 
 
 def state_dir(env: dict[str, str], repo: Path, session: str) -> Path:
-    root = Path(env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
     return root / "worktrees" / paths.sha256_hex(str(repo)) / session
 
 
@@ -58,7 +58,7 @@ def plan_file(tmp_path: Path, text: str = "# plan\n\nphase one\n") -> Path:
 # body unescaped, see "The argument channel is not escaped" in AGENTS.md -- and the plan path
 # `arm` actually opens, so its split points are a direct spec, not an implementation detail.
 # This corpus and its expected splits used to be asserted differentially, against the shell
-# port `ocrl_split_args` was translated from; that reference was retired in Phase 8, so the
+# port `arl_split_args` was translated from; that reference was retired in Phase 8, so the
 # split points below are now the specification.
 
 
@@ -114,7 +114,7 @@ def test_arm_freezes_the_plan_and_records_the_activation(git_repo: Path, tmp_pat
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan)], cwd=git_repo, env=env)
 
     assert proc.returncode == 0, proc.stderr
-    assert "**opencode-review-loop is ARMED for this worktree.**" in proc.stdout
+    assert "**adversarial-review-loop is ARMED for this worktree.**" in proc.stdout
     assert "Phases are not set yet" in proc.stdout
 
     document = read_state(env, git_repo, "s1")
@@ -152,7 +152,7 @@ def test_the_arm_summary_says_whether_a_final_review_will_run(
     This line lands in the slash-command output the moment a plan starts, and reports the
     fully-resolved value, so a repo config or environment override cannot make it lie.
     """
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW=setting)
+    env = armed_env(clean_env, ARL_FINAL_REVIEW=setting)
 
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
@@ -165,7 +165,7 @@ def test_arm_writes_both_pointers(git_repo: Path, tmp_path: Path, clean_env: dic
     env = armed_env(clean_env)
     run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
-    root = Path(env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
     assert (root / "sessions" / "s1").read_text() == f"{git_repo}\n"
     assert (root / "worktrees" / paths.sha256_hex(str(git_repo)) / "latest").read_text() == "s1\n"
 
@@ -271,10 +271,10 @@ def test_a_concurrent_newer_arm_landing_between_the_check_and_the_freeze_is_stil
     env = armed_env(clean_env)
     # Unlike run_bootstrap, this drives arm.run() in-process so the monkeypatch below can
     # take effect -- and in-process means os.environ is overlaid, not replaced, so any
-    # OCRL_*/XDG_* the host happens to carry has to be cleared first (test_state.py's
+    # ARL_*/XDG_* the host happens to carry has to be cleared first (test_state.py's
     # state_env fixture does the same, for the same reason).
     for key in list(os.environ):
-        if key.startswith(("OCRL_", "XDG_")):
+        if key.startswith(("ARL_", "XDG_")):
             monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -318,7 +318,7 @@ def test_a_missing_session_id_records_nothing_and_says_so(git_repo: Path, tmp_pa
     assert proc.returncode == 1
     assert "ARMING FAILED" in proc.stdout
     assert "no session id was supplied" in proc.stdout
-    assert not (Path(env["XDG_STATE_HOME"]) / "opencode-review-loop" / "worktrees").exists()
+    assert not (Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop" / "worktrees").exists()
 
 
 @pytest.mark.parametrize(
@@ -341,7 +341,7 @@ def test_a_refusal_is_persisted_as_arm_failed(
     proc = run_bootstrap(["arm", "--session", "s1", *argv], cwd=git_repo, env=env)
 
     assert proc.returncode == 1
-    assert "**opencode-review-loop: ARMING FAILED" in proc.stdout
+    assert "**adversarial-review-loop: ARMING FAILED" in proc.stdout
     assert expected in proc.stdout
 
     document = read_state(env, git_repo, "s1")
@@ -350,7 +350,7 @@ def test_a_refusal_is_persisted_as_arm_failed(
     assert document["session_id"] == "s1"
     assert document["worktree"] == str(git_repo)
     # Both pointers, so the failure is findable from a hook *and* from `status`.
-    root = Path(env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
     assert (root / "sessions" / "s1").read_text() == f"{git_repo}\n"
     assert (root / "worktrees" / paths.sha256_hex(str(git_repo)) / "latest").read_text() == "s1\n"
 
@@ -387,7 +387,7 @@ def test_a_dirty_worktree_is_refused_unless_allowed(git_repo: Path, tmp_path: Pa
 
 
 def test_allow_dirty_can_also_come_from_config(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_ALLOW_DIRTY="true")
+    env = armed_env(clean_env, ARL_ALLOW_DIRTY="true")
     (git_repo / "untracked.txt").write_text("work in progress\n")
 
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
@@ -429,7 +429,7 @@ def _path_without_opencode(tmp_path: Path) -> str:
 def probe_env(clean_env: dict[str, str], bindir: str | Path, **extra: str) -> dict[str, str]:
     """A clean environment on ``bindir`` alone, pinned to the harness that *has* a model probe.
 
-    ``OCRL_HARNESS`` is pinned rather than left at its default because every caller is about
+    ``ARL_HARNESS`` is pinned rather than left at its default because every caller is about
     the **model list**, and only OpenCode can produce one: ``claude`` has no ``models``
     subcommand, so ``probe_models`` answers ``None`` and the callers check for the binary and
     stop. Left on the default these tests would still pass -- against a code path that never
@@ -437,7 +437,7 @@ def probe_env(clean_env: dict[str, str], bindir: str | Path, **extra: str) -> di
     green that means nothing. What the default harness does with an absent binary has its own
     test (``test_arming_without_the_default_harnesss_binary_is_refused``).
     """
-    return {**clean_env, "PATH": str(bindir), "OCRL_HARNESS": "opencode", **extra}
+    return {**clean_env, "PATH": str(bindir), "ARL_HARNESS": "opencode", **extra}
 
 
 def test_arming_without_opencode_is_refused(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -455,7 +455,7 @@ def test_arming_without_the_default_harnesss_binary_is_refused(git_repo: Path, t
 
     It reports the binary **that harness** runs, not a name inherited from the project's own:
     the two differ, and a message naming the wrong executable sends the user to install the
-    wrong thing. Nothing here pins ``OCRL_HARNESS`` -- that is the point.
+    wrong thing. Nothing here pins ``ARL_HARNESS`` -- that is the point.
     """
     env = {**clean_env, "PATH": _path_without_opencode(tmp_path)}
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
@@ -470,7 +470,7 @@ def test_a_model_opencode_does_not_report_is_refused(git_repo: Path, tmp_path: P
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/other-model\\n'\n")
     fake.chmod(0o755)
-    env = probe_env(clean_env, bindir, OCRL_MODEL="vendor/wanted-model")
+    env = probe_env(clean_env, bindir, ARL_MODEL="vendor/wanted-model")
 
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
@@ -499,7 +499,7 @@ def test_a_reported_model_is_accepted(git_repo: Path, tmp_path: Path, clean_env:
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/other\\nvendor/wanted\\n'\n")
     fake.chmod(0o755)
-    env = probe_env(clean_env, bindir, OCRL_MODEL="vendor/wanted")
+    env = probe_env(clean_env, bindir, ARL_MODEL="vendor/wanted")
 
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
@@ -617,7 +617,7 @@ def test_the_armed_banner_reflects_the_environment_not_the_override_alone(
     Both the reviewer probe and the persisted ``overrides`` already used the fully-resolved
     config -- this pins the one place that used to compute its own, wrong answer.
     """
-    env = armed_env(clean_env, OCRL_MODEL="vendor/env-wins")
+    env = armed_env(clean_env, ARL_MODEL="vendor/env-wins")
     proc = run_bootstrap(
         ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --model vendor/flag-loses"],
         cwd=git_repo,
@@ -678,7 +678,7 @@ def test_a_model_override_is_probed_instead_of_the_stored_default(git_repo: Path
     """``--model`` must be validated against itself -- probing the stored model would pass
     on the strength of a model this run will not use.
 
-    The stored default comes from the repo config, not ``OCRL_MODEL``: the environment
+    The stored default comes from the repo config, not ``ARL_MODEL``: the environment
     would otherwise beat the ``--model`` override in the merge order (Phase 1's
     ``defaults < user < repo < activation overrides < env``), which would make this test
     assert the wrong thing rather than exercise the reordering it is named for.
@@ -687,7 +687,7 @@ def test_a_model_override_is_probed_instead_of_the_stored_default(git_repo: Path
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/stored\\n'\n")
     fake.chmod(0o755)
-    (git_repo / ".opencode-review-loop.json").write_text('{"model": "vendor/stored"}')
+    (git_repo / ".adversarial-review-loop.json").write_text('{"model": "vendor/stored"}')
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "repo config")
     env = probe_env(clean_env, bindir)
@@ -710,7 +710,7 @@ def test_a_model_override_that_is_reported_arms(git_repo: Path, tmp_path: Path, 
     fake = bindir / "opencode"
     fake.write_text("#!/usr/bin/env bash\nprintf 'vendor/stored\\nvendor/override\\n'\n")
     fake.chmod(0o755)
-    (git_repo / ".opencode-review-loop.json").write_text('{"model": "vendor/stored"}')
+    (git_repo / ".adversarial-review-loop.json").write_text('{"model": "vendor/stored"}')
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "repo config")
     env = probe_env(clean_env, bindir)
@@ -774,15 +774,15 @@ def test_an_unimplemented_harness_is_refused_at_arm_time(git_repo: Path, tmp_pat
 
 
 def test_the_reviewer_seam_does_not_excuse_an_unimplemented_harness(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    """``OCRL_REVIEWER_CMD`` replaces the reviewer *command*, not the harness: session minting,
+    """``ARL_REVIEWER_CMD`` replaces the reviewer *command*, not the harness: session minting,
     id validation and every lease are still sized from whatever ``harness`` names, so the name
     is checked ahead of the seam rather than behind it.
 
     ``armed_env`` sets the seam, so the refusal above already runs under it -- this states the
     property directly, because moving the check below the early return would silently arm.
     """
-    env = armed_env(clean_env, OCRL_HARNESS="not-a-harness")
-    assert env["OCRL_REVIEWER_CMD"], "this test is only meaningful with the seam in place"
+    env = armed_env(clean_env, ARL_HARNESS="not-a-harness")
+    assert env["ARL_REVIEWER_CMD"], "this test is only meaningful with the seam in place"
 
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
 
@@ -795,7 +795,7 @@ def test_a_harness_that_cannot_enumerate_models_checks_only_its_binary(git_repo:
     not know exits non-zero at review time, which blocks (Rule 1). But the binary must be there.
     """
     bindir = Path(_path_without_opencode(tmp_path))
-    env = {**clean_env, "PATH": str(bindir), "OCRL_HARNESS": "claude-code", "OCRL_MODEL": "a-model-nothing-reports"}
+    env = {**clean_env, "PATH": str(bindir), "ARL_HARNESS": "claude-code", "ARL_MODEL": "a-model-nothing-reports"}
 
     proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
     assert proc.returncode == 1
@@ -814,14 +814,14 @@ def test_the_harness_is_pinned_even_without_a_flag(git_repo: Path, tmp_path: Pat
     """Arming records the harness it actually probed, so a later config edit cannot move a live
     activation onto a reviewer whose binary was never checked.
 
-    ``.opencode-review-loop.json`` travels with the tree under review and is not a trust
+    ``.adversarial-review-loop.json`` travels with the tree under review and is not a trust
     boundary; without the pin, editing it mid-activation switches the reviewer silently and
     every later review fails with "that binary is not on PATH" -- an operational failure that
     reads as the reviewer's fault. `harness` is the only key that decides which binary must
     exist, which is why it is pinned and `model`/`variant` are not.
     """
     env = armed_env(clean_env)
-    (git_repo / ".opencode-review-loop.json").write_text('{"harness": "claude-code"}')
+    (git_repo / ".adversarial-review-loop.json").write_text('{"harness": "claude-code"}')
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "repo config")
 
@@ -834,12 +834,12 @@ def test_the_harness_is_pinned_even_without_a_flag(git_repo: Path, tmp_path: Pat
 def test_a_repo_config_edit_cannot_switch_the_harness_mid_activation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """The pin's whole point, asserted through what the gate actually resolves afterwards."""
     env = armed_env(clean_env)
-    (git_repo / ".opencode-review-loop.json").write_text('{"harness": "claude-code"}')
+    (git_repo / ".adversarial-review-loop.json").write_text('{"harness": "claude-code"}')
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "repo config")
     assert run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env).returncode == 0
 
-    (git_repo / ".opencode-review-loop.json").write_text('{"harness": "opencode"}')
+    (git_repo / ".adversarial-review-loop.json").write_text('{"harness": "opencode"}')
 
     proc = run_bootstrap(["status"], cwd=git_repo, env=env)
 
@@ -848,26 +848,26 @@ def test_a_repo_config_edit_cannot_switch_the_harness_mid_activation(git_repo: P
 
 
 def test_the_environment_still_outranks_the_pinned_harness(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    """The pin sits in the activation overlay, which `OCRL_*` beats -- so the documented
+    """The pin sits in the activation overlay, which `ARL_*` beats -- so the documented
     one-off escape still works and the pin is not a lock."""
     env = armed_env(clean_env)
     assert run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env).returncode == 0
 
-    proc = run_bootstrap(["status"], cwd=git_repo, env={**env, "OCRL_HARNESS": "claude-code"})
+    proc = run_bootstrap(["status"], cwd=git_repo, env={**env, "ARL_HARNESS": "claude-code"})
 
     assert proc.returncode == 0, proc.stderr
     assert "harness:             claude-code\n" in proc.stdout
 
 
 def test_an_environment_masked_harness_flag_pins_what_was_actually_probed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    """``OCRL_HARNESS`` outranks the activation overlay, so with the two disagreeing the flag
+    """``ARL_HARNESS`` outranks the activation overlay, so with the two disagreeing the flag
     never reaches the probe -- and must not reach the stored overlay either.
 
     **Fails on a pin that records ``--harness``' own value.** `_check_reviewer` checked the
     environment's harness; storing the flag's would pin one nothing verified, and the moment
     the variable left the environment the activation would silently start running it.
     """
-    env = armed_env(clean_env, OCRL_HARNESS="opencode")
+    env = armed_env(clean_env, ARL_HARNESS="opencode")
 
     proc = run_bootstrap(
         ["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --harness claude-code"],

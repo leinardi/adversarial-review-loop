@@ -16,9 +16,9 @@ from pathlib import Path
 import pytest
 from conftest import git, git_status_ignored
 
-from ocrl import gitsnap
-from ocrl.config import Config
-from ocrl.gitsnap import SnapshotError
+from arl import gitsnap
+from arl.config import Config
+from arl.gitsnap import SnapshotError
 
 #: git's constant id for the empty tree.
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -330,7 +330,7 @@ def test_a_submodule_is_declared_as_not_diffed(git_repo: Path, tmp_path: Path) -
     inner.mkdir()
     git(inner, "init", "-q", "-b", "main")
     git(inner, "config", "user.email", "selftest@example.invalid")
-    git(inner, "config", "user.name", "ocrl selftest")
+    git(inner, "config", "user.name", "arl selftest")
     (inner / "lib.txt").write_text("lib\n")
     git(inner, "add", "-A")
     git(inner, "commit", "-qm", "lib")

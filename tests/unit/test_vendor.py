@@ -16,17 +16,17 @@ from pathlib import Path
 
 from conftest import PLUGIN_ROOT
 
-import ocrl
-from ocrl._vendor import bashlex
+import arl
+from arl._vendor import bashlex
 
-VENDOR = PLUGIN_ROOT / "scripts" / "ocrl" / "_vendor"
+VENDOR = PLUGIN_ROOT / "scripts" / "arl" / "_vendor"
 BASHLEX = VENDOR / "bashlex"
 
 
 def test_the_parser_is_the_vendored_copy() -> None:
     """Not a system install, not a virtualenv: the file in this repository."""
     assert Path(bashlex.__file__).resolve() == (BASHLEX / "__init__.py").resolve()
-    assert bashlex.__name__ == "ocrl._vendor.bashlex"
+    assert bashlex.__name__ == "arl._vendor.bashlex"
 
 
 def test_no_top_level_bashlex_is_introduced() -> None:
@@ -36,7 +36,7 @@ def test_no_top_level_bashlex_is_introduced() -> None:
     top-level ``bashlex`` that a system-installed copy could win -- and then the parser
     behind the gate would be whichever version the machine happened to have.
     """
-    assert bashlex.__name__ == "ocrl._vendor.bashlex"
+    assert bashlex.__name__ == "arl._vendor.bashlex"
     assert str(VENDOR) not in sys.path
     assert "bashlex" not in sys.modules
 
@@ -65,13 +65,11 @@ def test_parsing_writes_nothing_into_the_vendor_directory(plugin_copy: Path, tmp
     Run with ``-B`` so the only writes under test are the parser's own; where *bytecode*
     goes is a property of the bootstrap, asserted in ``test_bootstrap.py``.
     """
-    vendored = plugin_copy / "ocrl" / "_vendor" / "bashlex"
+    vendored = plugin_copy / "arl" / "_vendor" / "bashlex"
     before = {p.name: p.stat().st_mtime_ns for p in vendored.iterdir()}
 
     script = (
-        f"import sys; sys.path.insert(0, {str(plugin_copy)!r})\n"
-        "from ocrl import cmdshape\n"
-        "cmdshape.validate_commit('git add -A && git commit -m x')\n"
+        f"import sys; sys.path.insert(0, {str(plugin_copy)!r})\nfrom arl import cmdshape\ncmdshape.validate_commit('git add -A && git commit -m x')\n"
     )
     proc = subprocess.run(
         [sys.executable, "-I", "-B", "-c", script],
@@ -98,13 +96,13 @@ def test_every_vendored_module_imports_itself_by_the_vendored_name() -> None:
         source = source_file.read_text()
         assert "from bashlex import" not in source, f"{source_file.name} still imports the top-level name"
         assert "import bashlex" not in source, f"{source_file.name} still imports the top-level name"
-        if "from ocrl._vendor.bashlex import" in source:
+        if "from arl._vendor.bashlex import" in source:
             rewritten.add(source_file.name)
 
     assert rewritten == {"__init__.py", "heredoc.py", "parser.py", "state.py", "subst.py", "tokenizer.py", "yacc.py"}
 
 
 def test_the_plugin_declares_the_licence_it_inherits() -> None:
-    manifest = json.loads((ocrl.PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text())
+    manifest = json.loads((arl.PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text())
     assert manifest["license"] == "GPL-3.0-or-later"
-    assert "GNU GENERAL PUBLIC LICENSE" in (ocrl.PLUGIN_ROOT / "LICENSE").read_text()
+    assert "GNU GENERAL PUBLIC LICENSE" in (arl.PLUGIN_ROOT / "LICENSE").read_text()

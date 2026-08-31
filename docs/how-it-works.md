@@ -56,13 +56,13 @@ reporter tries again.
    start to finish, the way a final sign-off would, rather than phase by phase. That one is
    off by default because on a long plan it becomes too big to be read properly; turn it on
    with `final_review true` if you want it every time, or run
-   `/opencode-review-loop:finish` to get it for a single plan. It has to be *before* the
+   `/adversarial-review-loop:finish` to get it for a single plan. It has to be *before* the
    tool steps out, though — once it's done, that review can't be run after the fact.
 
 ## Some things worth knowing
 
 - **You can pause it**, up front (`--until 2`) or halfway through a phase
-  (`/opencode-review-loop:pause`) — it finishes and commits what it's on, then stops. The
+  (`/adversarial-review-loop:pause`) — it finishes and commits what it's on, then stops. The
   loop won't push you into "just one more phase" on its own.
 - **You can pick it back up later**, even days later, in a brand-new conversation, without
   losing any of the approvals already earned or restarting from scratch.
@@ -102,16 +102,16 @@ re-injects the things a compacted session needs to carry on —
 It never re-injects the plan itself: re-inserting a 64 KiB document into a context that was
 just compacted for being too large would undo the compaction. It also never quotes a
 reviewer's findings — that is model-authored text, and it stays behind
-`/opencode-review-loop:report`.
+`/adversarial-review-loop:report`.
 
 **For a very long plan, pause deliberately rather than relying on compaction.** Compaction is
 lossy no matter what gets re-injected, and the cleanest context is a fresh one:
 
 ```console
-$ /opencode-review-loop:implement plan.md --until 5     # stop after phase 5
+$ /adversarial-review-loop:implement plan.md --until 5     # stop after phase 5
   … phases 1–5 land …
 $ /clear
-$ /opencode-review-loop:resume --until 10               # fresh context, same activation
+$ /adversarial-review-loop:resume --until 10               # fresh context, same activation
 ```
 
 `resume` re-arms the hooks, re-prints the plan path and names the next phase, and every
@@ -126,7 +126,7 @@ and run the command instead:
 ```console
   … Claude is deep in phase 3 of 9 …
 Esc
-$ /opencode-review-loop:pause
+$ /adversarial-review-loop:pause
 $ continue
   … phase 3 is finished, reviewed and committed, then the turn ends paused …
 ```
@@ -136,7 +136,7 @@ half-finished work for it to fold into a review. That is what makes it the right
 turning the machine off, and before upgrading the plugin itself: the upgrade lands between
 phases, on a clean tree, rather than mid-phase. Reinstall the plugin and start a fresh
 session afterwards (a running Claude Code holds the old skill bodies cached), then
-`/opencode-review-loop:resume --until 0` to carry on with every approval intact.
+`/adversarial-review-loop:resume --until 0` to carry on with every approval intact.
 
 ## Why bother with all this?
 

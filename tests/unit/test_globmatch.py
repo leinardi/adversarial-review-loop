@@ -13,7 +13,7 @@ import itertools
 import pytest
 from conftest import bash_glob, bash_glob_many
 
-from ocrl import globmatch
+from arl import globmatch
 
 
 @pytest.fixture(autouse=True, scope="module")

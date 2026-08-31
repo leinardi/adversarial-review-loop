@@ -17,8 +17,8 @@ from conftest import BOOTSTRAP
 
 
 def load_bootstrap() -> ModuleType:
-    """Import ``ocrl-bootstrap.py``, whose filename is not a legal module name."""
-    spec = importlib.util.spec_from_file_location("ocrl_bootstrap_under_test", BOOTSTRAP)
+    """Import ``arl-bootstrap.py``, whose filename is not a legal module name."""
+    spec = importlib.util.spec_from_file_location("arl_bootstrap_under_test", BOOTSTRAP)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -50,8 +50,8 @@ def test_overlaps(a: str, b: str, expected: bool) -> None:
 def test_a_root_cache_prefix_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`sys.pycache_prefix` mirrors absolute source paths beneath the prefix.
 
-    With a prefix of "/", the bytecode for "/plugin/scripts/ocrl/x.py" lands right back at
-    "/plugin/scripts/ocrl/x.pyc" -- inside the plugin checkout.
+    With a prefix of "/", the bytecode for "/plugin/scripts/arl/x.py" lands right back at
+    "/plugin/scripts/arl/x.pyc" -- inside the plugin checkout.
     """
     monkeypatch.chdir(tmp_path)
     assert not boot._cache_dir_is_safe("/")

@@ -8,13 +8,13 @@ user-invocable: true
 
 # Manually accept the current tree
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh accept --reason "$ARGUMENTS"`
+!`${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh accept --reason "$ARGUMENTS"`
 
 ## What just happened
 
 The block above is the output of accepting, which ran **before you had a turn**. It grants exactly one thing: the current working tree is added to `approved_trees`, the same record a passing review would have written. It does not advance the phase and does not complete the activation — the next commit still goes through the ordinary review gate, and the tree it commits must still be this exact one for the gate to let it through without a review.
 
-**If it says nothing was accepted, stop.** The activation could not be accepted into for the reason given — read it and follow the alternative it names (usually `set-phases`, `/opencode-review-loop:resume`, or a fresh `/opencode-review-loop:implement <plan.md>`).
+**If it says nothing was accepted, stop.** The activation could not be accepted into for the reason given — read it and follow the alternative it names (usually `set-phases`, `/adversarial-review-loop:resume`, or a fresh `/adversarial-review-loop:implement <plan.md>`).
 
 **If it accepted a `NEEDS_HUMAN` escalation**, the activation is `ACTIVE` again and commits are gated normally from here.
 

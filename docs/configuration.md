@@ -5,24 +5,24 @@
 Five layers, lowest to highest priority:
 
 ```text
-defaults  <  user config  <  repo config  <  activation overrides  <  OCRL_* environment
+defaults  <  user config  <  repo config  <  activation overrides  <  ARL_* environment
 ```
 
 | Layer | Where | Set by |
 | --- | --- | --- |
 | defaults | built into `config.py` | nobody — the fallback |
-| user config | `$XDG_CONFIG_HOME/opencode-review-loop/config.json` | `/opencode-review-loop:config <key> <value>` |
-| repo config | `<repo>/.opencode-review-loop.json` | `/opencode-review-loop:config <key> <value> --repo`, or hand-edited |
+| user config | `$XDG_CONFIG_HOME/adversarial-review-loop/config.json` | `/adversarial-review-loop:config <key> <value>` |
+| repo config | `<repo>/.adversarial-review-loop.json` | `/adversarial-review-loop:config <key> <value> --repo`, or hand-edited |
 | activation overrides | inside `state.json`, for the current activation only | `--harness`/`--model`/`--variant` on `implement` or `resume` |
-| environment | the process environment | `OCRL_*` variables |
+| environment | the process environment | `ARL_*` variables |
 
 A concrete example: your user config sets `model` to `openai/gpt-5.6-sol`. The repo you're
-working in sets it to `anthropic/claude-opus-5` in `.opencode-review-loop.json`. You run
-`/opencode-review-loop:implement plan.md --model my-org/reviewer-model` for one specific
-run. Someone has `OCRL_MODEL=debug/stub` set in their shell for testing. The model actually
+working in sets it to `anthropic/claude-opus-5` in `.adversarial-review-loop.json`. You run
+`/adversarial-review-loop:implement plan.md --model my-org/reviewer-model` for one specific
+run. Someone has `ARL_MODEL=debug/stub` set in their shell for testing. The model actually
 used is `debug/stub` — environment always wins, activation overrides beat both config
 files, and the repo file beats your personal one. Nothing here is silent: run
-`/opencode-review-loop:config` with no arguments and it prints every key's resolved value
+`/adversarial-review-loop:config` with no arguments and it prints every key's resolved value
 *and which layer set it*, computed by re-running the merge layer by layer rather than
 guessing.
 
@@ -58,18 +58,18 @@ guessing.
 | `final_review` | `false` | run the final cumulative review at `Stop` |
 | `cold_confirm` | `false` | re-review an approving round cold — no session, no prior-round attachment — and act on that verdict instead |
 
-Environment variables are the upper-cased key with an `OCRL_` prefix — `OCRL_MODEL`,
-`OCRL_BLOCK_SEVERITY`, `OCRL_MAX_FAILURES`, and so on. Since an environment variable is
+Environment variables are the upper-cased key with an `ARL_` prefix — `ARL_MODEL`,
+`ARL_BLOCK_SEVERITY`, `ARL_MAX_FAILURES`, and so on. Since an environment variable is
 always a string, each is coerced by the key's type: a boolean key checks against a set of
 true-ish spellings, an integer key requires all-digit text and is otherwise **skipped
 entirely** (a typo leaves the previous layer's value standing rather than silently becoming
-`0`), and `OCRL_IGNORE_GLOBS` is comma-separated into a list. JSON config files need none of
+`0`), and `ARL_IGNORE_GLOBS` is comma-separated into a list. JSON config files need none of
 this — their values are already the right type.
 
 ## Reading and writing it
 
 ```console
-$ /opencode-review-loop:config
+$ /adversarial-review-loop:config
 harness                  claude-code          (default)
 model                    opus                 (default: claude-code)
 variant                                       (default)
@@ -83,16 +83,16 @@ not a constant: it is whatever the selected harness calls its own, so the value 
 what a run would actually pass and the layer says which harness decided it.
 
 ```console
-$ /opencode-review-loop:config ttl_hours 72
+$ /adversarial-review-loop:config ttl_hours 72
 ttl_hours: 24 -> 72
-written to /home/you/.config/opencode-review-loop/config.json
+written to /home/you/.config/adversarial-review-loop/config.json
 
-$ /opencode-review-loop:config ttl_hours --unset
+$ /adversarial-review-loop:config ttl_hours --unset
 ttl_hours: 72 -> (unset)
 
-$ /opencode-review-loop:config verify_cmd --repo -- pytest --maxfail=1
+$ /adversarial-review-loop:config verify_cmd --repo -- pytest --maxfail=1
 verify_cmd: (unset) -> pytest --maxfail=1
-written to <repo>/.opencode-review-loop.json
+written to <repo>/.adversarial-review-loop.json
 ```
 
 Put `--` before a value that itself looks like a flag (a `verify_cmd` starting with `-`,
@@ -124,18 +124,18 @@ files in the precedence chain, but below the environment.
 you passed `--harness`. `model` and `variant` are not: they keep resolving through the
 config layers on every round. The difference is that `harness` is what decides which binary
 has to exist, so it is the only one whose drift silently voids the reachability check
-arming just did — a `.opencode-review-loop.json` edited to another harness mid-activation
+arming just did — a `.adversarial-review-loop.json` edited to another harness mid-activation
 would leave every later review failing with "that binary is not on PATH", and that file
 travels with the tree under review and is not a trust boundary.
 
 So an activation keeps the harness it was armed with, and switching it is explicit: pass
-`--harness` to `resume`, or set `OCRL_HARNESS`, which still outranks the overlay. A
+`--harness` to `resume`, or set `ARL_HARNESS`, which still outranks the overlay. A
 `resume` that names a harness has its binary and model list checked against the one being
 switched *to*. Continuity does not carry across a switch: a session pointer minted by one
 harness is not presentable to another, so the next review simply starts fresh.
 
 What gets pinned is the harness that was actually **probed**, not the one you typed. Since
-`OCRL_HARNESS` outranks the overlay, `OCRL_HARNESS=claude-code … --harness opencode` checks
+`ARL_HARNESS` outranks the overlay, `ARL_HARNESS=claude-code … --harness opencode` checks
 *claude-code* — so claude-code is what is recorded, and the armed banner says so. Recording the
 flag instead would pin a reviewer nothing verified, and the activation would start running
 it the moment the variable left your environment.
@@ -159,7 +159,7 @@ what is now on disk.
 
 ## Repo config is not trusted for policy
 
-`.opencode-review-loop.json` lives inside the repository under review, which the rest of
+`.adversarial-review-loop.json` lives inside the repository under review, which the rest of
 this system treats as content an agent could have written — because it can be, once
 mutations are allowed, whether through `config --repo` (user-only) or a plain file edit
 (not user-only at all). Every key it can set is a real lever, and none of them are fenced
@@ -186,7 +186,7 @@ off from a self-serving edit:
   commit — but setting it *is* code execution, and the string can be anything, not only a
   command already present in the repo.
 
-None of this needs the `config` command at all. `/opencode-review-loop:config --repo` is
+None of this needs the `config` command at all. `/adversarial-review-loop:config --repo` is
 the controlled, user-only way to write this file; the file itself is an ordinary one, and
 Claude can rewrite it like any other file once mutations are permitted — the next config
 load simply picks up whatever it now says. Treat every key here as something Claude could
@@ -251,7 +251,7 @@ output mode, so nothing is shown rather than something estimated):
 - each stored report carries a `cost:` line per invocation — under `cold_confirm` the round
   with context and the cold confirmation each get their own, which is the argument for or
   against that setting in one place;
-- `/opencode-review-loop:status` totals the activation and the current phase;
+- `/adversarial-review-loop:status` totals the activation and the current phase;
 - the CLI's own output is kept verbatim beside each transcript as `raw/NNN-*.out.envelope`.
 
 None of these figures feed any decision the gate makes. They are reported, never read.
@@ -259,7 +259,7 @@ None of these figures feed any decision the gate makes. They are reported, never
 ## Where config state lives
 
 State — `state.json`, frozen plans, reports, bundles — never lives inside the repository.
-It's under `$XDG_STATE_HOME/opencode-review-loop/`, one directory per `(worktree, session)`
+It's under `$XDG_STATE_HOME/adversarial-review-loop/`, one directory per `(worktree, session)`
 pair. The **one** exception to "nothing is written inside the repo" is an explicit,
 user-only `config <key> <value> --repo`, and even that never chmods anything beyond the one
 file it writes.

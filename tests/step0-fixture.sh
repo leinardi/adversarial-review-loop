@@ -5,13 +5,13 @@
 # repository that the loop is allowed to gate. Never point them at work you care
 # about: the whole exercise is about provoking denials and bad commits.
 #
-# usage: tests/step0-fixture.sh [target-dir]      (default: ~/ocrl-step0)
+# usage: tests/step0-fixture.sh [target-dir]      (default: ~/arl-step0)
 
 set -euo pipefail
 
-TARGET=${1:-$HOME/ocrl-step0}
+TARGET=${1:-$HOME/arl-step0}
 REPO="$TARGET/repo"
-STATE_ROOT=${XDG_STATE_HOME:-$HOME/.local/state}/opencode-review-loop
+STATE_ROOT=${XDG_STATE_HOME:-$HOME/.local/state}/adversarial-review-loop
 
 if [ -e "$TARGET" ]; then
     printf 'refusing to touch an existing path: %s\n' "$TARGET" >&2
@@ -26,7 +26,7 @@ mkdir -p "$REPO"
 cd "$REPO"
 git init -q -b main
 git config user.email 'step0@example.invalid'
-git config user.name 'ocrl step0'
+git config user.name 'arl step0'
 
 # Tooling that writes into a worktree will otherwise land you in RECONCILE
 # mid-test, which is a real behaviour but not the one being tested here.
@@ -49,7 +49,7 @@ EOF
 cat >README.md <<'EOF'
 # step0 fixture
 
-A throwaway repository for exercising the opencode-review-loop gate.
+A throwaway repository for exercising the adversarial-review-loop gate.
 EOF
 
 git add -A

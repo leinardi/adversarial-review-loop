@@ -10,7 +10,7 @@ Every activation has `armed_at`. Once `ttl_hours` (default 24) has passed, every
 answers `STALE` instead of the stored status — derived at read time, never a separate
 timer, and it never silently disarms; it blocks and tells you what to do.
 
-The fix is `/opencode-review-loop:resume`, not a fresh `implement`. `resume` refreshes
+The fix is `/adversarial-review-loop:resume`, not a fresh `implement`. `resume` refreshes
 `armed_at` — which is what un-stales it — while `implement` re-baselines from scratch,
 throwing away the phase list and every approval already earned. `resume` is explicitly
 designed to continue a `STALE` activation: it re-verifies the things that actually matter
@@ -48,7 +48,7 @@ instead of demanding the next phase. It adds no new denial: if Claude is told to
 going anyway, nothing stops it. The gate on every commit is exactly as strict either side
 of the pause target; only the Stop-hook's insistence on outstanding phases changes.
 
-`/opencode-review-loop:pause` names the same target mid-flight, and writes nothing else.
+`/adversarial-review-loop:pause` names the same target mid-flight, and writes nothing else.
 Because it grants nothing it needs no clean worktree, unlike `resume --until N`. Two
 consequences of it being that small are worth knowing. It does **not** bump
 `activation_generation`, deliberately: that bump exists to invalidate a decision whose
@@ -128,7 +128,7 @@ Two further consequences worth knowing.
 **There is no remedy afterwards.** A `COMPLETE` activation can never be reviewed
 cumulatively: `finish` refuses one, and so does `resume`. The decision is made at the moment
 the turn ends, not later. If you want the pass, ask for it *before* that —
-`/opencode-review-loop:finish`, which ignores `final_review`.
+`/adversarial-review-loop:finish`, which ignores `final_review`.
 
 **Refusals on this path escalate much faster.** When a completion is refused (the activation
 moved underneath it, the TTL shrank mid-turn, the recorded phase evidence doesn't hold up),
@@ -204,7 +204,7 @@ not a second change of mind.
 **Accepted consequence:** a reviewer that raises a genuinely new, non-repeating objection
 every round never trips this. Nothing here distinguishes real, ongoing progress from an
 unlucky sequence of distinct findings that never happens to repeat — both keep the loop
-running indefinitely. `/opencode-review-loop:accept` is the only bound in that case: it
+running indefinitely. `/adversarial-review-loop:accept` is the only bound in that case: it
 approves the current tree without another review and continues, regardless of how many
 rounds ran or what they disagreed about. If a phase is taking an unreasonable number of
 rounds, that is the exit, not a config knob to make the reviewer stop trying.
@@ -281,7 +281,7 @@ Claude Code process the plugin is enabled in. The original design registered the
 `implement` and `resume` skills' frontmatter instead, and that had a hole: skill hooks
 register *per process*, on invocation. Interrupt a run, quit, `claude --resume` the next
 day, type `continue` — the resumed process has the same session id, `state.json` says
-`ACTIVE`, `/opencode-review-loop:status` agrees, and not one `ocrl` hook is registered.
+`ACTIVE`, `/adversarial-review-loop:status` agrees, and not one `arl` hook is registered.
 Every commit lands ungated while the state claims enforcement (measured 2026-08-30; see
 `tests/STEP0.md`).
 
@@ -291,7 +291,7 @@ call is about, nothing written, exit 0 in well under a second. The path that is 
 is a session with no pointer in a worktree whose `latest` activation is still live — a fresh
 `claude` opened there, or a resumed session that came back under a new id. That session is
 **unbound**: every mutation is denied, naming the activation and telling the user to run
-`/opencode-review-loop:resume`, which binds the session and keeps every approval. The other
+`/adversarial-review-loop:resume`, which binds the session and keeps every approval. The other
 session's document is never touched.
 
 Two more things are needed for that to be fail-closed rather than merely convenient. First,
@@ -302,7 +302,7 @@ is still caught. The skills arm from a prompt-expansion line, and when that line
 run, Claude Code aborts the skill and Claude gets no turn — the skill body's own warning
 never reaches it, and nothing has been persisted for the gate to find. So a
 `UserPromptSubmit` hook (`intent`) records a marker the moment a prompt *starting with*
-`/opencode-review-loop:implement` or `:resume` is submitted, before any expansion, naming
+`/adversarial-review-loop:implement` or `:resume` is submitted, before any expansion, naming
 the worktree it was submitted from. A successful (or failed-but-recorded) arm supersedes it
 by writing the session pointer, which carries the marker's own token; an *unanswered* marker is read as "arming never ran"
 *whatever pointer the session held before* — an earlier activation that ended is still a
@@ -327,7 +327,7 @@ failed arm: whichever side wrote last, the gate is enforcing.
 A marker that exists but cannot be read, names no absolute worktree, or carries no valid
 token is never "no intent" — but neither is it assigned to whatever repository the call
 happens to be in. It denies *everywhere*, records nothing and consumes nothing, and only
-`/opencode-review-loop:stop` (which now passes `--session`) discards it. Otherwise a
+`/adversarial-review-loop:stop` (which now passes `--session`) discards it. Otherwise a
 corrupted marker for repository A would be consumed by a call in repository B, and A would
 go ungated.
 
@@ -347,7 +347,7 @@ process there is nothing left to register twice when `implement` and a same-sess
 A handful of things depend on exactly how Claude Code itself behaves and can't be verified
 from a script — `tests/STEP0.md` is the runbook for those, and as of this writing five
 items remain open: whether any host-provided signal can distinguish a user's own
-`/opencode-review-loop:stop` from the identical command run inside a wrapper script (item
+`/adversarial-review-loop:stop` from the identical command run inside a wrapper script (item
 11), whether a `Stop`-hook's `systemMessage` is guaranteed to reach the user rather than
 just the model (item 12), whether `{"decision":"block"}` has any effect on
 `PostToolUse`/`PostToolUseFailure` (items 13–14), and whether a doubly-registered hook

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from test_commands_arm import _path_without_opencode
 
-from ocrl import reviewer_probe
+from arl import reviewer_probe
 
 
 def _fake_opencode(bindir: Path, script: str) -> None:

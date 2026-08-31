@@ -14,11 +14,11 @@ from pathlib import Path
 import pytest
 from conftest import PLUGIN_ROOT, SCRIPTS_DIR
 
-from ocrl import config as ocrl_config
-from ocrl import paths, state
-from ocrl.atomic import write_private_atomic
-from ocrl.config import Config
-from ocrl.errors import StateLoadError, UnsafePathError
+from arl import config as arl_config
+from arl import paths, state
+from arl.atomic import write_private_atomic
+from arl.config import Config
+from arl.errors import StateLoadError, UnsafePathError
 
 LEGACY_FIXTURE = PLUGIN_ROOT / "tests" / "fixtures" / "state-v1-legacy.json"
 
@@ -30,7 +30,7 @@ SESSION = "sess1"
 def state_env(clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Apply the isolated environment to this process too, since paths reads os.environ."""
     for key in list(os.environ):
-        if key.startswith(("OCRL_", "XDG_")):
+        if key.startswith(("ARL_", "XDG_")):
             monkeypatch.delenv(key, raising=False)
     for key, value in clean_env.items():
         monkeypatch.setenv(key, value)
@@ -38,7 +38,7 @@ def state_env(clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> dic
 
 
 def default_config() -> Config:
-    return ocrl_config.load("", {})
+    return arl_config.load("", {})
 
 
 # -- durability ------------------------------------------------------------
@@ -185,7 +185,7 @@ def test_concurrent_mutations_do_not_lose_an_update(state_env: dict[str, str]) -
     program = (
         "import sys\n"
         f"sys.path.insert(0, {str(SCRIPTS_DIR)!r})\n"
-        "from ocrl.state import State\n"
+        "from arl.state import State\n"
         f"st = State({WORKTREE!r}, {SESSION!r})\n"
         "with st.transaction():\n"
         "    st.update(failures=st.get_int('failures') + 1)\n"
@@ -402,7 +402,7 @@ def test_escalation_survives_concurrent_ordinary_mutations(state_env: dict[str, 
     bump = (
         "import sys\n"
         f"sys.path.insert(0, {str(SCRIPTS_DIR)!r})\n"
-        "from ocrl.state import State\n"
+        "from arl.state import State\n"
         f"st = State({WORKTREE!r}, {SESSION!r})\n"
         "with st.transaction():\n"
         "    st.update(defers=st.get_int('defers') + 1)\n"
@@ -410,7 +410,7 @@ def test_escalation_survives_concurrent_ordinary_mutations(state_env: dict[str, 
     escalate = (
         "import sys\n"
         f"sys.path.insert(0, {str(SCRIPTS_DIR)!r})\n"
-        "from ocrl.state import State\n"
+        "from arl.state import State\n"
         f"st = State({WORKTREE!r}, {SESSION!r})\n"
         "st.needs_human('escalated under contention')\n"
     )
@@ -567,7 +567,7 @@ def test_an_expired_activation_becomes_stale(state_env: dict[str, str], monkeypa
     st = state.State(WORKTREE, SESSION)
     st.new()
     st.update(status="ACTIVE", armed_at=1_000_000)
-    monkeypatch.setattr("ocrl.state.now", lambda: 1_000_000 + 25 * 3600)
+    monkeypatch.setattr("arl.state.now", lambda: 1_000_000 + 25 * 3600)
     assert st.effective_status(default_config()) == "STALE"
 
 
@@ -575,7 +575,7 @@ def test_an_unexpired_activation_keeps_its_status(state_env: dict[str, str], mon
     st = state.State(WORKTREE, SESSION)
     st.new()
     st.update(status="ACTIVE", armed_at=1_000_000)
-    monkeypatch.setattr("ocrl.state.now", lambda: 1_000_000 + 23 * 3600)
+    monkeypatch.setattr("arl.state.now", lambda: 1_000_000 + 23 * 3600)
     assert st.effective_status(default_config()) == "ACTIVE"
 
 
@@ -584,7 +584,7 @@ def test_terminal_statuses_ignore_the_ttl(status: str, state_env: dict[str, str]
     st = state.State(WORKTREE, SESSION)
     st.new()
     st.update(status=status, armed_at=1)
-    monkeypatch.setattr("ocrl.state.now", lambda: 10**9)
+    monkeypatch.setattr("arl.state.now", lambda: 10**9)
     assert st.effective_status(default_config()) == status
 
 
@@ -592,7 +592,7 @@ def test_a_zero_armed_at_never_goes_stale(state_env: dict[str, str], monkeypatch
     st = state.State(WORKTREE, SESSION)
     st.new()
     st.update(status="ARMED", armed_at=0)
-    monkeypatch.setattr("ocrl.state.now", lambda: 10**9)
+    monkeypatch.setattr("arl.state.now", lambda: 10**9)
     assert st.effective_status(default_config()) == "ARMED"
 
 

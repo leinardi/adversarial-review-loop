@@ -17,10 +17,10 @@ import time
 
 import pytest
 
-from ocrl import cmdshape
-from ocrl._vendor import bashlex
-from ocrl._vendor.bashlex import errors as bashlex_errors
-from ocrl.cmdshape import CommandShapeError
+from arl import cmdshape
+from arl._vendor import bashlex
+from arl._vendor.bashlex import errors as bashlex_errors
+from arl.cmdshape import CommandShapeError
 
 # -- the corpus ------------------------------------------------------------
 
@@ -309,18 +309,18 @@ def test_the_loose_detectors(command: str, commit: bool, reset: bool) -> None:
 @pytest.mark.parametrize(
     ("command", "expected"),
     [
-        ("ocrl.sh finish", True),
-        ("/x/y/ocrl.sh deactivate", True),
-        ("ocrl finish", True),
-        ("ocrl.sh resume", True),
-        ("ocrl.sh config", True),
-        ("ocrl.sh accept", True),
-        ("ocrl.sh accept --reason x", True),
-        ("ocrl.sh pause", True),
-        ("ocrl.sh pause 3", True),
-        ("/x/y/ocrl.sh resume --until 2", True),
-        ("ocrl.sh status", False),
-        pytest.param("ocrl.sh finishing", False, id="lookalike-suffix-not-an-escape"),
+        ("arl.sh finish", True),
+        ("/x/y/arl.sh deactivate", True),
+        ("arl finish", True),
+        ("arl.sh resume", True),
+        ("arl.sh config", True),
+        ("arl.sh accept", True),
+        ("arl.sh accept --reason x", True),
+        ("arl.sh pause", True),
+        ("arl.sh pause 3", True),
+        ("/x/y/arl.sh resume --until 2", True),
+        ("arl.sh status", False),
+        pytest.param("arl.sh finishing", False, id="lookalike-suffix-not-an-escape"),
         pytest.param("finish", False, id="bare-word-without-the-entrypoint-is-not-an-escape"),
         ("", False),
     ],
@@ -446,8 +446,8 @@ def _bash_words(text: str) -> list[str]:
         pytest.param(r"g\it", "git", id="backslash"),
         pytest.param("'g'it", "git", id="single-quotes"),
         pytest.param('g"i"t', "git", id="double-quotes"),
-        pytest.param(r"oc\rl.sh", "ocrl.sh", id="escaped-entrypoint"),
-        pytest.param("'o'crl.sh", "ocrl.sh", id="quoted-entrypoint"),
+        pytest.param(r"a\rl.sh", "arl.sh", id="escaped-entrypoint"),
+        pytest.param("'a'rl.sh", "arl.sh", id="quoted-entrypoint"),
     ],
 )
 def test_a_real_bash_reads_the_disguised_word_as_the_real_name(disguised: str, real: str) -> None:
@@ -477,14 +477,14 @@ def test_a_disguised_reset_is_detected(command: str) -> None:
 
 @pytest.mark.parametrize(
     "command",
-    [r"oc\rl.sh finish", "/p/'o'crl.sh deactivate", r"ocrl\.sh finish", r"oc\rl.sh resume", r"oc\rl.sh config", r"oc\rl.sh pause"],
+    [r"a\rl.sh finish", "/p/'a'rl.sh deactivate", r"arl\.sh finish", r"a\rl.sh resume", r"a\rl.sh config", r"a\rl.sh pause"],
 )
 def test_a_disguised_escape_is_detected(command: str) -> None:
     assert cmdshape.is_escape(command)
 
 
 #: The exact path ``arm`` prints for the model to copy. Nothing else is the exception.
-ENTRYPOINT = "/plugin/scripts/ocrl.sh"
+ENTRYPOINT = "/plugin/scripts/arl.sh"
 
 
 @pytest.mark.parametrize(
@@ -492,9 +492,9 @@ ENTRYPOINT = "/plugin/scripts/ocrl.sh"
     [
         pytest.param(f"{ENTRYPOINT} set-phases --phase one", True, id="the-trusted-path"),
         pytest.param(f'{ENTRYPOINT} set-phases --phase "one" --phase "two"', True, id="several-phases"),
-        pytest.param("./ocrl set-phases --phase one", False, id="a-program-the-repo-ships"),
-        pytest.param("ocrl.sh set-phases --phase one", False, id="bare-name-off-PATH"),
-        pytest.param("/elsewhere/ocrl.sh set-phases", False, id="another-copy"),
+        pytest.param("./arl set-phases --phase one", False, id="a-program-the-repo-ships"),
+        pytest.param("arl.sh set-phases --phase one", False, id="bare-name-off-PATH"),
+        pytest.param("/elsewhere/arl.sh set-phases", False, id="another-copy"),
         pytest.param(f"git add -A && git commit -m x && {ENTRYPOINT} set-phases --phase x", False, id="commit-chained-ahead"),
         pytest.param(f"{ENTRYPOINT} set-phases --phase x && git commit -m x", False, id="commit-chained-behind"),
         pytest.param(f"echo {ENTRYPOINT} set-phases", False, id="mentioned-not-invoked"),
@@ -505,9 +505,9 @@ ENTRYPOINT = "/plugin/scripts/ocrl.sh"
     ],
 )
 def test_only_the_trusted_set_phases_command_is_the_armed_exception(command: str, accepted: bool) -> None:
-    """Two bypasses at once: a substring match, and trusting anything named ``ocrl``.
+    """Two bypasses at once: a substring match, and trusting anything named ``arl``.
 
-    The shell matched ``ocrl\\(\\.sh\\)\\?[[:space:]]\\+set-phases`` anywhere in the raw
+    The shell matched ``arl\\(\\.sh\\)\\?[[:space:]]\\+set-phases`` anywhere in the raw
     command, so a commit could ride along in front of it -- and any executable with that name,
     including one the repository under review ships, satisfied it.
     """

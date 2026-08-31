@@ -1,16 +1,19 @@
 {
-  "name": "opencode-review-loop",
-  "description": "Implement an agreed plan with an enforced OpenCode adversarial review loop: every phase commit is gated on an external review.",
-  "version": "0.10.0",
+  "name": "adversarial-review-loop",
+  "description": "Implement an agreed plan with an enforced adversarial review loop: every phase commit is gated on an external review.",
+  "version": "0.11.0",
   "author": {
     "name": "Roberto Leinardi"
   },
-  "homepage": "https://github.com/leinardi/opencode-review-loop",
+  "homepage": "https://github.com/leinardi/adversarial-review-loop",
   "license": "GPL-3.0-or-later",
   "keywords": [
     "review",
-    "opencode",
+    "code-review",
+    "adversarial",
     "hooks",
-    "quality-gate"
+    "quality-gate",
+    "claude-code",
+    "opencode"
   ]
 }

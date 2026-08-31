@@ -1,4 +1,4 @@
-project_name: "opencode-review-loop"
+project_name: "adversarial-review-loop"
 languages:
   - python
 encoding: "utf-8"

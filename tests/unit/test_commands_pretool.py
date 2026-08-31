@@ -1,6 +1,6 @@
 """``pretool`` -- the hook that decides whether a mutation happens.
 
-Everything here drives the real entrypoint through ``scripts/ocrl-bootstrap.py`` with a
+Everything here drives the real entrypoint through ``scripts/arl-bootstrap.py`` with a
 payload on stdin, because the property under test is the whole contract: what lands on
 stdout, what the exit status is, and what the activation says afterwards. A helper returning
 the right verdict while the entrypoint emits the wrong JSON is not a gate.
@@ -18,14 +18,14 @@ import pytest
 from conftest import FAKE_REVIEWER, decision, git, run_bootstrap, run_hook
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
 
-from ocrl import paths
+from arl import paths
 
 SESSION = "s1"
 
 #: The gate's own script, as ``arm`` prints it for the model to copy. ``set-phases`` accepts
 #: this exact path and nothing else, so the tests pin it rather than inherit it.
 PLUGIN_ROOT = "/plugin"
-ENTRYPOINT = f"{PLUGIN_ROOT}/scripts/ocrl.sh"
+ENTRYPOINT = f"{PLUGIN_ROOT}/scripts/arl.sh"
 
 
 # --------------------------------------------------------------------------
@@ -101,7 +101,7 @@ def test_no_pointer_in_a_worktree_nobody_armed_passes(git_repo: Path, clean_env:
 
     assert proc.returncode == 0
     assert proc.stdout == ""
-    assert not list((Path(clean_env["XDG_STATE_HOME"]) / "opencode-review-loop").rglob("state.json"))
+    assert not list((Path(clean_env["XDG_STATE_HOME"]) / "adversarial-review-loop").rglob("state.json"))
 
 
 def test_no_pointer_in_a_worktree_armed_by_another_session_denies(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -114,7 +114,7 @@ def test_no_pointer_in_a_worktree_armed_by_another_session_denies(git_repo: Path
     assert verdict == "deny"
     assert "not bound to it" in reason
     assert f"activation {SESSION}, status ACTIVE" in reason
-    assert "/opencode-review-loop:resume" in reason
+    assert "/adversarial-review-loop:resume" in reason
     assert "Do not implement the plan" in reason
     # Nothing was written: the activation belongs to the other session.
     assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
@@ -167,7 +167,7 @@ def test_no_pointer_with_git_unavailable_denies(git_repo: Path, clean_env: dict[
     assert verdict == "deny"
     assert "could not tell which repository" in reason
     assert "git could not be run" in reason
-    assert not list((Path(env["XDG_STATE_HOME"]) / "opencode-review-loop").rglob("state.json"))
+    assert not list((Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop").rglob("state.json"))
 
 
 def test_no_pointer_with_a_vanished_cwd_denies(git_repo: Path, clean_env: dict[str, str]) -> None:
@@ -250,7 +250,7 @@ def test_an_unusable_session_id_is_not_turned_into_a_state_path(git_repo: Path, 
     proc = run_hook("pretool", payload(git_repo, tool="Write", session="../escape"), cwd=git_repo, env=clean_env)
     assert proc.returncode == 0
     assert proc.stdout == ""
-    root = Path(clean_env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    root = Path(clean_env["XDG_STATE_HOME"]) / "adversarial-review-loop"
     assert not (root / "worktrees" / "escape").exists()
     assert not list(root.rglob("escape*"))
 
@@ -498,15 +498,15 @@ def test_a_non_object_plan_revisions_entry_escalates_rather_than_crashing(git_re
 @pytest.mark.parametrize(
     "command",
     [
-        "ocrl.sh finish",
-        "/some/where/ocrl deactivate",
-        "cd /x && ocrl.sh finish",
-        "ocrl.sh resume",
-        "ocrl.sh config model x",
-        "ocrl.sh accept",
-        "ocrl.sh accept --reason x",
-        "ocrl.sh pause",
-        "ocrl.sh pause 2",
+        "arl.sh finish",
+        "/some/where/arl deactivate",
+        "cd /x && arl.sh finish",
+        "arl.sh resume",
+        "arl.sh config model x",
+        "arl.sh accept",
+        "arl.sh accept --reason x",
+        "arl.sh pause",
+        "arl.sh pause 2",
     ],
 )
 def test_claude_may_not_end_the_loop_itself(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
@@ -523,7 +523,7 @@ def test_the_escape_denial_outranks_a_commit_in_the_same_command(git_repo: Path,
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
 
-    verdict, reason = pretool(git_repo, env, command="git commit -m x && ocrl.sh finish")
+    verdict, reason = pretool(git_repo, env, command="git commit -m x && arl.sh finish")
 
     assert verdict == "deny"
     assert "user-only commands" in reason
@@ -634,7 +634,7 @@ def test_an_approving_review_allows_the_commit_and_records_the_pending_tree(
 
 
 def test_a_blocking_review_denies_and_returns_every_finding(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
 
@@ -647,7 +647,7 @@ def test_a_blocking_review_denies_and_returns_every_finding(git_repo: Path, tmp_
 
 
 def test_a_blocking_review_offers_clarify_with_the_budget_left(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes", OCRL_MAX_CLARIFICATIONS="2")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes", ARL_MAX_CLARIFICATIONS="2")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
 
@@ -660,13 +660,13 @@ def test_a_blocking_review_offers_clarify_with_the_budget_left(git_repo: Path, t
     lines = reason.splitlines()
     hint = next(i for i, line in enumerate(lines) if line.startswith("If a finding is ambiguous"))
     assert lines[hint - 1] == ""
-    assert lines[0].startswith("opencode-review-loop: the reviewer requires changes before phase 1")
+    assert lines[0].startswith("adversarial-review-loop: the reviewer requires changes before phase 1")
     assert reason.index("Clarifications left") < reason.index("Blocking findings")
 
 
 def test_a_blocking_review_drops_the_clarify_offer_when_none_are_left(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Pointing at a command that can only refuse would cost a round to find out."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes", OCRL_MAX_CLARIFICATIONS="0")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes", ARL_MAX_CLARIFICATIONS="0")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
 
@@ -679,7 +679,7 @@ def test_a_blocking_review_drops_the_clarify_offer_when_none_are_left(git_repo: 
 
 def test_a_reviewer_the_gate_contradicts_still_blocks(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """The reviewer's own verdict is advisory; an actionable critical finding blocks anyway."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE="approve-with-critical")
+    env = armed_env(clean_env, ARL_FAKE_MODE="approve-with-critical")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
 
@@ -691,7 +691,7 @@ def test_a_reviewer_the_gate_contradicts_still_blocks(git_repo: Path, tmp_path: 
 
 def test_a_failing_reviewer_counts_and_then_escalates(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """A failed review is never an approval, and a run of them is not an infinite retry."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE="nonzero", OCRL_MAX_FAILURES="1")
+    env = armed_env(clean_env, ARL_FAKE_MODE="nonzero", ARL_MAX_FAILURES="1")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
     command = 'git add -A && git commit -m "x"'
@@ -712,7 +712,7 @@ def test_a_transient_failure_is_counted_separately_from_operational_ones(git_rep
     paces its own retries against ``max_transient_failures`` and leaves the ordinary
     ``failures``/``max_failures`` budget untouched.
     """
-    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited", OCRL_MAX_FAILURES="1")
+    env = armed_env(clean_env, ARL_FAKE_MODE="rate-limited", ARL_MAX_FAILURES="1")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
     command = 'git add -A && git commit -m "x"'
@@ -735,7 +735,7 @@ def test_a_backoff_in_effect_denies_without_invoking_the_reviewer(git_repo: Path
     command that does not exist: if the check were skipped, that attempt would crash rather
     than deny, and if it invoked anyway ``report_seq`` would advance.
     """
-    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited")
+    env = armed_env(clean_env, ARL_FAKE_MODE="rate-limited")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
     command = 'git add -A && git commit -m "x"'
@@ -743,7 +743,7 @@ def test_a_backoff_in_effect_denies_without_invoking_the_reviewer(git_repo: Path
     pretool(git_repo, env, command=command)
     before = read_state(env, git_repo, SESSION)["report_seq"]
 
-    missing_reviewer_env = {**env, "OCRL_REVIEWER_CMD": str(tmp_path / "reviewer-must-not-run")}
+    missing_reviewer_env = {**env, "ARL_REVIEWER_CMD": str(tmp_path / "reviewer-must-not-run")}
     verdict, reason = pretool(git_repo, missing_reviewer_env, command=command)
 
     assert verdict == "deny"
@@ -752,7 +752,7 @@ def test_a_backoff_in_effect_denies_without_invoking_the_reviewer(git_repo: Path
 
 
 def test_exhausting_the_transient_budget_escalates_to_needs_human(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited", OCRL_MAX_TRANSIENT_FAILURES="1")
+    env = armed_env(clean_env, ARL_FAKE_MODE="rate-limited", ARL_MAX_TRANSIENT_FAILURES="1")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
     command = 'git add -A && git commit -m "x"'
@@ -770,7 +770,7 @@ def test_exhausting_the_transient_budget_escalates_to_needs_human(git_repo: Path
 
 
 def test_an_approval_clears_the_transient_counters(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited")
+    env = armed_env(clean_env, ARL_FAKE_MODE="rate-limited")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
     command = 'git add -A && git commit -m "x"'
@@ -779,7 +779,7 @@ def test_an_approval_clears_the_transient_counters(git_repo: Path, tmp_path: Pat
     assert read_state(env, git_repo, SESSION)["transient_failures"] == 1
     patch_state(env, git_repo, retry_not_before=0)
 
-    approving_env = {**env, "OCRL_FAKE_MODE": "approve"}
+    approving_env = {**env, "ARL_FAKE_MODE": "approve"}
     verdict, _ = pretool(git_repo, approving_env, command=command)
 
     assert verdict == "allow"
@@ -800,7 +800,7 @@ def test_a_stale_backoff_never_blocks_a_tree_already_approved(git_repo: Path, tm
     setting ``retry_not_before`` into the future *after* the approval already landed, rather
     than through real concurrency.
     """
-    env = armed_env(clean_env, OCRL_FAKE_MODE="approve")
+    env = armed_env(clean_env, ARL_FAKE_MODE="approve")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
     command = 'git add -A && git commit -m "x"'
@@ -827,7 +827,7 @@ def test_an_approval_superseded_by_a_newer_round_is_refused(git_repo: Path, tmp_
 
     The stand-in reviewer plays the concurrent review's part: it appends the newer round and
     then returns ``APPROVED``. Fails on the old code, which allowed the commit."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE="approve-superseded")
+    env = armed_env(clean_env, ARL_FAKE_MODE="approve-superseded")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
     before = read_state(env, git_repo, SESSION)["approved_trees"]
@@ -851,7 +851,7 @@ def test_a_transient_failure_whose_activation_moved_first_is_not_counted(git_rep
     mutates ``pending_approved_tree`` itself, mid-invocation, the same technique
     ``clarify-mutate`` uses.
     """
-    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited-elsewhere")
+    env = armed_env(clean_env, ARL_FAKE_MODE="rate-limited-elsewhere")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
     command = 'git add -A && git commit -m "x"'
@@ -866,7 +866,7 @@ def test_a_transient_failure_whose_activation_moved_first_is_not_counted(git_rep
 
 
 def test_an_oversized_file_is_never_silently_left_out_of_the_snapshot(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_MAX_FILE_BYTES="16")
+    env = armed_env(clean_env, ARL_MAX_FILE_BYTES="16")
     active(git_repo, tmp_path, env)
     (git_repo / "big.bin").write_bytes(b"x" * 64)
 
@@ -879,7 +879,7 @@ def test_an_oversized_file_is_never_silently_left_out_of_the_snapshot(git_repo: 
 
 def test_a_stale_pending_approval_is_cleared_before_a_new_attempt(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """An approval from an earlier attempt is stale by definition once a new commit is gated."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
     patch_state(env, git_repo, pending_approved_tree="deadbeef", pending_command="git commit -m old")
@@ -1075,9 +1075,9 @@ def test_a_plain_set_phases_is_still_allowed(git_repo: Path, tmp_path: Path, cle
 @pytest.mark.parametrize(
     "command",
     [
-        pytest.param("./ocrl set-phases --phase one", id="a-program-the-repo-ships"),
-        pytest.param("ocrl.sh set-phases --phase one", id="bare-name-off-PATH"),
-        pytest.param("/elsewhere/ocrl.sh set-phases --phase one", id="another-copy"),
+        pytest.param("./arl set-phases --phase one", id="a-program-the-repo-ships"),
+        pytest.param("arl.sh set-phases --phase one", id="bare-name-off-PATH"),
+        pytest.param("/elsewhere/arl.sh set-phases --phase one", id="another-copy"),
     ],
 )
 def test_only_this_gates_own_script_is_the_armed_exception(
@@ -1086,7 +1086,7 @@ def test_only_this_gates_own_script_is_the_armed_exception(
     clean_env: dict[str, str],
     command: str,
 ) -> None:
-    """Matching by basename trusts any executable named ``ocrl`` -- including one the repo ships.
+    """Matching by basename trusts any executable named ``arl`` -- including one the repo ships.
 
     That is an arbitrary program allowed to run at the one moment everything else is denied.
     """
@@ -1119,7 +1119,7 @@ def test_a_disguised_commit_command_still_reaches_the_gate(
     pass and the commit ran with no snapshot and no review. A blocking reviewer is used here
     so the assertion proves the command was actually *reviewed*, not merely denied.
     """
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
 
@@ -1132,8 +1132,8 @@ def test_a_disguised_commit_command_still_reaches_the_gate(
 @pytest.mark.parametrize(
     "command",
     [
-        pytest.param(r"/plugin/scripts/oc\rl.sh finish", id="backslash"),
-        pytest.param("/plugin/scripts/'o'crl.sh deactivate", id="quotes"),
+        pytest.param(r"/plugin/scripts/a\rl.sh finish", id="backslash"),
+        pytest.param("/plugin/scripts/'a'rl.sh deactivate", id="quotes"),
     ],
 )
 def test_a_disguised_escape_is_still_denied(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
@@ -1175,7 +1175,7 @@ def test_an_approval_does_not_land_on_an_activation_that_moved(git_repo: Path, t
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
-    env["OCRL_REVIEWER_CMD"] = str(escalating_reviewer(tmp_path, state_dir(env, git_repo, SESSION) / "state.json"))
+    env["ARL_REVIEWER_CMD"] = str(escalating_reviewer(tmp_path, state_dir(env, git_repo, SESSION) / "state.json"))
 
     verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
 
@@ -1205,7 +1205,7 @@ def escalating_reviewer(tmp_path: Path, state_path: Path) -> Path:
         'd["reason"] = "escalated while the review ran"\n'
         "p.write_text(json.dumps(d))\n"
         "PY\n"
-        "printf 'Fine.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<OCRL-END>>>\\n'\n"
+        "printf 'Fine.\\n\\n<<<ARL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
     return script
@@ -1392,13 +1392,13 @@ def test_an_escalation_does_not_reopen_a_mode_the_user_stopped(git_repo: Path, t
     """Rule 4: the user owns the exits, and a review that fails afterwards may not undo one.
 
     The reviewer stand-in disarms the activation from inside the review -- the window in which
-    a user actually runs ``/opencode-review-loop:stop`` -- and then fails. Escalating over that
+    a user actually runs ``/adversarial-review-loop:stop`` -- and then fails. Escalating over that
     would turn their ``DISARMED`` back into a state that denies every mutation.
     """
-    env = armed(clean_env, OCRL_MAX_FAILURES="0")
+    env = armed(clean_env, ARL_MAX_FAILURES="0")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
-    env["OCRL_REVIEWER_CMD"] = str(stopping_reviewer(tmp_path, state_dir(env, git_repo, SESSION) / "state.json"))
+    env["ARL_REVIEWER_CMD"] = str(stopping_reviewer(tmp_path, state_dir(env, git_repo, SESSION) / "state.json"))
 
     verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
 
@@ -1481,7 +1481,7 @@ def test_a_symlink_into_the_state_root_does_not_bypass_the_guard(git_repo: Path,
     """Containment was decided lexically, so an alias inside the repository shared no prefix."""
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
-    (git_repo / "alias").symlink_to(Path(env["XDG_STATE_HOME"]) / "opencode-review-loop")
+    (git_repo / "alias").symlink_to(Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop")
     target = f"alias/worktrees/{paths.sha256_hex(str(git_repo))}/{SESSION}/state.json"
 
     proc = run_hook(
@@ -1497,8 +1497,8 @@ def test_a_symlink_into_the_state_root_does_not_bypass_the_guard(git_repo: Path,
 
 
 def test_a_relative_state_dir_does_not_bypass_the_guard(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    """``OCRL_STATE_DIR`` is used verbatim, so a relative one never matched an absolute target."""
-    env = armed(clean_env, OCRL_STATE_DIR="relative-state")
+    """``ARL_STATE_DIR`` is used verbatim, so a relative one never matched an absolute target."""
+    env = armed(clean_env, ARL_STATE_DIR="relative-state")
     proc = run_bootstrap(["arm", "--session", SESSION, "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
     assert proc.returncode == 0, proc.stdout
     proc = run_bootstrap(["set-phases", "--phase", "one"], cwd=git_repo, env=env)
@@ -1523,15 +1523,15 @@ def test_a_relative_state_dir_does_not_bypass_the_guard(git_repo: Path, tmp_path
 
 
 def test_a_round_two_medium_outside_the_changed_paths_is_deferred_and_shown(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
     verdict, _ = pretool(git_repo, env, command='git add -A && git commit -m "x"')
     assert verdict == "deny", "round 1: a.txt:1 high"
 
     (git_repo / "other.txt").write_text("round two\n")
-    env["OCRL_FAKE_MODE"] = "medium-file"
-    env["OCRL_FAKE_FILE"] = "new.txt:1"  # in the full diff, unchanged since round 1, never raised
+    env["ARL_FAKE_MODE"] = "medium-file"
+    env["ARL_FAKE_FILE"] = "new.txt:1"  # in the full diff, unchanged since round 1, never raised
     verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
 
     assert verdict == "allow"
@@ -1543,14 +1543,14 @@ def test_a_round_two_medium_outside_the_changed_paths_is_deferred_and_shown(git_
 
 
 def test_a_round_two_medium_in_a_changed_path_still_denies(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env)
     (git_repo / "new.txt").write_text("work\n")
     assert pretool(git_repo, env, command='git add -A && git commit -m "x"')[0] == "deny"
 
     (git_repo / "other.txt").write_text("round two\n")
-    env["OCRL_FAKE_MODE"] = "medium-file"
-    env["OCRL_FAKE_FILE"] = "other.txt:1"
+    env["ARL_FAKE_MODE"] = "medium-file"
+    env["ARL_FAKE_FILE"] = "other.txt:1"
     verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
 
     assert verdict == "deny"

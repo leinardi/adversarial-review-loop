@@ -23,14 +23,14 @@ from typing import IO
 import pytest
 from conftest import FAKE_REVIEWER, git, git_status_ignored
 
-import ocrl
-from ocrl import cli, gitsnap, harness, report, reviewer, state
-from ocrl import config as ocrl_config
-from ocrl.commands import hooks
-from ocrl.config import Config
-from ocrl.harness import opencode as opencode_harness
-from ocrl.reviewer import BundleError, BundleTooLarge, Invocation, Review, ReviewerFailed, Target
-from ocrl.util import now as ocrl_now
+import arl
+from arl import cli, gitsnap, harness, report, reviewer, state
+from arl import config as arl_config
+from arl.commands import hooks
+from arl.config import Config
+from arl.harness import opencode as opencode_harness
+from arl.reviewer import BundleError, BundleTooLarge, Invocation, Review, ReviewerFailed, Target
+from arl.util import now as arl_now
 
 SESSION = "revsess"
 
@@ -69,7 +69,7 @@ MODE_VERDICTS = [
 def review_env(clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Apply the isolated environment to this process too, since paths reads os.environ."""
     for key in list(os.environ):
-        if key.startswith(("OCRL_", "XDG_")):
+        if key.startswith(("ARL_", "XDG_")):
             monkeypatch.delenv(key, raising=False)
     for key, value in clean_env.items():
         monkeypatch.setenv(key, value)
@@ -108,14 +108,14 @@ def assert_descendant_never_ran(marker: Path, *, started: float) -> None:
 
 
 def config_with(**overrides: object) -> Config:
-    return Config({**ocrl_config.DEFAULTS, **overrides})
+    return Config({**arl_config.DEFAULTS, **overrides})
 
 
 def discovery_config(**overrides: object) -> Config:
     """:func:`config_with`, pinned to the harness whose sessions are *discovered*.
 
-    Every test that drives ``OCRL_SESSION_LIST_CMD``, plants a ``ses_…`` pointer or asserts on
-    a listing is exercising ``ocrl.harness.opencode.DiscoveredSessions`` in particular, not
+    Every test that drives ``ARL_SESSION_LIST_CMD``, plants a ``ses_…`` pointer or asserts on
+    a listing is exercising ``arl.harness.opencode.DiscoveredSessions`` in particular, not
     whichever harness ``config.DEFAULTS`` happens to name -- the other strategy pre-assigns its
     ids and makes no listing call at all, so those tests would be asserting on a code path that
     never runs. Pinning it here is what keeps them about the strategy, and what lets the default
@@ -152,7 +152,7 @@ def fake_reviewer_output(tmp_path: Path, mode: str, **env: str) -> Path:
             [str(FAKE_REVIEWER), str(tmp_path), "prompt"],
             stdout=sink,
             stderr=subprocess.STDOUT,
-            env={**os.environ, "OCRL_FAKE_MODE": mode, **env},
+            env={**os.environ, "ARL_FAKE_MODE": mode, **env},
             check=False,
         )
     return out
@@ -274,7 +274,7 @@ def test_argv_honours_pure_and_variant(tmp_path: Path) -> None:
 def test_verify_output_is_attached_last(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`verify.txt` is kept out of `bundle_manifest` precisely so it can stay last, after the
     `context/` files -- `stage_invocation` is what puts it there."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=1, context=True, verify=True)
 
     staged, context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "staged", include_context=True)
@@ -284,7 +284,7 @@ def test_verify_output_is_attached_last(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_plan_revisions_are_attached_in_ascending_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=3)
 
     entries = reviewer.bundle_manifest(bundle, tmp_path, digest, include_context=True)
@@ -302,7 +302,7 @@ def test_plan_revisions_are_attached_in_ascending_order(tmp_path: Path, monkeypa
 def test_plan_revisions_sort_numerically_not_lexically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``rev10`` must not precede ``rev2`` -- a plain lexical sort would put it there. Counting
     contiguously from zero cannot make that mistake, which is why it replaced the sorted glob."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=11)
 
     entries = reviewer.bundle_manifest(bundle, tmp_path, digest, include_context=True)
@@ -780,7 +780,7 @@ def test_the_incremental_diff_is_omitted_not_truncated_past_the_ceiling(activati
                 "verdict": "CHANGES_REQUIRED",
                 "tree": seed_tree,
                 "base": seed_tree,
-                "at": ocrl_now(),
+                "at": arl_now(),
                 "findings": [],
                 "supersedes": [],
             }
@@ -889,7 +889,7 @@ def invoke_fake(tmp_path: Path, mode: str, *, config: Config | None = None, **en
         TARGET,
         run,
         config=config or config_with(),
-        environ={**os.environ, "OCRL_REVIEWER_CMD": str(FAKE_REVIEWER), "OCRL_FAKE_MODE": mode, **env},
+        environ={**os.environ, "ARL_REVIEWER_CMD": str(FAKE_REVIEWER), "ARL_FAKE_MODE": mode, **env},
     )
     return run.out_path
 
@@ -918,7 +918,7 @@ def test_a_missing_reviewer_is_a_failure_not_a_pass(tmp_path: Path) -> None:
             TARGET,
             Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=out),
             config=config_with(),
-            environ={**os.environ, "OCRL_REVIEWER_CMD": str(tmp_path / "does-not-exist")},
+            environ={**os.environ, "ARL_REVIEWER_CMD": str(tmp_path / "does-not-exist")},
         )
     assert str(caught.value) == "the reviewer exited with status 127"
 
@@ -933,7 +933,7 @@ def test_terminal_escapes_are_stripped(tmp_path: Path) -> None:
         TARGET,
         Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=out),
         config=config_with(),
-        environ={**os.environ, "OCRL_REVIEWER_CMD": str(script)},
+        environ={**os.environ, "ARL_REVIEWER_CMD": str(script)},
     )
     assert out.read_bytes() == PLAIN_VERDICT
 
@@ -955,7 +955,7 @@ def test_a_timed_out_reviewers_partial_output_is_still_kept(tmp_path: Path) -> N
             TARGET,
             Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=out),
             config=config_with(timeout_sec=1),
-            environ={**os.environ, "OCRL_REVIEWER_CMD": str(script)},
+            environ={**os.environ, "ARL_REVIEWER_CMD": str(script)},
         )
     assert out.read_text() == "half an answer\n"
 
@@ -988,7 +988,7 @@ def test_a_timeout_kills_what_the_reviewer_spawned(tmp_path: Path) -> None:
             TARGET,
             Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=tmp_path / "reviewer.out"),
             config=config_with(timeout_sec=1),
-            environ={**os.environ, "OCRL_REVIEWER_CMD": str(spawner(tmp_path, marker))},
+            environ={**os.environ, "ARL_REVIEWER_CMD": str(spawner(tmp_path, marker))},
         )
     assert_descendant_never_ran(marker, started=started)
 
@@ -1010,7 +1010,7 @@ def test_a_timeout_kills_a_descendant_that_ignores_sigterm(tmp_path: Path, deaf:
             TARGET,
             Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=tmp_path / "reviewer.out"),
             config=config_with(timeout_sec=1),
-            environ={**os.environ, "OCRL_REVIEWER_CMD": str(spawner(tmp_path, marker, deaf=deaf, name=f"deaf-{deaf}.sh"))},
+            environ={**os.environ, "ARL_REVIEWER_CMD": str(spawner(tmp_path, marker, deaf=deaf, name=f"deaf-{deaf}.sh"))},
         )
     assert_descendant_never_ran(marker, started=started)
 
@@ -1147,8 +1147,8 @@ def test_a_missing_out_path_falls_back_to_operational(tmp_path: Path) -> None:
 
 
 def test_run_invocation_classifies_a_timeout_as_transient(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OCRL_REVIEWER_CMD", str(FAKE_REVIEWER))
-    monkeypatch.setenv("OCRL_FAKE_MODE", "slow")
+    monkeypatch.setenv("ARL_REVIEWER_CMD", str(FAKE_REVIEWER))
+    monkeypatch.setenv("ARL_FAKE_MODE", "slow")
     review, invoked = reviewer._run_invocation(TARGET, invocation(tmp_path), config=config_with(timeout_sec=1))
     assert invoked is False
     assert review.verdict == "OP_FAILURE"
@@ -1156,8 +1156,8 @@ def test_run_invocation_classifies_a_timeout_as_transient(tmp_path: Path, monkey
 
 
 def test_run_invocation_classifies_a_plain_nonzero_exit_as_operational(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OCRL_REVIEWER_CMD", str(FAKE_REVIEWER))
-    monkeypatch.setenv("OCRL_FAKE_MODE", "nonzero")
+    monkeypatch.setenv("ARL_REVIEWER_CMD", str(FAKE_REVIEWER))
+    monkeypatch.setenv("ARL_FAKE_MODE", "nonzero")
     review, invoked = reviewer._run_invocation(TARGET, invocation(tmp_path), config=config_with())
     assert invoked is False
     assert review.verdict == "OP_FAILURE"
@@ -1196,15 +1196,15 @@ def test_missing_markers_are_a_failure(tmp_path: Path) -> None:
     out.write_text("VERDICT APPROVED\n")
     parsed = reviewer.parse(out, config=config_with())
     assert parsed.verdict == "OP_FAILURE"
-    assert "missing the <<<OCRL-FINDINGS>>> / <<<OCRL-END>>> markers" in parsed.error
+    assert "missing the <<<ARL-FINDINGS>>> / <<<ARL-END>>> markers" in parsed.error
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        b"prose\n<<<OCRL-FINDINGS>>>\nFINDING severity=critical actionable=n\0o file=a.txt:7 | Nil deref\nVERDICT APPROVED\n<<<OCRL-END>>>\n",
-        b"prose\n<<<OCRL-FINDINGS>>>\nVERDICT APPROVED\n<<<OCRL-END>>>\n\0",
-        b"\0prose\n<<<OCRL-FINDINGS>>>\nVERDICT APPROVED\n<<<OCRL-END>>>\n",
+        b"prose\n<<<ARL-FINDINGS>>>\nFINDING severity=critical actionable=n\0o file=a.txt:7 | Nil deref\nVERDICT APPROVED\n<<<ARL-END>>>\n",
+        b"prose\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>\n\0",
+        b"\0prose\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>\n",
     ],
 )
 def test_output_carrying_a_nul_byte_is_refused(tmp_path: Path, payload: bytes) -> None:
@@ -1225,7 +1225,7 @@ def test_output_carrying_a_nul_byte_is_refused(tmp_path: Path, payload: bytes) -
 
 def test_a_nul_byte_inside_a_finding_line_is_refused(tmp_path: Path) -> None:
     out = tmp_path / "o"
-    out.write_bytes(b"prose\n<<<OCRL-FINDINGS>>>\nFINDING severity=critical actionable=n\0o file=a | x\nVERDICT APPROVED\n<<<OCRL-END>>>\n")
+    out.write_bytes(b"prose\n<<<ARL-FINDINGS>>>\nFINDING severity=critical actionable=n\0o file=a | x\nVERDICT APPROVED\n<<<ARL-END>>>\n")
 
     mine = reviewer.parse(out, config=config_with())
 
@@ -1247,7 +1247,7 @@ def test_missing_markers_carry_kind_contract(tmp_path: Path) -> None:
 
 def test_a_nul_refusal_carries_kind_contract(tmp_path: Path) -> None:
     out = tmp_path / "o"
-    out.write_bytes(b"\0prose\n<<<OCRL-FINDINGS>>>\nVERDICT APPROVED\n<<<OCRL-END>>>\n")
+    out.write_bytes(b"\0prose\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>\n")
     assert reviewer.parse(out, config=config_with()).kind == "contract"
 
 
@@ -1262,7 +1262,7 @@ def test_output_that_is_not_valid_utf8_is_refused(tmp_path: Path) -> None:
     could not be encoded when ``state.json`` is saved and would crash the whole review. A
     UTF-8 text protocol that is not valid UTF-8 fails the contract, like a NUL byte."""
     out = tmp_path / "o"
-    out.write_bytes(b"prose\n<<<OCRL-FINDINGS>>>\nFINDING severity=high actionable=yes file=a | bad \xff byte\nVERDICT APPROVED\n<<<OCRL-END>>>\n")
+    out.write_bytes(b"prose\n<<<ARL-FINDINGS>>>\nFINDING severity=high actionable=yes file=a | bad \xff byte\nVERDICT APPROVED\n<<<ARL-END>>>\n")
 
     parsed = reviewer.parse(out, config=config_with())
 
@@ -1274,12 +1274,12 @@ def test_a_non_utf8_review_appends_no_round_history_and_still_reports(activation
     script = tmp_path / "bad-utf8-reviewer.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
-        "printf 'p\\n\\n<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf 'p\\n\\n<<<ARL-FINDINGS>>>\\n'\n"
         r"printf 'FINDING severity=high actionable=yes file=a | \xff\n'" + "\n"
-        "printf 'VERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+        "printf 'VERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    os.environ["ARL_REVIEWER_CMD"] = str(script)
 
     review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
 
@@ -1406,10 +1406,10 @@ def test_two_marker_blocks_never_approve(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "marker_line",
     [
-        "prose <<<OCRL-FINDINGS>>> trailing",
-        "<<<OCRL-FINDINGS>>> trailing",
-        "> <<<OCRL-FINDINGS>>>",
-        "`<<<OCRL-FINDINGS>>>`",
+        "prose <<<ARL-FINDINGS>>> trailing",
+        "<<<ARL-FINDINGS>>> trailing",
+        "> <<<ARL-FINDINGS>>>",
+        "`<<<ARL-FINDINGS>>>`",
     ],
 )
 def test_a_marker_buried_in_a_line_does_not_open_the_block(tmp_path: Path, marker_line: str) -> None:
@@ -1420,7 +1420,7 @@ def test_a_marker_buried_in_a_line_does_not_open_the_block(tmp_path: Path, marke
     assert "missing the" in parsed.error
 
 
-@pytest.mark.parametrize("marker_line", ["<<<OCRL-END>>> and more", "text <<<OCRL-END>>>"])
+@pytest.mark.parametrize("marker_line", ["<<<ARL-END>>> and more", "text <<<ARL-END>>>"])
 def test_a_buried_end_marker_does_not_close_the_block(tmp_path: Path, marker_line: str) -> None:
     parsed = parse_text(tmp_path, f"prose\n{reviewer.FINDINGS_MARKER}\nVERDICT APPROVED\n{marker_line}\n")
     assert parsed.verdict == "OP_FAILURE"
@@ -1582,8 +1582,8 @@ def test_a_carriage_return_does_not_split_a_finding(tmp_path: Path) -> None:
 
 
 def execute_fake(activation: state.State, repo: Path, mode: str, *, config: Config | None = None, scope: str = "phase") -> Review:
-    os.environ["OCRL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
-    os.environ["OCRL_FAKE_MODE"] = mode
+    os.environ["ARL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
+    os.environ["ARL_FAKE_MODE"] = mode
     return reviewer.execute(target_for(repo, scope=scope), state=activation, config=config or config_with())
 
 
@@ -1673,7 +1673,7 @@ def test_a_round_records_what_it_cost_when_the_harness_reported_it() -> None:
 
 
 def test_a_round_with_no_reported_cost_records_no_usage_key(activation: state.State, git_repo: Path) -> None:
-    """The `OCRL_REVIEWER_CMD` seam makes no model call, so there is nothing to account for --
+    """The `ARL_REVIEWER_CMD` seam makes no model call, so there is nothing to account for --
     and an absent key is what `status` reads as "this round's cost was never reported"."""
     assert reviewer._usage_record(Review()) == {}
 
@@ -1701,12 +1701,12 @@ def test_a_finding_detail_with_a_unicode_line_separator_stays_one_record(activat
     script = tmp_path / "u2028-reviewer.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
-        "printf 'Look.\\n\\n<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf 'Look.\\n\\n<<<ARL-FINDINGS>>>\\n'\n"
         "printf 'FINDING severity=high actionable=yes file=a.txt:1 | first line\\u2028second line\\n'\n"
-        "printf 'VERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+        "printf 'VERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    os.environ["ARL_REVIEWER_CMD"] = str(script)
 
     review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
     assert review.verdict == "CHANGES_REQUIRED"
@@ -1747,8 +1747,8 @@ def test_the_cold_confirmation_verdict_is_the_one_recorded(activation: state.Sta
     session_id = "ses_deadbeef01"
     row = {"id": session_id, "title": title, "created": _future_ms(), "directory": str(git_repo)}
 
-    os.environ["OCRL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     reviewer.execute(target, state=activation, config=cold_config)
     second = reviewer.execute(target_for(git_repo), state=activation, config=cold_config)
@@ -1775,8 +1775,8 @@ def test_by_default_a_warm_approval_is_acted_on_without_a_second_call(
     session_id = "ses_deadbeef01"
     row = {"id": session_id, "title": title, "created": _future_ms(), "directory": str(git_repo)}
 
-    os.environ["OCRL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     seen: list[Invocation] = []
     real = reviewer._run_invocation
@@ -1835,7 +1835,7 @@ def test_the_supersedes_grammar_rejects_a_malformed_line(line: str) -> None:
 
 
 def _block(*body: str) -> bytes:
-    return ("Prose first.\n\n<<<OCRL-FINDINGS>>>\n" + "".join(f"{line}\n" for line in body) + "<<<OCRL-END>>>\n").encode()
+    return ("Prose first.\n\n<<<ARL-FINDINGS>>>\n" + "".join(f"{line}\n" for line in body) + "<<<ARL-END>>>\n").encode()
 
 
 def test_a_supersedes_line_is_recorded_and_never_clears_a_blocking_finding(tmp_path: Path) -> None:
@@ -1880,12 +1880,12 @@ def test_a_final_review_never_records_supersedes_end_to_end(activation: state.St
     script = tmp_path / "final-supersedes.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
-        "printf 'Look.\\n\\n<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf 'Look.\\n\\n<<<ARL-FINDINGS>>>\\n'\n"
         "printf 'SUPERSEDES round=1 file=a.txt:1 | should not be accepted\\n'\n"
-        "printf 'VERDICT APPROVED\\n<<<OCRL-END>>>\\n'\n"
+        "printf 'VERDICT APPROVED\\n<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    os.environ["ARL_REVIEWER_CMD"] = str(script)
     review = reviewer.execute(target_for(git_repo, scope="final"), state=activation, config=config_with())
     assert review.verdict == "OP_FAILURE"
 
@@ -1991,7 +1991,7 @@ def _scripted_reviewer(tmp_path: Path, name: str, contract: str) -> None:
     script = tmp_path / f"{name}.sh"
     script.write_text(f"#!/usr/bin/env bash\nprintf '%b' '{contract}'\n")
     script.chmod(0o755)
-    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    os.environ["ARL_REVIEWER_CMD"] = str(script)
 
 
 def _run_scripted(activation: state.State, repo: Path, tmp_path: Path, name: str, contract: str) -> Review:
@@ -2001,10 +2001,10 @@ def _run_scripted(activation: state.State, repo: Path, tmp_path: Path, name: str
     return reviewer.execute(target_for(repo), state=activation, config=config_with())
 
 
-_ROUND_1 = "Looks off.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=warn.py:1 | needs warn-before\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n"
-_ROUND_2 = "Different concern.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=other.py:1 | needs something else\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n"
-_ROUND_3 = "Back to the first concern.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=warn.py:9 | needs warn-before after all\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n"
-_APPROVES = "All good.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<OCRL-END>>>\\n"
+_ROUND_1 = "Looks off.\\n\\n<<<ARL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=warn.py:1 | needs warn-before\\nVERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n"
+_ROUND_2 = "Different concern.\\n\\n<<<ARL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=other.py:1 | needs something else\\nVERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n"
+_ROUND_3 = "Back to the first concern.\\n\\n<<<ARL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=warn.py:9 | needs warn-before after all\\nVERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n"
+_APPROVES = "All good.\\n\\n<<<ARL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<ARL-END>>>\\n"
 
 
 def test_review_oscillating_is_set_once_a_finding_reappears(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
@@ -2055,20 +2055,20 @@ def test_the_context_files_oscillating_section_only_ever_sees_rounds_before_the_
 # Phase 5: stall detection
 # --------------------------------------------------------------------------
 
-_STUCK = "Same problem again.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=stuck.py:1 | still wrong\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n"
+_STUCK = "Same problem again.\\n\\n<<<ARL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=stuck.py:1 | still wrong\\nVERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n"
 
 
 def test_a_persisting_anchor_escalates_without_invoking_the_reviewer(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
     """Three consecutive rounds raising the same anchor (``stall_rounds`` default 3) trips the
     check on the fourth attempt -- and the reviewer must never run for it: pointing
-    ``OCRL_REVIEWER_CMD`` at a nonexistent binary is what proves that, not merely a verdict."""
+    ``ARL_REVIEWER_CMD`` at a nonexistent binary is what proves that, not merely a verdict."""
     _run_scripted(activation, git_repo, tmp_path, "round1", _STUCK)
     _run_scripted(activation, git_repo, tmp_path, "round2", _STUCK)
     _run_scripted(activation, git_repo, tmp_path, "round3", _STUCK)
     before_seq = activation.get_int("report_seq")
     assert before_seq == 3
 
-    os.environ["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
+    os.environ["ARL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
     review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
 
     assert review.verdict == "NEEDS_HUMAN"
@@ -2117,12 +2117,12 @@ def test_a_concurrently_completed_round_overrides_this_invocations_own_approval(
         "p.write_text(json.dumps(d))\n"
         "PY\n"
         "printf 'Looks fine to me now.\\n\\n'\n"
-        "printf '<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf '<<<ARL-FINDINGS>>>\\n'\n"
         "printf 'VERDICT APPROVED\\n'\n"
-        "printf '<<<OCRL-END>>>\\n'\n"
+        "printf '<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    os.environ["ARL_REVIEWER_CMD"] = str(script)
 
     # `stall_rounds` pinned to 2 so round 1 plus the concurrently injected round are a stall
     # on their own: what is under test is the race, not where the threshold happens to sit.
@@ -2188,12 +2188,12 @@ def test_the_stored_report_reflects_the_override_even_when_only_the_late_authori
         "p.write_text(json.dumps(d))\n"
         "PY\n"
         "printf 'Looks fine to me now.\\n\\n'\n"
-        "printf '<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf '<<<ARL-FINDINGS>>>\\n'\n"
         "printf 'VERDICT APPROVED\\n'\n"
-        "printf '<<<OCRL-END>>>\\n'\n"
+        "printf '<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    os.environ["ARL_REVIEWER_CMD"] = str(script)
 
     # Pinned to 2 for the same reason as the lock-free variant above: round 1 plus the
     # injected round are the stall, and the threshold is not what is under test.
@@ -2247,7 +2247,7 @@ def test_releasing_lets_a_fresh_claim_through(activation: state.State, git_repo:
 def test_an_expired_claim_is_reclaimable(activation: state.State, git_repo: Path) -> None:
     target = target_for(git_repo)
     config = config_with(timeout_sec=1)
-    activation.data["active_review"] = {target.label: {"generation": 0, "claimed_at": ocrl_now() - 100_000, "claim_id": "dead-token"}}
+    activation.data["active_review"] = {target.label: {"generation": 0, "claimed_at": arl_now() - 100_000, "claim_id": "dead-token"}}
     activation.save()
 
     with activation.transaction():
@@ -2273,7 +2273,7 @@ def test_the_active_review_window_survives_a_cold_confirmations_own_timeout(acti
 
     aged = old_window + 60  # past the session pointer's own window
     assert aged < new_window, "the test's own aging must still land inside the wider window"
-    activation.data["active_review"] = {target.label: {"generation": 0, "claimed_at": ocrl_now() - aged, "claim_id": "still-alive"}}
+    activation.data["active_review"] = {target.label: {"generation": 0, "claimed_at": arl_now() - aged, "claim_id": "still-alive"}}
     activation.save()
 
     with activation.transaction():
@@ -2320,7 +2320,7 @@ def test_a_second_overlapping_execute_is_refused_without_invoking_and_a_retry_af
         held = reviewer._claim_active_review(activation, target, config)
     assert held is not None
 
-    os.environ["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
+    os.environ["ARL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
     review = reviewer.execute(target, state=activation, config=config)
 
     assert review.verdict == "OP_FAILURE"
@@ -2367,7 +2367,7 @@ def test_two_reviews_that_both_finish_before_either_finalizes_do_not_both_author
         claim_id = f"claim{label}"
         with activation.transaction():
             activation.data["active_review"] = {
-                "phase1": {"generation": activation.get_int("activation_generation"), "claimed_at": ocrl_now(), "claim_id": claim_id}
+                "phase1": {"generation": activation.get_int("activation_generation"), "claimed_at": arl_now(), "claim_id": claim_id}
             }
         return reviewer._ReviewRun(
             target=target,
@@ -2415,7 +2415,7 @@ def test_an_oscillating_anchor_alone_also_trips_the_stall_check(activation: stat
     before_seq = activation.get_int("report_seq")
     assert before_seq == 3
 
-    os.environ["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
+    os.environ["ARL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
     review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
 
     assert review.verdict == "NEEDS_HUMAN"
@@ -2427,10 +2427,10 @@ def test_four_distinct_anchors_never_stall_and_the_reviewer_runs_every_round(act
     """The deliberate design choice: a genuinely non-repeating sequence of findings has no
     cap. A future change that quietly adds one must fail here."""
     scripts = [
-        "Problem A.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=a.py:1 | problem a\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n",
-        "Problem B.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=b.py:1 | problem b\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n",
-        "Problem C.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=c.py:1 | problem c\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n",
-        "Problem D.\\n\\n<<<OCRL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=d.py:1 | problem d\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n",
+        "Problem A.\\n\\n<<<ARL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=a.py:1 | problem a\\nVERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n",
+        "Problem B.\\n\\n<<<ARL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=b.py:1 | problem b\\nVERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n",
+        "Problem C.\\n\\n<<<ARL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=c.py:1 | problem c\\nVERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n",
+        "Problem D.\\n\\n<<<ARL-FINDINGS>>>\\nFINDING severity=medium actionable=yes file=d.py:1 | problem d\\nVERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n",
     ]
     for index, contract in enumerate(scripts, start=1):
         review = _run_scripted(activation, git_repo, tmp_path, f"round{index}", contract)
@@ -2456,7 +2456,7 @@ def test_a_final_scope_review_is_never_stalled(activation: state.State, git_repo
         script = tmp_path / f"{name}.sh"
         script.write_text(f"#!/usr/bin/env bash\nprintf '%b' '{contract}'\n")
         script.chmod(0o755)
-        os.environ["OCRL_REVIEWER_CMD"] = str(script)
+        os.environ["ARL_REVIEWER_CMD"] = str(script)
         return reviewer.execute(target_for(git_repo, scope="final"), state=activation, config=config_with())
 
     run("f1", _STUCK)
@@ -2470,7 +2470,7 @@ def test_a_final_scope_review_is_never_stalled(activation: state.State, git_repo
 def test_review_argv_attaches_prior_rounds_after_the_plan_revisions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Under the state root, because `context_attachments` proves containment there before it
     # will hand a path to `-f` -- see `test_a_context_attachment_below_a_symlink_is_refused`.
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     # Two revisions, because one is not attached at all -- an unrevised plan is carried by
     # `range.txt`. The ordering this asserts only exists once there is a revision attachment.
     bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=2, context=True)
@@ -2484,7 +2484,7 @@ def test_review_argv_attaches_prior_rounds_after_the_plan_revisions(tmp_path: Pa
 
 
 def test_a_cold_confirmation_stages_no_context_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=1, context=True)
 
     warm, warm_context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "warm", include_context=True)
@@ -2505,8 +2505,8 @@ def test_confirm_cold_runs_a_context_free_bundle_scoped_invocation(
     label = f"{activation.get_int('report_seq') + 1:03d}"
     title = reviewer._unique_title(activation, target, label)
     row = {"id": "ses_deadbeef01", "title": title, "created": _future_ms(), "directory": str(git_repo)}
-    os.environ["OCRL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     seen: list[Invocation] = []
     real = reviewer._run_invocation
@@ -2536,7 +2536,7 @@ def test_a_fresh_approval_shown_prior_rounds_is_still_cold_confirmed(
     let exactly those rounds skip it, which is not a distinction the key's own threat model
     makes.
 
-    No ``OCRL_SESSION_LIST_CMD`` here, so continuity genuinely does not hold. Fails on the old
+    No ``ARL_SESSION_LIST_CMD`` here, so continuity genuinely does not hold. Fails on the old
     code, which found no cold invocation at all."""
     cold_config = config_with(cold_confirm=True)
     _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
@@ -2554,7 +2554,7 @@ def test_a_fresh_approval_shown_prior_rounds_is_still_cold_confirmed(
     _scripted_reviewer(tmp_path, "round2", _APPROVES)
     review = reviewer.execute(target_for(git_repo), state=activation, config=cold_config)
 
-    assert "OCRL_SESSION_LIST_CMD" not in os.environ, "this round had no continuity to lose"
+    assert "ARL_SESSION_LIST_CMD" not in os.environ, "this round had no continuity to lose"
     assert [run for run in seen if run.session_id] == [], "round 2 ran fresh, with no -s"
     assert list(context_dir.glob("002-prior-rounds.txt")), "round 2 was shown round 1's findings"
     cold = [run for run in seen if run.cold]
@@ -2593,12 +2593,12 @@ def test_context_vanishing_mid_review_does_not_skip_the_cold_confirmation(
         "#!/usr/bin/env bash\n"
         f"rm -f {str(context_dir)!r}/*-prior-rounds.txt\n"
         "printf 'All good.\\n\\n'\n"
-        "printf '<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf '<<<ARL-FINDINGS>>>\\n'\n"
         "printf 'VERDICT APPROVED\\n'\n"
-        "printf '<<<OCRL-END>>>\\n'\n"
+        "printf '<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    os.environ["ARL_REVIEWER_CMD"] = str(script)
 
     review = reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True))
 
@@ -2639,7 +2639,7 @@ def test_a_context_attachment_below_a_symlinked_directory_is_refused(tmp_path: P
     directories above it, so a ``context/`` planted as a link to somewhere else entirely leaves
     an ordinary regular file at the end of the path -- and the reviewer provider receives it.
     Fails on the old code, which attached the planted path."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path / "state"))
     secrets_dir = tmp_path / "elsewhere"
     secrets_dir.mkdir()
     (secrets_dir / "002-prior-rounds.txt").write_text("id_rsa")
@@ -2654,7 +2654,7 @@ def test_a_context_attachment_below_a_symlinked_directory_is_refused(tmp_path: P
 
 
 def test_a_context_attachment_that_is_itself_a_symlink_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path / "state"))
     secret = tmp_path / "id_rsa"
     secret.write_text("PRIVATE KEY")
 
@@ -2735,7 +2735,7 @@ def test_a_planted_diff_chunk_never_reaches_the_main_review(tmp_path: Path, monk
     arbitrary local file rode straight into the provider prompt.
 
     Fails on the old code, which attached the plant."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=1)
     secret = tmp_path / "id_rsa"
     secret.write_text("PRIVATE KEY")
@@ -2750,7 +2750,7 @@ def test_a_planted_diff_chunk_never_reaches_the_main_review(tmp_path: Path, monk
 
 def test_a_planted_plan_revision_never_reaches_the_main_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Same shape, the other glob: ``plan.rev*.md`` was globbed too."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=1)
     (bundle / "plan.rev7.md").write_text("not written by build_bundle")
 
@@ -2762,7 +2762,7 @@ def test_a_planted_plan_revision_never_reaches_the_main_review(tmp_path: Path, m
 def test_a_bundle_missing_a_manifested_chunk_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`range.txt` alone is not a bundle: a verdict formed on less evidence than was written
     is not the verdict the gate reserved a sequence for."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=2)
     (bundle / "changes.01.diff").unlink()
 
@@ -2773,7 +2773,7 @@ def test_a_bundle_missing_a_manifested_chunk_is_refused(tmp_path: Path, monkeypa
 def test_a_symlinked_bundle_directory_is_refused_on_the_main_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every file *below* a symlinked ``bundles/<seq>/`` is an ordinary regular file, so only
     walking the components catches it -- and the main review must catch it, not just clarify."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     planted = tmp_path / "planted"
     planted.mkdir()
     (planted / "range.txt").write_text("someone else's range")
@@ -2824,7 +2824,7 @@ def test_substituted_diff_content_is_refused_even_though_it_is_a_plain_file(tmp_
     reviewer would be judging something other than what was generated.
 
     Fails on the old code, which staged the substituted bytes and sent them."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=1)
 
     (bundle / "changes.00.diff").write_text("a completely different diff")
@@ -2840,7 +2840,7 @@ def test_a_rewritten_manifest_is_refused_against_the_recorded_digest(tmp_path: P
 
     Here the attacker shortens the evidence and reissues a matching manifest, which is exactly
     the "valid shorter manifest" case."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=2)
 
     (bundle / "changes.01.diff").unlink()
@@ -2856,7 +2856,7 @@ def test_a_rewritten_manifest_is_refused_against_the_recorded_digest(tmp_path: P
 def test_dropping_the_trailing_context_and_verify_attachments_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Deleting trailing attachments used to leave a well-formed, shorter set. The manifest
     names them, so their absence is now a failure rather than a quietly smaller review."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=1, context=True, verify=True)
 
     (bundle / "verify.txt").unlink()
@@ -2881,7 +2881,7 @@ def test_the_round_records_the_bundle_digest_it_was_judged_from(activation: stat
 def test_correcting_the_round_line_reissues_the_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`_downgrade_bundle_round` is the one place the gate edits a bundle after hashing it.
     Leaving the manifest alone would make its own correction look exactly like tampering."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=1)
     (bundle / "range.txt").write_text("round: 2\n")
     digest = _seal(bundle, tmp_path, total=1, revisions=0)
@@ -2909,7 +2909,7 @@ def test_a_verify_cmd_that_rewrites_the_evidence_fails_the_review(activation: st
     (git_repo / "a.txt").write_text("the real, malicious change\n")
     # Reaches the bundle exactly as a hostile repo config would: from the environment the gate
     # itself runs under. Nothing here changes how `state_root()` resolves.
-    hostile = 'printf \'benign\\n\' > "$(ls -d "$XDG_STATE_HOME"/opencode-review-loop/worktrees/*/*/bundles/001)"/changes.00.diff'
+    hostile = 'printf \'benign\\n\' > "$(ls -d "$XDG_STATE_HOME"/adversarial-review-loop/worktrees/*/*/bundles/001)"/changes.00.diff'
 
     review = execute_fake(activation, git_repo, "approve", config=config_with(verify_cmd=hostile))
 
@@ -2935,7 +2935,7 @@ def test_correcting_the_round_line_does_not_rebless_other_attachments(tmp_path: 
     """Rehashing the whole manifest on the gate's own `range.txt` correction would launder
     anything else that had changed since the bundle was sealed -- the same "hash after the
     untrusted step" mistake, in a second place. Only the corrected row may move."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, _digest = _intact_bundle(tmp_path, chunks=1)
     (bundle / "range.txt").write_text("round: 2\n")
     digest = _seal(bundle, tmp_path, total=1, revisions=0)
@@ -3004,7 +3004,7 @@ def test_the_round_line_correction_refuses_a_bundle_that_no_longer_matches_its_d
     verify the manifest against the digest this review was issued and decline.
 
     Fails on the old code, which returned a fresh digest over the attacker's manifest."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, _built = _intact_bundle(tmp_path, chunks=1)
     (bundle / "range.txt").write_text("round: 2\n")
     issued = _seal(bundle, tmp_path, total=1, revisions=0)
@@ -3024,7 +3024,7 @@ def test_the_round_line_correction_refuses_a_bundle_that_no_longer_matches_its_d
 def test_the_round_line_correction_refuses_a_tampered_range_txt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The other half: content injected into ``range.txt`` must not survive the round-line
     substitution and be rehashed as legitimate."""
-    monkeypatch.setenv("OCRL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, _built = _intact_bundle(tmp_path, chunks=1)
     (bundle / "range.txt").write_text("round: 2\n")
     issued = _seal(bundle, tmp_path, total=1, revisions=0)
@@ -3077,7 +3077,7 @@ def test_a_real_base_tree_still_diffs_normally(activation: state.State, git_repo
 
 
 def continuity_reviewer(tmp_path: Path) -> Path:
-    """Approves iff told it is continuing a session, via ``OCRL_SESSION_ID`` -- the env hook
+    """Approves iff told it is continuing a session, via ``ARL_SESSION_ID`` -- the env hook
     ``invoke`` sets on the stub path when ``run.session_id`` is non-empty. Drives the
     cold-approval invariant deterministically: the continued round approves, the cold
     confirmation (which never carries a session id) does not.
@@ -3085,12 +3085,12 @@ def continuity_reviewer(tmp_path: Path) -> Path:
     script = tmp_path / "continuity-reviewer.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
-        'if [ -n "${OCRL_SESSION_ID:-}" ]; then\n'
-        "    printf 'Continuing.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<OCRL-END>>>\\n'\n"
+        'if [ -n "${ARL_SESSION_ID:-}" ]; then\n'
+        "    printf 'Continuing.\\n\\n<<<ARL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<ARL-END>>>\\n'\n"
         "else\n"
-        "    printf 'Fresh or cold.\\n\\n<<<OCRL-FINDINGS>>>\\n"
+        "    printf 'Fresh or cold.\\n\\n<<<ARL-FINDINGS>>>\\n"
         "FINDING severity=high actionable=yes file=a.txt:1 | still there\\n"
-        "VERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+        "VERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n'\n"
         "fi\n"
     )
     script.chmod(0o755)
@@ -3098,7 +3098,7 @@ def continuity_reviewer(tmp_path: Path) -> Path:
 
 
 def session_list_script(tmp_path: Path, rows: list[dict[str, object]], *, name: str = "session-list.sh") -> Path:
-    """A stand-in for ``opencode session list --format json``, wired via ``OCRL_SESSION_LIST_CMD``."""
+    """A stand-in for ``opencode session list --format json``, wired via ``ARL_SESSION_LIST_CMD``."""
     script = tmp_path / name
     script.write_text(f"#!/usr/bin/env bash\ncat <<'JSON'\n{json.dumps(rows)}\nJSON\n")
     script.chmod(0o755)
@@ -3118,7 +3118,7 @@ def generation_bumping_reviewer(tmp_path: Path, state_path: Path) -> Path:
         'd["activation_generation"] = d.get("activation_generation", 0) + 1\n'
         "p.write_text(json.dumps(d))\n"
         "PY\n"
-        "printf 'Fine.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+        "printf 'Fine.\\n\\n<<<ARL-FINDINGS>>>\\nVERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
     return script
@@ -3157,7 +3157,7 @@ def matching_row(pointer: dict[str, object], repo: Path) -> dict[str, object]:
 def test_isolation_argv_and_env_cannot_drift_between_invoke_and_session_list(git_repo: Path) -> None:
     """One helper feeds both ``review_argv`` and the strategy's ``session list`` call.
 
-    They live in the same module now (``ocrl.harness.opencode``), which is the point: a
+    They live in the same module now (``arl.harness.opencode``), which is the point: a
     ``session list`` missing these flags would load the repository under review's own OpenCode
     plugins and project config while running *from inside* that repository.
     """
@@ -3211,8 +3211,8 @@ def test_the_session_list_call_itself_carries_the_isolation_flags(activation: st
 
     monkeypatch.setattr(reviewer, "run_bounded", fake_run_bounded)
     # Both seams off: this test is about the branch that builds a real `opencode` argv.
-    os.environ.pop("OCRL_REVIEWER_CMD", None)
-    os.environ.pop("OCRL_SESSION_LIST_CMD", None)
+    os.environ.pop("ARL_REVIEWER_CMD", None)
+    os.environ.pop("ARL_SESSION_LIST_CMD", None)
 
     config = config_with(pure=True, disable_project_config=True)
     rows = opencode_harness._list_sessions(repo=str(git_repo), config=config, act_dir=activation.act_dir, seq="isolation")
@@ -3285,7 +3285,7 @@ def test_session_ref_rejects_an_unrelated_session_in_the_same_repo(activation: s
     activation.data["reviewer_session"] = pointer
     activation.save()
     row = {"id": "ses_unrelated9", "title": "someone's TUI session", "created": 1, "directory": str(git_repo)}
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
 
@@ -3299,7 +3299,7 @@ def test_session_ref_rejects_a_title_mismatch(activation: state.State, git_repo:
     activation.save()
     row = matching_row(pointer, git_repo)
     row["title"] = "a different title"
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
     assert ref.session_id == ""
@@ -3311,7 +3311,7 @@ def test_session_ref_rejects_a_created_mismatch(activation: state.State, git_rep
     activation.save()
     row = matching_row(pointer, git_repo)
     row["created"] = 999
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
     assert ref.session_id == ""
@@ -3325,26 +3325,26 @@ def test_session_ref_accepts_a_symlinked_directory_and_rejects_a_different_repo(
     symlinked = tmp_path / "symlinked-repo"
     symlinked.symlink_to(git_repo)
     row = matching_row(pointer, symlinked)
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
     accepted = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config())
     assert accepted.session_id == pointer["id"]
 
     other_repo = tmp_path / "genuinely-different"
     other_repo.mkdir()
     row_wrong = matching_row(pointer, other_repo)
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row_wrong], name="session-list-2.sh"))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row_wrong], name="session-list-2.sh"))
     rejected = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config())
     assert rejected.session_id == ""
 
 
 def test_session_ref_falls_back_to_fresh_when_the_listing_is_unavailable(activation: state.State, git_repo: Path) -> None:
-    """No ``OCRL_SESSION_LIST_CMD`` -- the listing call is skipped, and an unverifiable
+    """No ``ARL_SESSION_LIST_CMD`` -- the listing call is skipped, and an unverifiable
     pointer falls back to a fresh session, never to an error."""
     pointer = stored_pointer()
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ.pop("OCRL_SESSION_LIST_CMD", None)
-    os.environ["OCRL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
+    os.environ.pop("ARL_SESSION_LIST_CMD", None)
+    os.environ["ARL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with())
     assert ref.session_id == ""
@@ -3370,7 +3370,7 @@ def test_session_ref_starts_fresh_once_the_round_cap_is_reached(activation: stat
     activation.data["reviewer_session"] = pointer
     activation.save()
     marker = tmp_path / "listing-ran"
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(counting_session_list(tmp_path, [matching_row(pointer, git_repo)], marker))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(counting_session_list(tmp_path, [matching_row(pointer, git_repo)], marker))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=config_with(max_session_rounds=3))
 
@@ -3384,7 +3384,7 @@ def test_session_ref_still_continues_below_the_round_cap(activation: state.State
     pointer = stored_pointer(round_number=2)
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config(max_session_rounds=3))
 
@@ -3396,7 +3396,7 @@ def test_a_round_cap_of_zero_never_resets(activation: state.State, git_repo: Pat
     pointer = stored_pointer(round_number=99)
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config(max_session_rounds=0))
 
@@ -3408,10 +3408,10 @@ def test_the_round_cap_still_refuses_to_capture_over_a_live_claim(activation: st
     """The cap returns before ``_try_claim``, so it has to make ``_try_claim``'s busy decision
     itself: a fresh *capturable* ref here would let this call overwrite a pointer another
     review is mid-conversation with."""
-    pointer = stored_pointer(round_number=3, claimed_at=ocrl_now(), claim_id="owner-token")
+    pointer = stored_pointer(round_number=3, claimed_at=arl_now(), claim_id="owner-token")
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config(max_session_rounds=3))
 
@@ -3432,7 +3432,7 @@ def test_a_tampered_round_counter_cannot_extend_the_cap(activation: state.State,
     pointer["round"] = stored
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config(max_session_rounds=3))
 
@@ -3448,7 +3448,7 @@ def test_session_ref_claims_an_unclaimed_pointer(activation: state.State, git_re
     pointer = stored_pointer(round_number=1)
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config())
 
@@ -3461,10 +3461,10 @@ def test_session_ref_claims_an_unclaimed_pointer(activation: state.State, git_re
 
 
 def test_session_ref_treats_a_live_claim_as_busy(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
-    pointer = stored_pointer(claimed_at=ocrl_now(), claim_id="owner-token")
+    pointer = stored_pointer(claimed_at=arl_now(), claim_id="owner-token")
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config())
 
@@ -3475,10 +3475,10 @@ def test_session_ref_treats_a_live_claim_as_busy(activation: state.State, git_re
 
 
 def test_session_ref_reclaims_an_expired_claim(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
-    pointer = stored_pointer(claimed_at=ocrl_now() - 10_000, claim_id="dead-token")
+    pointer = stored_pointer(claimed_at=arl_now() - 10_000, claim_id="dead-token")
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config(timeout_sec=1))
 
@@ -3497,7 +3497,7 @@ def test_a_stale_owners_release_is_a_no_op_after_reclaim(activation: state.State
 
     # B reclaims (A's claim is ancient -> expired).
     activation.data["reviewer_session"]["claim_id"] = "B-token"
-    activation.data["reviewer_session"]["claimed_at"] = ocrl_now()
+    activation.data["reviewer_session"]["claimed_at"] = arl_now()
     activation.save()
 
     reviewer._release_claim(activation, claim_id="A-token", round_number=99, expected=expected, config=config)
@@ -3517,22 +3517,22 @@ def test_capture_session_requires_exactly_one_match(activation: state.State, git
     act_dir = activation.act_dir
 
     # None at all.
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [], name="none.sh"))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [], name="none.sh"))
     assert not reviewer.capture_session(ctx, config=discovery_config(), act_dir=act_dir, seq="001", started_ms=started_ms)
 
     # Two rows carrying the title -- not a guess at which is ours.
     row = {"id": "ses_aaaaaaaa", "title": ctx.title, "created": _future_ms(), "directory": str(git_repo)}
     row2 = {**row, "id": "ses_bbbbbbbb"}
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row, row2], name="two.sh"))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row, row2], name="two.sh"))
     assert not reviewer.capture_session(ctx, config=discovery_config(), act_dir=act_dir, seq="002", started_ms=started_ms)
 
     # A row that predates the run.
     stale = {**row, "created": started_ms - 1}
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [stale], name="stale.sh"))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [stale], name="stale.sh"))
     assert not reviewer.capture_session(ctx, config=discovery_config(), act_dir=act_dir, seq="003", started_ms=started_ms)
 
     # Exactly one, valid, in-window match.
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row], name="one.sh"))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row], name="one.sh"))
     captured = reviewer.capture_session(ctx, config=discovery_config(), act_dir=act_dir, seq="004", started_ms=started_ms)
     assert captured.session_id == "ses_aaaaaaaa"
     assert bool(captured) is True
@@ -3543,7 +3543,7 @@ def test_capture_session_survives_a_non_json_listing(activation: state.State, gi
     script = tmp_path / "broken.sh"
     script.write_text("#!/usr/bin/env bash\nprintf 'not json'\n")
     script.chmod(0o755)
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(script)
+    os.environ["ARL_SESSION_LIST_CMD"] = str(script)
 
     captured = reviewer.capture_session(ctx, config=config_with(), act_dir=activation.act_dir, seq="001", started_ms=0)
     assert not captured
@@ -3561,8 +3561,8 @@ def test_capture_and_reuse_a_session_across_rounds(activation: state.State, git_
     session_id = "ses_deadbeef01"
     row = {"id": session_id, "title": title, "created": _future_ms(), "directory": str(git_repo)}
 
-    os.environ["OCRL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     first = reviewer.execute(target, state=activation, config=cold_config)
     assert first.verdict == "CHANGES_REQUIRED"
@@ -3610,9 +3610,9 @@ def test_a_continued_changes_required_triggers_no_cold_call(activation: state.St
     session_id = "ses_cafebabe1"
     row = {"id": session_id, "title": title, "created": _future_ms(), "directory": str(git_repo)}
 
-    os.environ["OCRL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
-    os.environ["OCRL_FAKE_MODE"] = "changes"
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
+    os.environ["ARL_FAKE_MODE"] = "changes"
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     reviewer.execute(target, state=activation, config=cold_config)
     second = reviewer.execute(target_for(git_repo), state=activation, config=cold_config)
@@ -3626,7 +3626,7 @@ def test_a_continued_changes_required_triggers_no_cold_call(activation: state.St
 
 
 def test_a_cold_approval_triggers_no_second_call(activation: state.State, git_repo: Path) -> None:
-    """No ``OCRL_SESSION_LIST_CMD`` -- capture and verify are both skipped, so every review
+    """No ``ARL_SESSION_LIST_CMD`` -- capture and verify are both skipped, so every review
     here is cold by construction, and a first, already-cold approval must not double-review
     even with ``cold_confirm`` on."""
     review = execute_fake(activation, git_repo, "approve", config=config_with(cold_confirm=True))
@@ -3640,8 +3640,8 @@ def test_capture_is_fingerprinted_against_a_concurrent_generation_bump(activatio
     title = reviewer._unique_title(activation, target, label)
     row = {"id": "ses_race000001", "title": title, "created": _future_ms(), "directory": str(git_repo)}
 
-    os.environ["OCRL_REVIEWER_CMD"] = str(generation_bumping_reviewer(tmp_path, activation.act_dir / "state.json"))
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_REVIEWER_CMD"] = str(generation_bumping_reviewer(tmp_path, activation.act_dir / "state.json"))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     review = reviewer.execute(target, state=activation, config=config_with())
 
@@ -3682,11 +3682,11 @@ def test_no_reviewer_transaction_rewrites_a_state_json_retired_mid_review(activa
         "p.write_text(json.dumps(d))\n"
         "m.write_text(p.read_text())\n"
         "PY\n"
-        "printf 'Fine.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+        "printf 'Fine.\\n\\n<<<ARL-FINDINGS>>>\\nVERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    os.environ["OCRL_REVIEWER_CMD"] = str(script)
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_REVIEWER_CMD"] = str(script)
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     review = reviewer.execute(target, state=activation, config=config_with())
 
@@ -3756,7 +3756,7 @@ def test_a_failure_report_is_still_stored_without_recording_a_round(activation: 
     script = tmp_path / "contract-break.sh"
     script.write_text("#!/usr/bin/env bash\nprintf 'no markers here at all\\n'\n")
     script.chmod(0o755)
-    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    os.environ["ARL_REVIEWER_CMD"] = str(script)
 
     review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
 
@@ -3897,7 +3897,7 @@ def test_a_claims_lease_is_the_owners_to_set_not_the_observers_to_recompute(acti
     stingy_window = reviewer._active_review_reclaim_after(stingy)
     assert stingy_window < entry["lease_sec"], "the two configs really do disagree"
     elapsed = (stingy_window + entry["lease_sec"]) // 2
-    entry["claimed_at"] = ocrl_now() - elapsed
+    entry["claimed_at"] = arl_now() - elapsed
 
     assert reviewer._claim_is_live(entry, stingy_window), "the owner's recorded lease decides, not the observer's config"
 
@@ -3918,7 +3918,7 @@ def test_a_short_lease_is_not_stretched_by_a_later_observers_larger_config(activ
         assert reviewer._claim_active_review(activation, target, stingy)
 
     entry = dict(activation.data["active_review"]["phase1"])
-    entry["claimed_at"] = ocrl_now() - entry["lease_sec"] - 1
+    entry["claimed_at"] = arl_now() - entry["lease_sec"] - 1
 
     assert not reviewer._claim_is_live(entry, reviewer._active_review_reclaim_after(config_with(timeout_sec=3000)))
 
@@ -3948,7 +3948,7 @@ def test_a_large_configured_timeout_still_produces_an_in_range_lease(activation:
     # Aged past a small observer's window but inside the owner's: the stored lease must win,
     # which it only can if the ceiling accepts it.
     small = reviewer._active_review_reclaim_after(config_with(timeout_sec=1))
-    entry["claimed_at"] = ocrl_now() - (small + lease) // 2
+    entry["claimed_at"] = arl_now() - (small + lease) // 2
     assert reviewer._claim_is_live(entry, small)
 
 
@@ -3964,7 +3964,7 @@ def test_a_tampered_lease_cannot_pin_a_label_forever(activation: state.State, gi
 
     entry = dict(activation.data["active_review"]["phase1"])
     entry["lease_sec"] = 10**12
-    entry["claimed_at"] = ocrl_now() - reviewer._active_review_reclaim_after(config) - 1
+    entry["claimed_at"] = arl_now() - reviewer._active_review_reclaim_after(config) - 1
 
     assert not reviewer._claim_is_live(entry, reviewer._active_review_reclaim_after(config))
 
@@ -3986,7 +3986,7 @@ def _slot_stealing_reviewer(tmp_path: Path, state_path: Path, verdict: str, name
         "                                 'claimed_at': 9999999999, 'claim_id': 'someone-else'}}\n"
         "p.write_text(json.dumps(d))\n"
         "PY\n"
-        f"printf 'Done.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT {verdict}\\n<<<OCRL-END>>>\\n'\n"
+        f"printf 'Done.\\n\\n<<<ARL-FINDINGS>>>\\nVERDICT {verdict}\\n<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
     return script
@@ -4001,7 +4001,7 @@ def test_a_review_whose_slot_was_stolen_mid_run_publishes_nothing(activation: st
     other's and must not be recorded, stored or acted on.
 
     Fails on the old code, which published the round and returned its verdict."""
-    os.environ["OCRL_REVIEWER_CMD"] = str(_slot_stealing_reviewer(tmp_path, activation.state_file, "CHANGES_REQUIRED", "thief"))
+    os.environ["ARL_REVIEWER_CMD"] = str(_slot_stealing_reviewer(tmp_path, activation.state_file, "CHANGES_REQUIRED", "thief"))
 
     review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
 
@@ -4037,7 +4037,7 @@ def test_the_cold_confirmation_is_not_run_once_the_slot_is_lost(
         return real(tgt, run, config=config, scope=scope)
 
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
-    os.environ["OCRL_REVIEWER_CMD"] = str(_slot_stealing_reviewer(tmp_path, activation.state_file, "APPROVED", "thief-approve"))
+    os.environ["ARL_REVIEWER_CMD"] = str(_slot_stealing_reviewer(tmp_path, activation.state_file, "APPROVED", "thief-approve"))
 
     review = reviewer.execute(target_for(git_repo), state=activation, config=cold_config)
 
@@ -4064,9 +4064,9 @@ def test_the_range_text_discloses_the_round(activation: state.State, git_repo: P
     title = reviewer._unique_title(activation, target, label)
     row = {"id": "ses_round0002", "title": title, "created": _future_ms(), "directory": str(git_repo)}
 
-    os.environ["OCRL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
-    os.environ["OCRL_FAKE_MODE"] = "changes"
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
+    os.environ["ARL_FAKE_MODE"] = "changes"
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     reviewer.execute(target, state=activation, config=discovery_config())
     bundle_dir = activation.act_dir / "bundles" / "001"
@@ -4086,9 +4086,9 @@ def test_the_range_text_discloses_the_active_block_severity(activation: state.St
     title = reviewer._unique_title(activation, target, label)
     row = {"id": "ses_round0003", "title": title, "created": _future_ms(), "directory": str(git_repo)}
 
-    os.environ["OCRL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
-    os.environ["OCRL_FAKE_MODE"] = "changes"
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
+    os.environ["ARL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
+    os.environ["ARL_FAKE_MODE"] = "changes"
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
     reviewer.execute(target, state=activation, config=config_with(block_severity="critical"))
     bundle_dir = activation.act_dir / "bundles" / "001"
@@ -4125,7 +4125,7 @@ def test_session_ref_reads_state_as_the_caller_loaded_it(activation: state.State
     # it always reloads under its own lock, by design; only the earlier structural read must
     # not.
     activation.save()
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
     ref = reviewer.session_ref(activation, target, config=discovery_config())
     assert ref.session_id == pointer["id"]
 
@@ -4145,7 +4145,7 @@ def test_a_concurrent_live_claim_stops_a_fresh_capture_from_overwriting_it(activ
     config = config_with()
     expected = hooks.activation(activation, config)
 
-    live_pointer = stored_pointer(session_id="ses_liveowner001", claimed_at=ocrl_now(), claim_id="live-token")
+    live_pointer = stored_pointer(session_id="ses_liveowner001", claimed_at=arl_now(), claim_id="live-token")
     activation.data["reviewer_session"] = live_pointer
     activation.save()
 
@@ -4160,7 +4160,7 @@ def test_a_bundle_failure_releases_the_claim_without_advancing_the_round(activat
     pointer = stored_pointer(round_number=1)
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     review = reviewer.execute(target_for(git_repo), state=activation, config=config_with(hard_diff_ceiling=1))
 
@@ -4187,10 +4187,10 @@ def failing_then_working_reviewer(tmp_path: Path) -> Path:
         "    echo boom >&2\n"
         "    exit 3\n"
         "fi\n"
-        f'if [ -n "${{OCRL_SESSION_ID:-}}" ]; then echo "$OCRL_SESSION_ID" > {str(seen)!r}; fi\n'
-        "printf 'Fine.\\n\\n<<<OCRL-FINDINGS>>>\\n"
+        f'if [ -n "${{ARL_SESSION_ID:-}}" ]; then echo "$ARL_SESSION_ID" > {str(seen)!r}; fi\n'
+        "printf 'Fine.\\n\\n<<<ARL-FINDINGS>>>\\n"
         "FINDING severity=high actionable=yes file=a.txt:1 | still there\\n"
-        "VERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+        "VERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
     return script
@@ -4200,8 +4200,8 @@ def test_a_failed_invocation_releases_its_claim_so_a_retry_can_continue_it(activ
     pointer = stored_pointer(round_number=1)
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ["OCRL_REVIEWER_CMD"] = str(failing_then_working_reviewer(tmp_path))
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_REVIEWER_CMD"] = str(failing_then_working_reviewer(tmp_path))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     first = reviewer.execute(target_for(git_repo), state=activation, config=discovery_config())
     assert first.verdict == "OP_FAILURE"
@@ -4263,7 +4263,7 @@ def test_reconfirm_claim_detects_a_reclaim_before_invoking(activation: state.Sta
     activation.data["reviewer_session"] = pointer
     activation.save()
     target = target_for(git_repo)
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     ref = reviewer.session_ref(activation, target, config=discovery_config())
     assert ref.session_id == pointer["id"]
@@ -4288,8 +4288,8 @@ def test_execute_falls_back_to_fresh_when_the_claim_is_lost_before_invoking(
     pointer = stored_pointer(round_number=1)
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ["OCRL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     real_build_bundle = reviewer.build_bundle
 
@@ -4304,7 +4304,7 @@ def test_execute_falls_back_to_fresh_when_the_claim_is_lost_before_invoking(
 
     review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
 
-    # `continuity_reviewer` approves iff OCRL_SESSION_ID is set -- it must not be, since the
+    # `continuity_reviewer` approves iff ARL_SESSION_ID is set -- it must not be, since the
     # claim was lost before invoke ran, so this must be a fresh, uncontinued round.
     assert review.verdict == "CHANGES_REQUIRED"
     assert review.confirmed is None
@@ -4326,7 +4326,7 @@ def test_session_ref_stays_silent_on_the_ordinary_fresh_starts(activation: state
     """Round 1 of a phase, and a pointer another phase left behind, are the *correct* way to
     start fresh. Logging those would bury the cases that matter under noise every single round,
     which is the whole reason the log is gated on the label rather than on usability."""
-    os.environ.pop("OCRL_SESSION_LIST_CMD", None)
+    os.environ.pop("ARL_SESSION_LIST_CMD", None)
     target = target_for(git_repo)
 
     activation.data["reviewer_session"] = {}
@@ -4362,8 +4362,8 @@ def test_session_ref_logs_when_the_listing_cannot_verify_the_pointer(
     pointer = stored_pointer()
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ.pop("OCRL_SESSION_LIST_CMD", None)
-    os.environ["OCRL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
+    os.environ.pop("ARL_SESSION_LIST_CMD", None)
+    os.environ["ARL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
 
     assert reviewer.session_ref(activation, target_for(git_repo), config=discovery_config()).session_id == ""
 
@@ -4381,7 +4381,7 @@ def test_session_ref_distinguishes_a_gone_session_from_a_saturated_listing(
     activation.save()
     other = dict(matching_row(pointer, git_repo), id="ses_somethingelse1")
 
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [other]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [other]))
     assert reviewer.session_ref(activation, target_for(git_repo), config=discovery_config()).session_id == ""
     short = capsys.readouterr().err
     assert "did not match exactly one listed session" in short
@@ -4390,7 +4390,7 @@ def test_session_ref_distinguishes_a_gone_session_from_a_saturated_listing(
     assert "saturated" not in short
 
     rows = [dict(other, id=f"ses_filler{index:08d}") for index in range(opencode_harness.SESSION_LIST_MAX)]
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, rows, name="session-list-full.sh"))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, rows, name="session-list-full.sh"))
     assert reviewer.session_ref(activation, target_for(git_repo), config=discovery_config()).session_id == ""
     full = capsys.readouterr().err
     assert f"{opencode_harness.SESSION_LIST_MAX} rows returned" in full
@@ -4402,10 +4402,10 @@ def test_session_ref_logs_a_pointer_another_review_is_holding(
 ) -> None:
     """A live claim forces a fresh *and* non-capturable round -- the most expensive fall-back
     there is, and the one most worth naming."""
-    pointer = stored_pointer(claimed_at=ocrl_now(), claim_id="someone-else", lease_sec=600)
+    pointer = stored_pointer(claimed_at=arl_now(), claim_id="someone-else", lease_sec=600)
     activation.data["reviewer_session"] = pointer
     activation.save()
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
+    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [matching_row(pointer, git_repo)]))
 
     ref = reviewer.session_ref(activation, target_for(git_repo), config=discovery_config())
 
@@ -4428,7 +4428,7 @@ def test_continuity_summary_names_the_session_in_full(activation: state.State) -
 
 def test_continuity_summary_marks_a_pointer_a_live_review_is_using(activation: state.State) -> None:
     """The claim is the one piece of live information ``status`` cannot get anywhere else."""
-    activation.data["reviewer_session"] = stored_pointer(claimed_at=ocrl_now(), claim_id="held", lease_sec=600)
+    activation.data["reviewer_session"] = stored_pointer(claimed_at=arl_now(), claim_id="held", lease_sec=600)
 
     assert reviewer.continuity_summary(activation, config_with()).endswith(", round 1, in use)")
 
@@ -4526,7 +4526,7 @@ def test_capture_session_rejects_a_listed_id_ending_in_a_newline(
     """The third call site: an id offered by the listing itself. Falling back to no capture is
     the safe direction -- the round simply does not become anyone's continuity pointer."""
     row = {"id": "ses_abcdefgh\n", "title": "t", "created": _future_ms(), "directory": str(git_repo)}
-    monkeypatch.setenv("OCRL_SESSION_LIST_CMD", str(session_list_script(tmp_path, [row])))
+    monkeypatch.setenv("ARL_SESSION_LIST_CMD", str(session_list_script(tmp_path, [row])))
 
     captured = reviewer.capture_session(
         reviewer._CaptureContext(target=target_for(git_repo), title="t", round_number=1),
@@ -4586,7 +4586,7 @@ def test_scope_matches_a_dot_slash_finding_against_its_normalised_prior_file() -
 
 def _write_block(tmp_path: Path, *findings: str, verdict: str = "APPROVED") -> Path:
     out = tmp_path / "late.out"
-    body = "prose\n\n<<<OCRL-FINDINGS>>>\n" + "".join(f"{line}\n" for line in findings) + f"VERDICT {verdict}\n<<<OCRL-END>>>\n"
+    body = "prose\n\n<<<ARL-FINDINGS>>>\n" + "".join(f"{line}\n" for line in findings) + f"VERDICT {verdict}\n<<<ARL-END>>>\n"
     out.write_text(body)
     return out
 
@@ -4648,7 +4648,7 @@ def test_late_block_severity_below_block_severity_is_clamped_up(tmp_path: Path) 
     reads as ``block_severity`` itself, so a *low* finding still does not block."""
     scope = _scope(changed=("changed.py",))
     config = config_with(block_severity="high", late_block_severity="low")
-    assert ocrl_config.late_threshold_rank(config) == ocrl_config.threshold_rank("high")
+    assert arl_config.late_threshold_rank(config) == arl_config.threshold_rank("high")
     review = reviewer.parse(_write_block(tmp_path, MEDIUM_CHANGED), config=config, allow_supersedes=True, scope=scope)
     assert review.verdict == "APPROVED"
     assert review.deferred == "", "below block_severity is not deferred, it is simply non-blocking"
@@ -4694,7 +4694,7 @@ def test_round_two_scope_holds_the_paths_changed_since_round_one_and_round_ones_
 
 def test_prior_files_are_stored_with_a_leading_dot_slash_normalised_away(activation: state.State, git_repo: Path) -> None:
     """``covers`` normalises the value it is asked about, so the stored side must match."""
-    os.environ["OCRL_FAKE_FILE"] = "./README.md:4"  # `medium-file` emits this value verbatim
+    os.environ["ARL_FAKE_FILE"] = "./README.md:4"  # `medium-file` emits this value verbatim
     execute_fake(activation, git_repo, "medium-file")
     (git_repo / "b.txt").write_text("second round\n")
     scope = reviewer.late_scope(target_for(git_repo), state=activation)
@@ -4782,7 +4782,7 @@ def test_a_scope_build_failure_is_an_op_failure_of_kind_bundle_never_an_approval
 
 
 def test_round_one_blocks_a_new_medium_wherever_it_is(activation: state.State, git_repo: Path) -> None:
-    os.environ["OCRL_FAKE_FILE"] = "a.txt:1"
+    os.environ["ARL_FAKE_FILE"] = "a.txt:1"
     review = execute_fake(activation, git_repo, "medium-file")
     assert review.verdict == "CHANGES_REQUIRED"
     assert review.deferred == ""
@@ -4791,7 +4791,7 @@ def test_round_one_blocks_a_new_medium_wherever_it_is(activation: state.State, g
 def test_round_two_defers_a_new_medium_in_an_untouched_file(activation: state.State, git_repo: Path) -> None:
     execute_fake(activation, git_repo, "changes")  # round 1: a.txt:1 high
     (git_repo / "b.txt").write_text("second round\n")
-    os.environ["OCRL_FAKE_FILE"] = "README.md:4"  # neither changed since round 1 nor named before
+    os.environ["ARL_FAKE_FILE"] = "README.md:4"  # neither changed since round 1 nor named before
     review = execute_fake(activation, git_repo, "medium-file")
     assert review.verdict == "APPROVED"
     assert review.findings == ""
@@ -4805,7 +4805,7 @@ def test_round_two_defers_a_new_medium_in_an_untouched_file(activation: state.St
 def test_round_two_blocks_the_same_medium_in_a_touched_file(activation: state.State, git_repo: Path) -> None:
     execute_fake(activation, git_repo, "changes")
     (git_repo / "b.txt").write_text("second round\n")
-    os.environ["OCRL_FAKE_FILE"] = "b.txt:1"
+    os.environ["ARL_FAKE_FILE"] = "b.txt:1"
     review = execute_fake(activation, git_repo, "medium-file")
     assert review.verdict == "CHANGES_REQUIRED"
     assert "b.txt:1" in review.findings
@@ -4814,7 +4814,7 @@ def test_round_two_blocks_the_same_medium_in_a_touched_file(activation: state.St
 def test_round_two_blocks_a_medium_in_a_file_round_one_named_at_another_line(activation: state.State, git_repo: Path) -> None:
     execute_fake(activation, git_repo, "changes")  # a.txt:1
     (git_repo / "b.txt").write_text("second round\n")
-    os.environ["OCRL_FAKE_FILE"] = "a.txt:9"
+    os.environ["ARL_FAKE_FILE"] = "a.txt:9"
     review = execute_fake(activation, git_repo, "medium-file")
     assert review.verdict == "CHANGES_REQUIRED"
 
@@ -4822,7 +4822,7 @@ def test_round_two_blocks_a_medium_in_a_file_round_one_named_at_another_line(act
 def test_round_two_blocks_a_high_in_an_untouched_file(activation: state.State, git_repo: Path) -> None:
     execute_fake(activation, git_repo, "approve")
     (git_repo / "b.txt").write_text("second round\n")
-    os.environ["OCRL_FAKE_FILE"] = "README.md"
+    os.environ["ARL_FAKE_FILE"] = "README.md"
     review = execute_fake(activation, git_repo, "changes-file")  # high
     assert review.verdict == "CHANGES_REQUIRED"
 
@@ -4832,7 +4832,7 @@ def test_a_deferred_finding_blocks_the_next_review_of_the_same_phase(activation:
     ``prior_files`` for every later round of this phase."""
     execute_fake(activation, git_repo, "changes")
     (git_repo / "b.txt").write_text("second round\n")
-    os.environ["OCRL_FAKE_FILE"] = "README.md:4"
+    os.environ["ARL_FAKE_FILE"] = "README.md:4"
     assert execute_fake(activation, git_repo, "medium-file").verdict == "APPROVED"
 
     (git_repo / "b.txt").write_text("third round\n")
@@ -4844,7 +4844,7 @@ def test_a_deferred_finding_blocks_the_next_review_of_the_same_phase(activation:
 def test_round_two_with_late_block_severity_medium_blocks_as_before(activation: state.State, git_repo: Path) -> None:
     execute_fake(activation, git_repo, "changes")
     (git_repo / "b.txt").write_text("second round\n")
-    os.environ["OCRL_FAKE_FILE"] = "README.md:4"
+    os.environ["ARL_FAKE_FILE"] = "README.md:4"
     review = execute_fake(activation, git_repo, "medium-file", config=config_with(late_block_severity="medium"))
     assert review.verdict == "CHANGES_REQUIRED"
 
@@ -4870,7 +4870,7 @@ def test_range_txt_says_when_the_late_rule_is_off_for_a_later_round(activation: 
     activation.update(round_history=history)
     activation.save()
     (git_repo / "b.txt").write_text("second round\n")
-    os.environ["OCRL_FAKE_FILE"] = "README.md:4"
+    os.environ["ARL_FAKE_FILE"] = "README.md:4"
     review = execute_fake(activation, git_repo, "medium-file")
     assert review.verdict == "CHANGES_REQUIRED", "no scope: the ordinary rule"
     text = (activation.act_dir / "bundles" / "002" / "range.txt").read_text()
@@ -4885,7 +4885,7 @@ def test_a_dot_slash_deferred_finding_still_blocks_the_next_review(activation: s
     miss its own recorded line on every later round and be deferred again, indefinitely."""
     execute_fake(activation, git_repo, "changes")
     (git_repo / "b.txt").write_text("second round\n")
-    os.environ["OCRL_FAKE_FILE"] = "./README.md:4"
+    os.environ["ARL_FAKE_FILE"] = "./README.md:4"
     assert execute_fake(activation, git_repo, "medium-file").verdict == "APPROVED", "round 2 defers it once"
 
     (git_repo / "b.txt").write_text("third round\n")
@@ -4910,13 +4910,13 @@ def _two_call_reviewer(tmp_path: Path, first: str, second: str) -> None:
         f"if [ \"$n\" = 1 ]; then printf '%b' '{first}'; else printf '%b' '{second}'; fi\n"
     )
     script.chmod(0o755)
-    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    os.environ["ARL_REVIEWER_CMD"] = str(script)
 
 
 _WARM_DEFERS = (
-    "A medium elsewhere.\\n\\n<<<OCRL-FINDINGS>>>\\n"
+    "A medium elsewhere.\\n\\n<<<ARL-FINDINGS>>>\\n"
     "FINDING severity=medium actionable=yes file=README.md:4 | new medium in an untouched file\\n"
-    "VERDICT APPROVED\\n<<<OCRL-END>>>\\n"
+    "VERDICT APPROVED\\n<<<ARL-END>>>\\n"
 )
 
 
@@ -4950,7 +4950,7 @@ def test_a_finding_a_cold_approval_dropped_still_blocks_the_next_review(activati
     assert reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True)).verdict == "APPROVED"
 
     (git_repo / "b.txt").write_text("third round\n")
-    os.environ["OCRL_FAKE_FILE"] = "README.md:4"
+    os.environ["ARL_FAKE_FILE"] = "README.md:4"
     review = execute_fake(activation, git_repo, "medium-file", config=config_with())
 
     assert review.verdict == "CHANGES_REQUIRED"
@@ -5020,7 +5020,7 @@ def execute_repair(
     config: Config | None = None,
 ) -> Review:
     """One review whose primary call breaks the contract, with ``repair`` choosing the retry."""
-    os.environ["OCRL_FAKE_REPAIR"] = repair
+    os.environ["ARL_FAKE_REPAIR"] = repair
     return execute_fake(activation, repo, "contract-repair", config=config)
 
 
@@ -5028,7 +5028,7 @@ def execute_repair(
 def _hook_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pretend this process is a ``pretool`` hook that has just started.
 
-    ``execute`` is normally reached through :func:`ocrl.cli.main`, which stamps the clock; a
+    ``execute`` is normally reached through :func:`arl.cli.main`, which stamps the clock; a
     unit test calling it directly leaves ``HOOK_DEADLINE_SEC`` at ``None``, which means "no
     deadline" and lets the repair run. Setting a real, generous budget instead exercises the
     arithmetic rather than the ``None`` short-circuit.
@@ -5112,7 +5112,7 @@ def test_a_repair_that_times_out_is_not_reclassified_as_transient(activation: st
     Classified ``transient``, this would pace a retry of a round that has no timing problem
     at all -- the reviewer answered promptly and then wrote the wrong shape."""
     monkeypatch.setattr(reviewer, "REPAIR_TIMEOUT_SEC", 1)
-    os.environ["OCRL_FAKE_REPAIR_SLEEP"] = "10"
+    os.environ["ARL_FAKE_REPAIR_SLEEP"] = "10"
 
     review = execute_repair(activation, git_repo, repair="slow")
 
@@ -5176,7 +5176,7 @@ def test_the_repair_context_is_the_fenced_tail_of_the_primary_transcript(
     assert "\x00" not in text
     body = text.split("--- transcript tail ---\n", 1)[1].split("\n--- end transcript tail ---", 1)[0]
     assert len(body.encode()) <= 64, "the tail is capped, and it is the tail that survives"
-    assert "<<<OCRL-END>>>" in body, "the end of the transcript is what a findings block sits at"
+    assert "<<<ARL-END>>>" in body, "the end of the transcript is what a findings block sits at"
 
 
 @pytest.mark.usefixtures("_hook_budget")
@@ -5378,7 +5378,7 @@ def test_the_repair_prompts_fallback_finding_is_a_line_the_gate_can_parse() -> N
     """The prompt tells the reviewer what to emit when the tail states no findings; that
     line has to survive ``_FINDING_RE``, or the instruction guarantees a second failure."""
     fallback = "FINDING severity=high actionable=yes file=- | review transcript incomplete"
-    assert fallback in ocrl.prompt_path("reviewer-repair").read_text()
+    assert fallback in arl.prompt_path("reviewer-repair").read_text()
     assert reviewer._FINDING_RE.match(fallback) is not None
 
 
@@ -5410,13 +5410,13 @@ def test_an_ordinary_phase_round_may_still_supersede(activation: state.State, gi
     script = tmp_path / "superseding-reviewer.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
-        "printf 'Round two.\\n\\n<<<OCRL-FINDINGS>>>\\n"
+        "printf 'Round two.\\n\\n<<<ARL-FINDINGS>>>\\n"
         "FINDING severity=high actionable=yes file=a.txt:1 | still there\\n"
         "SUPERSEDES round=1 file=a.txt:9 | the null case cannot occur here\\n"
-        "VERDICT CHANGES_REQUIRED\\n<<<OCRL-END>>>\\n'\n"
+        "VERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    os.environ["OCRL_REVIEWER_CMD"] = str(script)
+    os.environ["ARL_REVIEWER_CMD"] = str(script)
 
     review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
 
@@ -5456,8 +5456,8 @@ def test_the_whole_post_repair_path_still_publishes_when_both_deadlines_expire(
     hanging_list = tmp_path / "hanging-session-list.sh"
     hanging_list.write_text("#!/usr/bin/env bash\nsleep 30\n")
     hanging_list.chmod(0o755)
-    os.environ["OCRL_SESSION_LIST_CMD"] = str(hanging_list)
-    os.environ["OCRL_FAKE_REPAIR_SLEEP"] = "10"
+    os.environ["ARL_SESSION_LIST_CMD"] = str(hanging_list)
+    os.environ["ARL_FAKE_REPAIR_SLEEP"] = "10"
 
     review = execute_repair(activation, git_repo, repair="slow")
 

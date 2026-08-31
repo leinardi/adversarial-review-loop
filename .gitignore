@@ -19,7 +19,7 @@ out/
 
 # Python
 # Convenience only: Rule 3 (nothing is written inside the repository under review) is
-# enforced by sys.pycache_prefix in scripts/ocrl-bootstrap.py, not by this file.
+# enforced by sys.pycache_prefix in scripts/arl-bootstrap.py, not by this file.
 __pycache__/
 .pytest_cache/
 .mypy_cache/

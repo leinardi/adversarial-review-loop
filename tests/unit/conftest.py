@@ -13,11 +13,11 @@ from typing import Any
 
 import pytest
 
-import ocrl
+import arl
 
-PLUGIN_ROOT = ocrl.PLUGIN_ROOT
+PLUGIN_ROOT = arl.PLUGIN_ROOT
 SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
-BOOTSTRAP = SCRIPTS_DIR / "ocrl-bootstrap.py"
+BOOTSTRAP = SCRIPTS_DIR / "arl-bootstrap.py"
 SOCKET_STDIN = PLUGIN_ROOT / "tests" / "fixtures" / "socket-stdin.py"
 BASH_GLOB = PLUGIN_ROOT / "tests" / "fixtures" / "bash-glob.sh"
 FAKE_REVIEWER = PLUGIN_ROOT / "tests" / "fixtures" / "fake-reviewer.sh"
@@ -61,7 +61,7 @@ def bash_glob(path: str, glob: str) -> bool:
     return matched
 
 
-#: Modules a hostile repository under review would shadow to hijack the gate. ``ocrl`` and
+#: Modules a hostile repository under review would shadow to hijack the gate. ``arl`` and
 #: ``pathlib`` are on the import path of even ``--help``; the rest are reached as later
 #: phases import them, and cost nothing to plant now.
 SHADOWED_MODULES = ("json", "subprocess", "pathlib", "hashlib", "shutil")
@@ -120,9 +120,9 @@ def decision(proc: subprocess.CompletedProcess[str]) -> tuple[str, str]:
 def shared_pycache(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """One bytecode cache directory shared by every test in this session (per xdist worker).
 
-    ``ocrl-bootstrap.py`` puts ``sys.pycache_prefix`` under ``XDG_CACHE_HOME``. Pointing that
+    ``arl-bootstrap.py`` puts ``sys.pycache_prefix`` under ``XDG_CACHE_HOME``. Pointing that
     at each test's own ``tmp_path`` made every one of the ~1200 gate invocations in this suite
-    recompile the whole ``ocrl`` package from source: measured at ~145ms of the ~230ms an
+    recompile the whole ``arl`` package from source: measured at ~145ms of the ~230ms an
     ``arm`` took, i.e. the majority of the suite's runtime. The cache is keyed by absolute
     source path and validated against each source file's mtime and size, so sharing it across
     tests cannot make one test see another's code.
@@ -136,10 +136,10 @@ def shared_pycache(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture
 def clean_env(tmp_path: Path, shared_pycache: Path) -> dict[str, str]:
     """An environment isolated from the developer's real state and cache directories."""
-    # Every OCRL_* override goes, not just OCRL_STATE_DIR: a developer's shell may carry
-    # one (OCRL_MAX_STOP_BLOCKS is a documented leftover from the STEP0 runs), and it would
+    # Every ARL_* override goes, not just ARL_STATE_DIR: a developer's shell may carry
+    # one (ARL_MAX_STOP_BLOCKS is a documented leftover from the STEP0 runs), and it would
     # silently skew both the Python result and the shell one it is compared against.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("OCRL_")}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ARL_")}
     env["HOME"] = str(tmp_path / "home")
     env["XDG_STATE_HOME"] = str(tmp_path / "state")
     env["XDG_CACHE_HOME"] = str(shared_pycache)
@@ -183,7 +183,7 @@ def git_repo(tmp_path: Path) -> Path:
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")
     git(repo, "config", "user.email", "selftest@example.invalid")
-    git(repo, "config", "user.name", "ocrl selftest")
+    git(repo, "config", "user.name", "arl selftest")
     git(repo, "config", "commit.gpgsign", "false")
     (repo / "seed.txt").write_text("seed\n")
     git(repo, "add", "-A")
@@ -195,7 +195,7 @@ def git_repo(tmp_path: Path) -> Path:
 def hostile_repo(tmp_path: Path) -> Path:
     """A git repository under review that tries to shadow the gate's own imports."""
     repo = tmp_path / "hostile"
-    (repo / "ocrl").mkdir(parents=True)
+    (repo / "arl").mkdir(parents=True)
     marker = repo / "HIJACKED"
 
     # pathlib is itself one of the shadowed modules, so the payload writes its marker with
@@ -207,9 +207,9 @@ def hostile_repo(tmp_path: Path) -> Path:
         'raise SystemExit("hijacked")\n'
     )
 
-    (repo / "ocrl" / "__init__.py").write_text(hijack)
-    (repo / "ocrl" / "__main__.py").write_text(hijack)
-    (repo / "ocrl" / "cli.py").write_text(hijack)
+    (repo / "arl" / "__init__.py").write_text(hijack)
+    (repo / "arl" / "__main__.py").write_text(hijack)
+    (repo / "arl" / "cli.py").write_text(hijack)
     for name in SHADOWED_MODULES:
         (repo / f"{name}.py").write_text(hijack)
 

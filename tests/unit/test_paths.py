@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from ocrl import paths
-from ocrl.errors import RepoResolutionError
+from arl import paths
+from arl.errors import RepoResolutionError
 
 
 def sha256sum_of(text: str) -> str:
@@ -31,41 +31,41 @@ def test_sha256_matches_the_shell(text: str) -> None:
 
 
 def test_state_root_prefers_the_explicit_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OCRL_STATE_DIR", "/somewhere/else")
+    monkeypatch.setenv("ARL_STATE_DIR", "/somewhere/else")
     monkeypatch.setenv("XDG_STATE_HOME", "/ignored")
     assert paths.state_root() == Path("/somewhere/else")
 
 
 def test_state_root_falls_back_through_xdg_then_home(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("OCRL_STATE_DIR", raising=False)
+    monkeypatch.delenv("ARL_STATE_DIR", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", "/x")
-    assert paths.state_root() == Path("/x/opencode-review-loop")
+    assert paths.state_root() == Path("/x/adversarial-review-loop")
 
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.setenv("HOME", "/h")
-    assert paths.state_root() == Path("/h/.local/state/opencode-review-loop")
+    assert paths.state_root() == Path("/h/.local/state/adversarial-review-loop")
 
 
 def test_an_empty_value_is_treated_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     """The shell used `${VAR:-default}`, which falls back on empty as well as unset."""
-    monkeypatch.setenv("OCRL_STATE_DIR", "")
+    monkeypatch.setenv("ARL_STATE_DIR", "")
     monkeypatch.setenv("XDG_STATE_HOME", "")
     monkeypatch.setenv("HOME", "/h")
-    assert paths.state_root() == Path("/h/.local/state/opencode-review-loop")
+    assert paths.state_root() == Path("/h/.local/state/adversarial-review-loop")
 
 
 def test_an_empty_home_stays_absolute(monkeypatch: pytest.MonkeyPatch) -> None:
     """`"$HOME/.local/state"` with an empty HOME is "/.local/state", not a relative path."""
-    monkeypatch.delenv("OCRL_STATE_DIR", raising=False)
+    monkeypatch.delenv("ARL_STATE_DIR", raising=False)
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.setenv("HOME", "")
     root = paths.state_root()
     assert root.is_absolute()
-    assert root == Path("/.local/state/opencode-review-loop")
+    assert root == Path("/.local/state/adversarial-review-loop")
 
 
 def test_activation_and_pointer_layout(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OCRL_STATE_DIR", "/s")
+    monkeypatch.setenv("ARL_STATE_DIR", "/s")
     digest = paths.sha256_hex("/repo")
     assert paths.activation_dir("/repo", "sess") == Path(f"/s/worktrees/{digest}/sess")
     assert paths.latest_pointer_path("/repo") == Path(f"/s/worktrees/{digest}/latest")

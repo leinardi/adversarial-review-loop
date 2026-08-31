@@ -42,11 +42,11 @@ Do not re-litigate findings a phase review already accepted unless the end state
 Write your review as prose first, ranked most severe first. Then emit the machine-readable block, exactly once, exactly in this shape:
 
 ```
-<<<OCRL-FINDINGS>>>
+<<<ARL-FINDINGS>>>
 FINDING severity=high actionable=yes file=internal/store/db.go:88 | Phase 3 renamed the key; phase 1's reader still uses the old one
 FINDING severity=low actionable=no file=- | The two modules could share a helper
 VERDICT CHANGES_REQUIRED
-<<<OCRL-END>>>
+<<<ARL-END>>>
 ```
 
 Rules for the block:

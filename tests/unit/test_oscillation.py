@@ -1,4 +1,4 @@
-"""``ocrl.oscillation`` -- pure computation over synthetic ``round_history`` entries.
+"""``arl.oscillation`` -- pure computation over synthetic ``round_history`` entries.
 
 Covers the three-round warn-before/warn-after/both sequence that motivated this module
 (phase 4 of the convergence plan) and the negative cases that must not trip it.
@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from ocrl import oscillation
-from ocrl.oscillation import Anchor, persisting, reversals
+from arl import oscillation
+from arl.oscillation import Anchor, persisting, reversals
 
 
 def entry(

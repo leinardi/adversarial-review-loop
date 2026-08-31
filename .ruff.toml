@@ -2,8 +2,8 @@ line-length = 150
 target-version = "py312"
 
 # Vendored third-party code is kept diffable against upstream: the only change to it is the
-# import rewrite recorded in scripts/ocrl/_vendor/README.md.
-extend-exclude = ["scripts/ocrl/_vendor"]
+# import rewrite recorded in scripts/arl/_vendor/README.md.
+extend-exclude = ["scripts/arl/_vendor"]
 
 [lint]
 # Ruff always enables E and F by default; we extend that set.
@@ -25,7 +25,7 @@ ignore = [
 
 [lint.isort]
 # The package lives under scripts/, which isort cannot infer from the layout.
-known-first-party = ["ocrl"]
+known-first-party = ["arl"]
 
 [lint.pylint]
 allow-magic-value-types = ["str", "int"]

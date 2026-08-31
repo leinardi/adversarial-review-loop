@@ -44,12 +44,12 @@ Do not report pure taste. Do not report formatting a linter would catch. Do not 
 Write your review as prose first, ranked most severe first — what is wrong, where, why it matters, and what would fix it. Then emit the machine-readable block, exactly once, exactly in this shape:
 
 ```
-<<<OCRL-FINDINGS>>>
+<<<ARL-FINDINGS>>>
 FINDING severity=critical actionable=yes file=internal/api/x.go:42 | Nil deref when token absent
 FINDING severity=low actionable=no file=web/src/a.ts:9 | Naming preference
 SUPERSEDES round=1 file=internal/db/q.go:88 | round 1 called this a lost transaction; the caller does hold the lock, retracting it
 VERDICT CHANGES_REQUIRED
-<<<OCRL-END>>>
+<<<ARL-END>>>
 ```
 
 Rules for the block:

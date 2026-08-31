@@ -9,9 +9,9 @@ repos:
       # Python hooks: it is kept diffable against the upstream sdist, and upstream ships
       # trailing whitespace this repository would otherwise rewrite.
       - id: end-of-file-fixer
-        exclude: ^scripts/ocrl/_vendor/
+        exclude: ^scripts/arl/_vendor/
       - id: trailing-whitespace
-        exclude: ^scripts/ocrl/_vendor/
+        exclude: ^scripts/arl/_vendor/
       - id: check-yaml
       - id: check-json
       - id: check-toml
@@ -28,7 +28,7 @@ repos:
           # pytest ships py.typed; without it every @fixture and @parametrize is an
           # untyped decorator and mypy reports the test it decorates as untyped.
           - pytest==9.0.2
-        exclude: ^scripts/ocrl/_vendor/
+        exclude: ^scripts/arl/_vendor/
       - id: mypy
         alias: mypy-json-output
         name: mypy (json output)
@@ -45,20 +45,20 @@ repos:
             "--ignore-missing-imports",
             "--scripts-are-modules",
           ]
-        exclude: ^scripts/ocrl/_vendor/
+        exclude: ^scripts/arl/_vendor/
         stages: [manual]
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.7
     hooks:
       - id: ruff-check
         args: ["--fix"]
-        exclude: ^scripts/ocrl/_vendor/
+        exclude: ^scripts/arl/_vendor/
       - id: ruff-format
-        exclude: ^scripts/ocrl/_vendor/
+        exclude: ^scripts/arl/_vendor/
       - id: ruff-check
         alias: ruff-check-rdjson
         args: ["--fix", "-q", "--output-format=rdjson"]
-        exclude: ^scripts/ocrl/_vendor/
+        exclude: ^scripts/arl/_vendor/
         stages: [manual]
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.9

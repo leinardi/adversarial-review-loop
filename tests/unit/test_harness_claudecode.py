@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from ocrl import harness, reviewer
-from ocrl.config import DEFAULTS, Config
-from ocrl.harness import claudecode
+from arl import harness, reviewer
+from arl.config import DEFAULTS, Config
+from arl.harness import claudecode
 
 #: A result event the CLI would emit for a run that went well. Built by the helper below so
 #: every test starts from the same known-good shape and changes exactly the field it is about.
@@ -433,7 +433,7 @@ def test_a_run_that_did_not_persist_stores_no_pointer(tmp_path: Path, monkeypatc
 
 
 def test_the_reviewer_seam_skips_the_store_lookup_entirely(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Under ``OCRL_REVIEWER_CMD`` no ``claude`` ran, so there is no session to find.
+    """Under ``ARL_REVIEWER_CMD`` no ``claude`` ran, so there is no session to find.
 
     Skipped rather than merely quiet, and asserted because the difference is visible: without
     it every round of ``tests/selftest.sh`` logs a missing session it was never going to have,
@@ -441,7 +441,7 @@ def test_the_reviewer_seam_skips_the_store_lookup_entirely(tmp_path: Path, monke
     Same short-circuit ``opencode._list_sessions`` makes, for the same reason.
     """
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
-    monkeypatch.setenv("OCRL_REVIEWER_CMD", "/bin/true")
+    monkeypatch.setenv("ARL_REVIEWER_CMD", "/bin/true")
     minted = claudecode.SESSIONS.mint()
     store_session(tmp_path / "config", minted)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The one line of scripts/lib/gitsnap.sh that decides whether a review is skipped:
 #
-#     [[ $p == $g ]]        (ocrl_all_paths_ignored)
+#     [[ $p == $g ]]        (arl_all_paths_ignored)
 #
 # Exposed on its own so the Python matcher can be compared against real bash rather than
 # against a reading of the manual. Exit 0 when the path matches the glob, 1 when it does

@@ -1,14 +1,14 @@
 {
-  "description": "opencode-review-loop review gate. Registered at plugin load so the gate exists in every Claude Code process, not only the one that invoked /opencode-review-loop:implement. A session that never armed pays one silent, sub-second pass-through per tool call.",
+  "description": "adversarial-review-loop review gate. Registered at plugin load so the gate exists in every Claude Code process, not only the one that invoked /adversarial-review-loop:implement. A session that never armed pays one silent, sub-second pass-through per tool call.",
   "hooks": {
     "PreToolUse": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh pretool",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh pretool",
             "timeout": 1200,
-            "statusMessage": "OpenCode review gate"
+            "statusMessage": "Adversarial review gate"
           }
         ]
       }
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh confirm-commit",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh confirm-commit",
             "timeout": 60
           }
         ]
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh posttool-failure",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh posttool-failure",
             "timeout": 30
           }
         ]
@@ -42,9 +42,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh gate-stop",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh gate-stop",
             "timeout": 1800,
-            "statusMessage": "OpenCode review loop: end-of-turn gate"
+            "statusMessage": "Adversarial review loop: end-of-turn gate"
           }
         ]
       }
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh intent",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh intent",
             "timeout": 10
           }
         ]
@@ -66,7 +66,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh reorient",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh reorient",
             "timeout": 30
           }
         ]

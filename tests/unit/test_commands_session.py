@@ -15,7 +15,7 @@ import pytest
 from conftest import FAKE_REVIEWER, git, run_bootstrap
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
 
-from ocrl import harness, paths
+from arl import harness, paths
 
 
 def arm(repo: Path, tmp_path: Path, env: dict[str, str], session: str = "s1") -> None:
@@ -35,9 +35,9 @@ def marking_reviewer(tmp_path: Path, marker: Path) -> Path:
         f"open({str(marker)!r}, 'w').write('reviewed\\n')\n"
         "print('Reviewed the whole diff.')\n"
         "print()\n"
-        "print('<<<OCRL-FINDINGS>>>')\n"
+        "print('<<<ARL-FINDINGS>>>')\n"
         "print('VERDICT APPROVED')\n"
-        "print('<<<OCRL-END>>>')\n"
+        "print('<<<ARL-END>>>')\n"
     )
     stub.chmod(0o755)
     return stub
@@ -64,7 +64,7 @@ def test_set_phases_freezes_the_list_and_starts_phase_one(git_repo: Path, tmp_pa
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == (
-        "opencode-review-loop: 2 phases frozen. Now on phase 1 of 2:\n\n"
+        "adversarial-review-loop: 2 phases frozen. Now on phase 1 of 2:\n\n"
         "  1. first thing\n"
         "  2. second thing\n"
         "\nImplement phase 1, then commit it. The commit is the review gate.\n"
@@ -144,13 +144,13 @@ def test_set_phases_is_refused_after_arming_failed(git_repo: Path, clean_env: di
 
 def test_defer_is_counted_and_bounded(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """ "Let me ask the user something" is also the shape of an agent that has stalled."""
-    env = armed_env(clean_env, OCRL_MAX_DEFERS="2")
+    env = armed_env(clean_env, ARL_MAX_DEFERS="2")
     arm(git_repo, tmp_path, env)
     set_phases(git_repo, env, "one")
 
     first = run_bootstrap(["defer", "--reason", "need a decision"], cwd=git_repo, env=env)
     assert first.returncode == 0
-    assert first.stdout == "opencode-review-loop: turn end deferred (1 of 2). Reason recorded: need a decision\n"
+    assert first.stdout == "adversarial-review-loop: turn end deferred (1 of 2). Reason recorded: need a decision\n"
     document = read_state(env, git_repo, "s1")
     assert document["defers"] == 1
     assert document["defer_pending"] is True
@@ -178,7 +178,7 @@ def test_defer_without_an_activation_fails(git_repo: Path, clean_env: dict[str, 
 def test_status_without_an_activation(git_repo: Path, clean_env: dict[str, str]) -> None:
     proc = run_bootstrap(["status"], cwd=git_repo, env=armed_env(clean_env))
     assert proc.returncode == 0
-    assert proc.stdout == "opencode-review-loop: not armed in this worktree.\n"
+    assert proc.stdout == "adversarial-review-loop: not armed in this worktree.\n"
 
 
 def test_status_reports_the_activation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -229,7 +229,7 @@ def test_status_shows_the_stored_reviewer_session(git_repo: Path, tmp_path: Path
     Pinned to `opencode`: the stored id is a `ses_…`, and `continuity_summary` shows a pointer
     only when the *configured* harness recognises the shape -- which is the same check that
     stops one harness offering another's session as resumable."""
-    env = armed_env(clean_env, OCRL_HARNESS="opencode")
+    env = armed_env(clean_env, ARL_HARNESS="opencode")
     arm(git_repo, tmp_path, env)
     set_phases(git_repo, env, "first thing")
 
@@ -246,7 +246,7 @@ def test_status_shows_the_stored_reviewer_session(git_repo: Path, tmp_path: Path
 
 def test_status_shows_the_effective_status_alongside_the_stored_one(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """An expired activation reads as STALE, and STALE blocks -- it never silently disarms."""
-    env = armed_env(clean_env, OCRL_TTL_HOURS="1")
+    env = armed_env(clean_env, ARL_TTL_HOURS="1")
     arm(git_repo, tmp_path, env)
 
     path = state_dir(env, git_repo, "s1") / "state.json"
@@ -266,7 +266,7 @@ def test_status_shows_the_effective_status_alongside_the_stored_one(git_repo: Pa
 def test_report_without_an_activation(git_repo: Path, clean_env: dict[str, str]) -> None:
     proc = run_bootstrap(["report"], cwd=git_repo, env=armed_env(clean_env))
     assert proc.returncode == 0
-    assert proc.stdout == "opencode-review-loop: not armed in this worktree.\n"
+    assert proc.stdout == "adversarial-review-loop: not armed in this worktree.\n"
 
 
 def test_report_with_no_reports_yet(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -319,7 +319,7 @@ def test_finish_requires_a_clean_worktree(git_repo: Path, tmp_path: Path, clean_
 
 
 def test_finish_completes_on_an_approving_review(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="approve")
+    env = armed_env(clean_env, ARL_FAKE_MODE="approve")
     arm(git_repo, tmp_path, env)
     set_phases(git_repo, env, "one")
     (git_repo / "work.txt").write_text("done\n")
@@ -330,7 +330,7 @@ def test_finish_completes_on_an_approving_review(git_repo: Path, tmp_path: Path,
 
     assert proc.returncode == 0, proc.stdout
     assert "running the final cumulative review" in proc.stdout
-    assert "opencode-review-loop: COMPLETE." in proc.stdout
+    assert "adversarial-review-loop: COMPLETE." in proc.stdout
     document = read_state(env, git_repo, "s1")
     assert document["status"] == "COMPLETE"
     assert document["final_done_tree"] == git(git_repo, "rev-parse", "HEAD^{tree}")
@@ -345,7 +345,7 @@ def test_finish_never_completes_on_a_review_that_did_not_approve(
     mode: str,
 ) -> None:
     """Rule 1, at the last gate the user can reach: not approved is not complete."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE=mode)
+    env = armed_env(clean_env, ARL_FAKE_MODE=mode)
     arm(git_repo, tmp_path, env)
     set_phases(git_repo, env, "one")
     (git_repo / "work.txt").write_text("done\n")
@@ -374,14 +374,14 @@ def test_finish_reviews_even_when_final_review_is_disabled(git_repo: Path, tmp_p
     get one would become a lie. The marker file is the proof the reviewer really ran, rather
     than the output merely claiming a verdict.
     """
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="false")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="false")
     arm(git_repo, tmp_path, env)
     set_phases(git_repo, env, "one")
     (git_repo / "work.txt").write_text("done\n")
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "phase one")
     marker = tmp_path / "the-reviewer-ran"
-    env["OCRL_REVIEWER_CMD"] = str(marking_reviewer(tmp_path, marker))
+    env["ARL_REVIEWER_CMD"] = str(marking_reviewer(tmp_path, marker))
 
     proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
 
@@ -406,7 +406,7 @@ def test_finish_still_refuses_a_failed_review_when_final_review_is_disabled(
     completes anyway because nothing downstream is checking". ``final_review=false`` is exactly
     the configuration under which that would go unnoticed.
     """
-    env = armed_env(clean_env, OCRL_FAKE_MODE=mode, OCRL_FINAL_REVIEW="false")
+    env = armed_env(clean_env, ARL_FAKE_MODE=mode, ARL_FINAL_REVIEW="false")
     arm(git_repo, tmp_path, env)
     set_phases(git_repo, env, "one")
     (git_repo / "work.txt").write_text("done\n")
@@ -441,7 +441,7 @@ def test_finish_refuses_a_resumed_activation(git_repo: Path, tmp_path: Path, cle
 def test_finish_without_an_activation(git_repo: Path, clean_env: dict[str, str]) -> None:
     proc = run_bootstrap(["finish"], cwd=git_repo, env=armed_env(clean_env))
     assert proc.returncode == 0
-    assert proc.stdout == "opencode-review-loop: not armed in this worktree.\n"
+    assert proc.stdout == "adversarial-review-loop: not armed in this worktree.\n"
 
 
 # --------------------------------------------------------------------------
@@ -458,20 +458,20 @@ def test_deactivate_disarms_but_keeps_the_pointer(git_repo: Path, tmp_path: Path
     proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
 
     assert proc.returncode == 0
-    assert "opencode-review-loop: STOPPED for this worktree." in proc.stdout
+    assert "adversarial-review-loop: STOPPED for this worktree." in proc.stdout
     assert "at phase 1 of 2." in proc.stdout
     document = read_state(env, git_repo, "s1")
     assert document["status"] == "DISARMED"
     assert document["reason"] == "stopped by the user"
 
-    pointer = Path(env["XDG_STATE_HOME"]) / "opencode-review-loop" / "sessions" / "s1"
+    pointer = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop" / "sessions" / "s1"
     assert pointer.read_text() == f"{git_repo}\n"
 
 
 def test_deactivate_without_an_activation(git_repo: Path, clean_env: dict[str, str]) -> None:
     proc = run_bootstrap(["deactivate"], cwd=git_repo, env=armed_env(clean_env))
     assert proc.returncode == 0
-    assert proc.stdout == "opencode-review-loop: not armed in this worktree, so there is nothing to stop.\n"
+    assert proc.stdout == "adversarial-review-loop: not armed in this worktree, so there is nothing to stop.\n"
 
 
 # --------------------------------------------------------------------------
@@ -492,20 +492,20 @@ def test_commands_ignore_an_activation_from_another_worktree(
     other.mkdir()
 
     proc = run_bootstrap(["status"], cwd=other, env=env)
-    assert proc.stdout == "opencode-review-loop: not armed in this worktree.\n"
-    assert not (Path(env["XDG_STATE_HOME"]) / "opencode-review-loop" / "worktrees" / paths.sha256_hex(str(other))).exists()
+    assert proc.stdout == "adversarial-review-loop: not armed in this worktree.\n"
+    assert not (Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop" / "worktrees" / paths.sha256_hex(str(other))).exists()
 
 
 def test_a_reviewer_seam_is_all_these_tests_ever_call(clean_env: dict[str, str]) -> None:
     """Guard the guard: the suite must never be able to reach a real model."""
     assert FAKE_REVIEWER.is_file()
-    assert "OCRL_REVIEWER_CMD" in armed_env(clean_env)
+    assert "ARL_REVIEWER_CMD" in armed_env(clean_env)
 
 
 def test_status_names_the_harness_and_the_model_it_would_run(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """``model`` is unset by default and resolves to the harness's own, so a status line built
     from the raw config value would show a blank where the reviewer is named."""
-    env = armed_env(clean_env, OCRL_HARNESS="claude-code")
+    env = armed_env(clean_env, ARL_HARNESS="claude-code")
     arm(git_repo, tmp_path, env)
 
     proc = run_bootstrap(["status"], cwd=git_repo, env=env)
@@ -525,7 +525,7 @@ def test_status_reports_an_unimplemented_harness_instead_of_crashing(git_repo: P
     document["reviewer_session"] = {"id": "ses_fb7592bccffeVl5WXE354RQsD9", "label": "phase1", "round": 3}
     path.write_text(json.dumps(document))
 
-    proc = run_bootstrap(["status"], cwd=git_repo, env={**env, "OCRL_HARNESS": "not-a-harness"})
+    proc = run_bootstrap(["status"], cwd=git_repo, env={**env, "ARL_HARNESS": "not-a-harness"})
 
     assert proc.returncode == 0, proc.stderr
     assert "harness:             not-a-harness\n" in proc.stdout
@@ -666,7 +666,7 @@ def test_reorient_quotes_no_reviewer_prose(git_repo: Path, tmp_path: Path, clean
 
     assert "secret prose" not in out
     assert "report 007: CHANGES_REQUIRED, 1 finding(s)" in out
-    assert "/opencode-review-loop:report 7" in out
+    assert "/adversarial-review-loop:report 7" in out
 
 
 def test_reorient_says_nothing_when_no_activation_owns_the_session(git_repo: Path, clean_env: dict[str, str]) -> None:

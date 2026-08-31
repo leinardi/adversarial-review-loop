@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# opencode-review-loop selftest.
+# adversarial-review-loop selftest.
 #
 # Runs the whole gate against scratch repositories under $TMPDIR, with the
 # reviewer replaced by tests/fixtures/fake-reviewer.sh. No model is called and
@@ -11,25 +11,25 @@ set -uo pipefail
 
 TESTS_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PLUGIN_ROOT=$(dirname -- "$TESTS_DIR")
-OCRL="$PLUGIN_ROOT/scripts/ocrl.sh"
+ARL="$PLUGIN_ROOT/scripts/arl.sh"
 FAKE="$TESTS_DIR/fixtures/fake-reviewer.sh"
 FILTER=${1:-}
 
 export CLAUDE_PLUGIN_ROOT=$PLUGIN_ROOT
-export OCRL_REVIEWER_CMD=$FAKE
+export ARL_REVIEWER_CMD=$FAKE
 
 PASS=0
 FAIL=0
 CURRENT=''
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ocrl-selftest.XXXXXX")
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/arl-selftest.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
 
-# Run only every Nth section, offset by I: OCRL_SELFTEST_SHARD=I/N. Sections share nothing
+# Run only every Nth section, offset by I: ARL_SELFTEST_SHARD=I/N. Sections share nothing
 # -- each `new_case` builds its own repository under its own $ROOT and its own
-# OCRL_STATE_DIR -- so splitting them across processes is a scheduling decision and not a
+# ARL_STATE_DIR -- so splitting them across processes is a scheduling decision and not a
 # semantic one. tests/selftest-parallel.sh is what sets this; running the script by hand
 # without it executes everything, in order, exactly as before.
-SHARD=${OCRL_SELFTEST_SHARD:-}
+SHARD=${ARL_SELFTEST_SHARD:-}
 SHARD_INDEX=${SHARD%%/*}
 SHARD_TOTAL=${SHARD##*/}
 SECTION_N=0
@@ -81,11 +81,11 @@ new_case() {
     CASE_N=$((CASE_N + 1))
     CASE_DIR="$ROOT/case-$CASE_N"
     REPO="$CASE_DIR/repo"
-    export OCRL_STATE_DIR="$CASE_DIR/state"
+    export ARL_STATE_DIR="$CASE_DIR/state"
     mkdir -p "$REPO"
     git -C "$REPO" init -q -b main
     git -C "$REPO" config user.email selftest@example.invalid
-    git -C "$REPO" config user.name 'ocrl selftest'
+    git -C "$REPO" config user.name 'arl selftest'
     git -C "$REPO" config commit.gpgsign false
     printf 'seed\n' >"$REPO/seed.txt"
     git -C "$REPO" add -A
@@ -95,7 +95,7 @@ new_case() {
     SESSION="sess-$CASE_N"
 }
 
-ocrl() { (cd "$REPO" && "$OCRL" "$@"); }
+arl() { (cd "$REPO" && "$ARL" "$@"); }
 
 # pre <tool> [command] -- runs the PreToolUse dispatcher, prints the decision.
 # The helpers run inside command substitution, so the last hook payload is
@@ -113,7 +113,7 @@ pre_at() {
     local at=$1 tool=$2 cmd=${3:-} out
     out=$(jq -nc --arg s "$SESSION" --arg c "$at" --arg t "$tool" --arg cmd "$cmd" \
         '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:$t,tool_input:{command:$cmd}}' |
-        (cd "$at" && "$OCRL" pretool))
+        (cd "$at" && "$ARL" pretool))
     printf '%s' "$out" >"$ROOT/last.json"
     if [ -z "$out" ]; then
         printf 'pass'
@@ -154,7 +154,7 @@ confirm() {
     local cmd=$1 out
     out=$(jq -nc --arg s "$SESSION" --arg c "$REPO" --arg cmd "$cmd" \
         '{session_id:$s,cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{exit_code:0}}' |
-        (cd "$REPO" && "$OCRL" confirm-commit))
+        (cd "$REPO" && "$ARL" confirm-commit))
     printf '%s' "$out" >"$ROOT/last.json"
     printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""'
 }
@@ -162,14 +162,14 @@ confirm() {
 posttool_fail() {
     jq -nc --arg s "$SESSION" --arg c "$REPO" --arg cmd "$1" \
         '{session_id:$s,cwd:$c,hook_event_name:"PostToolUseFailure",tool_name:"Bash",tool_input:{command:$cmd}}' |
-        (cd "$REPO" && "$OCRL" posttool-failure)
+        (cd "$REPO" && "$ARL" posttool-failure)
 }
 
 stop_gate() {
     local out
     out=$(jq -nc --arg s "$SESSION" --arg c "$REPO" \
         '{session_id:$s,cwd:$c,hook_event_name:"Stop",stop_hook_active:false}' |
-        (cd "$REPO" && "$OCRL" gate-stop))
+        (cd "$REPO" && "$ARL" gate-stop))
     printf '%s' "$out" >"$ROOT/last.json"
     printf '%s' "$out"
 }
@@ -181,10 +181,10 @@ stop_decision() {
 }
 
 state_file() {
-    find "$OCRL_STATE_DIR/worktrees" -name state.json | head -n 1
+    find "$ARL_STATE_DIR/worktrees" -name state.json | head -n 1
 }
 
-# Mirrors ocrl_get, including its avoidance of `//` -- in jq `false // ""` is
+# Mirrors arl_get, including its avoidance of `//` -- in jq `false // ""` is
 # "", which would blank every boolean field being asserted on.
 sget() {
     jq -r --arg k "$1" '
@@ -200,7 +200,7 @@ sget() {
 # paths.sha256_hex documents itself as matching `printf '%s' … | sha256sum`, so this reproduces
 # the same hash the Python side computes for the worktree directory.
 state_file_for() {
-    printf '%s/worktrees/%s/%s/state.json' "$OCRL_STATE_DIR" "$(printf '%s' "$REPO" | sha256sum | cut -d' ' -f1)" "$1"
+    printf '%s/worktrees/%s/%s/state.json' "$ARL_STATE_DIR" "$(printf '%s' "$REPO" | sha256sum | cut -d' ' -f1)" "$1"
 }
 
 sget_for() {
@@ -214,15 +214,15 @@ sget_for() {
 intent_ok() {
     jq -nc --arg s "$SESSION" --arg c "$REPO" --arg p "$1" \
         '{session_id:$s,cwd:$c,hook_event_name:"UserPromptSubmit",prompt:$p}' |
-        (cd "$REPO" && "$OCRL" intent) >/dev/null
+        (cd "$REPO" && "$ARL" intent) >/dev/null
 }
 
 arm_ok() {
-    ocrl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
+    arl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
 }
 
 phases_ok() {
-    ocrl set-phases --phase 'Phase one: the thing' --phase 'Phase two: the other thing' >/dev/null 2>&1
+    arl set-phases --phase 'Phase one: the thing' --phase 'Phase two: the other thing' >/dev/null 2>&1
 }
 
 commit_now() {
@@ -238,7 +238,7 @@ commit_now() {
 # sections above already exercise snapshotting through the CLI on every run.
 #
 # The allowlist table below used to call scripts/lib/cmdshape.sh directly.
-# It is now driven through an armed `scripts/ocrl.sh pretool`, because
+# It is now driven through an armed `scripts/arl.sh pretool`, because
 # unit-level correctness (already proven in pytest) says nothing about
 # whether `pretool` actually calls the shape validator, on the right
 # argument, and turns its verdict into the right hook decision. This is the
@@ -459,7 +459,7 @@ fi
 if start 'arm: refuses a dirty worktree, folds it in with --allow-dirty'; then
     new_case
     printf 'dirt\n' >"$REPO/dirt.txt"
-    out=$(ocrl arm --session "$SESSION" --plan "$PLAN" 2>&1)
+    out=$(arl arm --session "$SESSION" --plan "$PLAN" 2>&1)
     rc=$?
     assert_eq 'arming a dirty worktree exits non-zero' "$rc" '1'
     assert_contains 'the failure names the dirt' "$out" 'worktree is dirty'
@@ -467,7 +467,7 @@ if start 'arm: refuses a dirty worktree, folds it in with --allow-dirty'; then
 
     new_case
     printf 'dirt\n' >"$REPO/dirt.txt"
-    out=$(ocrl arm --session "$SESSION" --plan "$PLAN" --allow-dirty 2>&1)
+    out=$(arl arm --session "$SESSION" --plan "$PLAN" --allow-dirty 2>&1)
     assert_eq '--allow-dirty arms cleanly' "$(sget status)" 'ARMED'
     assert_eq 'the baseline is the HEAD tree, so the dirt lands in phase 1' \
         "$(sget baseline_tree)" "$(git -C "$REPO" rev-parse 'HEAD^{tree}')"
@@ -475,22 +475,22 @@ fi
 
 if start 'arm: rejects a bad second argument and a missing plan'; then
     new_case
-    ocrl arm --session "$SESSION" --plan "$PLAN" '--wat' >/dev/null 2>&1
+    arl arm --session "$SESSION" --plan "$PLAN" '--wat' >/dev/null 2>&1
     assert_eq 'a malformed second argument fails closed' "$(sget status)" 'ARM_FAILED'
     assert_contains 'and says why' "$(sget reason)" '--allow-dirty'
 
     new_case
-    ocrl arm --session "$SESSION" --plan "$CASE_DIR/nope.md" >/dev/null 2>&1
+    arl arm --session "$SESSION" --plan "$CASE_DIR/nope.md" >/dev/null 2>&1
     assert_eq 'a non-existent plan fails closed' "$(sget status)" 'ARM_FAILED'
 
     new_case
-    ocrl arm --session "$SESSION" --plan "$CASE_DIR/pl\`an.md" >/dev/null 2>&1
+    arl arm --session "$SESSION" --plan "$CASE_DIR/pl\`an.md" >/dev/null 2>&1
     assert_eq 'a plan path with a backtick fails closed' "$(sget status)" 'ARM_FAILED'
     assert_contains 'and names the character class' "$(sget reason)" 'not safe'
 
     new_case
     printf 'x\n' >"$CASE_DIR/a plan.md"
-    ocrl arm --session "$SESSION" --plan "$CASE_DIR/a plan.md" >/dev/null 2>&1
+    arl arm --session "$SESSION" --plan "$CASE_DIR/a plan.md" >/dev/null 2>&1
     assert_eq 'a plan path with a space is accepted' "$(sget status)" 'ARMED'
 
     # Pinned to `opencode`: the model probe is a real `opencode models` call, and it is the
@@ -498,13 +498,13 @@ if start 'arm: rejects a bad second argument and a missing plan'; then
     # harness a bad name is caught at review time (a non-zero exit, an OP_FAILURE) rather than
     # at arm time, and this case would pass while probing nothing.
     new_case
-    with_env OCRL_HARNESS=opencode OCRL_MODEL='provider/does-not-exist' OCRL_REVIEWER_CMD='' \
-        ocrl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
+    with_env ARL_HARNESS=opencode ARL_MODEL='provider/does-not-exist' ARL_REVIEWER_CMD='' \
+        arl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
     assert_eq 'an unreachable model fails closed' "$(sget status)" 'ARM_FAILED'
 
     new_case
-    with_env OCRL_HARNESS='not-a-harness' OCRL_REVIEWER_CMD='' \
-        ocrl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
+    with_env ARL_HARNESS='not-a-harness' ARL_REVIEWER_CMD='' \
+        arl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
     assert_eq 'an unimplemented harness fails closed' "$(sget status)" 'ARM_FAILED'
     assert_contains 'and says which are implemented' "$(sget reason)" 'claude-code, opencode'
 fi
@@ -514,35 +514,35 @@ if start 'arm: --args parsing, as the slash command actually delivers it'; then
     # the script. $1 is unusable: its positional substitution is 0-based, so a
     # single-argument invocation leaves $1 literal and the shell empties it.
     new_case
-    ocrl arm --session "$SESSION" --args "$PLAN" >/dev/null 2>&1
+    arl arm --session "$SESSION" --args "$PLAN" >/dev/null 2>&1
     assert_eq 'a bare plan path arms' "$(sget status)" 'ARMED'
     assert_eq 'and allow_dirty stays off' "$(sget allow_dirty)" 'false'
 
     new_case
-    ocrl arm --session "$SESSION" --args "$PLAN --allow-dirty" >/dev/null 2>&1
+    arl arm --session "$SESSION" --args "$PLAN --allow-dirty" >/dev/null 2>&1
     assert_eq 'a trailing --allow-dirty arms' "$(sget status)" 'ARMED'
     assert_eq 'and turns allow_dirty on' "$(sget allow_dirty)" 'true'
 
     new_case
     printf 'x\n' >"$CASE_DIR/a plan with spaces.md"
-    ocrl arm --session "$SESSION" --args "$CASE_DIR/a plan with spaces.md" >/dev/null 2>&1
+    arl arm --session "$SESSION" --args "$CASE_DIR/a plan with spaces.md" >/dev/null 2>&1
     assert_eq 'a path containing spaces survives' "$(sget status)" 'ARMED'
     assert_contains 'and is the plan that was frozen' "$(sget plan_path)" 'a plan with spaces.md'
 
     new_case
     printf 'x\n' >"$CASE_DIR/spaced plan.md"
-    ocrl arm --session "$SESSION" --args "$CASE_DIR/spaced plan.md --allow-dirty" >/dev/null 2>&1
+    arl arm --session "$SESSION" --args "$CASE_DIR/spaced plan.md --allow-dirty" >/dev/null 2>&1
     assert_eq 'spaces plus the flag together' "$(sget status)" 'ARMED'
     assert_eq 'flag applied' "$(sget allow_dirty)" 'true'
     assert_contains 'path intact' "$(sget plan_path)" 'spaced plan.md'
 
     new_case
-    ocrl arm --session "$SESSION" --args "" >/dev/null 2>&1
+    arl arm --session "$SESSION" --args "" >/dev/null 2>&1
     assert_eq 'an empty argument string fails closed' "$(sget status)" 'ARM_FAILED'
     assert_contains 'naming the missing plan' "$(sget reason)" 'no plan path'
 
     new_case
-    ocrl arm --session "$SESSION" --args "$PLAN --wat" >/dev/null 2>&1
+    arl arm --session "$SESSION" --args "$PLAN --wat" >/dev/null 2>&1
     assert_eq 'an unknown trailing flag fails closed' "$(sget status)" 'ARM_FAILED'
     assert_contains 'naming the offending flag' "$(sget reason)" '--wat'
 fi
@@ -557,11 +557,11 @@ if start 'fail-closed: every arm failure denies every mutation'; then
         case "$mode" in
             dirty)
                 printf 'dirt\n' >"$REPO/dirt.txt"
-                ocrl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
+                arl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1
                 ;;
-            badarg) ocrl arm --session "$SESSION" --plan "$PLAN" '--nope' >/dev/null 2>&1 ;;
-            noplan) ocrl arm --session "$SESSION" --plan "$CASE_DIR/missing.md" >/dev/null 2>&1 ;;
-            badmodel) with_env OCRL_MODEL='provider/nope' OCRL_REVIEWER_CMD='' ocrl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1 ;;
+            badarg) arl arm --session "$SESSION" --plan "$PLAN" '--nope' >/dev/null 2>&1 ;;
+            noplan) arl arm --session "$SESSION" --plan "$CASE_DIR/missing.md" >/dev/null 2>&1 ;;
+            badmodel) with_env ARL_MODEL='provider/nope' ARL_REVIEWER_CMD='' arl arm --session "$SESSION" --plan "$PLAN" >/dev/null 2>&1 ;;
         esac
         assert_eq "[$mode] Edit is denied" "$(pre Edit)" 'deny'
         assert_eq "[$mode] Write is denied" "$(pre Write)" 'deny'
@@ -579,7 +579,7 @@ if start 'fail-closed: missing state denies mutations'; then
     arm_ok
     rm -f "$(state_file)"
     assert_eq 'Edit denied with no state' "$(pre Edit)" 'deny'
-    assert_contains 'and says how to recover' "$(pre_reason)" '/opencode-review-loop:implement'
+    assert_contains 'and says how to recover' "$(pre_reason)" '/adversarial-review-loop:implement'
     assert_eq 'Read still allowed' "$(pre Read)" 'pass'
 fi
 
@@ -592,7 +592,7 @@ if start 'rule 0: a session that never armed is not gated'; then
     assert_eq 'Edit passes' "$(pre Edit)" 'pass'
     assert_eq 'Bash passes' "$(pre Bash 'git add -A && git commit -m x')" 'pass'
     assert_eq 'the turn ends cleanly' "$(stop_decision)" 'ok'
-    assert_eq 'and no state was written' "$(find "$OCRL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+    assert_eq 'and no state was written' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
 fi
 
 if start 'rule 0: an arm that never executed still denies'; then
@@ -601,8 +601,8 @@ if start 'rule 0: an arm that never executed still denies'; then
     # unreadable script, an unresolved plugin root. cmd_arm cannot persist a
     # failure to start, so the next hook call has to.
     new_case
-    intent_ok '/opencode-review-loop:implement plan.md'
-    assert_eq 'no state exists yet' "$(find "$OCRL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+    intent_ok '/adversarial-review-loop:implement plan.md'
+    assert_eq 'no state exists yet' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
 
     assert_eq 'Edit is denied rather than silently passing' "$(pre Edit)" 'deny'
     assert_contains 'and says arming never ran' "$(pre_reason)" 'Arming never ran'
@@ -620,7 +620,7 @@ fi
 
 if start 'rule 0: a turn ending before any tool call still blocks an unstarted arm'; then
     new_case
-    intent_ok '/opencode-review-loop:resume'
+    intent_ok '/adversarial-review-loop:resume'
     out=$(stop_gate)
     assert_contains 'the Stop gate blocks' "$out" 'arming never ran'
     assert_eq 'and records it' "$(sget status)" 'ARM_FAILED'
@@ -629,9 +629,9 @@ fi
 if start 'rule 0: a failed re-arm does not hide behind a pointer that already ended'; then
     new_case
     arm_ok && phases_ok
-    ocrl deactivate >/dev/null 2>&1
+    arl deactivate >/dev/null 2>&1
     assert_eq 'DISARMED passes a commit' "$(pre Bash 'git add -A && git commit -m x')" 'pass'
-    intent_ok '/opencode-review-loop:implement plan.md'
+    intent_ok '/adversarial-review-loop:implement plan.md'
     assert_eq 'after an unanswered re-arm the commit is denied' "$(pre Bash 'git add -A && git commit -m x')" 'deny'
     assert_contains 'as arming never ran' "$(pre_reason)" 'Arming never ran'
     assert_eq 'and it is recorded' "$(sget status)" 'ARM_FAILED'
@@ -639,12 +639,12 @@ fi
 
 if start 'rule 0: an intent is scoped to the worktree it was submitted from'; then
     new_case
-    intent_ok '/opencode-review-loop:implement plan.md'
+    intent_ok '/adversarial-review-loop:implement plan.md'
     other="$CASE_DIR/other"
     mkdir -p "$other"
     git -C "$other" init -q -b main
     assert_eq 'a mutation in another repo passes' "$(pre_at "$other" Edit)" 'pass'
-    assert_eq 'and records nothing' "$(find "$OCRL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+    assert_eq 'and records nothing' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
     assert_eq 'the armed repo is still denied' "$(pre Edit)" 'deny'
     assert_eq 'and now recorded' "$(sget status)" 'ARM_FAILED'
 fi
@@ -663,13 +663,13 @@ if start 'rule 0: a bound session cannot be scoped out by a git that cannot run'
     done
     out=$(jq -nc --arg s "$SESSION" --arg c "$REPO/sub" \
         '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"/usr/bin/git add -A && /usr/bin/git commit -m x"}}' |
-        (cd "$REPO/sub" && PATH="$nogit" "$OCRL" pretool))
+        (cd "$REPO/sub" && PATH="$nogit" "$ARL" pretool))
     assert_eq 'the commit is denied' "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
     assert_contains 'because the repository could not be resolved' \
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')" 'could not tell which repository'
     out=$(jq -nc --arg s "$SESSION" --arg c "$REPO/sub" \
         '{session_id:$s,cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"git add -A && git commit -m x"},tool_response:{exit_code:0}}' |
-        (cd "$REPO/sub" && PATH="$nogit" "$OCRL" confirm-commit))
+        (cd "$REPO/sub" && PATH="$nogit" "$ARL" confirm-commit))
     assert_contains 'and confirm-commit reports rather than verifying' \
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""')" 'NOT confirmed'
 fi
@@ -680,10 +680,10 @@ if start 'rule 0: a marker landing after the arm is answered by the live loop'; 
     # own worktree and session answers it; ARM_FAILED must not overwrite it.
     new_case
     arm_ok && phases_ok
-    intent_ok '/opencode-review-loop:resume --allow-dirty'
+    intent_ok '/adversarial-review-loop:resume --allow-dirty'
     assert_eq 'the next edit passes' "$(pre Edit)" 'pass'
     assert_eq 'the loop is still ACTIVE' "$(sget status)" 'ACTIVE'
-    assert_eq 'and the marker was answered' "$(test -f "$OCRL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
+    assert_eq 'and the marker was answered' "$(test -f "$ARL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
 fi
 
 if start 'rule 0: a same-session resume that runs answers the intent marker'; then
@@ -692,9 +692,9 @@ if start 'rule 0: a same-session resume that runs answers the intent marker'; th
     # the live activation with ARM_FAILED.
     new_case
     arm_ok && phases_ok
-    intent_ok '/opencode-review-loop:resume --allow-dirty'
-    ocrl resume --session "$SESSION" --args '--allow-dirty' >/dev/null 2>&1
-    assert_eq 'the marker is answered' "$(test -f "$OCRL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
+    intent_ok '/adversarial-review-loop:resume --allow-dirty'
+    arl resume --session "$SESSION" --args '--allow-dirty' >/dev/null 2>&1
+    assert_eq 'the marker is answered' "$(test -f "$ARL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
     assert_eq 'the loop is still ACTIVE' "$(sget status)" 'ACTIVE'
     assert_eq 'an edit passes as mid-phase work' "$(pre Edit)" 'pass'
 fi
@@ -705,9 +705,9 @@ if start 'rule 0: a same-session resume that fails does not brick the live loop'
     # enforcing. The marker must not convert the typo into ARM_FAILED.
     new_case
     arm_ok && phases_ok
-    intent_ok '/opencode-review-loop:resume --no-such-flag'
-    ocrl resume --session "$SESSION" --args '--no-such-flag' >/dev/null 2>&1
-    assert_eq 'the marker is answered' "$(test -f "$OCRL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
+    intent_ok '/adversarial-review-loop:resume --no-such-flag'
+    arl resume --session "$SESSION" --args '--no-such-flag' >/dev/null 2>&1
+    assert_eq 'the marker is answered' "$(test -f "$ARL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
     assert_eq 'the loop is still ACTIVE' "$(sget status)" 'ACTIVE'
     assert_eq 'and still gating (an unshaped command is refused)' "$(pre Bash 'git commit --amend -m x')" 'deny'
     assert_eq 'while an edit still passes' "$(pre Edit)" 'pass'
@@ -715,31 +715,31 @@ fi
 
 if start 'rule 0: a marker that cannot be scoped denies without being consumed'; then
     new_case
-    intent_ok '/opencode-review-loop:implement plan.md'
-    printf '' >"$OCRL_STATE_DIR/intents/$SESSION"
+    intent_ok '/adversarial-review-loop:implement plan.md'
+    printf '' >"$ARL_STATE_DIR/intents/$SESSION"
     assert_eq 'Edit is denied' "$(pre Edit)" 'deny'
     assert_contains 'because the request cannot be scoped' "$(pre_reason)" 'cannot tell which repository'
-    assert_eq 'nothing was recorded against this repo' "$(find "$OCRL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
-    assert_eq 'and the marker is still there' "$(test -f "$OCRL_STATE_DIR/intents/$SESSION" && echo yes)" 'yes'
+    assert_eq 'nothing was recorded against this repo' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+    assert_eq 'and the marker is still there' "$(test -f "$ARL_STATE_DIR/intents/$SESSION" && echo yes)" 'yes'
     assert_eq 'Read is still allowed' "$(pre Read)" 'pass'
 
-    ocrl deactivate --session "$SESSION" >/dev/null 2>&1
-    assert_eq 'stop discards it' "$(test -f "$OCRL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
+    arl deactivate --session "$SESSION" >/dev/null 2>&1
+    assert_eq 'stop discards it' "$(test -f "$ARL_STATE_DIR/intents/$SESSION" || echo gone)" 'gone'
     assert_eq 'and mutations pass again' "$(pre Edit)" 'pass'
 fi
 
 if start 'rule 0: prose mentioning the command is not an intent'; then
     new_case
-    intent_ok 'yesterday /opencode-review-loop:implement worked fine, continue'
+    intent_ok 'yesterday /adversarial-review-loop:implement worked fine, continue'
     assert_eq 'Edit still passes' "$(pre Edit)" 'pass'
-    assert_eq 'and nothing was recorded' "$(find "$OCRL_STATE_DIR" -type f 2>/dev/null | wc -l)" '0'
+    assert_eq 'and nothing was recorded' "$(find "$ARL_STATE_DIR" -type f 2>/dev/null | wc -l)" '0'
 fi
 
 if start 'rule 0: an unbound session in an armed worktree is denied'; then
     # A second Claude Code process opening a worktree that another session
     # armed -- a fresh `claude`, or a resumed one under a new id -- carries no
     # pointer. The worktree's `latest` activation is live, so every mutation
-    # is denied until /opencode-review-loop:resume binds this session to it.
+    # is denied until /adversarial-review-loop:resume binds this session to it.
     new_case
     arm_ok && phases_ok
     assert_eq 'the bound session edits freely' "$(pre Edit)" 'pass'
@@ -747,18 +747,18 @@ if start 'rule 0: an unbound session in an armed worktree is denied'; then
     assert_eq 'an unbound session is denied an Edit' "$(SESSION=unbound-session pre Edit)" 'deny'
     assert_contains 'and told it is not bound' "$(pre_reason)" 'not bound to it'
     assert_contains 'naming the live activation' "$(pre_reason)" "activation $SESSION, status ACTIVE"
-    assert_contains 'and how to bind' "$(pre_reason)" '/opencode-review-loop:resume'
+    assert_contains 'and how to bind' "$(pre_reason)" '/adversarial-review-loop:resume'
     assert_eq 'a commit is denied' "$(SESSION=unbound-session pre Bash 'git add -A && git commit -m x')" 'deny'
     assert_eq 'an MCP mutation is denied' "$(SESSION=unbound-session pre mcp__serena__replace_content)" 'deny'
     assert_eq 'Read is still allowed' "$(SESSION=unbound-session pre Read)" 'pass'
 
     out=$(SESSION=unbound-session stop_gate)
     assert_contains 'the turn ends with a warning, not a block' "$out" 'systemMessage'
-    assert_contains 'that names resume' "$out" '/opencode-review-loop:resume'
+    assert_contains 'that names resume' "$out" '/adversarial-review-loop:resume'
     assert_eq 'the other activation is untouched' "$(sget status)" 'ACTIVE'
-    assert_eq 'and the unbound session recorded nothing' "$(find "$OCRL_STATE_DIR" -path '*unbound-session*' 2>/dev/null | wc -l)" '0'
+    assert_eq 'and the unbound session recorded nothing' "$(find "$ARL_STATE_DIR" -path '*unbound-session*' 2>/dev/null | wc -l)" '0'
 
-    ocrl deactivate >/dev/null 2>&1
+    arl deactivate >/dev/null 2>&1
     assert_eq 'once the loop ends, the unbound session passes' "$(SESSION=unbound-session pre Edit)" 'pass'
 fi
 
@@ -767,7 +767,7 @@ if start 'stop: disarming survives the unbound-session guard'; then
     # guard would then read as "never bound" and deny on every call.
     new_case
     arm_ok && phases_ok
-    ocrl deactivate >/dev/null 2>&1
+    arl deactivate >/dev/null 2>&1
     assert_eq 'status is DISARMED' "$(sget status)" 'DISARMED'
     assert_eq 'Edit passes after stopping' "$(pre Edit)" 'pass'
     assert_eq 'Bash passes after stopping' "$(pre Bash 'git add -A && git commit -m x')" 'pass'
@@ -786,7 +786,7 @@ if start 'hook input: the payload arrives on a socket, not a pipe'; then
             '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:"Edit",tool_input:{file_path:"a.txt"}}' \
             >"$CASE_DIR/payload.json"
         sock_out=$(cd "$REPO" && python3 "$TESTS_DIR/fixtures/socket-stdin.py" \
-            "$CASE_DIR/payload.json" "$OCRL" pretool 2>/dev/null)
+            "$CASE_DIR/payload.json" "$ARL" pretool 2>/dev/null)
         # Phases are frozen, so an Edit is allowed: reaching that verdict at all
         # proves the payload was read.
         if [ -z "$sock_out" ]; then
@@ -801,7 +801,7 @@ if start 'hook input: the payload arrives on a socket, not a pipe'; then
             '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"git commit --amend -m x"}}' \
             >"$CASE_DIR/payload2.json"
         sock_out=$(cd "$REPO" && python3 "$TESTS_DIR/fixtures/socket-stdin.py" \
-            "$CASE_DIR/payload2.json" "$OCRL" pretool 2>/dev/null)
+            "$CASE_DIR/payload2.json" "$ARL" pretool 2>/dev/null)
         assert_eq 'a socket payload parses tool_name and command' \
             "$(printf '%s' "$sock_out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
         assert_contains 'and reaches the real classifier' \
@@ -816,13 +816,13 @@ if start 'hook input: a payload with no session id denies rather than guessing' 
     arm_ok && phases_ok
     out=$(jq -nc --arg c "$REPO" \
         '{cwd:$c,hook_event_name:"PreToolUse",tool_name:"Edit",tool_input:{}}' |
-        (cd "$REPO" && "$OCRL" pretool))
+        (cd "$REPO" && "$ARL" pretool))
     assert_eq 'denied' "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision')" 'deny'
     assert_contains 'and names it an integration fault' \
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason')" 'no session id'
     # It must not leave junk state keyed by an empty session.
     assert_eq 'no state was written under an empty session key' \
-        "$(find "$OCRL_STATE_DIR/worktrees" -maxdepth 2 -name state.json 2>/dev/null | wc -l)" '0'
+        "$(find "$ARL_STATE_DIR/worktrees" -maxdepth 2 -name state.json 2>/dev/null | wc -l)" '0'
 fi
 
 # --------------------------------------------------------------------------
@@ -839,7 +839,7 @@ if start 'bootstrap: arm -> set-phases -> first edit, with no deadlock'; then
     assert_eq 'Grep allowed' "$(pre Grep)" 'pass'
     assert_eq 'an arbitrary Bash call is denied' "$(pre Bash 'ls')" 'deny'
     assert_eq 'the set-phases command itself is allowed' \
-        "$(pre Bash "$OCRL set-phases --phase 'a'")" 'allow'
+        "$(pre Bash "$ARL set-phases --phase 'a'")" 'allow'
     assert_eq 'ending the turn here blocks' "$(stop_decision)" 'block'
 
     phases_ok
@@ -848,7 +848,7 @@ if start 'bootstrap: arm -> set-phases -> first edit, with no deadlock'; then
     assert_eq 'Edit is allowed once the phases are frozen' "$(pre Edit)" 'pass'
     assert_eq 'ordinary Bash is allowed too' "$(pre Bash 'make test')" 'pass'
 
-    out=$(ocrl set-phases --phase 'x' 2>&1)
+    out=$(arl set-phases --phase 'x' 2>&1)
     assert_contains 'the phase list cannot be re-frozen' "$out" 'already frozen'
 fi
 
@@ -861,7 +861,7 @@ if start 'commit gate: approve, commit, advance'; then
     arm_ok && phases_ok
     printf 'phase one\n' >"$REPO/a.txt"
 
-    d=$(with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"')
+    d=$(with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"')
     assert_eq 'an approved review allows the commit' "$d" 'allow'
     assert_eq 'the approval is pending, and the phase has not advanced' "$(sget phase)" '1'
     if [ -n "$(sget pending_approved_tree)" ]; then ok 'a pending tree is recorded'; else bad 'a pending tree is recorded'; fi
@@ -879,7 +879,7 @@ if start 'commit gate: changes required blocks, and every finding comes back'; t
     new_case
     arm_ok && phases_ok
     printf 'phase one\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x')
     assert_eq 'a review that requires changes denies the commit' "$d" 'deny'
     assert_contains 'the finding is returned inline' "$(pre_reason)" 'Returns success on a failed lookup'
     assert_eq 'the phase did not advance' "$(sget phase)" '1'
@@ -889,7 +889,7 @@ if start 'commit gate: an APPROVE alongside an actionable critical still blocks'
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_FAKE_MODE=approve-with-critical pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_FAKE_MODE=approve-with-critical pre Bash 'git add -A && git commit -m x')
     assert_eq 'the gate recomputes the verdict and blocks' "$d" 'deny'
     assert_contains 'the critical finding is quoted' "$(pre_reason)" 'Nil deref'
 fi
@@ -898,7 +898,7 @@ if start 'commit gate: a non-actionable critical does not block'; then
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_FAKE_MODE=critical-nonactionable pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_FAKE_MODE=critical-nonactionable pre Bash 'git add -A && git commit -m x')
     assert_eq 'actionable=no never blocks, at any severity' "$d" 'allow'
 fi
 
@@ -906,7 +906,7 @@ if start 'commit gate: prose truncates but FINDING lines survive'; then
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_MAX_REASON_BYTES=2000 OCRL_FAKE_MODE=big-prose pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_MAX_REASON_BYTES=2000 ARL_FAKE_MODE=big-prose pre Bash 'git add -A && git commit -m x')
     r=$(pre_reason)
     assert_eq 'the commit is denied' "$d" 'deny'
     assert_contains 'the first finding survived' "$r" 'Must survive truncation'
@@ -919,7 +919,7 @@ if start 'commit gate: operational failures never approve'; then
         new_case
         arm_ok && phases_ok
         printf 'x\n' >"$REPO/a.txt"
-        d=$(with_env OCRL_FAKE_MODE=$mode pre Bash 'git add -A && git commit -m x')
+        d=$(with_env ARL_FAKE_MODE=$mode pre Bash 'git add -A && git commit -m x')
         assert_eq "[$mode] denied" "$d" 'deny'
         assert_contains "[$mode] and says a failed review is not an approval" "$(pre_reason)" 'never an approval'
     done
@@ -927,7 +927,7 @@ if start 'commit gate: operational failures never approve'; then
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_TIMEOUT_SEC=1 OCRL_FAKE_MODE=slow pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_TIMEOUT_SEC=1 ARL_FAKE_MODE=slow pre Bash 'git add -A && git commit -m x')
     assert_eq '[timeout] denied' "$d" 'deny'
     assert_contains '[timeout] and names the timeout' "$(pre_reason)" 'timed out after 1s'
 fi
@@ -940,7 +940,7 @@ if start 'commit gate: a block the contract does not allow never approves'; then
         new_case
         arm_ok && phases_ok
         printf 'x\n' >"$REPO/a.txt"
-        d=$(with_env OCRL_FAKE_MODE=$mode pre Bash 'git add -A && git commit -m x')
+        d=$(with_env ARL_FAKE_MODE=$mode pre Bash 'git add -A && git commit -m x')
         assert_eq "[$mode] denied" "$d" 'deny'
         assert_contains "[$mode] and says a failed review is not an approval" "$(pre_reason)" 'never an approval'
     done
@@ -950,7 +950,7 @@ if start 'contract repair: a malformed block is re-emitted instead of costing th
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_FAKE_MODE=contract-repair pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_FAKE_MODE=contract-repair pre Bash 'git add -A && git commit -m x')
     assert_eq 'the commit is still denied' "$d" 'deny'
     assert_contains 'with the findings the malformed block had stated' "$(pre_reason)" 'Returns success on a failed lookup'
     assert_contains 'and says the block was re-emitted' "$(pre_reason)" 're-emitted by a repair call'
@@ -966,7 +966,7 @@ if start 'contract repair: a repair that approves is discarded, and the failure 
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_FAKE_MODE=contract-repair OCRL_FAKE_REPAIR=approve pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_FAKE_MODE=contract-repair ARL_FAKE_REPAIR=approve pre Bash 'git add -A && git commit -m x')
     assert_eq 'denied' "$d" 'deny'
     assert_contains 'and says a failed review is not an approval' "$(pre_reason)" 'never an approval'
     assert_eq 'no round was recorded' "$(jq '.round_history | length' "$(state_file)")" '0'
@@ -975,12 +975,12 @@ fi
 
 if start 'contract repair: skipped when the hook has no budget left to finish it'; then
     # The whole-hook deadline, end to end: the shim passes its own `timeout` value as
-    # OCRL_HOOK_DEADLINE_SEC, so shrinking the timeout shrinks the gate's own budget and the
+    # ARL_HOOK_DEADLINE_SEC, so shrinking the timeout shrinks the gate's own budget and the
     # repair -- which needs REPAIR_TIMEOUT_SEC plus SETTLE_MARGIN_SEC -- is never launched.
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_FAKE_MODE=contract-repair OCRL_SHIM_TIMEOUT_PRETOOL=100 pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_FAKE_MODE=contract-repair ARL_SHIM_TIMEOUT_PRETOOL=100 pre Bash 'git add -A && git commit -m x')
     assert_eq 'denied' "$d" 'deny'
     act=$(dirname "$(state_file)")
     if [ -f "$act/raw/001-phase1-repair.out" ]; then bad 'no repair call was launched'; else ok 'no repair call was launched'; fi
@@ -991,22 +991,22 @@ if start 'commit gate: repeated failures escalate to needs-human'; then
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    export OCRL_MAX_FAILURES=2
-    with_env OCRL_FAKE_MODE=malformed pre Bash 'git add -A && git commit -m x' >/dev/null
-    with_env OCRL_FAKE_MODE=malformed pre Bash 'git add -A && git commit -m x' >/dev/null
-    d=$(with_env OCRL_FAKE_MODE=malformed pre Bash 'git add -A && git commit -m x')
+    export ARL_MAX_FAILURES=2
+    with_env ARL_FAKE_MODE=malformed pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=malformed pre Bash 'git add -A && git commit -m x' >/dev/null
+    d=$(with_env ARL_FAKE_MODE=malformed pre Bash 'git add -A && git commit -m x')
     assert_eq 'the third consecutive failure denies' "$d" 'deny'
     assert_eq 'and escalates' "$(sget status)" 'NEEDS_HUMAN'
     assert_eq 'after which every mutation stays denied' "$(pre Edit)" 'deny'
-    unset OCRL_MAX_FAILURES
+    unset ARL_MAX_FAILURES
 fi
 
 if start 'transient failures: a rate-limited exit paces retries and denies without invoking the reviewer'; then
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    export OCRL_MAX_FAILURES=1
-    d=$(with_env OCRL_FAKE_MODE=rate-limited pre Bash 'git add -A && git commit -m x')
+    export ARL_MAX_FAILURES=1
+    d=$(with_env ARL_FAKE_MODE=rate-limited pre Bash 'git add -A && git commit -m x')
     assert_eq 'the commit is denied' "$d" 'deny'
     assert_contains 'and the message names it as transient' "$(pre_reason)" 'transient'
     assert_eq 'the ordinary failure budget is untouched' "$(sget failures)" '0'
@@ -1015,32 +1015,32 @@ if start 'transient failures: a rate-limited exit paces retries and denies witho
 
     # A reviewer command that does not exist proves the very next attempt never reaches it:
     # the backoff denies before another provider call, not merely before another approval.
-    d=$(with_env OCRL_REVIEWER_CMD=/nonexistent/reviewer-must-not-run pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_REVIEWER_CMD=/nonexistent/reviewer-must-not-run pre Bash 'git add -A && git commit -m x')
     assert_eq 'the backed-off retry still denies' "$d" 'deny'
     assert_contains 'and names the remaining wait' "$(pre_reason)" 'Retry in'
     assert_eq 'no report sequence was reserved for it' "$(sget report_seq)" "$before"
-    unset OCRL_MAX_FAILURES
+    unset ARL_MAX_FAILURES
 fi
 
 if start 'transient failures: exhausting the budget escalates, and a later approval clears both counters'; then
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    export OCRL_MAX_TRANSIENT_FAILURES=1
-    with_env OCRL_FAKE_MODE=rate-limited pre Bash 'git add -A && git commit -m x' >/dev/null
+    export ARL_MAX_TRANSIENT_FAILURES=1
+    with_env ARL_FAKE_MODE=rate-limited pre Bash 'git add -A && git commit -m x' >/dev/null
 
     # Clears the backoff so this attempt reaches the reviewer rather than being denied by
     # the wait itself -- this case is about the budget being exhausted, not about pacing.
     f=$(state_file)
     jq '.retry_not_before = 1' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
-    d=$(with_env OCRL_FAKE_MODE=rate-limited pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_FAKE_MODE=rate-limited pre Bash 'git add -A && git commit -m x')
     assert_eq 'the second transient failure denies' "$d" 'deny'
     assert_eq 'and escalates once the transient budget is exhausted' "$(sget status)" 'NEEDS_HUMAN'
-    unset OCRL_MAX_TRANSIENT_FAILURES
+    unset ARL_MAX_TRANSIENT_FAILURES
 
     jq '.status = "ACTIVE" | .retry_not_before = 1' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
     printf 'y\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x')
     assert_eq 'a later approval succeeds' "$d" 'allow'
     assert_eq 'and clears the transient counter' "$(sget transient_failures)" '0'
     assert_eq 'and any pending backoff' "$(sget retry_not_before)" '0'
@@ -1050,11 +1050,11 @@ if start 'commit gate: the findings cap escalates instead of trimming'; then
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_MAX_FINDINGS=5 OCRL_FAKE_COUNT=6 OCRL_FAKE_MODE=many pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_MAX_FINDINGS=5 ARL_FAKE_COUNT=6 ARL_FAKE_MODE=many pre Bash 'git add -A && git commit -m x')
     assert_eq 'denied' "$d" 'deny'
     assert_eq 'escalated to needs-human' "$(sget status)" 'NEEDS_HUMAN'
     assert_contains 'and says the list was not trimmed' "$(pre_reason)" 'not an approval'
-    if find "$OCRL_STATE_DIR" -name '*.md' -path '*reports*' | grep -q .; then
+    if find "$ARL_STATE_DIR" -name '*.md' -path '*reports*' | grep -q .; then
         ok 'the full report is retained on disk'
     else bad 'the full report is retained on disk'; fi
 fi
@@ -1062,7 +1062,7 @@ fi
 if start 'commit gate: an unchanged tree is a cache hit with no review'; then
     new_case
     arm_ok && phases_ok
-    d=$(with_env OCRL_FAKE_MODE=changes pre Bash 'git commit -m "empty" --allow-empty')
+    d=$(with_env ARL_FAKE_MODE=changes pre Bash 'git commit -m "empty" --allow-empty')
     assert_eq 'no delta means no review, so a blocking reviewer is never consulted' "$d" 'allow'
     assert_contains 'and it says so' "$(pre_reason)" 'no review was needed'
 fi
@@ -1071,7 +1071,7 @@ if start 'commit gate: an oversized stageable file blocks'; then
     new_case
     arm_ok && phases_ok
     head -c 4000 /dev/zero | tr '\0' 'a' >"$REPO/big.bin"
-    d=$(with_env OCRL_MAX_FILE_BYTES=1000 pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_MAX_FILE_BYTES=1000 pre Bash 'git add -A && git commit -m x')
     assert_eq 'the commit is denied rather than the file silently dropped' "$d" 'deny'
     assert_contains 'and names the file' "$(pre_reason)" 'big.bin'
 fi
@@ -1080,7 +1080,7 @@ if start 'commit gate: ignore_globs skip the review'; then
     new_case
     arm_ok && phases_ok
     printf 'notes\n' >"$REPO/NOTES.md"
-    d=$(with_env OCRL_IGNORE_GLOBS='NOTES.md' OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_IGNORE_GLOBS='NOTES.md' ARL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x')
     assert_eq 'a change confined to ignore_globs is allowed without a review' "$d" 'allow'
 fi
 
@@ -1089,10 +1089,10 @@ if start 'prior rounds: round 2 is shown round 1 findings, and no bundle file ho
     arm_ok && phases_ok
 
     printf 'phase one\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
 
     printf 'phase one, revised\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_FAKE_MODE=echo-context pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_FAKE_MODE=echo-context pre Bash 'git add -A && git commit -m x')
     assert_eq 'round 2 still denies' "$d" 'deny'
 
     act=$(dirname "$(state_file)")
@@ -1116,7 +1116,7 @@ if start 'reorient: a compacted session is handed back the phase, the plan and t
 
     out=$(jq -nc --arg s "$SESSION" --arg c "$REPO" \
         '{session_id:$s,cwd:$c,hook_event_name:"SessionStart",source:"compact"}' |
-        (cd "$REPO" && "$OCRL" reorient))
+        (cd "$REPO" && "$ARL" reorient))
 
     assert_contains 'names the phase in progress' "$out" 'Phase 1 of'
     assert_contains 'restates the phase description' "$out" 'Phase one: the thing'
@@ -1135,7 +1135,7 @@ if start 'reorient: a compacted session is handed back the phase, the plan and t
     # Not our session: silent, and still exit 0. This hook grants nothing and blocks nothing.
     out=$(jq -nc --arg c "$REPO" \
         '{session_id:"never-armed",cwd:$c,hook_event_name:"SessionStart",source:"compact"}' |
-        (cd "$REPO" && "$OCRL" reorient))
+        (cd "$REPO" && "$ARL" reorient))
     assert_eq 'an unarmed session is re-oriented silently' "$out" ''
 fi
 
@@ -1144,10 +1144,10 @@ if start 'incremental diff: round 2 attaches it, round 1 does not'; then
     arm_ok && phases_ok
 
     printf 'phase one\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
 
     printf 'phase one, revised\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x')
     assert_eq 'round 2 still denies' "$d" 'deny'
 
     act=$(dirname "$(state_file)")
@@ -1176,7 +1176,7 @@ if start 'stall detection: three rounds of the same finding escalate without inv
 
     for r in r1 r2 r3; do
         printf '%s\n' "$r" >"$REPO/a.txt"
-        with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+        with_env ARL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
     done
 
     before=$(sget report_seq)
@@ -1185,7 +1185,7 @@ if start 'stall detection: three rounds of the same finding escalate without inv
     # A reviewer command that does not exist is what proves the fourth attempt never calls it:
     # the escalation is a static decision over round_history, not merely another denial.
     printf 'r4\n' >"$REPO/a.txt"
-    d=$(with_env OCRL_REVIEWER_CMD=/nonexistent/reviewer-must-not-run pre Bash 'git add -A && git commit -m x')
+    d=$(with_env ARL_REVIEWER_CMD=/nonexistent/reviewer-must-not-run pre Bash 'git add -A && git commit -m x')
     assert_eq 'the fourth attempt still denies' "$d" 'deny'
     assert_contains 'as an escalation to NEEDS_HUMAN' "$(pre_reason)" 'NEEDS_HUMAN'
     assert_contains 'naming the persisting anchor' "$(pre_reason)" 'a.txt'
@@ -1201,7 +1201,7 @@ if start 'stall detection: four rounds of distinct findings never escalate'; the
     # keeps the reviewer running with no round limit at all.
     for f in a b c d; do
         printf '%s\n' "$f" >"$REPO/$f.txt"
-        d=$(with_env OCRL_FAKE_MODE=changes-file OCRL_FAKE_FILE="$f.py" pre Bash 'git add -A && git commit -m x')
+        d=$(with_env ARL_FAKE_MODE=changes-file ARL_FAKE_FILE="$f.py" pre Bash 'git add -A && git commit -m x')
         assert_eq "round for $f.py denies as an ordinary CHANGES_REQUIRED" "$d" 'deny'
         assert_contains "round for $f.py actually reached the reviewer" "$(pre_reason)" "Problem in $f.py"
     done
@@ -1213,12 +1213,12 @@ if start 'clarify: answers one question, touches nothing, and is bounded'; then
     arm_ok && phases_ok
 
     printf 'phase one\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
 
     act=$(dirname "$(state_file)")
     before=$(cat "$(state_file)")
 
-    out=$(with_env OCRL_FAKE_MODE=clarify OCRL_MAX_CLARIFICATIONS=1 ocrl clarify --question 'what did finding 1 mean?')
+    out=$(with_env ARL_FAKE_MODE=clarify ARL_MAX_CLARIFICATIONS=1 arl clarify --question 'what did finding 1 mean?')
     assert_contains 'the reviewer prose comes back' "$out" 'Clarification.'
     assert_contains 'the question reached the reviewer' "$out" 'what did finding 1 mean?'
     assert_contains 'against the most recent round bundle' "$out" '/bundles/001'
@@ -1237,7 +1237,7 @@ if start 'clarify: answers one question, touches nothing, and is bounded'; then
     assert_eq 'the clarify counter advanced' "$(sget clarifications)" '1'
     assert_eq 'round_history is untouched' "$(printf '%s' "$before" | jq -c '.round_history')" "$(sget round_history)"
 
-    err=$(with_env OCRL_FAKE_MODE=clarify OCRL_MAX_CLARIFICATIONS=1 ocrl clarify --question 'a second question' 2>&1)
+    err=$(with_env ARL_FAKE_MODE=clarify ARL_MAX_CLARIFICATIONS=1 arl clarify --question 'a second question' 2>&1)
     assert_contains 'a second clarify past the cap is refused' "$err" 'already used'
     assert_contains 'and points at accept for a real disagreement' "$err" 'accept'
 fi
@@ -1251,7 +1251,7 @@ if start 'divergence: a partial commit enters reconcile'; then
     arm_ok && phases_ok
     printf 'one\n' >"$REPO/a.txt"
     printf 'two\n' >"$REPO/b.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
 
     git -C "$REPO" add a.txt
     git -C "$REPO" commit -qm 'only half'
@@ -1265,7 +1265,7 @@ if start 'divergence: an amend enters reconcile'; then
     new_case
     arm_ok && phases_ok
     printf 'one\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     git -C "$REPO" add -A
     git -C "$REPO" commit -q --amend -m 'amended seed'
     ctx=$(confirm 'git add -A && git commit -m x')
@@ -1277,7 +1277,7 @@ if start 'divergence: a failed commit clears the pending approval'; then
     new_case
     arm_ok && phases_ok
     printf 'one\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     if [ -n "$(sget pending_approved_tree)" ]; then ok 'pending is set'; else bad 'pending is set'; fi
     posttool_fail 'git add -A && git commit -m x'
     assert_eq 'PostToolUseFailure clears it' "$(sget pending_approved_tree)" ''
@@ -1291,7 +1291,7 @@ if start 'reconcile: a bad phase-1 commit is recoverable, bounded by the activat
     before=$(git -C "$REPO" rev-parse 'HEAD~0')
     printf 'one\n' >"$REPO/a.txt"
     printf 'two\n' >"$REPO/b.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     git -C "$REPO" add a.txt
     git -C "$REPO" commit -qm 'only half'
     confirm 'git add -A && git commit -m x' >/dev/null
@@ -1322,7 +1322,7 @@ if start 'reset: moving HEAD off a reviewed commit is denied outside reconcile';
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m x' >/dev/null
     d=$(pre Bash 'git reset --soft HEAD^')
@@ -1337,10 +1337,10 @@ fi
 if start 'escapes: Claude may not finish or deactivate'; then
     new_case
     arm_ok && phases_ok
-    assert_eq 'ocrl finish via Bash is denied' "$(pre Bash "$OCRL finish")" 'deny'
-    assert_eq 'ocrl deactivate via Bash is denied' "$(pre Bash "$OCRL deactivate")" 'deny'
+    assert_eq 'arl finish via Bash is denied' "$(pre Bash "$ARL finish")" 'deny'
+    assert_eq 'arl deactivate via Bash is denied' "$(pre Bash "$ARL deactivate")" 'deny'
     assert_contains 'and says who may run it' "$(pre_reason)" 'user-only'
-    out=$(ocrl deactivate 2>&1)
+    out=$(arl deactivate 2>&1)
     assert_contains 'the skill route works' "$out" 'STOPPED'
     assert_eq 'after which nothing is gated' "$(pre Edit)" 'pass'
 fi
@@ -1379,12 +1379,12 @@ if start 'stop: outstanding phases block, and the final review does not run'; th
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m x' >/dev/null
     assert_eq 'now on phase 2 of 2' "$(sget phase)" '2'
 
-    out=$(with_env OCRL_FAKE_MODE=approve stop_gate)
+    out=$(with_env ARL_FAKE_MODE=approve stop_gate)
     assert_contains 'the turn is blocked' "$out" 'still outstanding'
     assert_eq 'and the final review did not complete' "$(sget final_done_tree)" ''
     assert_eq 'so the activation is not complete' "$(sget status)" 'ACTIVE'
@@ -1392,12 +1392,12 @@ fi
 
 if start 'stop: the final cumulative review completes the activation'; then
     new_case
-    arm_ok && ocrl set-phases --phase 'only phase' >/dev/null 2>&1
+    arm_ok && arl set-phases --phase 'only phase' >/dev/null 2>&1
     printf 'x\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m x' >/dev/null
-    d=$(with_env OCRL_FAKE_MODE=approve OCRL_FINAL_REVIEW=true stop_decision)
+    d=$(with_env ARL_FAKE_MODE=approve ARL_FINAL_REVIEW=true stop_decision)
     assert_eq 'the turn ends' "$d" 'ok'
     assert_eq 'the activation is complete' "$(sget status)" 'COMPLETE'
     assert_eq 'and further commits are ungated' "$(pre Bash 'git commit --amend -m whatever')" 'pass'
@@ -1405,12 +1405,12 @@ fi
 
 if start 'stop: with final_review at its default off, COMPLETE never calls the reviewer'; then
     new_case
-    arm_ok && ocrl set-phases --phase 'only phase' >/dev/null 2>&1
+    arm_ok && arl set-phases --phase 'only phase' >/dev/null 2>&1
     printf 'x\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m x' >/dev/null
-    d=$(with_env OCRL_REVIEWER_CMD='/nonexistent/reviewer' stop_decision)
+    d=$(with_env ARL_REVIEWER_CMD='/nonexistent/reviewer' stop_decision)
     assert_eq 'the turn ends' "$d" 'ok'
     assert_eq 'the activation is complete' "$(sget status)" 'COMPLETE'
     assert_eq 'final_done_tree is set' "$(sget final_done_tree)" "$(git -C "$REPO" rev-parse 'HEAD^{tree}')"
@@ -1419,87 +1419,87 @@ fi
 
 if start 'finish: the review runs, and can still refuse, with final_review off'; then
     new_case
-    arm_ok && ocrl set-phases --phase 'only phase' >/dev/null 2>&1
+    arm_ok && arl set-phases --phase 'only phase' >/dev/null 2>&1
     printf 'x\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m x' >/dev/null
-    out=$(with_env OCRL_FAKE_MODE=changes OCRL_FINAL_REVIEW=false ocrl finish 2>&1 || true)
+    out=$(with_env ARL_FAKE_MODE=changes ARL_FINAL_REVIEW=false arl finish 2>&1 || true)
     assert_contains 'the reviewer ran and refused' "$out" 'did not pass'
     assert_eq 'so the activation is not complete' "$(sget status)" 'ACTIVE'
     assert_eq 'and final_done_tree is untouched' "$(sget final_done_tree)" ''
-    out=$(with_env OCRL_FAKE_MODE=approve OCRL_FINAL_REVIEW=false ocrl finish 2>&1)
+    out=$(with_env ARL_FAKE_MODE=approve ARL_FINAL_REVIEW=false arl finish 2>&1)
     assert_contains 'an approving one completes it' "$out" 'COMPLETE'
     assert_eq 'through the review, not around it' "$(sget reason)" 'final cumulative review approved (user-invoked finish)'
 fi
 
 if start 'stop: a failing final review blocks rather than completing'; then
     new_case
-    arm_ok && ocrl set-phases --phase 'only phase' >/dev/null 2>&1
+    arm_ok && arl set-phases --phase 'only phase' >/dev/null 2>&1
     printf 'x\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m x' >/dev/null
-    out=$(with_env OCRL_FAKE_MODE=changes OCRL_FINAL_REVIEW=true stop_gate)
+    out=$(with_env ARL_FAKE_MODE=changes ARL_FINAL_REVIEW=true stop_gate)
     assert_contains 'blocked with the findings' "$out" 'Returns success on a failed lookup'
     assert_eq 'not complete' "$(sget status)" 'ACTIVE'
 fi
 
 if start 'stop: uncommitted work is reviewed, then the commit is demanded'; then
     new_case
-    arm_ok && ocrl set-phases --phase 'only phase' >/dev/null 2>&1
+    arm_ok && arl set-phases --phase 'only phase' >/dev/null 2>&1
     printf 'x\n' >"$REPO/a.txt"
-    out=$(with_env OCRL_FAKE_MODE=changes stop_gate)
+    out=$(with_env ARL_FAKE_MODE=changes stop_gate)
     assert_contains 'unreviewed work is swept and blocks on findings' "$out" 'uncommitted work'
 fi
 
 if start 'stop: the no-progress counter escalates, and progress resets it'; then
     new_case
     arm_ok
-    export OCRL_MAX_STOP_BLOCKS=2
+    export ARL_MAX_STOP_BLOCKS=2
     assert_eq 'block 1' "$(stop_decision)" 'block'
     assert_eq 'block 2' "$(stop_decision)" 'block'
     out=$(stop_gate)
     assert_contains 'the third no-progress block escalates' "$out" 'STALLED'
     assert_eq 'to needs-human, not to approval' "$(sget status)" 'NEEDS_HUMAN'
-    unset OCRL_MAX_STOP_BLOCKS
+    unset ARL_MAX_STOP_BLOCKS
 
     new_case
     arm_ok
-    export OCRL_MAX_STOP_BLOCKS=2
+    export ARL_MAX_STOP_BLOCKS=2
     assert_eq 'block 1' "$(stop_decision)" 'block'
     phases_ok # progress
     printf 'x\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m x' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m x' >/dev/null
     assert_eq 'block after progress' "$(stop_decision)" 'block'
     assert_eq 'the counter restarted rather than accumulating' "$(sget stop_blocks)" '1'
     assert_eq 'and the loop is still ACTIVE' "$(sget status)" 'ACTIVE'
-    unset OCRL_MAX_STOP_BLOCKS
+    unset ARL_MAX_STOP_BLOCKS
 fi
 
 if start 'stop: a pre-active state blocks without ever calling the reviewer'; then
     new_case
-    ocrl arm --session "$SESSION" --plan "$CASE_DIR/missing.md" >/dev/null 2>&1
-    out=$(with_env OCRL_REVIEWER_CMD='/nonexistent/reviewer' stop_gate)
+    arl arm --session "$SESSION" --plan "$CASE_DIR/missing.md" >/dev/null 2>&1
+    out=$(with_env ARL_REVIEWER_CMD='/nonexistent/reviewer' stop_gate)
     assert_contains 'ARM_FAILED blocks with the reason' "$out" 'arming failed'
 
     new_case
     arm_ok
-    out=$(with_env OCRL_REVIEWER_CMD='/nonexistent/reviewer' stop_gate)
+    out=$(with_env ARL_REVIEWER_CMD='/nonexistent/reviewer' stop_gate)
     assert_contains 'phases-unset blocks with the command' "$out" 'set-phases --phase'
 fi
 
 if start 'stop: defer is honoured once and bounded'; then
     new_case
     arm_ok && phases_ok
-    export OCRL_MAX_DEFERS=1
-    ocrl defer --reason 'need to ask the user something' >/dev/null 2>&1
+    export ARL_MAX_DEFERS=1
+    arl defer --reason 'need to ask the user something' >/dev/null 2>&1
     assert_eq 'the deferred turn ends' "$(stop_decision)" 'ok'
-    out=$(ocrl defer --reason 'again' 2>&1)
+    out=$(arl defer --reason 'again' 2>&1)
     assert_contains 'the second defer is refused' "$out" 'limit'
-    unset OCRL_MAX_DEFERS
+    unset ARL_MAX_DEFERS
 fi
 
 # --------------------------------------------------------------------------
@@ -1510,7 +1510,7 @@ if start 'resume: continues in a new session, baseline and approvals survive'; t
     new_case
     arm_ok && phases_ok
     printf 'phase one\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m "phase 1"' >/dev/null
     assert_eq 'phase advanced to 2' "$(sget phase)" '2'
@@ -1520,7 +1520,7 @@ if start 'resume: continues in a new session, baseline and approvals survive'; t
     OLD_SESSION=$SESSION
     NEW_SESSION="sess-$CASE_N-resumed"
 
-    out=$(cd "$REPO" && "$OCRL" resume --session "$NEW_SESSION" 2>&1)
+    out=$(cd "$REPO" && "$ARL" resume --session "$NEW_SESSION" 2>&1)
     assert_contains 'the resume banner confirms' "$out" 'RESUMED for this worktree'
 
     assert_eq 'the baseline tree is unchanged' "$(sget_for "$NEW_SESSION" baseline_tree)" "$baseline_before"
@@ -1532,16 +1532,16 @@ if start 'resume: continues in a new session, baseline and approvals survive'; t
     # fallback, exercised through a shell command with no --session) and the per-session
     # pointer (exercised by driving pretool with the new session id, which only resolves a
     # worktree at all through pointer_read(session)).
-    s=$(ocrl status)
+    s=$(arl status)
     assert_contains 'the latest pointer names the new session' "$s" "session:             $NEW_SESSION"
     SESSION=$NEW_SESSION
     printf 'phase two\n' >"$REPO/b.txt"
     assert_eq 'the session pointer resolves and the phase-2 commit is still gated' \
-        "$(with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x')" 'deny'
+        "$(with_env ARL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x')" 'deny'
 
     # report_seq continues rather than restarting: the copied 001 report is still on disk
     # under the successor, and the phase-2 review just above (denied on findings) wrote 002.
-    reports=$(find "$OCRL_STATE_DIR/worktrees" -path "*/$NEW_SESSION/reports/*.md" -exec basename {} \; | sort)
+    reports=$(find "$ARL_STATE_DIR/worktrees" -path "*/$NEW_SESSION/reports/*.md" -exec basename {} \; | sort)
     assert_contains 'report 001 was carried forward' "$reports" '001-'
     assert_contains 'report 002 continues the sequence' "$reports" '002-'
 fi
@@ -1550,13 +1550,13 @@ if start 'resume: retires the predecessor, which denies rather than gates live';
     new_case
     arm_ok && phases_ok
     printf 'phase one\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m "phase 1"' >/dev/null
 
     OLD_SESSION=$SESSION
     NEW_SESSION="sess-$CASE_N-resumed"
-    ocrl resume --session "$NEW_SESSION" >/dev/null 2>&1
+    arl resume --session "$NEW_SESSION" >/dev/null 2>&1
 
     # This is the two-writable-authorities regression: with the old session id back in the
     # payload, pretool must read the retired document and deny -- never fall through to
@@ -1573,13 +1573,13 @@ fi
 
 if start 'pause: --until stops the loop early with no final review, resume completes it'; then
     new_case
-    ocrl arm --session "$SESSION" --plan "$PLAN" --until 1 >/dev/null 2>&1
+    arl arm --session "$SESSION" --plan "$PLAN" --until 1 >/dev/null 2>&1
     assert_eq 'armed with a pause target' "$(sget status)" 'ARMED'
     phases_ok
-    assert_contains 'the pause target is reported' "$(ocrl status)" 'pause target:        1 of 2'
+    assert_contains 'the pause target is reported' "$(arl status)" 'pause target:        1 of 2'
 
     printf 'phase one\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
     commit_now 'phase 1'
     confirm 'git add -A && git commit -m "phase 1"' >/dev/null
     assert_eq 'phase advanced to 2' "$(sget phase)" '2'
@@ -1587,22 +1587,22 @@ if start 'pause: --until stops the loop early with no final review, resume compl
     # A broken reviewer command proves the final review is never invoked here: the tree is
     # unchanged since the last approval, so neither the unreviewed-work sweep nor a final
     # review has anything to call it for, and the turn ends paused instead.
-    out=$(with_env OCRL_REVIEWER_CMD='/nonexistent/reviewer' stop_gate)
+    out=$(with_env ARL_REVIEWER_CMD='/nonexistent/reviewer' stop_gate)
     assert_contains 'the turn ends paused' "$out" 'paused'
     assert_contains 'not an approval of the whole plan' "$out" 'NOT an approval'
     assert_eq 'no final review ran' "$(sget final_done_tree)" ''
     assert_eq 'the activation did not complete' "$(sget status)" 'ACTIVE'
 
     NEW_SESSION="sess-$CASE_N-resumed"
-    out=$(ocrl resume --session "$NEW_SESSION" --until 2 2>&1)
+    out=$(arl resume --session "$NEW_SESSION" --until 2 2>&1)
     assert_contains 'resumed with the new pause target' "$out" 'pause target: 2 of 2'
     SESSION=$NEW_SESSION
 
     printf 'phase two\n' >"$REPO/b.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 2"' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 2"' >/dev/null
     commit_now 'phase 2'
     confirm 'git add -A && git commit -m "phase 2"' >/dev/null
-    d=$(with_env OCRL_FAKE_MODE=approve stop_decision)
+    d=$(with_env ARL_FAKE_MODE=approve stop_decision)
     assert_eq 'the turn ends' "$d" 'ok'
     assert_eq 'the final review ran and the activation completed' "$(sget_for "$NEW_SESSION" status)" 'COMPLETE'
 fi
@@ -1615,13 +1615,13 @@ if start 'pause: set mid-phase with a dirty worktree, the turn ends paused inste
     # Mid-phase, exactly as the user reaches for it: work in the worktree, nothing committed.
     # `resume --until 1` refuses this without --allow-dirty; `pause` has nothing to protect.
     printf 'phase one\n' >"$REPO/a.txt"
-    out=$(ocrl pause 2>&1)
+    out=$(arl pause 2>&1)
     assert_contains 'pausing after the phase in flight' "$out" 'pausing after phase 1 of 2'
     assert_eq 'the target was written' "$(sget stop_after_phase)" '1'
     assert_eq 'and nothing else moved' "$(sget activation_generation)" '0'
     assert_eq 'the activation is untouched' "$(sget status)" 'ACTIVE'
 
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
     commit_now 'phase 1'
     out=$(confirm 'git add -A && git commit -m "phase 1"')
     assert_contains 'the commit lands on the pause target, not on "next phase"' "$out" 'pause target'
@@ -1629,13 +1629,13 @@ if start 'pause: set mid-phase with a dirty worktree, the turn ends paused inste
 
     # Without the pause this blocks with "phases 2..2 are still outstanding". A broken
     # reviewer command proves nothing was invoked to reach the paused answer.
-    out=$(with_env OCRL_REVIEWER_CMD='/nonexistent/reviewer' stop_gate)
+    out=$(with_env ARL_REVIEWER_CMD='/nonexistent/reviewer' stop_gate)
     assert_contains 'the turn ends paused' "$out" 'paused'
     assert_contains 'not an approval of the whole plan' "$out" 'NOT an approval'
     assert_eq 'the activation did not complete' "$(sget status)" 'ACTIVE'
 
     # Claude's own route to it is denied, like every other user-only command.
-    assert_eq 'claude may not pause itself' "$(pre Bash "$OCRL pause")" 'deny'
+    assert_eq 'claude may not pause itself' "$(pre Bash "$ARL pause")" 'deny'
     assert_contains 'and is told why' "$(pre_reason)" 'user-only commands'
 fi
 
@@ -1647,7 +1647,7 @@ if start 'pause: a reconcile is named as recoverable, an escalation as blocked';
     # RECONCILE is deliberately absent from pretool's terminal-deny list: the recovery is
     # Claude's own to run, so the note must not tell it to stop.
     jq '.status = "RECONCILE"' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
-    out=$(ocrl pause 2>&1)
+    out=$(arl pause 2>&1)
     assert_contains 'the reconcile is named' "$out" 'Note: this activation is RECONCILE'
     assert_contains 'and the recovery is Claude to run' "$out" 'Carry out the recovery'
     if printf '%s' "$out" | grep -qF 'do not carry on implementing'; then
@@ -1661,7 +1661,7 @@ if start 'pause: a reconcile is named as recoverable, an escalation as blocked';
 
     # NEEDS_HUMAN is in that list, so here the opposite is required.
     jq '.status = "NEEDS_HUMAN"' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
-    out=$(ocrl pause 2>&1)
+    out=$(arl pause 2>&1)
     assert_contains 'the escalation is named' "$out" 'Note: this activation is NEEDS_HUMAN'
     assert_contains 'and work is denied' "$out" 'do not carry on implementing'
     assert_eq 'which the gate agrees with' "$(pre Edit)" 'deny'
@@ -1670,20 +1670,20 @@ fi
 if start 'pause: clearing the target lets the same session run to the end'; then
     new_case
     arm_ok && phases_ok
-    ocrl pause 1 >/dev/null 2>&1
+    arl pause 1 >/dev/null 2>&1
     assert_eq 'the target is set' "$(sget stop_after_phase)" '1'
 
-    out=$(ocrl pause all 2>&1)
+    out=$(arl pause all 2>&1)
     assert_contains 'the target is reported cleared' "$out" 'pause target cleared'
     assert_eq 'and is gone from state' "$(sget stop_after_phase)" '0'
 
     printf 'phase one\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
+    with_env ARL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
     commit_now 'phase 1'
     out=$(confirm 'git add -A && git commit -m "phase 1"')
     assert_contains 'the loop asks for the next phase again' "$out" 'phase 2'
 
-    with_env OCRL_REVIEWER_CMD='/nonexistent/reviewer' assert_eq 'and the turn cannot end' "$(stop_decision)" 'block'
+    with_env ARL_REVIEWER_CMD='/nonexistent/reviewer' assert_eq 'and the turn cannot end' "$(stop_decision)" 'block'
     assert_contains 'because a phase is outstanding' "$(last_out | jq -r '.reason // ""')" 'still outstanding'
 fi
 
@@ -1698,7 +1698,7 @@ if start 'ttl: an expired activation blocks and never silently disarms'; then
     jq '.armed_at = 1' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
     assert_eq 'a mutation is denied' "$(pre Edit)" 'deny'
     assert_contains 'and asks for a re-arm' "$(pre_reason)" 'Re-arm with'
-    with_env OCRL_REVIEWER_CMD='/nonexistent/reviewer' assert_eq 'the turn cannot end' "$(stop_decision)" 'block'
+    with_env ARL_REVIEWER_CMD='/nonexistent/reviewer' assert_eq 'the turn cannot end' "$(stop_decision)" 'block'
 fi
 
 # --------------------------------------------------------------------------
@@ -1715,7 +1715,7 @@ if start 'hot path: a read-only tool answers without loading config or state'; t
             out="$CASE_DIR/trace-$tool.txt"
             jq -nc --arg s "$SESSION" --arg c "$REPO" --arg t "$tool" \
                 '{session_id:$s,cwd:$c,hook_event_name:"PreToolUse",tool_name:$t,tool_input:{}}' |
-                (cd "$REPO" && strace -f -e trace=execve -o "$out" "$OCRL" pretool >/dev/null 2>&1)
+                (cd "$REPO" && strace -f -e trace=execve -o "$out" "$ARL" pretool >/dev/null 2>&1)
             # Only successful execs count; the shebang's PATH probe fails cheaply.
             grep -c 'execve.*= 0' "$out" 2>/dev/null || printf '0'
         }
@@ -1789,7 +1789,7 @@ if start 'interpreter probe: a missing python3 fails closed, not open, on every 
         p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$nopy/$b"
     done
 
-    out=$(hook_payload PreToolUse | (cd "$REPO" && PATH="$nopy" "$OCRL" pretool))
+    out=$(hook_payload PreToolUse | (cd "$REPO" && PATH="$nopy" "$ARL" pretool))
     rc=$?
     assert_eq 'pretool: the shim itself exits 0, not 127' "$rc" '0'
     assert_eq 'pretool denies rather than failing open' \
@@ -1797,18 +1797,18 @@ if start 'interpreter probe: a missing python3 fails closed, not open, on every 
     assert_contains 'and names the missing interpreter' \
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')" 'python3'
 
-    out=$(hook_payload PostToolUse | (cd "$REPO" && PATH="$nopy" "$OCRL" confirm-commit))
+    out=$(hook_payload PostToolUse | (cd "$REPO" && PATH="$nopy" "$ARL" confirm-commit))
     rc=$?
     assert_eq 'confirm-commit: the shim itself exits 0' "$rc" '0'
     assert_contains 'and reports the failure rather than staying silent' \
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""')" 'python3'
 
-    out=$(hook_payload PostToolUseFailure | (cd "$REPO" && PATH="$nopy" "$OCRL" posttool-failure))
+    out=$(hook_payload PostToolUseFailure | (cd "$REPO" && PATH="$nopy" "$ARL" posttool-failure))
     rc=$?
     assert_eq 'posttool-failure: the shim itself exits 0' "$rc" '0'
     assert_eq 'and stays silent, matching its ordinary behaviour' "$out" ''
 
-    out=$(hook_payload Stop | (cd "$REPO" && PATH="$nopy" "$OCRL" gate-stop))
+    out=$(hook_payload Stop | (cd "$REPO" && PATH="$nopy" "$ARL" gate-stop))
     rc=$?
     assert_eq 'gate-stop: the shim itself exits 0' "$rc" '0'
     assert_eq 'and blocks the turn rather than letting it end' \
@@ -1833,22 +1833,22 @@ exit 1
 PYEOF
     chmod +x "$fakepy/python3"
 
-    out=$(hook_payload PreToolUse | (cd "$REPO" && PATH="$fakepy:$PATH" "$OCRL" pretool))
+    out=$(hook_payload PreToolUse | (cd "$REPO" && PATH="$fakepy:$PATH" "$ARL" pretool))
     assert_eq 'pretool: exactly one valid JSON object, not the fragment' \
         "$(printf '%s' "$out" | jq -c . 2>/dev/null | wc -l)" '1'
     assert_eq 'and it denies' \
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
 
-    out=$(hook_payload PostToolUse | (cd "$REPO" && PATH="$fakepy:$PATH" "$OCRL" confirm-commit))
+    out=$(hook_payload PostToolUse | (cd "$REPO" && PATH="$fakepy:$PATH" "$ARL" confirm-commit))
     assert_eq 'confirm-commit: exactly one valid JSON object, not the fragment' \
         "$(printf '%s' "$out" | jq -c . 2>/dev/null | wc -l)" '1'
     assert_contains 'and it reports the failure' \
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""')" 'could not run'
 
-    out=$(hook_payload PostToolUseFailure | (cd "$REPO" && PATH="$fakepy:$PATH" "$OCRL" posttool-failure))
+    out=$(hook_payload PostToolUseFailure | (cd "$REPO" && PATH="$fakepy:$PATH" "$ARL" posttool-failure))
     assert_eq 'posttool-failure: exactly zero bytes, not the fragment' "$out" ''
 
-    out=$(hook_payload Stop | (cd "$REPO" && PATH="$fakepy:$PATH" "$OCRL" gate-stop))
+    out=$(hook_payload Stop | (cd "$REPO" && PATH="$fakepy:$PATH" "$ARL" gate-stop))
     assert_eq 'gate-stop: exactly one valid JSON object, not the fragment' \
         "$(printf '%s' "$out" | jq -c . 2>/dev/null | wc -l)" '1'
     assert_eq 'and it blocks' \
@@ -1871,7 +1871,7 @@ PYEOF
     # -- `timeout` returning 124 and the shim treating that as any other
     # failure -- without waiting out the real, minutes-long default.
     t0=$(date +%s)
-    out=$(hook_payload PreToolUse | (cd "$REPO" && PATH="$hangpy:$PATH" OCRL_SHIM_TIMEOUT_PRETOOL=1 "$OCRL" pretool))
+    out=$(hook_payload PreToolUse | (cd "$REPO" && PATH="$hangpy:$PATH" ARL_SHIM_TIMEOUT_PRETOOL=1 "$ARL" pretool))
     elapsed=$(($(date +%s) - t0))
     assert_eq 'pretool: a hung parser still denies' \
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
@@ -1882,7 +1882,7 @@ PYEOF
     fi
 
     t0=$(date +%s)
-    out=$(hook_payload PostToolUse | (cd "$REPO" && PATH="$hangpy:$PATH" OCRL_SHIM_TIMEOUT_CONFIRM_COMMIT=1 "$OCRL" confirm-commit))
+    out=$(hook_payload PostToolUse | (cd "$REPO" && PATH="$hangpy:$PATH" ARL_SHIM_TIMEOUT_CONFIRM_COMMIT=1 "$ARL" confirm-commit))
     elapsed=$(($(date +%s) - t0))
     assert_contains 'confirm-commit: reports the timeout rather than hanging' \
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""')" 'timed out'
@@ -1891,7 +1891,7 @@ PYEOF
     fi
 
     t0=$(date +%s)
-    out=$(hook_payload PostToolUseFailure | (cd "$REPO" && PATH="$hangpy:$PATH" OCRL_SHIM_TIMEOUT_POSTTOOL_FAILURE=1 "$OCRL" posttool-failure))
+    out=$(hook_payload PostToolUseFailure | (cd "$REPO" && PATH="$hangpy:$PATH" ARL_SHIM_TIMEOUT_POSTTOOL_FAILURE=1 "$ARL" posttool-failure))
     elapsed=$(($(date +%s) - t0))
     assert_eq 'posttool-failure: stays silent rather than hanging' "$out" ''
     if [ "$elapsed" -le 15 ]; then ok "posttool-failure returned in ${elapsed}s"; else
@@ -1899,7 +1899,7 @@ PYEOF
     fi
 
     t0=$(date +%s)
-    out=$(hook_payload Stop | (cd "$REPO" && PATH="$hangpy:$PATH" OCRL_SHIM_TIMEOUT_GATE_STOP=1 "$OCRL" gate-stop))
+    out=$(hook_payload Stop | (cd "$REPO" && PATH="$hangpy:$PATH" ARL_SHIM_TIMEOUT_GATE_STOP=1 "$ARL" gate-stop))
     elapsed=$(($(date +%s) - t0))
     assert_eq 'gate-stop: a hung parser still blocks' \
         "$(printf '%s' "$out" | jq -r '.decision // "ok"')" 'block'
@@ -1908,7 +1908,7 @@ PYEOF
     fi
 fi
 
-if start 'shim contract: OCRL_SHIM_TIMEOUT_* cannot loosen or disable the timeout'; then
+if start 'shim contract: ARL_SHIM_TIMEOUT_* cannot loosen or disable the timeout'; then
     new_case
     arm_ok && phases_ok
 
@@ -1916,13 +1916,13 @@ if start 'shim contract: OCRL_SHIM_TIMEOUT_* cannot loosen or disable the timeou
     # `timeout` for, then runs the real command so the hook still completes.
     # `timeout 0` means "no limit" to both GNU and uutils coreutils, so an
     # override of 0 would be exactly as dangerous as removing the wrapper
-    # entirely -- this is the regression the clamp in ocrl_bounded_timeout
+    # entirely -- this is the regression the clamp in arl_bounded_timeout
     # exists to prevent.
     faketimeout="$CASE_DIR/fake-timeout-bin"
     mkdir -p "$faketimeout"
     cat >"$faketimeout/timeout" <<'PYEOF'
 #!/usr/bin/env bash
-printf '%s' "$1" >"$OCRL_TEST_TIMEOUT_LOG"
+printf '%s' "$1" >"$ARL_TEST_TIMEOUT_LOG"
 shift
 exec "$@"
 PYEOF
@@ -1932,7 +1932,7 @@ PYEOF
         local value=$1
         rm -f "$CASE_DIR/log.txt"
         hook_payload PreToolUse |
-            (cd "$REPO" && PATH="$faketimeout:$PATH" OCRL_TEST_TIMEOUT_LOG="$CASE_DIR/log.txt" OCRL_SHIM_TIMEOUT_PRETOOL="$value" "$OCRL" pretool) >/dev/null
+            (cd "$REPO" && PATH="$faketimeout:$PATH" ARL_TEST_TIMEOUT_LOG="$CASE_DIR/log.txt" ARL_SHIM_TIMEOUT_PRETOOL="$value" "$ARL" pretool) >/dev/null
         cat "$CASE_DIR/log.txt" 2>/dev/null
     }
 
@@ -1966,11 +1966,11 @@ if start 'status and report render'; then
     new_case
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
-    with_env OCRL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
-    s=$(ocrl status)
+    with_env ARL_FAKE_MODE=changes pre Bash 'git add -A && git commit -m x' >/dev/null
+    s=$(arl status)
     assert_contains 'status names the phase' "$s" 'phase:               1 of 2'
     assert_contains 'status lists the reports' "$s" 'changes_required'
-    r=$(ocrl report)
+    r=$(arl report)
     assert_contains 'the stored report holds the raw output' "$r" 'Raw reviewer output'
     assert_contains 'and the blocking findings' "$r" 'Returns success on a failed lookup'
 fi
@@ -1980,10 +1980,10 @@ if start 'dry-run prints the exact invocation without calling the reviewer'; the
     arm_ok && phases_ok
     printf 'x\n' >"$REPO/a.txt"
     # `dry-run` composes the invocation through the harness itself, so it is the one command
-    # here that steps outside the OCRL_REVIEWER_CMD seam -- and therefore the only place this
+    # here that steps outside the ARL_REVIEWER_CMD seam -- and therefore the only place this
     # script sees a real harness's argv at all. Nothing is executed: no reviewer binary has to
     # exist for either half of this case.
-    out=$(ocrl dry-run 2>&1)
+    out=$(arl dry-run 2>&1)
     assert_contains 'the default harness is named' "$out" '# harness: claude-code'
     assert_contains 'the model flag is shown' "$out" '--model'
     assert_contains 'the repository is granted by path' "$out" '--add-dir'
@@ -1992,7 +1992,7 @@ if start 'dry-run prints the exact invocation without calling the reviewer'; the
     assert_contains 'the bundle is attached' "$out" 'range.txt'
     assert_contains 'the prompt is shown' "$out" 'adversarial code reviewer'
 
-    out=$(with_env OCRL_HARNESS=opencode ocrl dry-run 2>&1)
+    out=$(with_env ARL_HARNESS=opencode arl dry-run 2>&1)
     assert_contains 'the selected harness is named' "$out" '# harness: opencode'
     assert_contains 'the model flag is shown' "$out" '-m'
     assert_contains 'the bundle is attached by path' "$out" 'range.txt'

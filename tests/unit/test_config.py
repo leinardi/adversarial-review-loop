@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ocrl import config, harness
+from arl import config, harness
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def layers(tmp_path: Path, clean_env: dict[str, str]) -> dict[str, str]:
 
 
 def write_user_config(env: dict[str, str], values: object) -> None:
-    path = Path(env["XDG_CONFIG_HOME"]) / "opencode-review-loop" / "config.json"
+    path = Path(env["XDG_CONFIG_HOME"]) / "adversarial-review-loop" / "config.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(values if isinstance(values, str) else json.dumps(values))
 
@@ -52,7 +52,7 @@ def test_all_four_layers_in_order(layers: dict[str, str], tmp_path: Path) -> Non
     repo = tmp_path / "repo"
     write_user_config(layers, {"model": "user-model", "block_severity": "high", "ttl_hours": 5})
     write_repo_config(repo, {"model": "repo-model", "block_severity": "medium"})
-    layers["OCRL_MODEL"] = "env-model"
+    layers["ARL_MODEL"] = "env-model"
 
     cfg = config.load(str(repo), layers)
 
@@ -74,12 +74,12 @@ def test_overrides_beat_repo_but_lose_to_environment(layers: dict[str, str], tmp
     repo = tmp_path / "repo"
     write_user_config(layers, {"model": "user-model"})
     write_repo_config(repo, {"model": "repo-model"})
-    layers["OCRL_MODEL"] = "env-model"
+    layers["ARL_MODEL"] = "env-model"
 
     cfg = config.load(str(repo), layers, overrides={"model": "override-model"})
     assert cfg.as_str("model") == "env-model", "the environment must still win over an activation override"
 
-    del layers["OCRL_MODEL"]
+    del layers["ARL_MODEL"]
     cfg = config.load(str(repo), layers, overrides={"model": "override-model"})
     assert cfg.as_str("model") == "override-model", "an override must beat the repo config"
 
@@ -109,7 +109,7 @@ def test_an_unparseable_file_drops_the_whole_file_layer(layers: dict[str, str], 
     repo = tmp_path / "repo"
     write_user_config(layers, {"model": "user-model"})
     write_repo_config(repo, "{ not json")
-    layers["OCRL_BLOCK_SEVERITY"] = "critical"
+    layers["ARL_BLOCK_SEVERITY"] = "critical"
 
     cfg = config.load(str(repo), layers)
 
@@ -129,20 +129,20 @@ def test_a_non_object_file_is_skipped_on_its_own(layers: dict[str, str], tmp_pat
 
 @pytest.mark.parametrize(("raw", "expected"), [("1", True), ("true", True), ("TRUE", True), ("yes", True), ("on", True)])
 def test_truthy_environment_values(raw: str, expected: bool, layers: dict[str, str]) -> None:
-    layers["OCRL_PURE"] = raw
+    layers["ARL_PURE"] = raw
     assert config.load("", layers).as_bool("pure") is expected
 
 
 @pytest.mark.parametrize("raw", ["0", "false", "no", "off", "", "True", "YES", "anything"])
 def test_everything_else_is_false(raw: str, layers: dict[str, str]) -> None:
     """Exact matching, so a typo never silently enables something."""
-    layers["OCRL_PURE"] = raw
+    layers["ARL_PURE"] = raw
     assert config.load("", layers).as_bool("pure") is False
 
 
 def test_final_review_env_override(layers: dict[str, str]) -> None:
     assert config.load("", layers).as_bool("final_review") is False
-    layers["OCRL_FINAL_REVIEW"] = "true"
+    layers["ARL_FINAL_REVIEW"] = "true"
     assert config.load("", layers).as_bool("final_review") is True
 
 
@@ -156,14 +156,14 @@ def test_final_review_precedence_across_all_four_layers(layers: dict[str, str], 
     write_repo_config(repo, {"final_review": False})
     assert config.load(str(repo), layers).as_bool("final_review") is False, "repo must beat user"
 
-    layers["OCRL_FINAL_REVIEW"] = "true"
+    layers["ARL_FINAL_REVIEW"] = "true"
     assert config.load(str(repo), layers).as_bool("final_review") is True, "environment must beat repo"
 
 
 def test_cold_confirm_env_override(layers: dict[str, str]) -> None:
     """Off by default, and reachable for a single run without touching a config file."""
     assert config.load("", layers).as_bool("cold_confirm") is False
-    layers["OCRL_COLD_CONFIRM"] = "true"
+    layers["ARL_COLD_CONFIRM"] = "true"
     assert config.load("", layers).as_bool("cold_confirm") is True
 
 
@@ -177,31 +177,31 @@ def test_cold_confirm_precedence_across_all_four_layers(layers: dict[str, str], 
     write_repo_config(repo, {"cold_confirm": False})
     assert config.load(str(repo), layers).as_bool("cold_confirm") is False, "repo must beat user"
 
-    layers["OCRL_COLD_CONFIRM"] = "true"
+    layers["ARL_COLD_CONFIRM"] = "true"
     assert config.load(str(repo), layers).as_bool("cold_confirm") is True, "environment must beat repo"
 
 
 def test_a_non_numeric_integer_override_is_skipped_not_zeroed(layers: dict[str, str]) -> None:
     write_user_config(layers, {"timeout_sec": 111})
-    layers["OCRL_TIMEOUT_SEC"] = "not-a-number"
+    layers["ARL_TIMEOUT_SEC"] = "not-a-number"
     assert config.load("", layers).as_int("timeout_sec") == 111
 
 
 def test_max_session_rounds_defaults_to_three_and_takes_an_integer_override(layers: dict[str, str]) -> None:
     assert config.load("", layers).as_int("max_session_rounds") == 3
-    layers["OCRL_MAX_SESSION_ROUNDS"] = "0"
+    layers["ARL_MAX_SESSION_ROUNDS"] = "0"
     assert config.load("", layers).as_int("max_session_rounds") == 0, "0 disables the cap; it must not be read as unset"
 
 
 def test_ignore_globs_is_comma_separated_in_the_environment(layers: dict[str, str]) -> None:
-    layers["OCRL_IGNORE_GLOBS"] = "a/*,,b/**,"
+    layers["ARL_IGNORE_GLOBS"] = "a/*,,b/**,"
     assert config.load("", layers).as_list("ignore_globs") == ["a/*", "b/**"]
 
 
 def test_an_empty_string_override_still_counts_as_set(layers: dict[str, str]) -> None:
     """The shell tested `${!var+set}`, which is true for an empty value."""
     write_user_config(layers, {"variant": "from-user"})
-    layers["OCRL_VARIANT"] = ""
+    layers["ARL_VARIANT"] = ""
     assert config.load("", layers).as_str("variant") == ""
 
 
@@ -211,12 +211,12 @@ def test_an_empty_string_override_still_counts_as_set(layers: dict[str, str]) ->
 def test_a_false_boolean_renders_as_false_not_empty(layers: dict[str, str]) -> None:
     """The shell's `.[$k] // ""` blanked every false boolean; this does not reproduce it."""
     assert config.load("", layers).as_str("pure") == "true"
-    layers["OCRL_PURE"] = "0"
+    layers["ARL_PURE"] = "0"
     assert config.load("", layers).as_str("pure") == "false"
 
 
 def test_a_list_renders_comma_joined(layers: dict[str, str]) -> None:
-    layers["OCRL_IGNORE_GLOBS"] = "a,b"
+    layers["ARL_IGNORE_GLOBS"] = "a,b"
     assert config.load("", layers).as_str("ignore_globs") == "a,b"
 
 
@@ -292,7 +292,7 @@ def test_late_block_severity_defaults_to_high(layers: dict[str, str], tmp_path: 
 
 
 def test_late_block_severity_env_override(layers: dict[str, str]) -> None:
-    layers["OCRL_LATE_BLOCK_SEVERITY"] = "critical"
+    layers["ARL_LATE_BLOCK_SEVERITY"] = "critical"
     assert config.load("", layers).as_str("late_block_severity") == "critical"
 
 
@@ -311,10 +311,10 @@ def test_an_unrecognised_late_block_severity_falls_back_to_block_severity(layers
 
 
 def test_the_harness_is_settable_from_the_environment(layers: dict[str, str], tmp_path: Path) -> None:
-    """``harness`` is a plain string key, so `OCRL_HARNESS` reaches it through `from_env`'s
-    string branch like any other -- which is what makes `OCRL_HARNESS=claude-code make dry-run`
+    """``harness`` is a plain string key, so `ARL_HARNESS` reaches it through `from_env`'s
+    string branch like any other -- which is what makes `ARL_HARNESS=claude-code make dry-run`
     work without a config file."""
-    layers["OCRL_HARNESS"] = "claude-code"
+    layers["ARL_HARNESS"] = "claude-code"
 
     cfg = config.load(str(tmp_path / "repo"), layers)
 

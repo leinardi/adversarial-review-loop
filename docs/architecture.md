@@ -8,18 +8,18 @@ as it stands; it doesn't repeat the reasoning behind every design choice.
 ## The shape of it
 
 ```text
- Claude Code                          scripts/ocrl.sh (guarded Bash shim)
+ Claude Code                          scripts/arl.sh (guarded Bash shim)
  ┌──────────────────┐                 ┌──────────────────────────────────┐
  │ skill invocation   ──!`…`─────────▶│  probes python3, wraps it in       │
  │ (prompt-expansion)  │               │  `timeout`, discards partial       │
  │                     │               │  output on any non-zero exit       │
- │ PreToolUse hook    ─────────────────▶  scripts/ocrl-bootstrap.py         │
+ │ PreToolUse hook    ─────────────────▶  scripts/arl-bootstrap.py         │
  │ PostToolUse hook   ─────────────────▶    -I, absolute path, sets         │
  │ PostToolUseFailure ─────────────────▶    sys.pycache_prefix before       │
- │ Stop hook          ─────────────────▶    ocrl is ever imported           │
+ │ Stop hook          ─────────────────▶    arl is ever imported           │
  └──────────────────┘                 └──────────────┬───────────────────┘
                                                        ▼
-                                        scripts/ocrl/cli.py (subcommand dispatch)
+                                        scripts/arl/cli.py (subcommand dispatch)
                                                        │
                        ┌───────────────────────────────┼───────────────────────────────┐
                        ▼                                ▼                                ▼
@@ -109,7 +109,7 @@ entry is resolved through `gitsnap.checked_tree` before it reaches a git command
 
 ### The clarify channel
 
-`ocrl.sh clarify --question "…"` asks the reviewer one prose question about the review it
+`arl.sh clarify --question "…"` asks the reviewer one prose question about the review it
 just gave, without attempting a commit or spending a new round. It is Claude-invocable —
 it parses no `VERDICT`, writes nothing that can approve anything, and reaches
 `hook.pass_()` under `ACTIVE` without any gate change. It runs **cold and session-less**,
@@ -128,7 +128,7 @@ Discovery is the hard part: across two full activations Claude reached for it ze
 So every **phase-scoped** blocking verdict — the commit gate's `CHANGES_REQUIRED` and the
 Stop sweep's — carries `report.with_clarify_hint`, a paragraph of its own naming the exact
 command and what is left of the allowance ("Clarifications left: N of M"), and both
-`/opencode-review-loop:implement` and `:resume` name it in "Rules while the mode is active".
+`/adversarial-review-loop:implement` and `:resume` name it in "Rules while the mode is active".
 The hint is omitted once nothing is left, and never appears on the **final** cumulative
 review: `clarify` binds to the latest `round_history` entry of the current phase's label,
 and a final review writes none.
@@ -221,7 +221,7 @@ ordinary `set-phases` command.
 ## On disk
 
 ```text
-$XDG_STATE_HOME/opencode-review-loop/
+$XDG_STATE_HOME/adversarial-review-loop/
 ├── sessions/<session-id>            → which worktree this session armed
 └── worktrees/<sha256(worktree)>/
     ├── latest                       → which session owns this worktree right now
@@ -248,31 +248,31 @@ payload, re-read on every agentic turn of the review. See [configuration.md](con
 
 Nothing here lives inside the repository under review, with one narrow exception —
 `config <key> <value> --repo`, an explicit user-only write to the repo's own
-`.opencode-review-loop.json`. See [security.md](security.md) for why that boundary matters
+`.adversarial-review-loop.json`. See [security.md](security.md) for why that boundary matters
 and exactly what does and doesn't cross it.
 
 ## Module map
 
 | Path | Owns |
 | --- | --- |
-| `scripts/ocrl.sh` | the guarded shim every hook actually invokes — interpreter probe, `timeout` wrapping, fail-closed fallback on any non-zero exit |
-| `scripts/ocrl-bootstrap.py` | trusted absolute entrypoint; sets up `sys.path` and `sys.pycache_prefix` before anything else imports |
-| `scripts/ocrl/cli.py` | subcommand dispatch |
-| `scripts/ocrl/paths.py` | state-directory layout, path safety checks |
-| `scripts/ocrl/atomic.py` | durable, private writes — `write_private_atomic` (state root) and `write_atomic` (the one repo-writing path) |
-| `scripts/ocrl/hookio.py` | hook payload parsing and the fail-closed decision emitters |
-| `scripts/ocrl/config.py` | precedence: env → activation overrides → repo file → user file → defaults |
-| `scripts/ocrl/state.py` | `state.json`, session pointers, `STATE_VERSION` migration, effective status |
-| `scripts/ocrl/gitsnap.py` | the throwaway-index tree snapshot, oversized-file guard, submodule detection |
-| `scripts/ocrl/cmdshape.py` | deny-list plus a real bash parser (vendored bashlex) deciding whether a commit command may run |
-| `scripts/ocrl/globmatch.py` | glob matching for `ignore_globs`, reimplemented rather than shelled out |
-| `scripts/ocrl/reviewer.py` | bundle building, staging, running the reviewer command, output-contract parsing |
-| `scripts/ocrl/harness/` | the reviewer-CLI seam — the `Harness`/`SessionStrategy` protocols and the registry, plus one module per implementation (`opencode.py`, `claudecode.py`) |
-| `scripts/ocrl/reviewer_probe.py` | the `opencode models` reachability probe, reached through the OpenCode harness; a CLI that cannot enumerate its models has none |
-| `scripts/ocrl/planrev.py` | plan-revision bookkeeping — backfilling revision 0, path/hash verification, the active revision |
-| `scripts/ocrl/report.py` | report storage; the text Claude actually sees |
-| `scripts/ocrl/commands/` | one module per subcommand — `arm`, `resume`, `phases`, `session`, `configcmd`, `completion`, `dryrun`, `accept`, `clarify`, `pausecmd`, plus the four hook entrypoints |
-| `scripts/ocrl/_vendor/bashlex/` | vendored parser, kept diffable against upstream |
+| `scripts/arl.sh` | the guarded shim every hook actually invokes — interpreter probe, `timeout` wrapping, fail-closed fallback on any non-zero exit |
+| `scripts/arl-bootstrap.py` | trusted absolute entrypoint; sets up `sys.path` and `sys.pycache_prefix` before anything else imports |
+| `scripts/arl/cli.py` | subcommand dispatch |
+| `scripts/arl/paths.py` | state-directory layout, path safety checks |
+| `scripts/arl/atomic.py` | durable, private writes — `write_private_atomic` (state root) and `write_atomic` (the one repo-writing path) |
+| `scripts/arl/hookio.py` | hook payload parsing and the fail-closed decision emitters |
+| `scripts/arl/config.py` | precedence: env → activation overrides → repo file → user file → defaults |
+| `scripts/arl/state.py` | `state.json`, session pointers, `STATE_VERSION` migration, effective status |
+| `scripts/arl/gitsnap.py` | the throwaway-index tree snapshot, oversized-file guard, submodule detection |
+| `scripts/arl/cmdshape.py` | deny-list plus a real bash parser (vendored bashlex) deciding whether a commit command may run |
+| `scripts/arl/globmatch.py` | glob matching for `ignore_globs`, reimplemented rather than shelled out |
+| `scripts/arl/reviewer.py` | bundle building, staging, running the reviewer command, output-contract parsing |
+| `scripts/arl/harness/` | the reviewer-CLI seam — the `Harness`/`SessionStrategy` protocols and the registry, plus one module per implementation (`opencode.py`, `claudecode.py`) |
+| `scripts/arl/reviewer_probe.py` | the `opencode models` reachability probe, reached through the OpenCode harness; a CLI that cannot enumerate its models has none |
+| `scripts/arl/planrev.py` | plan-revision bookkeeping — backfilling revision 0, path/hash verification, the active revision |
+| `scripts/arl/report.py` | report storage; the text Claude actually sees |
+| `scripts/arl/commands/` | one module per subcommand — `arm`, `resume`, `phases`, `session`, `configcmd`, `completion`, `dryrun`, `accept`, `clarify`, `pausecmd`, plus the four hook entrypoints |
+| `scripts/arl/_vendor/bashlex/` | vendored parser, kept diffable against upstream |
 | `prompts/*.md` | the fixed reviewer prompts — one per review kind, plus `reviewer-efficiency.md`, the working guidance each harness delivers its own way (a system prompt where the CLI has one) |
 | `skills/*/SKILL.md` | the nine slash commands |
 

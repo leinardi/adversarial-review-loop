@@ -36,7 +36,7 @@ from conftest import BOOTSTRAP, git, run_bootstrap
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
 from test_commands_session import arm, set_phases
 
-from ocrl.commands import resume
+from arl.commands import resume
 
 #: Long enough for every spawned process to reach the lock, short enough not to drag the
 #: suite. The assertions do not depend on it: they are invariants that must hold either way.
@@ -127,7 +127,7 @@ def spawn(argv: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.Pope
 
 def test_concurrent_defers_cannot_overspend_the_allowance(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """One allowance, one success -- however many callers read ``defers: 0`` first."""
-    env = armed_env(clean_env, OCRL_MAX_DEFERS="1")
+    env = armed_env(clean_env, ARL_MAX_DEFERS="1")
     arm(git_repo, tmp_path, env)
     set_phases(git_repo, env, "one")
 
@@ -148,7 +148,7 @@ def test_concurrent_defers_cannot_overspend_the_allowance(git_repo: Path, tmp_pa
 
 def test_a_second_defer_still_succeeds_when_the_limit_allows_it(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Guard against fixing the race by refusing everything: the count must still advance."""
-    env = armed_env(clean_env, OCRL_MAX_DEFERS="3")
+    env = armed_env(clean_env, ARL_MAX_DEFERS="3")
     arm(git_repo, tmp_path, env)
     set_phases(git_repo, env, "one")
 
@@ -209,22 +209,22 @@ def reviewer_stub(tmp_path: Path) -> Path:
     stub.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os\n"
-        "state = os.environ.get('OCRL_TEST_STATE')\n"
+        "state = os.environ.get('ARL_TEST_STATE')\n"
         "if state:\n"
         "    with open(state) as handle:\n"
         "        document = json.load(handle)\n"
-        "    document.update(json.loads(os.environ['OCRL_TEST_PATCH']))\n"
+        "    document.update(json.loads(os.environ['ARL_TEST_PATCH']))\n"
         "    with open(state, 'w') as handle:\n"
         "        json.dump(document, handle)\n"
-        "touch = os.environ.get('OCRL_TEST_TOUCH')\n"
+        "touch = os.environ.get('ARL_TEST_TOUCH')\n"
         "if touch:\n"
         "    with open(touch, 'w') as handle:\n"
         "        handle.write('appeared while the review was running\\n')\n"
-        "started = os.environ.get('OCRL_TEST_STARTED')\n"
+        "started = os.environ.get('ARL_TEST_STARTED')\n"
         "if started:\n"
         "    with open(started, 'w') as handle:\n"
         "        handle.write('reviewing\\n')\n"
-        "go = os.environ.get('OCRL_TEST_GO')\n"
+        "go = os.environ.get('ARL_TEST_GO')\n"
         "if go:\n"
         "    import time\n"
         "    for _ in range(1200):\n"
@@ -233,9 +233,9 @@ def reviewer_stub(tmp_path: Path) -> Path:
         "        time.sleep(0.05)\n"
         "print('Reviewed the whole diff.')\n"
         "print()\n"
-        "print('<<<OCRL-FINDINGS>>>')\n"
+        "print('<<<ARL-FINDINGS>>>')\n"
         "print('VERDICT APPROVED')\n"
-        "print('<<<OCRL-END>>>')\n"
+        "print('<<<ARL-END>>>')\n"
     )
     stub.chmod(0o755)
     return stub
@@ -257,9 +257,9 @@ def test_finish_does_not_overwrite_an_escalation_that_arrived_during_the_review(
     """Rule 1 at its sharpest: an approval must never overwrite somebody else's NEEDS_HUMAN."""
     env = armed_env(clean_env)
     armed_and_committed(git_repo, tmp_path, env)
-    env["OCRL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
-    env["OCRL_TEST_STATE"] = str(state_dir(env, git_repo, "s1") / "state.json")
-    env["OCRL_TEST_PATCH"] = json.dumps({"status": "NEEDS_HUMAN", "reason": "concurrent gate escalation"})
+    env["ARL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
+    env["ARL_TEST_STATE"] = str(state_dir(env, git_repo, "s1") / "state.json")
+    env["ARL_TEST_PATCH"] = json.dumps({"status": "NEEDS_HUMAN", "reason": "concurrent gate escalation"})
 
     proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
 
@@ -288,9 +288,9 @@ def test_finish_does_not_overwrite_any_transition(
     """
     env = armed_env(clean_env)
     armed_and_committed(git_repo, tmp_path, env)
-    env["OCRL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
-    env["OCRL_TEST_STATE"] = str(state_dir(env, git_repo, "s1") / "state.json")
-    env["OCRL_TEST_PATCH"] = json.dumps({"status": status, "reason": "someone else decided"})
+    env["ARL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
+    env["ARL_TEST_STATE"] = str(state_dir(env, git_repo, "s1") / "state.json")
+    env["ARL_TEST_PATCH"] = json.dumps({"status": status, "reason": "someone else decided"})
 
     proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
 
@@ -312,12 +312,12 @@ def test_finish_refuses_when_the_activation_goes_stale_under_a_long_review(
     The stored status never changes here -- only the derived one does -- which is why the
     fingerprint carries both.
     """
-    env = armed_env(clean_env, OCRL_TTL_HOURS="1")
+    env = armed_env(clean_env, ARL_TTL_HOURS="1")
     armed_and_committed(git_repo, tmp_path, env)
-    env["OCRL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
-    env["OCRL_TEST_STATE"] = str(state_dir(env, git_repo, "s1") / "state.json")
+    env["ARL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
+    env["ARL_TEST_STATE"] = str(state_dir(env, git_repo, "s1") / "state.json")
     # Only the clock moves: same activation, same stored status, now past its TTL.
-    env["OCRL_TEST_PATCH"] = json.dumps({"armed_at": 1})
+    env["ARL_TEST_PATCH"] = json.dumps({"armed_at": 1})
 
     proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
 
@@ -336,8 +336,8 @@ def test_finish_refuses_when_the_worktree_changes_during_the_review(
     env = armed_env(clean_env)
     armed_and_committed(git_repo, tmp_path, env)
     reviewed = git(git_repo, "rev-parse", "HEAD^{tree}")
-    env["OCRL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
-    env["OCRL_TEST_TOUCH"] = str(git_repo / "appeared.txt")
+    env["ARL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
+    env["ARL_TEST_TOUCH"] = str(git_repo / "appeared.txt")
 
     proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
 
@@ -358,9 +358,9 @@ def test_finish_refuses_when_the_activation_is_replaced_during_the_review(
     """A re-arm mid-review means the approval belongs to a plan that is no longer active."""
     env = armed_env(clean_env)
     armed_and_committed(git_repo, tmp_path, env)
-    env["OCRL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
-    env["OCRL_TEST_STATE"] = str(state_dir(env, git_repo, "s1") / "state.json")
-    env["OCRL_TEST_PATCH"] = json.dumps({"armed_at": 99, "baseline_tree": "0" * 40, "status": "ARMED"})
+    env["ARL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
+    env["ARL_TEST_STATE"] = str(state_dir(env, git_repo, "s1") / "state.json")
+    env["ARL_TEST_PATCH"] = json.dumps({"armed_at": 99, "baseline_tree": "0" * 40, "status": "ARMED"})
 
     proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
 
@@ -392,18 +392,18 @@ def test_finish_refuses_when_the_worktree_changes_while_it_waits_for_the_lock(
     """
     env = armed_env(clean_env)
     armed_and_committed(git_repo, tmp_path, env)
-    env["OCRL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
-    env["OCRL_TEST_STARTED"] = str(tmp_path / "review-started")
-    env["OCRL_TEST_GO"] = str(tmp_path / "review-go")
+    env["ARL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
+    env["ARL_TEST_STARTED"] = str(tmp_path / "review-started")
+    env["ARL_TEST_GO"] = str(tmp_path / "review-go")
 
     worker = spawn(["finish"], cwd=git_repo, env=env)
     deadline = time.monotonic() + 60
-    while not Path(env["OCRL_TEST_STARTED"]).exists():
+    while not Path(env["ARL_TEST_STARTED"]).exists():
         assert time.monotonic() < deadline, "the reviewer stub never started"
         time.sleep(0.02)
 
     with activation_lock(env, git_repo):
-        Path(env["OCRL_TEST_GO"]).write_text("go\n")
+        Path(env["ARL_TEST_GO"]).write_text("go\n")
         settle([worker], env, git_repo)  # completion reaches the lock (and, unfixed, snapshots first)
         (git_repo / "late.txt").write_text("unreviewed content\n")
         # Not shortened: this one is the window the *unfixed* code needs to snapshot the
@@ -447,11 +447,11 @@ def test_finish_refuses_an_activation_that_was_already_unfinishable(
     The reviewer must not even run: it is a model call spent on an activation whose answer
     cannot be applied.
     """
-    env = armed_env(clean_env, OCRL_TTL_HOURS="1")
+    env = armed_env(clean_env, ARL_TTL_HOURS="1")
     armed_and_committed(git_repo, tmp_path, env)
-    env["OCRL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
+    env["ARL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
     invoked = tmp_path / "reviewer-was-invoked"
-    env["OCRL_TEST_STARTED"] = str(invoked)
+    env["ARL_TEST_STARTED"] = str(invoked)
 
     path = state_dir(env, git_repo, "s1") / "state.json"
     document = json.loads(path.read_text())
@@ -481,7 +481,7 @@ def test_a_stale_finish_names_the_recovery_the_other_gates_name(
     clean_env: dict[str, str],
 ) -> None:
     """One recovery contract across the loop: re-arm, or stop."""
-    env = armed_env(clean_env, OCRL_TTL_HOURS="2")
+    env = armed_env(clean_env, ARL_TTL_HOURS="2")
     armed_and_committed(git_repo, tmp_path, env)
     path = state_dir(env, git_repo, "s1") / "state.json"
     document = json.loads(path.read_text())
@@ -492,8 +492,8 @@ def test_a_stale_finish_names_the_recovery_the_other_gates_name(
 
     assert proc.returncode == 1
     assert "past ttl_hours (2)" in proc.stdout
-    assert "/opencode-review-loop:implement <plan.md>" in proc.stdout
-    assert "/opencode-review-loop:stop" in proc.stdout
+    assert "/adversarial-review-loop:implement <plan.md>" in proc.stdout
+    assert "/adversarial-review-loop:stop" in proc.stdout
 
 
 def test_finish_still_completes_when_nothing_interferes(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -502,14 +502,14 @@ def test_finish_still_completes_when_nothing_interferes(git_repo: Path, tmp_path
     ``final_review=true`` here only makes the intent explicit -- ``finish`` always invokes the
     reviewer regardless of the key; see Phase 5's pins for that guarantee itself.
     """
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
     armed_and_committed(git_repo, tmp_path, env)
-    env["OCRL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
+    env["ARL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
 
     proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
 
     assert proc.returncode == 0, proc.stdout
-    assert "opencode-review-loop: COMPLETE." in proc.stdout
+    assert "adversarial-review-loop: COMPLETE." in proc.stdout
     document = read_state(env, git_repo, "s1")
     assert document["status"] == "COMPLETE"
     assert document["final_done_tree"] == git(git_repo, "rev-parse", "HEAD^{tree}")

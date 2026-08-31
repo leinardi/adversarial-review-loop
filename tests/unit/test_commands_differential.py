@@ -1,6 +1,6 @@
 """The user-facing commands, driven through the guarded shim against the bootstrap directly.
 
-``scripts/ocrl.sh`` is a thin guarded shim over ``python3 -I scripts/ocrl-bootstrap.py`` (see
+``scripts/arl.sh`` is a thin guarded shim over ``python3 -I scripts/arl-bootstrap.py`` (see
 "Interpreter invocation" in ``AGENTS.md``); for non-hook subcommands it simply ``exec``s the
 bootstrap. This proves that pass-through is real: the same argv and the same environment
 produce byte-identical output whether invoked through the shim or the bootstrap directly. That
@@ -24,18 +24,18 @@ import pytest
 from conftest import PLUGIN_ROOT, git, run_bootstrap
 from test_commands_arm import armed_env, plan_file, state_dir
 
-OCRL_SH = PLUGIN_ROOT / "scripts" / "ocrl.sh"
+ARL_SH = PLUGIN_ROOT / "scripts" / "arl.sh"
 
 #: Fields whose value is a clock reading; equality would be a flake, presence is the claim.
 _VOLATILE = ("armed_at",)
 
 
 def shell(argv: list[str], *, cwd: Path, env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([str(OCRL_SH), *argv], cwd=str(cwd), env=dict(env), capture_output=True, text=True, check=False)
+    return subprocess.run([str(ARL_SH), *argv], cwd=str(cwd), env=dict(env), capture_output=True, text=True, check=False)
 
 
 def wipe(env: Mapping[str, str]) -> None:
-    shutil.rmtree(Path(env["XDG_STATE_HOME"]) / "opencode-review-loop", ignore_errors=True)
+    shutil.rmtree(Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop", ignore_errors=True)
 
 
 def normalised_state(env: dict[str, str], repo: Path, session: str) -> dict[str, object]:
@@ -161,7 +161,7 @@ def test_status_with_phases_reads_identically(git_repo: Path, tmp_path: Path, cl
 
 
 def test_defer_reads_identically(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_MAX_DEFERS="1")
+    env = armed_env(clean_env, ARL_MAX_DEFERS="1")
     plan = plan_file(tmp_path)
     compare(
         [
@@ -175,7 +175,7 @@ def test_defer_reads_identically(git_repo: Path, tmp_path: Path, clean_env: dict
 
 
 def test_an_exhausted_defer_reads_identically(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_MAX_DEFERS="1")
+    env = armed_env(clean_env, ARL_MAX_DEFERS="1")
     plan = plan_file(tmp_path)
     compare(
         [
@@ -244,7 +244,7 @@ def test_the_session_pointer_is_byte_identical(git_repo: Path, tmp_path: Path, c
     """A pointer the other implementation cannot read is a rollback that denies everything."""
     env = armed_env(clean_env)
     plan = plan_file(tmp_path)
-    root = Path(env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
 
     wipe(env)
     shell(["arm", "--session", "s1", "--plan", str(plan)], cwd=git_repo, env=env)

@@ -10,21 +10,21 @@ Budget about an hour, plus a handful of real model calls in session A.
 - The plugin installed:
 
   ```text
-  /plugin marketplace add ~/Workspace/github/opencode-review-loop
-  /plugin install opencode-review-loop
+  /plugin marketplace add ~/Workspace/github/adversarial-review-loop
+  /plugin install adversarial-review-loop
   ```
 
-- **A working Bash sandbox, or none at all.** Arming runs through Claude Code's Bash sandbox at prompt-expansion time, so if the sandbox cannot start, `ocrl arm` never runs. On Ubuntu-family kernels `kernel.apparmor_restrict_unprivileged_userns=1` blocks the unprivileged user namespace the sandbox needs, and every command dies with `apply-seccomp: write /proc/self/setgroups`. Check with `unshare --user --map-root-user true`.
+- **A working Bash sandbox, or none at all.** Arming runs through Claude Code's Bash sandbox at prompt-expansion time, so if the sandbox cannot start, `arl arm` never runs. On Ubuntu-family kernels `kernel.apparmor_restrict_unprivileged_userns=1` blocks the unprivileged user namespace the sandbox needs, and every command dies with `apply-seccomp: write /proc/self/setgroups`. Check with `unshare --user --map-root-user true`.
 
-  Two independent things must hold: the sandbox must be able to start, **and** it must permit writes to the state root. A `denyWrite` covering `~/` blocks `$XDG_STATE_HOME/opencode-review-loop`, so arming fails on its first write even when the sandbox works.
+  Two independent things must hold: the sandbox must be able to start, **and** it must permit writes to the state root. A `denyWrite` covering `~/` blocks `$XDG_STATE_HOME/adversarial-review-loop`, so arming fails on its first write even when the sandbox works.
 
 - A throwaway fixture — never point this at work you care about, since the exercise is about provoking denials and bad commits:
 
   ```console
-  tests/step0-fixture.sh          # creates ~/ocrl-step0
+  tests/step0-fixture.sh          # creates ~/arl-step0
   ```
 
-**Two escape hatches, worth knowing before you need them.** Once armed, the session's tool calls are gated, so if a run wedges: `/opencode-review-loop:stop` disarms it, and failing that `rm -rf ~/.local/state/opencode-review-loop` removes all state. `/clear` also disarms, because the hooks are session-scoped.
+**Two escape hatches, worth knowing before you need them.** Once armed, the session's tool calls are gated, so if a run wedges: `/adversarial-review-loop:stop` disarms it, and failing that `rm -rf ~/.local/state/adversarial-review-loop` removes all state. `/clear` also disarms, because the hooks are session-scoped.
 
 Already settled empirically against `opencode 1.18.18` and `openai/gpt-5.6-sol`, so they are not in the runbook: `-f` attachments outside the repo are reachable with the pattern-scoped `external_directory`, and OpenCode's permission patterns are last-match-wins. Static checks against Claude Code 2.1.235 confirm every frontmatter key and hook event used here exists in the binary.
 
@@ -33,16 +33,16 @@ Already settled empirically against `opencode 1.18.18` and `openai/gpt-5.6-sol`,
 ## Session A — the main run
 
 ```console
-cd ~/ocrl-step0/repo && claude
+cd ~/arl-step0/repo && claude
 ```
 
 ### A1. Arm, and watch what happens before Claude gets a turn
 
 ```text
-/opencode-review-loop:implement ~/ocrl-step0/plan.md
+/adversarial-review-loop:implement ~/arl-step0/plan.md
 ```
 
-**Expect** a block beginning `**opencode-review-loop is ARMED for this worktree.**`, naming the repository, a baseline tree, an activation commit, and the reviewer model — *before* Claude says anything.
+**Expect** a block beginning `**adversarial-review-loop is ARMED for this worktree.**`, naming the repository, a baseline tree, an activation commit, and the reviewer model — *before* Claude says anything.
 
 This is **item 2, and it is load-bearing.** It is the one result that can invalidate the architecture.
 
@@ -54,7 +54,7 @@ This is **item 2, and it is load-bearing.** It is the one result that can invali
 Confirm the state landed:
 
 ```console
-ls ~/.local/state/opencode-review-loop/worktrees/*/*/
+ls ~/.local/state/adversarial-review-loop/worktrees/*/*/
 ```
 
 You should see `state.json` and `plan.frozen.md` — that is **item 7**, a hook script reading a plan from outside the repo.
@@ -65,7 +65,7 @@ You should see `state.json` and `plan.frozen.md` — that is **item 7**, a hook 
 /hooks
 ```
 
-**Expect** four entries pointing at `scripts/ocrl.sh`: `PreToolUse` (no matcher), `PostToolUse` (`Bash`), `PostToolUseFailure` (`Bash`), `Stop`. That `${CLAUDE_PLUGIN_ROOT}` resolved at all is **item 5** — a path that failed to expand would show up as a missing command on every tool call.
+**Expect** four entries pointing at `scripts/arl.sh`: `PreToolUse` (no matcher), `PostToolUse` (`Bash`), `PostToolUseFailure` (`Bash`), `Stop`. That `${CLAUDE_PLUGIN_ROOT}` resolved at all is **item 5** — a path that failed to expand would show up as a missing command on every tool call.
 
 If `PostToolUseFailure` is absent, the loop still holds: a stale pending approval is cleared by the next gate anyway. Drop the registration to avoid a dead entry.
 
@@ -90,7 +90,7 @@ The third row is the failure this item exists to catch: a session-id mismatch ma
 Cross-check the ids directly:
 
 ```text
-/opencode-review-loop:status
+/adversarial-review-loop:status
 ```
 
 The `session:` line must match the directory name under `worktrees/*/` from A1.
@@ -107,7 +107,7 @@ Watch for two specific things:
 - After the last phase, ending the turn should reach `COMPLETE`. With `final_review` at its
   default `false` no cumulative review runs — with a clean worktree the sweep has nothing to
   review either, so expect no reviewer call at all; check `status` and expect the `reason` to
-  say the review was skipped. Run this item with `OCRL_FINAL_REVIEW=true` if you want to
+  say the review was skipped. Run this item with `ARL_FINAL_REVIEW=true` if you want to
   exercise the cumulative review instead, which is the path 0.5.x always took.
 
 Expect the reviewer to be strict. In my own end-to-end run it rejected two successive attempts on scope grounds before approving, which is the gate working, not a malfunction.
@@ -121,7 +121,7 @@ While session A is still armed, open a second terminal in **any other repository
 ### A6. Close out
 
 ```text
-/opencode-review-loop:stop
+/adversarial-review-loop:stop
 ```
 
 ---
@@ -130,18 +130,18 @@ While session A is still armed, open a second terminal in **any other repository
 
 One session, four invocations back to back. No `/stop` needed between them: re-arming overwrites the state for that session, and `implement` runs at expansion time so it is never gated. Press Esc to interrupt Claude between attempts — only the banner matters.
 
-If the fixture has already been through an end-to-end run, rewind it first (`git -C ~/ocrl-step0/repo reset --hard <seed>`), or Claude will correctly report that the plan is already implemented and defer instead of working.
+If the fixture has already been through an end-to-end run, rewind it first (`git -C ~/arl-step0/repo reset --hard <seed>`), or Claude will correctly report that the plan is already implemented and defer instead of working.
 
 | Invocation | Expected |
 | --- | --- |
-| `/opencode-review-loop:implement ~/ocrl-step0/plan.md` | arms; banner reports `folded into phase 1: false` |
-| `/opencode-review-loop:implement ~/ocrl-step0/plan.md --allow-dirty` | arms; banner reports `folded into phase 1: true` |
-| `/opencode-review-loop:implement` (no argument) | `ARMING FAILED`, naming the missing plan |
-| `` /opencode-review-loop:implement ~/ocrl-step0/pl`id`an.md `` | `ARMING FAILED … characters that are not safe` |
+| `/adversarial-review-loop:implement ~/arl-step0/plan.md` | arms; banner reports `folded into phase 1: false` |
+| `/adversarial-review-loop:implement ~/arl-step0/plan.md --allow-dirty` | arms; banner reports `folded into phase 1: true` |
+| `/adversarial-review-loop:implement` (no argument) | `ARMING FAILED`, naming the missing plan |
+| `` /adversarial-review-loop:implement ~/arl-step0/pl`id`an.md `` | `ARMING FAILED … characters that are not safe` |
 
 **Settled 2026-08-19, and it changed the design.** The skill body originally passed `"$1" "$2"`. Claude Code's positional substitution is **0-based** — `$N` resolves `s[N]` of a zero-indexed array, so `$1` is the *second* argument — and an out-of-range `$N` is left in the body verbatim, where the expansion shell then turns it into the empty string. A single-argument invocation therefore armed with an empty plan path and failed closed with "no plan path was supplied".
 
-The body now passes `--args "$ARGUMENTS"` as one string and splits it in `ocrl_split_args` (ported as `commands.arm.split_args`, in `scripts/ocrl/commands/arm.py`, since the Phase 8 Bash removal), which also keeps plan paths containing spaces intact. The same routine (`wPt`) confirms Claude Code does **not** shell-escape substituted arguments, which is why the character-set check in `cmd_arm` (now the same `scripts/ocrl/commands/arm.py`) and the probe below both matter.
+The body now passes `--args "$ARGUMENTS"` as one string and splits it in `arl_split_args` (ported as `commands.arm.split_args`, in `scripts/arl/commands/arm.py`, since the Phase 8 Bash removal), which also keeps plan paths containing spaces intact. The same routine (`wPt`) confirms Claude Code does **not** shell-escape substituted arguments, which is why the character-set check in `cmd_arm` (now the same `scripts/arl/commands/arm.py`) and the probe below both matter.
 
 ### The argument-safety probe, and what it established
 
@@ -151,14 +151,14 @@ Confirmed empirically on 2026-08-20, by reproducing the substitute-then-`eval` s
 
 | `$ARGUMENTS` | Result |
 | --- | --- |
-| `~/ocrl-step0/pl`​`id`​`an.md` | the backtick also closes the outer `` !`…` `` delimiter, truncating the command into a bash syntax error — the arm never runs |
+| `~/arl-step0/pl`​`id`​`an.md` | the backtick also closes the outer `` !`…` `` delimiter, truncating the command into a bash syntax error — the arm never runs |
 | `x"; id; echo "` | **`id` executes.** The quote closes `--args "…"`, the semicolon starts a new command |
 
 So the live backtick probe fails safe by accident, not by design: it breaks the syntax before it can run. The quote-and-semicolon form is the real test, and it injects.
 
 **This is not fixable inside the plugin.** No quoting of `$ARGUMENTS` in the body helps — double quotes are escaped by `"`, single quotes by `'` — because the substitution happens before any shell sees it. It is a property of `` !`…` `` expansion that every plugin interpolating `$ARGUMENTS` into a command shares.
 
-What bounds it here: `implement` is `disable-model-invocation: true`, so Claude cannot invoke the skill. The only party who can supply a hostile path is the person typing the slash command. The realistic risk is a pasted path from an untrusted source, not a compromised agent. The character-set check in `cmd_arm` (now `scripts/ocrl/commands/arm.py`) still refuses such a path, but it runs *after* the injected command has already executed, so it limits the review loop's state rather than preventing execution.
+What bounds it here: `implement` is `disable-model-invocation: true`, so Claude cannot invoke the skill. The only party who can supply a hostile path is the person typing the slash command. The realistic risk is a pasted path from an untrusted source, not a compromised agent. The character-set check in `cmd_arm` (now `scripts/arl/commands/arm.py`) still refuses such a path, but it runs *after* the injected command has already executed, so it limits the review loop's state rather than preventing execution.
 
 Worth reporting upstream if you want it changed.
 
@@ -179,11 +179,11 @@ If it has no effect, the residual limit stands as documented in the README: our 
 
 ## Session D — a host-only signal for the user's exits (item 11)
 
-Open, and the reason Rule 4 is documented as a limit rather than a guarantee. `finish` and `stop` are shell subcommands, so anything that can run a shell can run them; the gate cannot tell a user's `/opencode-review-loop:stop` from the same command issued inside `bash escape.sh`. Confirmed by experiment: the script commits and disarms, and nothing prevents either.
+Open, and the reason Rule 4 is documented as a limit rather than a guarantee. `finish` and `stop` are shell subcommands, so anything that can run a shell can run them; the gate cannot tell a user's `/adversarial-review-loop:stop` from the same command issued inside `bash escape.sh`. Confirmed by experiment: the script commits and disarms, and nothing prevents either.
 
 What the gate now does about it is *report* — `confirm-commit` emits `additionalContext`, and the Stop gate emits a `systemMessage`. Both are covered by `tests/unit/test_commands_posttool.py` and `test_commands_stop.py`, so what remains here is the half a shell test cannot reach.
 
-1. Run the escape for real: have Claude write and run a script that commits and then invokes `ocrl.sh deactivate`. **Expect** the `additionalContext` report on the tool result, and the `systemMessage` at turn end.
+1. Run the escape for real: have Claude write and run a script that commits and then invokes `arl.sh deactivate`. **Expect** the `additionalContext` report on the tool result, and the `systemMessage` at turn end.
 2. **Check where the `systemMessage` is rendered.** AGENTS.md rests on it reaching the *user*, so that relaying it is not the model's decision. Confirm it appears in the user's transcript, and note whether it is also fed back to the model. If it turns out to be model-visible only, the visibility argument in AGENTS.md is wrong and must be rewritten — this is the item that decides it.
 3. Then the open question: is there anything the host offers that the model cannot produce? Register a `UserPromptSubmit` hook and check whether it fires for a slash command, and what the payload carries. Compare the environment a skill body sees at prompt-expansion time against the one a `Bash` tool call sees; anything in the first and absent from the second is a candidate.
 4. **Expect**, if either works: `deactivate` and `finish` refuse unless the signal is present, and the wrapper escape stops ending the mode.
@@ -197,7 +197,7 @@ Note what a positive result would *not* fix. A model that can run arbitrary Bash
 
 The Python port's fail-closed fallback table (see "The shim is not three lines" in `AGENTS.md`) gives `confirm-commit` (`PostToolUse`) and `posttool-failure` (`PostToolUseFailure`) weaker fallbacks than `pretool` and `gate-stop`, because neither can deny — the tool call has already run by the time either fires. `confirm-commit` falls back to `additionalContext`, which is known to work because the entrypoint already emits it on its ordinary path. `posttool-failure` stays silent, matching its current behaviour. A stronger `{"decision":"block"}` would be preferable for both, but it is documented as **unverified for these events** rather than assumed, and this is the item that settles it.
 
-1. With the fixture armed and phases frozen, have Claude run a plain, successful `Bash` call that is not a commit (`echo hi`). Point `OCRL_REVIEWER_CMD` or a scratch build of `confirm-commit` at a stub that returns `{"decision":"block","reason":"step0 probe"}` instead of its normal `additionalContext` response, and watch whether the turn is actually blocked, or whether `decision` is simply ignored on `PostToolUse` the way an unrecognised key would be.
+1. With the fixture armed and phases frozen, have Claude run a plain, successful `Bash` call that is not a commit (`echo hi`). Point `ARL_REVIEWER_CMD` or a scratch build of `confirm-commit` at a stub that returns `{"decision":"block","reason":"step0 probe"}` instead of its normal `additionalContext` response, and watch whether the turn is actually blocked, or whether `decision` is simply ignored on `PostToolUse` the way an unrecognised key would be.
 2. **Expect**, if it works: the turn does not end (or Claude is redirected) with `"step0 probe"` visible, the same way a `Stop`-hook block behaves.
 3. **Fallback**, if it does not: `PostToolUse` only honours `hookSpecificOutput.additionalContext` (or nothing), and the table's existing choice stands, documented as a deliberate limit.
 4. Repeat for `PostToolUseFailure`: force a failing `Bash` call (a command that exits non-zero) while a `pending_approved_tree` is set, and have `posttool-failure` return `{"decision":"block","reason":"step0 probe"}` instead of its normal silent exit.
@@ -214,7 +214,7 @@ Untested: `implement` and `resume` both carry the identical `hooks:` block (deli
 The handlers look idempotent by inspection: a second `confirm-commit` firing on the same tool call finds no `pending_approved_tree` and an already-approved `HEAD`, so it has nothing to do; a second `pretool` firing on the same commit finds the tree already approved and takes the cache-hit path rather than reviewing twice. But that is reasoning about what the handler does when called, not a measurement of *how many times Claude Code calls it* — once per tool call regardless of registration count, once per registration (so twice, sequentially), or with the second registration replacing the first. Any of those changes what "idempotent" needs to mean, and only one of the three costs nothing.
 
 1. Arm normally (`implement`), let a phase or two run.
-2. In the *same* session, run `/opencode-review-loop:resume` (same-session path — nothing to retire, nothing new to register against).
+2. In the *same* session, run `/adversarial-review-loop:resume` (same-session path — nothing to retire, nothing new to register against).
 3. Run `/hooks` and count entries: one set of four, or two?
 4. If two: make a commit and watch whether it takes noticeably longer than a single-registration commit did earlier in the same run — a slow reviewer run twice, sequentially, is the one outcome that would not otherwise be visible from the handler's own idempotence.
 
@@ -232,7 +232,7 @@ The handlers look idempotent by inspection: a second `confirm-commit` firing on 
 4. **Item 20**: with the run finished, open `claude` *in the fixture repository* and run `/resume`. Expect the picker to list only your own sessions, none of the review rounds — the harness runs from an empty `<act_dir>/cwd`, and `claude -p` buckets its session store by cwd. Then confirm the sessions do exist under `~/.claude/projects/<slug of act_dir/cwd>/`, or continuity is silently dropping every round (which costs tokens, not correctness — `AssignedSessions.capture` logs it).
 5. **If item 20 fails** — review sessions do appear in the repository's picker — the cwd is not being honoured, and the fix is in `harness.claudecode.session_cwd`, not in the gate. Do not "fix" it with `--no-session-persistence`: that would take `--resume` continuity with it.
 
-Run the OpenCode side at least once too (`OCRL_HARNESS=opencode`), since a default that changed is exactly when the other path stops getting exercised by accident.
+Run the OpenCode side at least once too (`ARL_HARNESS=opencode`), since a default that changed is exactly when the other path stops getting exercised by accident.
 
 ## Record the outcome
 
@@ -262,17 +262,17 @@ Run the OpenCode side at least once too (`OCRL_HARNESS=opencode`), since a defau
 
 With the fixture armed, a separate session in an unrelated repository edited a file with no gate activity at all — no denial, no status message, no added latency.
 
-*(Superseded 2026-08-30 — see "Plugin-level hooks" below. The property held; it was also the hole.)* Note precisely what that establishes. A second session has no `ocrl` hooks registered, because skill hooks register on invocation rather than at plugin load, so the dispatcher never runs there. That is the property that matters day to day: **installing the plugin does not tax or gate sessions that never armed it.** The narrower branch — same session, different worktree, where the dispatcher *does* run and compares the pointer against the repo root — is covered by the `scoping` cases in `selftest.sh` rather than here.
+*(Superseded 2026-08-30 — see "Plugin-level hooks" below. The property held; it was also the hole.)* Note precisely what that establishes. A second session has no `arl` hooks registered, because skill hooks register on invocation rather than at plugin load, so the dispatcher never runs there. That is the property that matters day to day: **installing the plugin does not tax or gate sessions that never armed it.** The narrower branch — same session, different worktree, where the dispatcher *does* run and compares the pointer against the repo root — is covered by the `scoping` cases in `selftest.sh` rather than here.
 
 ### Plugin-level hooks, 2026-08-30
 
-The isolation property above turned out to be the hole. A real run (44 phases, `claude-code` harness) was interrupted at phase 13 with Esc, the session quit and the machine shut down. The next day `claude --resume` brought the same session id back, `/opencode-review-loop:status` reported `ACTIVE`, phase 14 of 44, and Claude was told to `continue`. Phase 14 was implemented and committed with no gate at all: no review, no `pretool` denial, `last_approved_tree` still phase 13's, `rounds this phase: 0`. `/reload-plugins` in that session reported `0 hooks`, and `ocrl.sh selftest` passed 399/399 — the code was fine, the registration was gone. Skill hooks register per process, on invocation; nothing in the resumed process had invoked `implement` or `resume`, and the state file cannot tell whether hooks exist.
+The isolation property above turned out to be the hole. A real run (44 phases, `claude-code` harness) was interrupted at phase 13 with Esc, the session quit and the machine shut down. The next day `claude --resume` brought the same session id back, `/adversarial-review-loop:status` reported `ACTIVE`, phase 14 of 44, and Claude was told to `continue`. Phase 14 was implemented and committed with no gate at all: no review, no `pretool` denial, `last_approved_tree` still phase 13's, `rounds this phase: 0`. `/reload-plugins` in that session reported `0 hooks`, and `arl.sh selftest` passed 399/399 — the code was fine, the registration was gone. Skill hooks register per process, on invocation; nothing in the resumed process had invoked `implement` or `resume`, and the state file cannot tell whether hooks exist.
 
 The fix moves every hook into `hooks/hooks.json`, registered at plugin load. Consequences, all deliberate:
 
 - The dispatcher runs in every session the plugin is enabled in. Unarmed sessions pay a silent pass (~0.1s, no writes). "Installing the plugin does not gate sessions that never armed it" still holds; "does not tax" now means one interpreter start per tool call.
 - **Rule 0 changed shape.** "No pointer means `arm` never executed" no longer follows, since the dispatcher running no longer proves the skill was invoked. No pointer now means "this session never bound". In a worktree whose `latest` activation is live, that session is denied every mutation until `resume` binds it; anywhere else it passes — *provided* the worktree could be resolved at all. `paths.repo_root_or_raise` tells git's "not a repository" apart from a git that cannot run, a vanished `cwd` or a timeout; only the first passes. Adversarial review of the first draft caught the alternative: with `repo_root()` folding every failure into `""`, dropping `git` from the hook's PATH would have turned the gate off.
-- **An `arm` that never started is still caught, by a different witness.** The same review caught the first draft's claim that `implement`'s banner covers it — this file already records ("A failed arm never reaches Claude", below) that a failed expansion aborts the skill and Claude gets no turn. So `commands/intent.py` now runs on `UserPromptSubmit` and records a marker when the prompt *starts with* `/opencode-review-loop:implement` or `:resume`, before anything expands; `pointer_write` clears it. A marker with no pointer is the old "arming never ran" branch, `ARM_FAILED` recorded by the dispatcher, message and counting unchanged.
+- **An `arm` that never started is still caught, by a different witness.** The same review caught the first draft's claim that `implement`'s banner covers it — this file already records ("A failed arm never reaches Claude", below) that a failed expansion aborts the skill and Claude gets no turn. So `commands/intent.py` now runs on `UserPromptSubmit` and records a marker when the prompt *starts with* `/adversarial-review-loop:implement` or `:resume`, before anything expands; `pointer_write` clears it. A marker with no pointer is the old "arming never ran" branch, `ARM_FAILED` recorded by the dispatcher, message and counting unchanged.
 - A `SessionStart` hook now also fires on `resume`, so a resumed session is re-oriented by the plugin rather than by whatever the transcript happened to carry.
 - Item 15 closes: one registration per process, nothing to double.
 
@@ -280,7 +280,7 @@ Not yet measured against a live session: that the `resume` matcher fires on `cla
 
 ### The unanswered marker, 2026-08-30
 
-First live run of the intent design, against the same 44-phase activation: `claude --resume`, then `/opencode-review-loop:resume --allow-dirty`. The `UserPromptSubmit` hook recorded the marker (proving the two open items above), the resume **succeeded** and printed its banner — and the very next tool call was denied with "Arming never ran", after which the Stop-block stall escalated the live activation to `NEEDS_HUMAN`.
+First live run of the intent design, against the same 44-phase activation: `claude --resume`, then `/adversarial-review-loop:resume --allow-dirty`. The `UserPromptSubmit` hook recorded the marker (proving the two open items above), the resume **succeeded** and printed its banner — and the very next tool call was denied with "Arming never ran", after which the Stop-block stall escalated the live activation to `NEEDS_HUMAN`.
 
 The hole: only three arming paths wrote a pointer — first arm, arm failure, cross-session takeover — and a *same-session* resume is deliberately none of them (it has a valid pointer already and "a same-session failure writes nothing"). So the marker outlived a successful resume, and `record_unstarted_arm` then overwrote the live `ACTIVE` document with `ARM_FAILED`. The state survived otherwise (phases, approvals and `phase_commits` are merged over, not wiped), and `stop` → `resume` recovers it, since `DISARMED` is resumable and `NEEDS_HUMAN` is not.
 
@@ -303,7 +303,7 @@ repository the call was in. The session could no longer edit the file that would
 gate blocked the turn until `max_stop_blocks` escalated it to `NEEDS_HUMAN`.
 
 Recovery took two user actions, in order: a shell command (typed by the user, outside the
-model's tool loop) to make the truthiness correct, then `/opencode-review-loop:stop` to clear
+model's tool loop) to make the truthiness correct, then `/adversarial-review-loop:stop` to clear
 the `ARM_FAILED` state the bug had recorded. Note that `stop` alone was not enough — the
 broken check ran *before* any status was read — and neither was reverting the code alone,
 since the recorded state outlived it.
@@ -324,7 +324,7 @@ Three real reviews landed in `reports/` with their bundles. The reviewer globbed
 
 A second full run on 2026-08-20 repeated this against genuinely broken code (`greet.py` rewound to the seed), producing commits `9a8cb7e` and `57625c9`, three more real `gpt-5.6-sol` reviews, and a clean `COMPLETE`.
 
-That run also showed a rough edge worth knowing about: re-running `implement` in a session that already holds an older arm failure in its context, Claude reported the **stale** failure rather than the fresh banner. It corrected itself one tool call later — the gate's denial named the real state — but if a banner and Claude's summary disagree, believe the banner and `/opencode-review-loop:status`, not the prose.
+That run also showed a rough edge worth knowing about: re-running `implement` in a session that already holds an older arm failure in its context, Claude reported the **stale** failure rather than the fresh banner. It corrected itself one tool call later — the gate's denial named the real state — but if a banner and Claude's summary disagree, believe the banner and `/adversarial-review-loop:status`, not the prose.
 
 Items 1 and 4 fall out of this run: all four hooks fired, and the pre-phase `Read` of the frozen plan was permitted while the gate still denied mutations, which is only possible if the expansion-time session id matches the one the hooks receive.
 
@@ -342,7 +342,7 @@ Inducing the condition needed more care than expected, and the detours are worth
 
 ### The Claude Code harness, 2026-08-29
 
-Probed against `claude` 2.1.251, before `scripts/ocrl/harness/claudecode.py` was written. Three of the four things that module depends on are not what the flag help implies, and each one changed the design.
+Probed against `claude` 2.1.251, before `scripts/arl/harness/claudecode.py` was written. Three of the four things that module depends on are not what the flag help implies, and each one changed the design.
 
 - **`--tools` bounds the built-in tool set only.** A run given exactly `--tools "Read,Grep,Glob"` still listed every connected MCP server's tools in its init event — Gmail, Drive and a code-editing server among them. `--strict-mcp-config` is what removes them (`mcp_servers: []`), so the harness passes it **unconditionally** rather than under `pure`: it is that harness's share of the `"*": "deny"` at the head of OpenCode's permission document, not of `--pure`.
 - **`--safe-mode --strict-mcp-config --disable-slash-commands` does isolate.** `skills` and `slash_commands` both came back empty. `plugins` still *listed* the installed plugins, including this one — that listing is inert metadata, not a live surface, which settles the question the plan raised. Note that `--restricted` is **not** equivalent: it drops MCP servers but left 15 skills and 45 slash commands loaded.
@@ -359,8 +359,8 @@ Items 19 and 20 still need a real session: a payload at the plugin's chunk ceili
 Expansion not running in skill bodies is the only outcome that forces a redesign. The fallback:
 
 1. Remove the `` !`…` `` line from `skills/implement/SKILL.md`.
-2. Have the body instruct Claude to run `ocrl.sh arm …` as its first action.
-3. Add a narrow `pretool` exception for exactly that command, mirroring the existing `set-phases` exception in `scripts/ocrl/commands/pretool.py`.
+2. Have the body instruct Claude to run `arl.sh arm …` as its first action.
+3. Add a narrow `pretool` exception for exactly that command, mirroring the existing `set-phases` exception in `scripts/arl/commands/pretool.py`.
 
 That reintroduces a one-command hole in the pre-activation guard — smaller than the original design's, but not zero, and it must be written to match only the exact arm command shape.
 

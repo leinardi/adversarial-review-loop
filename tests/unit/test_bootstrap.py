@@ -21,7 +21,7 @@ def test_hostile_repo_cannot_shadow_the_gate(hostile_repo: Path, clean_env: dict
     assert not (hostile_repo / "HIJACKED").exists(), "a shadowed module executed as the gate"
     assert "HOSTILE" not in proc.stderr
     assert proc.returncode == 0
-    assert "usage: ocrl.sh <subcommand>" in proc.stdout
+    assert "usage: arl.sh <subcommand>" in proc.stdout
 
 
 def test_naive_invocation_is_the_thing_being_defended_against(hostile_repo: Path, clean_env: dict[str, str]) -> None:
@@ -31,7 +31,7 @@ def test_naive_invocation_is_the_thing_being_defended_against(hostile_repo: Path
     true the test above stops proving anything, and this failure says so.
     """
     proc = subprocess.run(
-        [sys.executable, "-m", "ocrl"],
+        [sys.executable, "-m", "arl"],
         cwd=str(hostile_repo),
         env=clean_env,
         capture_output=True,
@@ -60,7 +60,7 @@ def test_bytecode_never_lands_in_either_repository(
     tmp_path: Path,
 ) -> None:
     """Rule 3, applied to ``__pycache__``: neither the reviewed repo nor the plugin repo."""
-    bootstrap = plugin_copy / "ocrl-bootstrap.py"
+    bootstrap = plugin_copy / "arl-bootstrap.py"
     assert pycache_dirs(plugin_copy) == set()
 
     # Deliberately not the session-shared cache the other tests run against: the closing
@@ -75,7 +75,7 @@ def test_bytecode_never_lands_in_either_repository(
     assert pycache_dirs(hostile_repo) == set(), "the gate wrote bytecode into the reviewed repo"
     assert git_status_ignored(hostile_repo) == "", "the gate dirtied the repository under review"
 
-    cache_root = Path(env["XDG_CACHE_HOME"]) / "opencode-review-loop" / "pycache"
+    cache_root = Path(env["XDG_CACHE_HOME"]) / "adversarial-review-loop" / "pycache"
     assert list(cache_root.rglob("*.pyc")), "the bytecode cache was disabled, not relocated"
 
 
@@ -88,7 +88,7 @@ def test_bytecode_is_disabled_rather_than_written_relative(hostile_repo: Path, p
     env = dict(clean_env)
     env.pop("XDG_CACHE_HOME", None)
     env["HOME"] = ""
-    bootstrap = plugin_copy / "ocrl-bootstrap.py"
+    bootstrap = plugin_copy / "arl-bootstrap.py"
 
     proc = run_bootstrap(["--help"], cwd=hostile_repo, env=env, bootstrap=bootstrap)
 
@@ -106,7 +106,7 @@ def test_an_absolute_cache_path_inside_the_reviewed_repo_is_refused(hostile_repo
     """
     env = dict(clean_env)
     env["XDG_CACHE_HOME"] = str(hostile_repo / ".cache")
-    bootstrap = plugin_copy / "ocrl-bootstrap.py"
+    bootstrap = plugin_copy / "arl-bootstrap.py"
 
     proc = run_bootstrap(["--help"], cwd=hostile_repo, env=env, bootstrap=bootstrap)
 
@@ -121,7 +121,7 @@ def test_a_cache_path_elsewhere_in_the_reviewed_repo_is_refused(hostile_repo: Pa
     workdir.mkdir(parents=True)
     env = dict(clean_env)
     env["XDG_CACHE_HOME"] = str(hostile_repo / ".cache")
-    bootstrap = plugin_copy / "ocrl-bootstrap.py"
+    bootstrap = plugin_copy / "arl-bootstrap.py"
 
     proc = run_bootstrap(["--help"], cwd=workdir, env=env, bootstrap=bootstrap)
 
@@ -134,7 +134,7 @@ def test_a_cache_path_inside_the_plugin_is_refused(hostile_repo: Path, plugin_co
     """The plugin gates work on itself, so its own checkout is a repository under review."""
     env = dict(clean_env)
     env["XDG_CACHE_HOME"] = str(plugin_copy / ".cache")
-    bootstrap = plugin_copy / "ocrl-bootstrap.py"
+    bootstrap = plugin_copy / "arl-bootstrap.py"
 
     proc = run_bootstrap(["--help"], cwd=hostile_repo, env=env, bootstrap=bootstrap)
 
@@ -147,11 +147,11 @@ def test_a_cache_path_that_is_an_ancestor_is_refused(hostile_repo: Path, plugin_
     """`sys.pycache_prefix` mirrors absolute source paths beneath the prefix.
 
     So a prefix that merely *contains* a source tree still writes into it: with a prefix of
-    `/`, the bytecode for `/plugin/scripts/ocrl/x.py` lands at `/plugin/scripts/ocrl/x.pyc`.
+    `/`, the bytecode for `/plugin/scripts/arl/x.py` lands at `/plugin/scripts/arl/x.pyc`.
     """
     env = dict(clean_env)
     env["XDG_CACHE_HOME"] = "/"
-    bootstrap = plugin_copy / "ocrl-bootstrap.py"
+    bootstrap = plugin_copy / "arl-bootstrap.py"
 
     proc = run_bootstrap(["--help"], cwd=hostile_repo, env=env, bootstrap=bootstrap)
 
@@ -165,4 +165,4 @@ def test_unknown_subcommand_exits_two(hostile_repo: Path, clean_env: dict[str, s
     proc = run_bootstrap(["no-such-subcommand"], cwd=hostile_repo, env=clean_env)
     assert proc.returncode == 2
     assert proc.stdout == ""
-    assert "usage: ocrl.sh <subcommand>" in proc.stderr
+    assert "usage: arl.sh <subcommand>" in proc.stderr

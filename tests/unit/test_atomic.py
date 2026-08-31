@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from ocrl.atomic import read_verified_file, verified_file, write_atomic, write_private_atomic
+from arl.atomic import read_verified_file, verified_file, write_atomic, write_private_atomic
 
 
 def test_write_atomic_leaves_the_directory_mode_untouched(tmp_path: Path) -> None:

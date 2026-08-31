@@ -125,7 +125,7 @@ def test_advancing_the_phase_clears_a_transient_backoff_left_standing(git_repo: 
 def test_the_last_phase_hands_over_to_the_stop_gate(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Pin: with ``final_review`` on, the hand-over still promises the cumulative review."""
     env = armed_env(clean_env)
-    env["OCRL_FINAL_REVIEW"] = "true"
+    env["ARL_FINAL_REVIEW"] = "true"
     active(git_repo, tmp_path, env, "the only phase")
     gated_commit(git_repo, env)
 
@@ -160,7 +160,7 @@ def test_the_last_phase_promises_no_review_when_final_review_is_disabled(git_rep
     # COMPLETE_UNREVIEWED says so -- the hand-over that precedes it must not say more.
     assert "passed the\nper-commit gate" in message
     assert "reviewed individually" not in message
-    assert "/opencode-review-loop:finish" in message
+    assert "/adversarial-review-loop:finish" in message
     assert read_state(env, git_repo, SESSION)["phase"] == 2
 
 
@@ -345,7 +345,7 @@ def test_a_crashing_confirm_says_the_commit_was_not_verified(git_repo: Path, tmp
     The shell armed no fallback for this event at all, so a crash between the commit and the
     check emitted nothing and the phase simply never advanced -- indistinguishable, from the
     outside, from a check that ran and was happy. The lockfile is replaced with a symlink,
-    which ``ocrl.atomic`` refuses to write through, so the entrypoint reaches its fail-closed
+    which ``arl.atomic`` refuses to write through, so the entrypoint reaches its fail-closed
     fallback instead of a decision.
     """
     env = armed_env(clean_env)

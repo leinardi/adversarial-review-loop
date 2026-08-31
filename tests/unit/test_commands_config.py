@@ -19,12 +19,12 @@ from conftest import SCRIPTS_DIR, run_bootstrap
 from test_commands_arm import _path_without_opencode, armed_env, probe_env
 from test_commands_dryrun import argv_of
 
-from ocrl import config as config_module
-from ocrl import harness
+from arl import config as config_module
+from arl import harness
 
 
 def user_config_file(env: dict[str, str]) -> Path:
-    return Path(env["XDG_CONFIG_HOME"]) / "opencode-review-loop" / "config.json"
+    return Path(env["XDG_CONFIG_HOME"]) / "adversarial-review-loop" / "config.json"
 
 
 def repo_config_file(repo: Path) -> Path:
@@ -48,7 +48,7 @@ def test_no_arguments_shows_every_key_at_its_default(git_repo: Path, clean_env: 
 def test_show_reports_the_layer_that_set_a_key(git_repo: Path, clean_env: dict[str, str]) -> None:
     run_bootstrap(["config", "ttl_hours", "5"], cwd=git_repo, env=clean_env)
     run_bootstrap(["config", "block_severity", "high", "--repo"], cwd=git_repo, env=clean_env)
-    env = {**clean_env, "OCRL_MAX_DEFERS": "9"}
+    env = {**clean_env, "ARL_MAX_DEFERS": "9"}
 
     proc = run_bootstrap(["config"], cwd=git_repo, env=env)
 
@@ -449,8 +449,8 @@ def test_locked_config_target_serialises_two_processes(git_repo: Path, clean_env
         "import sys, time\n"
         f"sys.path.insert(0, {str(SCRIPTS_DIR)!r})\n"
         "from pathlib import Path\n"
-        "from ocrl import atomic, paths\n"
-        "from ocrl.commands.configcmd import _lock_path\n"
+        "from arl import atomic, paths\n"
+        "from arl.commands.configcmd import _lock_path\n"
         f"target = Path({str(target)!r})\n"
         "with atomic.locked(_lock_path(target), root=paths.state_root()):\n"
         "    start = time.monotonic()\n"
@@ -506,7 +506,7 @@ def test_show_names_the_harness_whose_default_model_it_prints(git_repo: Path, cl
 
 
 def test_show_follows_the_configured_harness_for_the_model_default(git_repo: Path, clean_env: dict[str, str]) -> None:
-    env = {**clean_env, "OCRL_HARNESS": "opencode"}
+    env = {**clean_env, "ARL_HARNESS": "opencode"}
 
     proc = run_bootstrap(["config"], cwd=git_repo, env=env)
 
@@ -518,7 +518,7 @@ def test_show_follows_the_configured_harness_for_the_model_default(git_repo: Pat
 def test_show_flags_a_harness_this_build_does_not_implement(git_repo: Path, clean_env: dict[str, str]) -> None:
     """``config`` is how a user finds a bad ``harness`` value, so it reports one rather than
     crashing on it -- and never prints a model name that nothing is going to run."""
-    env = {**clean_env, "OCRL_HARNESS": "not-a-harness"}
+    env = {**clean_env, "ARL_HARNESS": "not-a-harness"}
 
     proc = run_bootstrap(["config"], cwd=git_repo, env=env)
 
@@ -556,7 +556,7 @@ def test_a_model_is_not_validated_for_a_harness_that_cannot_enumerate(git_repo: 
     bindir = Path(_path_without_opencode(tmp_path))
     (bindir / "claude").write_text("#!/usr/bin/env bash\nexit 0\n")
     (bindir / "claude").chmod(0o755)
-    env = {**clean_env, "PATH": str(bindir), "OCRL_HARNESS": "claude-code"}
+    env = {**clean_env, "PATH": str(bindir), "ARL_HARNESS": "claude-code"}
 
     proc = run_bootstrap(["config", "model", "whatever-they-call-it"], cwd=git_repo, env=env)
 
@@ -566,11 +566,11 @@ def test_a_model_is_not_validated_for_a_harness_that_cannot_enumerate(git_repo: 
 
 
 def test_show_credits_the_harness_when_a_layer_sets_an_empty_model(git_repo: Path, clean_env: dict[str, str]) -> None:
-    """``OCRL_MODEL=""`` is *set* -- `from_env` keeps empty values deliberately -- so the layer
+    """``ARL_MODEL=""`` is *set* -- `from_env` keeps empty values deliberately -- so the layer
     walk credits ``env`` while the model actually used is still the harness's own. Crediting
     ``env`` alone would attribute a model name to a layer that named none.
     """
-    env = {**clean_env, "OCRL_MODEL": ""}
+    env = {**clean_env, "ARL_MODEL": ""}
 
     proc = run_bootstrap(["config"], cwd=git_repo, env=env)
 
@@ -583,7 +583,7 @@ def test_show_credits_the_harness_when_a_layer_sets_an_empty_model(git_repo: Pat
 
 def test_show_credits_the_layer_alone_when_it_names_a_real_model(git_repo: Path, clean_env: dict[str, str]) -> None:
     """The note is only about a fallback, so a layer that actually supplies a model gets none."""
-    env = {**clean_env, "OCRL_MODEL": "vendor/named"}
+    env = {**clean_env, "ARL_MODEL": "vendor/named"}
 
     proc = run_bootstrap(["config"], cwd=git_repo, env=env)
 

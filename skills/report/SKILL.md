@@ -1,13 +1,13 @@
 ---
 name: report
-description: Print a stored OpenCode review report in full, including every finding and the raw reviewer output.
+description: Print a stored review report in full, including every finding and the raw reviewer output.
 argument-hint: "[report-number]"
 user-invocable: true
 ---
 
 # Stored review report
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/ocrl.sh report "$1"`
+!`${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh report "$1"`
 
 The report above is printed in full — nothing is truncated here, unlike the summary attached to a denial.
 

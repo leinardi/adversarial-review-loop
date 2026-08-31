@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stand-in reviewer used by the selftest, so the loop logic can be exercised
-# without spending a model call. Behaviour is chosen with OCRL_FAKE_MODE.
+# without spending a model call. Behaviour is chosen with ARL_FAKE_MODE.
 #
 # Invoked as: fake-reviewer.sh <bundle_dir> <prompt_file>
 
@@ -8,96 +8,96 @@ set -uo pipefail
 
 bundle=${1:-}
 prompt=${2:-}
-mode=${OCRL_FAKE_MODE:-approve}
+mode=${ARL_FAKE_MODE:-approve}
 
 case "$mode" in
     approve)
         printf 'Read the whole diff. Nothing blocking.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     approve-with-nit)
         printf 'One taste-level remark, nothing that must change.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=low actionable=no file=a.txt:1 | Could be named better\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     changes)
         printf 'The error path is wrong.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n'
         printf 'VERDICT CHANGES_REQUIRED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     changes-file)
         # Same shape as `changes`, but the finding's anchor (file) is named by
-        # OCRL_FAKE_FILE, so a test can drive a sequence of rounds that either repeat the
+        # ARL_FAKE_FILE, so a test can drive a sequence of rounds that either repeat the
         # same anchor (stall detection) or raise a fresh one every round (no cap).
-        f=${OCRL_FAKE_FILE:-a.txt}
+        f=${ARL_FAKE_FILE:-a.txt}
         printf 'A problem in %s.\n\n' "$f"
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=high actionable=yes file=%s:1 | Problem in %s\n' "$f" "$f"
         printf 'VERDICT CHANGES_REQUIRED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     medium-file)
-        # A medium, actionable finding at OCRL_FAKE_FILE (default a.txt:1) under the
+        # A medium, actionable finding at ARL_FAKE_FILE (default a.txt:1) under the
         # reviewer's own APPROVED -- so the gate's recomputation alone decides whether it
         # blocks. Drives the late-round rule: whether such a finding blocks from round 2 on
         # depends on where it is, not on what the reviewer concluded.
-        f=${OCRL_FAKE_FILE:-a.txt:1}
+        f=${ARL_FAKE_FILE:-a.txt:1}
         printf 'A medium problem in %s.\n\n' "$f"
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=medium actionable=yes file=%s | Medium problem in %s\n' "$f" "$f"
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     contract-repair)
         # A primary call that runs to completion and then writes a block the gate cannot
         # parse (`severity=P1 location=` -- the real shape seen after an OpenCode context
-        # compaction), plus a repair call whose behaviour OCRL_FAKE_REPAIR chooses. The two
+        # compaction), plus a repair call whose behaviour ARL_FAKE_REPAIR chooses. The two
         # are told apart by the prompt file the gate hands over, which is the only thing that
         # distinguishes them from the reviewer's side.
         case "$prompt" in
             */reviewer-repair.md)
-                case "${OCRL_FAKE_REPAIR:-ok}" in
+                case "${ARL_FAKE_REPAIR:-ok}" in
                     ok)
-                        printf '<<<OCRL-FINDINGS>>>\n'
+                        printf '<<<ARL-FINDINGS>>>\n'
                         printf 'FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n'
                         printf 'VERDICT CHANGES_REQUIRED\n'
-                        printf '<<<OCRL-END>>>\n'
+                        printf '<<<ARL-END>>>\n'
                         ;;
                     approve)
                         # Rule: no approval may ever originate from a repair. Discarded.
-                        printf '<<<OCRL-FINDINGS>>>\n'
+                        printf '<<<ARL-FINDINGS>>>\n'
                         printf 'VERDICT APPROVED\n'
-                        printf '<<<OCRL-END>>>\n'
+                        printf '<<<ARL-END>>>\n'
                         ;;
                     no-findings)
                         # A blocking verdict with nothing blocking in it. Also discarded: the
                         # tail may simply have been cut above the findings.
-                        printf '<<<OCRL-FINDINGS>>>\n'
+                        printf '<<<ARL-FINDINGS>>>\n'
                         printf 'VERDICT CHANGES_REQUIRED\n'
-                        printf '<<<OCRL-END>>>\n'
+                        printf '<<<ARL-END>>>\n'
                         ;;
                     supersedes)
                         # A valid blocking block with one reversal bolted on. The repair has
                         # no earlier round to reverse -- it sees a truncated tail -- so this
                         # must fail the contract rather than record fabricated reversal
                         # evidence that `oscillation` would later count towards a stall.
-                        printf '<<<OCRL-FINDINGS>>>\n'
+                        printf '<<<ARL-FINDINGS>>>\n'
                         printf 'FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n'
                         printf 'SUPERSEDES round=1 file=a.txt:9 | on reflection the earlier round was wrong\n'
                         printf 'VERDICT CHANGES_REQUIRED\n'
-                        printf '<<<OCRL-END>>>\n'
+                        printf '<<<ARL-END>>>\n'
                         ;;
                     malformed)
                         printf 'I re-read it and it still seems fine to me.\n'
                         ;;
                     slow)
-                        sleep "${OCRL_FAKE_REPAIR_SLEEP:-30}"
+                        sleep "${ARL_FAKE_REPAIR_SLEEP:-30}"
                         ;;
                     nonzero)
                         printf 'boom\n' >&2
@@ -108,41 +108,41 @@ case "$mode" in
                         # test can assert it is shown range.txt and the fenced tail, nothing
                         # else. Still a valid blocking block so the round is recovered.
                         printf 'attachments:\n'
-                        printf '%s\n' "${OCRL_CONTEXT_FILES:-(none)}"
-                        printf '<<<OCRL-FINDINGS>>>\n'
+                        printf '%s\n' "${ARL_CONTEXT_FILES:-(none)}"
+                        printf '<<<ARL-FINDINGS>>>\n'
                         printf 'FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n'
                         printf 'VERDICT CHANGES_REQUIRED\n'
-                        printf '<<<OCRL-END>>>\n'
+                        printf '<<<ARL-END>>>\n'
                         ;;
                     *)
-                        printf 'unknown OCRL_FAKE_REPAIR: %s\n' "${OCRL_FAKE_REPAIR:-}" >&2
+                        printf 'unknown ARL_FAKE_REPAIR: %s\n' "${ARL_FAKE_REPAIR:-}" >&2
                         exit 2
                         ;;
                 esac
                 ;;
             *)
                 printf 'The error path is wrong, and the lookup on line 1 returns success.\n\n'
-                printf '<<<OCRL-FINDINGS>>>\n'
+                printf '<<<ARL-FINDINGS>>>\n'
                 printf 'FINDING severity=P1 location=a.txt:1 | Returns success on a failed lookup\n'
                 printf 'VERDICT CHANGES_REQUIRED\n'
-                printf '<<<OCRL-END>>>\n'
+                printf '<<<ARL-END>>>\n'
                 ;;
         esac
         ;;
     approve-with-critical)
         # A reviewer that contradicts itself: the gate must recompute and block.
         printf 'Looks fine overall.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=critical actionable=yes file=a.txt:7 | Nil deref when the token is absent\n'
         printf 'VERDICT APPROVE\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     critical-nonactionable)
         printf 'A worry I cannot pin down.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=critical actionable=no file=- | General unease about the design\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     malformed)
         printf 'I reviewed it and it seems fine to me.\n'
@@ -151,87 +151,87 @@ case "$mode" in
     # own APPROVED. Each one used to be read as "no findings" and approved the commit.
     bad-actionable)
         printf 'Looks fine to me.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=critical actionable=maybe file=a.txt:7 | Nil deref when the token is absent\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     bad-severity)
         printf 'Looks fine to me.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=spicy actionable=yes file=a.txt:7 | Nil deref when the token is absent\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     mangled-finding)
         # One stray colon, and the whole finding stopped counting.
         printf 'Looks fine to me.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING: severity=critical actionable=yes file=a.txt:7 | Nil deref when the token is absent\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     stray-end)
         # The real findings sit above a stray end marker, so the sed range never saw them.
         printf 'Serious problems below.\n\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         printf 'FINDING severity=critical actionable=yes file=a.txt:7 | Nil deref when the token is absent\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     two-blocks)
         printf 'Two blocks, one of them empty.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=critical actionable=yes file=a.txt:7 | Nil deref when the token is absent\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         printf 'On reflection:\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     inline-start-marker)
         # The marker is real, but it is buried in a sentence rather than on its own line.
         printf 'Serious problems below.\n\n'
-        printf 'As requested: <<<OCRL-FINDINGS>>> here it comes\n'
+        printf 'As requested: <<<ARL-FINDINGS>>> here it comes\n'
         printf 'FINDING severity=critical actionable=yes file=a.txt:7 | Nil deref when the token is absent\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     suffixed-end-marker)
         printf 'Serious problems below.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>> -- end of block\n'
+        printf '<<<ARL-END>>> -- end of block\n'
         ;;
     nul-byte)
         # A NUL inside `actionable=no` is invisible in a terminal, and command substitution
         # deletes it -- so the shell used to validate a repaired copy of this line.
         printf 'Looks fine to me.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=critical actionable=n\000o file=a.txt:7 | Nil deref when the token is absent\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     two-verdicts)
         printf 'Undecided.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'VERDICT CHANGES_REQUIRED\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     chatty-block)
         printf 'Prose, then a block with commentary in it.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'Nothing worth reporting, honestly.\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     no-verdict)
         printf 'Review body.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=low actionable=no file=a.txt:1 | Something\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     empty) ;;
     nonzero)
@@ -252,7 +252,7 @@ case "$mode" in
         # this one is still deciding it hit a rate limit. `pretool._review_failed`'s
         # fingerprint guard must refuse to count this against the transient budget once it
         # notices the activation moved underneath it. Same technique as `clarify-mutate`.
-        root="${OCRL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-review-loop}"
+        root="${ARL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/adversarial-review-loop}"
         sf=$(find "$root" -name state.json 2>/dev/null | head -n1)
         if [ -n "$sf" ]; then
             tmp=$(mktemp)
@@ -266,51 +266,51 @@ case "$mode" in
         ;;
     many)
         printf 'Very many findings.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
-        for i in $(seq 1 "${OCRL_FAKE_COUNT:-6}"); do
+        printf '<<<ARL-FINDINGS>>>\n'
+        for i in $(seq 1 "${ARL_FAKE_COUNT:-6}"); do
             printf 'FINDING severity=medium actionable=yes file=a.txt:%s | Finding number %s\n' "$i" "$i"
         done
         printf 'VERDICT CHANGES_REQUIRED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     big-prose)
         # Prose far past max_reason_bytes; every FINDING line must still arrive.
         for i in $(seq 1 2000); do
             printf 'Prose line %s: padding that exists only to overflow the prose budget.\n' "$i"
         done
-        printf '\n<<<OCRL-FINDINGS>>>\n'
+        printf '\n<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=high actionable=yes file=a.txt:1 | Must survive truncation\n'
         printf 'FINDING severity=critical actionable=yes file=b.txt:2 | Must also survive truncation\n'
         printf 'VERDICT CHANGES_REQUIRED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     echo-bundle)
         printf 'Bundle contents:\n'
         ls -1 "$bundle"
-        printf '\n<<<OCRL-FINDINGS>>>\nVERDICT APPROVED\n<<<OCRL-END>>>\n'
+        printf '\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>\n'
         ;;
     echo-context)
         # Dumps the context/ attachments the real path would pass with -f, so the selftest
         # can assert round 2 is actually shown round 1's findings. Still a blocking verdict
         # so the denial reason carries the dump back.
         printf 'Prior rounds seen by this reviewer:\n'
-        if [ -n "${OCRL_CONTEXT_FILES:-}" ]; then
-            printf '%s\n' "$OCRL_CONTEXT_FILES" | while IFS= read -r f; do
+        if [ -n "${ARL_CONTEXT_FILES:-}" ]; then
+            printf '%s\n' "$ARL_CONTEXT_FILES" | while IFS= read -r f; do
                 [ -n "$f" ] && cat "$f"
             done
         else
             printf '(no context files were passed)\n'
         fi
-        printf '\n<<<OCRL-FINDINGS>>>\n'
+        printf '\n<<<ARL-FINDINGS>>>\n'
         printf 'FINDING severity=high actionable=yes file=a.txt:1 | round two is still unhappy\n'
         printf 'VERDICT CHANGES_REQUIRED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     clarify-mutate)
         # Simulates a resume/accept/stop landing while the reviewer answers: bumps
         # activation_generation in state.json so clarify's post-invoke fingerprint check
         # fires and the reply is discarded rather than printed.
-        root="${OCRL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-review-loop}"
+        root="${ARL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/adversarial-review-loop}"
         sf=$(find "$root" -name state.json 2>/dev/null | head -n1)
         if [ -n "$sf" ]; then
             tmp=$(mktemp)
@@ -324,7 +324,7 @@ case "$mode" in
         # hooks.Activation field, so the caller's fingerprint check cannot see it -- only the
         # "is this still the newest verdict?" check inside the approval transaction can.
         # seq 999 so it is unambiguously newer than anything this activation allocates.
-        root="${OCRL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-review-loop}"
+        root="${ARL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/adversarial-review-loop}"
         sf=$(find "$root" -name state.json 2>/dev/null | head -n1)
         if [ -n "$sf" ]; then
             tmp=$(mktemp)
@@ -338,15 +338,15 @@ case "$mode" in
             }]' "$sf" >"$tmp" && mv "$tmp" "$sf"
         fi
         printf 'Nothing blocking, from where I sat.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     approve-superseded-final)
         # As approve-superseded, but for the `final` label -- the completion path writes
         # COMPLETE, which disarms the gate permanently, so a stale approval landing over a
         # newer final verdict there cannot be corrected by a later round.
-        root="${OCRL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-review-loop}"
+        root="${ARL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/adversarial-review-loop}"
         sf=$(find "$root" -name state.json 2>/dev/null | head -n1)
         if [ -n "$sf" ]; then
             tmp=$(mktemp)
@@ -359,16 +359,16 @@ case "$mode" in
             }]' "$sf" >"$tmp" && mv "$tmp" "$sf"
         fi
         printf 'Nothing blocking, from where I sat.\n\n'
-        printf '<<<OCRL-FINDINGS>>>\n'
+        printf '<<<ARL-FINDINGS>>>\n'
         printf 'VERDICT APPROVED\n'
-        printf '<<<OCRL-END>>>\n'
+        printf '<<<ARL-END>>>\n'
         ;;
     clarify-supersede)
         # Simulates a concurrent reviewer.execute finishing a newer round while this clarify
         # runs: appends a round_history entry with the next seq, without touching any
         # hooks.Activation field -- so clarify's post-invoke "still the latest round?" check
         # fires (not the fingerprint check).
-        root="${OCRL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-review-loop}"
+        root="${ARL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/adversarial-review-loop}"
         sf=$(find "$root" -name state.json 2>/dev/null | head -n1)
         if [ -n "$sf" ]; then
             tmp=$(mktemp)
@@ -389,15 +389,15 @@ case "$mode" in
         printf 'Clarification.\n\n'
         printf 'bundle: %s\n' "$bundle"
         if [ -f "$bundle/range.txt" ]; then grep -E '^(base_tree|head_tree|round):' "$bundle/range.txt" || true; fi
-        if [ -n "${OCRL_QUESTION_FILE:-}" ] && [ -f "$OCRL_QUESTION_FILE" ]; then
+        if [ -n "${ARL_QUESTION_FILE:-}" ] && [ -f "$ARL_QUESTION_FILE" ]; then
             printf 'question seen:\n'
-            cat "$OCRL_QUESTION_FILE"
+            cat "$ARL_QUESTION_FILE"
         else
             printf '(no question file was passed)\n'
         fi
         ;;
     *)
-        printf 'unknown OCRL_FAKE_MODE: %s\n' "$mode" >&2
+        printf 'unknown ARL_FAKE_MODE: %s\n' "$mode" >&2
         exit 2
         ;;
 esac

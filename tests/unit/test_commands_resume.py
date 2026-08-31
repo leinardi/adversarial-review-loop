@@ -1,6 +1,6 @@
 """``resume`` -- a second arming path that must not lose the original baseline or approvals.
 
-Every test here drives the real CLI through ``scripts/ocrl-bootstrap.py`` (or the real hook
+Every test here drives the real CLI through ``scripts/arl-bootstrap.py`` (or the real hook
 entrypoints, for the retirement/resurrection tests), for the same reason ``test_commands_arm``
 does: the property under test is "does an activation exist on disk afterwards, and does it say
 the right thing", not a function's return value.
@@ -20,9 +20,9 @@ from test_commands_posttool import COMMIT, confirm
 from test_commands_pretool import armed, patch_state, payload, pretool
 from test_commands_stop import ended, stop
 
-from ocrl import gitsnap, paths
-from ocrl.commands import hooks
-from ocrl.commands import resume as resume_module
+from arl import gitsnap, paths
+from arl.commands import hooks
+from arl.commands import resume as resume_module
 
 S1 = "s1"
 S2 = "s2"
@@ -99,7 +99,7 @@ def test_cross_session_resume_preserves_baseline_and_approvals(git_repo: Path, t
     assert isinstance(before_generation, int)
     assert after["activation_generation"] == before_generation + 1
 
-    root = Path(env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
     assert (root / "sessions" / S2).read_text() == f"{git_repo}\n"
     assert (root / "worktrees" / paths.sha256_hex(str(git_repo)) / "latest").read_text() == S2 + "\n"
 
@@ -390,7 +390,7 @@ def test_nothing_armed_is_refused_without_writing_latest(git_repo: Path, clean_e
     assert "no activation was ever armed" in output
     document = read_state(env, git_repo, S2)
     assert document["status"] == "ARM_FAILED"
-    root = Path(env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
     assert (root / "sessions" / S2).read_text() == f"{git_repo}\n"
     assert not (root / "worktrees" / paths.sha256_hex(str(git_repo)) / "latest").exists()
 
@@ -414,7 +414,7 @@ def test_terminal_statuses_refuse_and_leave_latest_alone(
 
     assert code == 1
     assert expected in output
-    root = Path(env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
     assert (root / "worktrees" / paths.sha256_hex(str(git_repo)) / "latest").read_text() == S1 + "\n"
 
 
@@ -425,7 +425,7 @@ def test_an_already_resumed_activation_is_refused_naming_the_successor(git_repo:
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
     resume(git_repo, env, session=S2)
-    root = Path(env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
     latest = root / "worktrees" / paths.sha256_hex(str(git_repo)) / "latest"
     latest.write_text(f"{S1}\n")  # simulate the loser reading `latest` before the winner repointed it
 
@@ -695,7 +695,7 @@ def test_same_session_resume_reactivates_a_deactivated_activation(git_repo: Path
 
 
 def test_same_session_resume_un_stales_an_expired_activation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed(clean_env, OCRL_TTL_HOURS="1")
+    env = armed(clean_env, ARL_TTL_HOURS="1")
     active(git_repo, tmp_path, env)
     patch_state(env, git_repo, armed_at=1)
 
@@ -788,10 +788,10 @@ def test_publication_time_dirty_recheck_applies_even_without_a_plan_revision(
 
     monkeypatch.setattr(gitsnap, "worktree_clean", dirtying_worktree_clean)
     # In-process rather than through run_bootstrap, so the monkeypatch above takes effect --
-    # which means os.environ is overlaid, not replaced, so any OCRL_*/XDG_* the host happens
+    # which means os.environ is overlaid, not replaced, so any ARL_*/XDG_* the host happens
     # to carry has to be cleared first (mirrors test_commands_arm's racing-arm test).
     for key in list(os.environ):
-        if key.startswith(("OCRL_", "XDG_")):
+        if key.startswith(("ARL_", "XDG_")):
             monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -1033,7 +1033,7 @@ def test_evidence_corruption_escalates_the_predecessor_across_sessions_too(git_r
     assert read_state(env, git_repo, S2)["status"] == "NEEDS_HUMAN"
     # Retirement never happened -- the corruption was caught before dispatch -- so `latest`
     # still names the (now escalated) predecessor, not the failed session.
-    root = Path(env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
     assert (root / "worktrees" / paths.sha256_hex(str(git_repo)) / "latest").read_text() == S2 + "\n"
 
 
@@ -1097,12 +1097,12 @@ def test_resuming_onto_an_unimplemented_harness_is_refused(git_repo: Path, tmp_p
 
 
 def test_a_resume_pins_the_probed_harness_not_an_environment_masked_flag(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    """The same rule as ``arm``: ``OCRL_HARNESS`` outranks the overlay, so a ``--harness`` it
+    """The same rule as ``arm``: ``ARL_HARNESS`` outranks the overlay, so a ``--harness`` it
     masks was never probed and must not be stored as though it had been."""
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
 
-    code, banner = resume_argv(git_repo, {**env, "OCRL_HARNESS": "opencode"}, S2, ["--harness", "claude-code"])
+    code, banner = resume_argv(git_repo, {**env, "ARL_HARNESS": "opencode"}, S2, ["--harness", "claude-code"])
 
     assert code == 0, banner
     assert read_state(env, git_repo, S2)["overrides"] == {"harness": "opencode"}

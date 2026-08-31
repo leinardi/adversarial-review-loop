@@ -16,11 +16,11 @@ from pathlib import Path
 import pytest
 from conftest import git
 
-from ocrl import config as ocrl_config
-from ocrl import harness, report, state
-from ocrl.config import Config
-from ocrl.reviewer import Review, Target
-from ocrl.util import TRUNCATION_MARKER
+from arl import config as arl_config
+from arl import harness, report, state
+from arl.config import Config
+from arl.reviewer import Review, Target
+from arl.util import TRUNCATION_MARKER
 
 SESSION = "repsess"
 
@@ -31,7 +31,7 @@ INVALID_UTF8 = b"tool output: \xff\xfe\n"
 @pytest.fixture
 def report_env(clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     for key in list(os.environ):
-        if key.startswith(("OCRL_", "XDG_")):
+        if key.startswith(("ARL_", "XDG_")):
             monkeypatch.delenv(key, raising=False)
     for key, value in clean_env.items():
         monkeypatch.setenv(key, value)
@@ -51,7 +51,7 @@ def a_target(scope: str = "phase", phase: int = 1, base: str = "b", head: str = 
 
 
 def config_with(**overrides: object) -> Config:
-    return Config({**ocrl_config.DEFAULTS, **overrides})
+    return Config({**arl_config.DEFAULTS, **overrides})
 
 
 def a_review(**overrides: object) -> Review:
@@ -216,9 +216,9 @@ def test_the_report_is_private(act_dir: Path) -> None:
 
 
 def test_the_reason_leads_with_the_headline_and_ends_with_the_instruction() -> None:
-    text = report.reason(a_review(), "opencode-review-loop: changes required.", config=config_with())
+    text = report.reason(a_review(), "adversarial-review-loop: changes required.", config=config_with())
 
-    assert text.startswith("opencode-review-loop: changes required.\n")
+    assert text.startswith("adversarial-review-loop: changes required.\n")
     assert text.endswith("Verify and address the findings above, then commit again. The commit is gated until the review passes.\n")
 
 
@@ -397,9 +397,9 @@ def test_with_clarify_hint_leaves_a_headline_alone_when_the_allowance_is_spent(a
 
 
 def test_the_clarify_hint_names_the_entrypoint_the_gate_accepts(act_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/plugins/ocrl")
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/plugins/arl")
     hint = report.clarify_hint(state=a_state(clarifications=0), config=config_with())
-    assert '`/plugins/ocrl/scripts/ocrl.sh clarify --question "..."`' in hint
+    assert '`/plugins/arl/scripts/arl.sh clarify --question "..."`' in hint
 
 
 # --------------------------------------------------------------------------

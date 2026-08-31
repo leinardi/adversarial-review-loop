@@ -25,12 +25,12 @@ If Claude is following the loop's own instructions, the gate is airtight: it can
 anything the reviewer hasn't seen exactly, it cannot end its own escapes (`finish`,
 `resume`, `config`), and it cannot silently disarm the mode. If Claude is deliberately
 trying to get around it — writing a wrapper script that commits and then calls
-`ocrl.sh deactivate`, or writing `status: "DISARMED"` straight into `state.json` — **it
+`arl.sh deactivate`, or writing `status: "DISARMED"` straight into `state.json` — **it
 can, and the design does not pretend otherwise.** Both of those are confirmed by
 experiment, not theoretical:
 
 - A wrapper script (`bash escape.sh`, where the script commits and then runs
-  `ocrl.sh deactivate`) is recognised as neither a commit nor a user-only escape by the
+  `arl.sh deactivate`) is recognised as neither a commit nor a user-only escape by the
   command classifier — because it *is* neither, as a shell command; the gate reads
   `tool_input.command` as a string, and that string is `bash escape.sh`. The commit inside
   it lands unreviewed and the mode ends.
@@ -137,7 +137,7 @@ only the first of them is unconditional:
   happened per commit — **when `final_review` is enabled, which since 0.6.0 it is not by
   default.** On a default install, the deny-list plus `PostToolUse` verification is the
   whole of the Stop path's protection, and the end-state pass exists only if someone asks
-  for it: `final_review true`, or `/opencode-review-loop:finish`. `finish` ignores
+  for it: `final_review true`, or `/adversarial-review-loop:finish`. `finish` ignores
   `final_review` — but only that key; it still has to pass the ordinary finishability
   checks, and those are config-reachable too (a `ttl_hours` low enough to make the
   activation `STALE` refuses `finish` before any review runs). Once an activation is
@@ -233,7 +233,7 @@ What the key buys, when it is on: a tampered `reviewer_session.id`, or a tampere
 misleading context and produce a verdict — but that verdict can never be an approval by itself.
 At worst it denies, which is a stronger failure mode than most of this document's findings (a
 denial-of-service, not a wrong grant), and the user's answer to it is
-`/opencode-review-loop:accept`.
+`/adversarial-review-loop:accept`.
 
 **Why it is not the default, and what that costs — stated without averaging the two channels
 together.** The cost of the key being *on* is a full second model call on every approving round
@@ -265,9 +265,9 @@ default gives that sentence up. Say so when quoting this section.
   *denial*, because the verdict acted on came from a call that never saw it. With it **off**,
   an approving verdict may have been shaped by it, and the backstops above are what remains. A
   review loop that will not converge — whether from injected content or an ordinary
-  disagreement — is exactly what `/opencode-review-loop:accept` exists to break out of.
+  disagreement — is exactly what `/adversarial-review-loop:accept` exists to break out of.
 
-Turn it on — `/opencode-review-loop:config cold_confirm true`, or `OCRL_COLD_CONFIRM=true` for
+Turn it on — `/adversarial-review-loop:config cold_confirm true`, or `ARL_COLD_CONFIRM=true` for
 a single run — when the threat model is a tampered `state.json`, or a diff plausibly carrying an
 injection, rather than a review loop that will not settle. Like every other key it is
 repo-settable, and the note under "Repo config is not trusted for policy" applies: a repository
@@ -448,7 +448,7 @@ picker for the repository they are working in.
 
 ## Repo config is attacker-controlled input, full stop
 
-`.opencode-review-loop.json`, when present, lives inside the repository under review — the
+`.adversarial-review-loop.json`, when present, lives inside the repository under review — the
 same repository Claude is implementing a plan against, and an ordinary file Claude can
 rewrite once mutations are permitted. Every key it sets is a lever, not only `verify_cmd`:
 
@@ -487,7 +487,7 @@ Both were found by experiment, not theory, and both look correct if reverted:
 
 - **`python3 -m` or a relative path, instead of an absolute one.** Hooks run with the
   repository under review as the current directory. `-m` puts that directory at the front
-  of `sys.path`, so a repository shipping `ocrl/__main__.py` — or merely `json.py` — would
+  of `sys.path`, so a repository shipping `arl/__main__.py` — or merely `json.py` — would
   execute arbitrary code as the gate itself. The only sanctioned invocation is
   `python3 -I <absolute path to the bootstrap>`.
 - **`uv run`, even with flags, on the hook path.** In a directory containing a

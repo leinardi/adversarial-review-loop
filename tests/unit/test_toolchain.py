@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-import ocrl
+import arl
 
 
 def test_python_floor() -> None:
@@ -13,10 +13,10 @@ def test_python_floor() -> None:
 
 
 def test_plugin_root_is_the_checkout() -> None:
-    assert (ocrl.PLUGIN_ROOT / "scripts" / "ocrl.sh").is_file()
-    assert ocrl.PACKAGE_ROOT.parent.name == "scripts"
+    assert (arl.PLUGIN_ROOT / "scripts" / "arl.sh").is_file()
+    assert arl.PACKAGE_ROOT.parent.name == "scripts"
 
 
 def test_prompt_path_resolves_shipped_prompts() -> None:
     for name in ("reviewer-phase", "reviewer-final"):
-        assert ocrl.prompt_path(name).is_file()
+        assert arl.prompt_path(name).is_file()

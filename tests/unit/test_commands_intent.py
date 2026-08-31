@@ -27,16 +27,16 @@ def intent(repo: Path, env: dict[str, str], prompt: str, session: str = SESSION)
 
 
 def marker(env: dict[str, str], session: str = SESSION) -> Path:
-    return Path(env["XDG_STATE_HOME"]) / "opencode-review-loop" / "intents" / session
+    return Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop" / "intents" / session
 
 
 @pytest.mark.parametrize(
     "prompt",
     [
-        "/opencode-review-loop:implement plan.md",
-        "/opencode-review-loop:implement",
-        "  /opencode-review-loop:resume --until 3",
-        "/opencode-review-loop:resume\n",
+        "/adversarial-review-loop:implement plan.md",
+        "/adversarial-review-loop:implement",
+        "  /adversarial-review-loop:resume --until 3",
+        "/adversarial-review-loop:resume\n",
     ],
 )
 def test_an_arming_prompt_records_intent(git_repo: Path, clean_env: dict[str, str], prompt: str) -> None:
@@ -50,31 +50,31 @@ def test_an_arming_prompt_records_intent(git_repo: Path, clean_env: dict[str, st
     "prompt",
     [
         "continue",
-        "yesterday I ran /opencode-review-loop:implement and it worked",
-        "/opencode-review-loop:implementation plan.md",
-        "/opencode-review-loop:status",
-        "x/opencode-review-loop:implement",
+        "yesterday I ran /adversarial-review-loop:implement and it worked",
+        "/adversarial-review-loop:implementation plan.md",
+        "/adversarial-review-loop:status",
+        "x/adversarial-review-loop:implement",
         "",
     ],
 )
 def test_any_other_prompt_records_nothing(git_repo: Path, clean_env: dict[str, str], prompt: str) -> None:
     assert intent(git_repo, clean_env, prompt) == ""
     assert not marker(clean_env).exists()
-    assert not (Path(clean_env["XDG_STATE_HOME"]) / "opencode-review-loop").exists()
+    assert not (Path(clean_env["XDG_STATE_HOME"]) / "adversarial-review-loop").exists()
 
 
 def test_an_unusable_session_id_records_nothing(git_repo: Path, clean_env: dict[str, str]) -> None:
-    assert intent(git_repo, clean_env, "/opencode-review-loop:implement plan.md", session="../escape") == ""
-    assert not (Path(clean_env["XDG_STATE_HOME"]) / "opencode-review-loop").exists()
+    assert intent(git_repo, clean_env, "/adversarial-review-loop:implement plan.md", session="../escape") == ""
+    assert not (Path(clean_env["XDG_STATE_HOME"]) / "adversarial-review-loop").exists()
 
 
 def test_a_marker_that_cannot_be_written_blocks_the_prompt(git_repo: Path, clean_env: dict[str, str]) -> None:
     """Enforcement was requested and could not be recorded: the arm must not run on top of that."""
-    root = Path(clean_env["XDG_STATE_HOME"]) / "opencode-review-loop"
+    root = Path(clean_env["XDG_STATE_HOME"]) / "adversarial-review-loop"
     root.mkdir(parents=True)
     (root / "intents").write_text("a file where the directory should be\n")
 
-    out = intent(git_repo, clean_env, "/opencode-review-loop:implement plan.md")
+    out = intent(git_repo, clean_env, "/adversarial-review-loop:implement plan.md")
 
     document = json.loads(out)
     assert document["decision"] == "block"
@@ -83,14 +83,14 @@ def test_a_marker_that_cannot_be_written_blocks_the_prompt(git_repo: Path, clean
 
 def test_arming_clears_the_marker(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed(clean_env)
-    intent(git_repo, env, "/opencode-review-loop:implement plan.md")
+    intent(git_repo, env, "/adversarial-review-loop:implement plan.md")
     assert marker(env).exists()
 
     active(git_repo, tmp_path, env)
 
     assert not marker(env).exists()
     # The pointer superseded it; Rule 0 reads the pointer first.
-    assert (Path(env["XDG_STATE_HOME"]) / "opencode-review-loop" / "sessions" / SESSION).is_file()
+    assert (Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop" / "sessions" / SESSION).is_file()
 
 
 @pytest.mark.parametrize("status", ["DISARMED", "COMPLETE"])
@@ -99,7 +99,7 @@ def test_intent_outranks_a_pointer_whose_activation_ended(git_repo: Path, tmp_pa
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
     patch_state(env, git_repo, status=status)
-    intent(git_repo, env, "/opencode-review-loop:implement plan.md")
+    intent(git_repo, env, "/adversarial-review-loop:implement plan.md")
 
     verdict, reason = pretool(git_repo, env, tool="Write")
 
@@ -114,7 +114,7 @@ def test_intent_outranks_a_pointer_whose_activation_ended(git_repo: Path, tmp_pa
 
 def test_intent_for_one_worktree_is_neither_enforced_on_nor_consumed_by_another(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed_env(clean_env)
-    intent(git_repo, env, "/opencode-review-loop:implement plan.md")
+    intent(git_repo, env, "/adversarial-review-loop:implement plan.md")
     other = tmp_path / "other"
     other.mkdir()
     git(other, "init", "-q")
@@ -124,7 +124,7 @@ def test_intent_for_one_worktree_is_neither_enforced_on_nor_consumed_by_another(
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == ""  # B is not guarded, and nothing was recorded for it
     assert marker(env).exists()  # A's request is still pending
-    assert not list((Path(env["XDG_STATE_HOME"]) / "opencode-review-loop").rglob("state.json"))
+    assert not list((Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop").rglob("state.json"))
 
     verdict, reason = pretool(git_repo, env, tool="Write")
 
@@ -137,7 +137,7 @@ def test_intent_for_one_worktree_is_neither_enforced_on_nor_consumed_by_another(
 def test_a_marker_that_cannot_be_scoped_denies_without_being_consumed(git_repo: Path, clean_env: dict[str, str], damage: str) -> None:
     """It could be any repository's request, so it is never assigned to this one."""
     env = armed_env(clean_env)
-    intent(git_repo, env, "/opencode-review-loop:implement plan.md")
+    intent(git_repo, env, "/adversarial-review-loop:implement plan.md")
     if damage == "unreadable":
         marker(env).chmod(0)
     elif damage == "relative":
@@ -152,9 +152,9 @@ def test_a_marker_that_cannot_be_scoped_denies_without_being_consumed(git_repo: 
 
         assert verdict == "deny"
         assert "cannot tell which repository" in reason
-        assert "/opencode-review-loop:stop" in reason
+        assert "/adversarial-review-loop:stop" in reason
         # Neither recorded against this repository nor consumed.
-        assert not list((Path(env["XDG_STATE_HOME"]) / "opencode-review-loop").rglob("state.json"))
+        assert not list((Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop").rglob("state.json"))
         assert marker(env).exists()
         # A read is still allowed, and the turn ends rather than blocking forever.
         proc = run_hook("pretool", prompt_payload(git_repo, "") | {"tool_name": "Read", "tool_input": {}}, cwd=git_repo, env=env)
@@ -165,7 +165,7 @@ def test_a_marker_that_cannot_be_scoped_denies_without_being_consumed(git_repo: 
 
 def test_only_stop_discards_a_marker_that_cannot_be_scoped(git_repo: Path, clean_env: dict[str, str]) -> None:
     env = armed_env(clean_env)
-    intent(git_repo, env, "/opencode-review-loop:implement plan.md")
+    intent(git_repo, env, "/adversarial-review-loop:implement plan.md")
     marker(env).write_text("")
 
     proc = run_bootstrap(["deactivate", "--session", SESSION], cwd=git_repo, env=env)
@@ -181,10 +181,10 @@ def test_only_stop_discards_a_marker_that_cannot_be_scoped(git_repo: Path, clean
 def test_a_pointer_answers_its_own_marker_even_if_cleanup_never_ran(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """The pointer is published first and carries the token, so a crash before cleanup is inert."""
     env = armed(clean_env)
-    intent(git_repo, env, "/opencode-review-loop:implement plan.md")
+    intent(git_repo, env, "/adversarial-review-loop:implement plan.md")
     token = marker(env).read_text().split("\n")[1].removeprefix("intent=")
     active(git_repo, tmp_path, env)
-    pointer = Path(env["XDG_STATE_HOME"]) / "opencode-review-loop" / "sessions" / SESSION
+    pointer = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop" / "sessions" / SESSION
     assert pointer.read_text().split("\n")[1] == f"intent={token}"
 
     # Simulate the crash window: the pointer landed, the unlink did not.
@@ -201,7 +201,7 @@ def test_a_pointer_answers_its_own_marker_even_if_cleanup_never_ran(git_repo: Pa
 def test_a_marker_whose_cleanup_fails_does_not_fail_the_arm(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """The pointer is the acknowledgement; cleanup is best effort, and a stale marker is inert."""
     env = armed(clean_env)
-    intent(git_repo, env, "/opencode-review-loop:implement plan.md")
+    intent(git_repo, env, "/adversarial-review-loop:implement plan.md")
     intents = marker(env).parent
     intents.chmod(0o500)
     try:
@@ -231,7 +231,7 @@ def test_a_marker_landing_after_the_arm_is_answered_by_the_live_loop(git_repo: P
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
     patch_state(env, git_repo, status=status)
-    intent(git_repo, env, "/opencode-review-loop:resume --allow-dirty")  # the late marker
+    intent(git_repo, env, "/adversarial-review-loop:resume --allow-dirty")  # the late marker
 
     proc = run_hook("pretool", {"session_id": SESSION, "cwd": str(git_repo), "tool_name": "Write", "tool_input": {}}, cwd=git_repo, env=env)
 
@@ -244,7 +244,7 @@ def test_a_same_session_resume_answers_the_marker_even_though_it_writes_no_point
     """The measured runhold failure: successful resume, unanswered marker, live loop bricked."""
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
-    intent(git_repo, env, "/opencode-review-loop:resume --allow-dirty")
+    intent(git_repo, env, "/adversarial-review-loop:resume --allow-dirty")
 
     proc = run_bootstrap(["resume", "--session", SESSION, "--args", "--allow-dirty"], cwd=git_repo, env=env)
 
@@ -260,7 +260,7 @@ def test_a_same_session_resume_answers_the_marker_even_though_it_writes_no_point
 def test_a_failed_same_session_resume_does_not_brick_the_live_loop(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
-    intent(git_repo, env, "/opencode-review-loop:resume --no-such-flag")
+    intent(git_repo, env, "/adversarial-review-loop:resume --no-such-flag")
 
     proc = run_bootstrap(["resume", "--session", SESSION, "--args", "--no-such-flag"], cwd=git_repo, env=env)
 
@@ -272,7 +272,7 @@ def test_a_failed_same_session_resume_does_not_brick_the_live_loop(git_repo: Pat
 def test_intent_with_no_pointer_is_an_arm_that_never_ran(git_repo: Path, clean_env: dict[str, str]) -> None:
     """The expansion never executed: the very next mutation records ARM_FAILED and denies."""
     env = armed_env(clean_env)
-    intent(git_repo, env, "/opencode-review-loop:implement plan.md")
+    intent(git_repo, env, "/adversarial-review-loop:implement plan.md")
 
     verdict, reason = pretool(git_repo, env, tool="Write")
 

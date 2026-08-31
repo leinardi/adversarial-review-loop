@@ -13,7 +13,7 @@ through the per-commit gate or the unreviewed-work sweep alone -- neither of whi
 model review (an unchanged, already-approved or ignore_globs-matched tree passes either one
 without a call); with ``final_review=true`` it is reachable only through an approving final
 cumulative review that nothing invalidated while it ran. Tests that exercise the reviewed path
-set ``OCRL_FINAL_REVIEW=true`` explicitly so their names stay true.
+set ``ARL_FINAL_REVIEW=true`` explicitly so their names stay true.
 """
 
 from __future__ import annotations
@@ -32,10 +32,10 @@ from test_commands_posttool import COMMIT, gated_commit
 from test_commands_pretool import SESSION, active, active_until, arm, patch_state, payload
 from test_commands_races import activation_lock, reviewer_stub, settle
 
-from ocrl import commands as commands_module
-from ocrl import config as config_module
-from ocrl.commands import completion
-from ocrl.state import State
+from arl import commands as commands_module
+from arl import config as config_module
+from arl.commands import completion
+from arl.state import State
 
 
 def stop(repo: Path, env: dict[str, str], **kwargs: object) -> dict[str, object]:
@@ -60,7 +60,7 @@ def ended(response: dict[str, object]) -> str:
 
 def record_intent(repo: Path, env: dict[str, str]) -> None:
     """What ``UserPromptSubmit`` leaves behind when the user submits an arming command."""
-    payload = {"session_id": SESSION, "cwd": str(repo), "prompt": "/opencode-review-loop:implement plan.md"}
+    payload = {"session_id": SESSION, "cwd": str(repo), "prompt": "/adversarial-review-loop:implement plan.md"}
     proc = run_hook("intent", payload, cwd=repo, env=env)
     assert proc.returncode == 0, proc.stderr
 
@@ -88,7 +88,7 @@ def test_no_session_id_ends_the_turn_saying_nothing_was_reviewed(git_repo: Path,
 def test_no_pointer_in_a_worktree_nobody_armed_says_nothing(git_repo: Path, clean_env: dict[str, str]) -> None:
     """The hooks register at plugin load, so a session that never armed must end its turns silently."""
     assert stop(git_repo, clean_env) == {}
-    assert not list((Path(clean_env["XDG_STATE_HOME"]) / "opencode-review-loop").rglob("state.json"))
+    assert not list((Path(clean_env["XDG_STATE_HOME"]) / "adversarial-review-loop").rglob("state.json"))
 
 
 def test_intent_with_no_pointer_records_arm_failed_and_blocks(git_repo: Path, clean_env: dict[str, str]) -> None:
@@ -103,7 +103,7 @@ def test_intent_with_no_pointer_records_arm_failed_and_blocks(git_repo: Path, cl
 
 def test_the_unstarted_arm_block_is_counted_rather_than_endless(git_repo: Path, clean_env: dict[str, str]) -> None:
     """Without counting, the same message repeats on every turn end until the host cap hits."""
-    env = {**armed_env(clean_env), "OCRL_MAX_STOP_BLOCKS": "1"}
+    env = {**armed_env(clean_env), "ARL_MAX_STOP_BLOCKS": "1"}
     record_intent(git_repo, env)
     blocked(stop(git_repo, env))
 
@@ -144,7 +144,7 @@ def test_no_pointer_in_a_worktree_armed_by_another_session_ends_the_turn_unappro
     message = ended(stop(git_repo, env, session="s2"))
 
     assert "not bound to it" in message
-    assert "/opencode-review-loop:resume" in message
+    assert "/adversarial-review-loop:resume" in message
     assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
     assert read_state(env, git_repo, SESSION)["stop_blocks"] == 0
 
@@ -244,7 +244,7 @@ def test_a_deferred_turn_may_end_once(git_repo: Path, tmp_path: Path, clean_env:
 
 def test_uncommitted_work_is_reviewed_before_the_turn_may_end(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Work that never reached a commit still gets reviewed; a blocking review blocks."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env)
     (git_repo / "unreviewed.txt").write_text("never gated\n")
 
@@ -256,7 +256,7 @@ def test_uncommitted_work_is_reviewed_before_the_turn_may_end(git_repo: Path, tm
 
 def test_a_blocking_sweep_offers_clarify_with_the_budget_left(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """The sweep reviews the phase scope, so its round is one ``clarify`` can target."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes", OCRL_MAX_CLARIFICATIONS="2")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes", ARL_MAX_CLARIFICATIONS="2")
     active(git_repo, tmp_path, env)
     (git_repo / "unreviewed.txt").write_text("never gated\n")
 
@@ -266,12 +266,12 @@ def test_a_blocking_sweep_offers_clarify_with_the_budget_left(git_repo: Path, tm
     lines = reason.splitlines()
     hint = next(i for i, line in enumerate(lines) if line.startswith("If a finding is ambiguous"))
     assert lines[hint - 1] == ""
-    assert lines[0].startswith("opencode-review-loop: the turn is ending with uncommitted work")
+    assert lines[0].startswith("adversarial-review-loop: the turn is ending with uncommitted work")
     assert reason.index("Clarifications left") < reason.index("Blocking findings")
 
 
 def test_a_blocking_sweep_drops_the_clarify_offer_when_none_are_left(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes", OCRL_MAX_CLARIFICATIONS="0")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes", ARL_MAX_CLARIFICATIONS="0")
     active(git_repo, tmp_path, env)
     (git_repo / "unreviewed.txt").write_text("never gated\n")
 
@@ -282,7 +282,7 @@ def test_a_blocking_sweep_drops_the_clarify_offer_when_none_are_left(git_repo: P
 
 
 def test_a_failed_sweep_review_is_never_an_approval(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="nonzero")
+    env = armed_env(clean_env, ARL_FAKE_MODE="nonzero")
     active(git_repo, tmp_path, env)
     (git_repo / "unreviewed.txt").write_text("never gated\n")
 
@@ -297,7 +297,7 @@ def test_a_stalled_phase_escalates_through_the_sweep_without_invoking_the_review
     gate alone would leave the Stop gate's unreviewed-work sweep free to keep invoking a
     reviewer a phase has already been found stalled on. This is the bypass regression test:
     it must fail on any implementation that puts the check in ``pretool`` instead."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env)
 
     for round_number in (1, 2, 3):
@@ -307,7 +307,7 @@ def test_a_stalled_phase_escalates_through_the_sweep_without_invoking_the_review
     before_seq = read_state(env, git_repo, SESSION)["report_seq"]
     assert before_seq == 3, "three ordinary sweep rounds ran (`stall_rounds` default 3)"
 
-    env["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
+    env["ARL_REVIEWER_CMD"] = "/nonexistent/reviewer-must-not-run"
     (git_repo / "unreviewed.txt").write_text("round 4\n")
     response = stop(git_repo, env)
 
@@ -351,12 +351,12 @@ def test_a_generation_bump_during_the_sweep_discards_the_approval(
         "p.write_text(json.dumps(d))\n"
         "PY\n"
         "printf 'Looks fine.\\n\\n'\n"
-        "printf '<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf '<<<ARL-FINDINGS>>>\\n'\n"
         "printf 'VERDICT APPROVED\\n'\n"
-        "printf '<<<OCRL-END>>>\\n'\n"
+        "printf '<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    env["OCRL_REVIEWER_CMD"] = str(script)
+    env["ARL_REVIEWER_CMD"] = str(script)
 
     reason = blocked(stop(git_repo, env))
 
@@ -380,7 +380,7 @@ def test_a_sweep_approval_superseded_by_a_newer_round_is_discarded(
 
     A check written only into ``pretool`` would be bypassed here, which is what this test
     pins. Fails on the old code, which marked the tree approved."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE="approve-superseded")
+    env = armed_env(clean_env, ARL_FAKE_MODE="approve-superseded")
     active(git_repo, tmp_path, env)
     approved_before = read_state(env, git_repo, SESSION)["approved_trees"]
     (git_repo / "unreviewed.txt").write_text("never gated\n")
@@ -427,12 +427,12 @@ def test_a_sweep_finding_the_activation_resumed_mid_review_does_not_mutate_it(
         "m.write_text(p.read_text())\n"
         "PY\n"
         "printf 'Looks fine.\\n\\n'\n"
-        "printf '<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf '<<<ARL-FINDINGS>>>\\n'\n"
         "printf 'VERDICT APPROVED\\n'\n"
-        "printf '<<<OCRL-END>>>\\n'\n"
+        "printf '<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    env["OCRL_REVIEWER_CMD"] = str(script)
+    env["ARL_REVIEWER_CMD"] = str(script)
 
     response = stop(git_repo, env)
 
@@ -449,7 +449,7 @@ def test_a_completion_refusal_finding_the_activation_resumed_does_not_mutate_it(
     ``resume`` retiring this activation into ``RESUMED`` while the final review runs must end
     the turn quietly and never write to the now-retired ``state.json``.
     """
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
     state_path = state_dir(env, git_repo, SESSION) / "state.json"
@@ -469,12 +469,12 @@ def test_a_completion_refusal_finding_the_activation_resumed_does_not_mutate_it(
         "m.write_text(p.read_text())\n"
         "PY\n"
         "printf 'Looks fine.\\n\\n'\n"
-        "printf '<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf '<<<ARL-FINDINGS>>>\\n'\n"
         "printf 'VERDICT APPROVED\\n'\n"
-        "printf '<<<OCRL-END>>>\\n'\n"
+        "printf '<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    env["OCRL_REVIEWER_CMD"] = str(script)
+    env["ARL_REVIEWER_CMD"] = str(script)
 
     response = stop(git_repo, env)
 
@@ -506,7 +506,7 @@ def test_a_dirty_worktree_blocks_before_the_final_review(git_repo: Path, tmp_pat
 
 
 def test_an_approving_final_review_completes_the_activation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
 
@@ -528,7 +528,7 @@ def test_a_superseded_final_review_does_not_complete_the_activation(git_repo: Pa
     path, there is no later round to correct it: the gate is off.
 
     Fails on the old code, which completed and disarmed."""
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true", OCRL_FAKE_MODE="approve-superseded-final")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true", ARL_FAKE_MODE="approve-superseded-final")
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
 
@@ -572,7 +572,7 @@ def test_stop_pauses_at_the_target_without_the_final_review(git_repo: Path, tmp_
     assert "Next up, phase 3 of 3" in message
     assert "NOT an approval of the whole plan" in message
     assert "resume --until M" in message
-    assert "/opencode-review-loop:finish" in message
+    assert "/adversarial-review-loop:finish" in message
 
     document = read_state(env, git_repo, SESSION)
     # A pause must never reach COMPLETE, which disarms -- the reviewer here always approves,
@@ -589,7 +589,7 @@ def test_stop_runs_the_final_review_once_the_pause_target_is_reached_and_finish_
     clean_env: dict[str, str],
 ) -> None:
     """``finish_requested`` is what lets the user cut a paused plan short deliberately."""
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
     active_until(git_repo, tmp_path, env, 1, "one", "two")
     committed_phase(git_repo, env)
     patch_state(env, git_repo, finish_requested=True)
@@ -606,7 +606,7 @@ def test_stop_behaves_as_unset_when_the_pause_target_equals_the_phase_count(
     clean_env: dict[str, str],
 ) -> None:
     """A target at or above the last phase is no pause at all -- the final review still runs."""
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
     active_until(git_repo, tmp_path, env, 1, "only phase")
     committed_phase(git_repo, env)
 
@@ -629,7 +629,7 @@ def test_disabled_final_review_completes_without_calling_the_reviewer(git_repo: 
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
-    env["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer"
+    env["ARL_REVIEWER_CMD"] = "/nonexistent/reviewer"
 
     message = ended(stop(git_repo, env))
 
@@ -743,7 +743,7 @@ def test_commit_refuses_when_ttl_shrinks_while_the_completion_is_pending(
     assert state.effective_status(config) == "ACTIVE", "must not be stale yet at start()"
     pending = completion.start(state, config=config, repo=str(git_repo))
 
-    user_config = Path(env["XDG_CONFIG_HOME"]) / "opencode-review-loop" / "config.json"
+    user_config = Path(env["XDG_CONFIG_HOME"]) / "adversarial-review-loop" / "config.json"
     user_config.parent.mkdir(parents=True, exist_ok=True)
     user_config.write_text(json.dumps({"ttl_hours": 1}))
 
@@ -910,7 +910,7 @@ def unborn_repo(tmp_path: Path) -> Path:
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")
     git(repo, "config", "user.email", "selftest@example.invalid")
-    git(repo, "config", "user.name", "ocrl selftest")
+    git(repo, "config", "user.name", "arl selftest")
     git(repo, "config", "commit.gpgsign", "false")
     return repo
 
@@ -1069,10 +1069,10 @@ def test_commit_revalidates_phase_state_under_its_own_lock(
 
 def test_enabled_final_review_with_a_broken_reviewer_still_blocks(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Pin: catches an inverted condition (``if final_review`` instead of ``if not final_review``)."""
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
-    env["OCRL_REVIEWER_CMD"] = "/nonexistent/reviewer"
+    env["ARL_REVIEWER_CMD"] = "/nonexistent/reviewer"
 
     reason = blocked(stop(git_repo, env))
 
@@ -1082,7 +1082,7 @@ def test_enabled_final_review_with_a_broken_reviewer_still_blocks(git_repo: Path
 
 def test_disabled_final_review_the_sweep_still_blocks(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Pin: ``final_review`` only ever skips the cumulative review, never the per-commit sweep."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env)
     (git_repo / "unreviewed.txt").write_text("never gated\n")
 
@@ -1173,7 +1173,7 @@ def test_a_failed_finish_with_final_review_disabled_still_blocks_at_the_next_tur
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
-    env["OCRL_FAKE_MODE"] = "changes"
+    env["ARL_FAKE_MODE"] = "changes"
 
     proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
     assert proc.returncode == 1, proc.stdout
@@ -1215,9 +1215,9 @@ def test_stop_does_not_complete_unreviewed_when_finish_lands_during_the_sweep(
     (git_repo / "late.txt").write_text("landed without going through the gate\n")
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "a raw commit")
-    env["OCRL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
-    env["OCRL_TEST_STATE"] = str(state_dir(env, git_repo, SESSION) / "state.json")
-    env["OCRL_TEST_PATCH"] = json.dumps({"finish_requested": True})
+    env["ARL_REVIEWER_CMD"] = str(reviewer_stub(tmp_path))
+    env["ARL_TEST_STATE"] = str(state_dir(env, git_repo, SESSION) / "state.json")
+    env["ARL_TEST_PATCH"] = json.dumps({"finish_requested": True})
 
     message = ended(stop(git_repo, env))
 
@@ -1296,7 +1296,7 @@ def test_a_concurrently_enabled_final_review_still_blocks_the_skip_path(
 
     Same technique as the ``finish_requested`` race above: the test holds the activation lock
     so the worker is guaranteed to queue for it, then writes a config file while it waits,
-    standing in for a concurrent ``ocrl config final_review true``. The *user* config file is
+    standing in for a concurrent ``arl config final_review true``. The *user* config file is
     used rather than the repo one deliberately: the repo config lives inside the git worktree,
     so writing it would also dirty the tree and trip the (separate, pre-existing) worktree
     check first -- which would still block, just not for the reason this test exists to prove.
@@ -1304,7 +1304,7 @@ def test_a_concurrently_enabled_final_review_still_blocks_the_skip_path(
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
-    user_config = Path(env["XDG_CONFIG_HOME"]) / "opencode-review-loop" / "config.json"
+    user_config = Path(env["XDG_CONFIG_HOME"]) / "adversarial-review-loop" / "config.json"
     user_config.parent.mkdir(parents=True, exist_ok=True)
 
     with activation_lock(env, git_repo, session=SESSION):
@@ -1409,7 +1409,7 @@ def test_a_concurrent_complete_does_not_suppress_this_turns_own_changes_required
     concurrent completion landing while this review runs -- and still returns
     ``CHANGES_REQUIRED`` itself, deterministically, instead of racing a real second process.
     """
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
     state_path = state_dir(env, git_repo, SESSION) / "state.json"
@@ -1426,13 +1426,13 @@ def test_a_concurrent_complete_does_not_suppress_this_turns_own_changes_required
         "p.write_text(json.dumps(d))\n"
         "PY\n"
         "printf 'The error path is wrong.\\n\\n'\n"
-        "printf '<<<OCRL-FINDINGS>>>\\n'\n"
+        "printf '<<<ARL-FINDINGS>>>\\n'\n"
         "printf 'FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\\n'\n"
         "printf 'VERDICT CHANGES_REQUIRED\\n'\n"
-        "printf '<<<OCRL-END>>>\\n'\n"
+        "printf '<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
-    env["OCRL_REVIEWER_CMD"] = str(script)
+    env["ARL_REVIEWER_CMD"] = str(script)
 
     reason = blocked(stop(git_repo, env))
 
@@ -1474,10 +1474,10 @@ def test_a_malformed_finish_requested_refuses_rather_than_completes(
 
 
 def test_a_blocking_final_review_blocks_and_leaves_the_mode_armed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
-    env["OCRL_FAKE_MODE"] = "changes"
+    env["ARL_FAKE_MODE"] = "changes"
 
     reason = blocked(stop(git_repo, env))
 
@@ -1486,10 +1486,10 @@ def test_a_blocking_final_review_blocks_and_leaves_the_mode_armed(git_repo: Path
 
 
 def test_a_failed_final_review_is_never_an_approval(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
-    env["OCRL_FAKE_MODE"] = "nonzero"
+    env["ARL_FAKE_MODE"] = "nonzero"
 
     reason = blocked(stop(git_repo, env))
 
@@ -1508,7 +1508,7 @@ def test_an_escalation_during_the_final_review_is_not_overwritten_by_it(
     which is exactly the window a slow model call opens. Without the fingerprint check the
     approval that follows would overwrite it with ``COMPLETE`` and disarm the mode.
     """
-    env = armed_env(clean_env, OCRL_FINAL_REVIEW="true")
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
 
@@ -1524,10 +1524,10 @@ def test_an_escalation_during_the_final_review_is_not_overwritten_by_it(
         'd["reason"] = "escalated while the review ran"\n'
         "p.write_text(json.dumps(d))\n"
         "PY\n"
-        "printf 'Fine.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<OCRL-END>>>\\n'\n"
+        "printf 'Fine.\\n\\n<<<ARL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<ARL-END>>>\\n'\n"
     )
     escalate.chmod(0o755)
-    env["OCRL_REVIEWER_CMD"] = str(escalate)
+    env["ARL_REVIEWER_CMD"] = str(escalate)
 
     reason = blocked(stop(git_repo, env))
 
@@ -1555,7 +1555,7 @@ def test_a_second_turn_end_on_an_already_reviewed_tree_says_nothing(git_repo: Pa
 
 def test_progress_resets_the_no_progress_count(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Only genuine stalls count, or a long correct session would escalate for being long."""
-    env = armed_env(clean_env, OCRL_MAX_STOP_BLOCKS="3")
+    env = armed_env(clean_env, ARL_MAX_STOP_BLOCKS="3")
     active(git_repo, tmp_path, env, "phase one", "phase two")
     committed_phase(git_repo, env)
     blocked(stop(git_repo, env))
@@ -1662,14 +1662,14 @@ def test_a_late_escalation_does_not_reopen_a_mode_the_user_stopped(git_repo: Pat
     """Rule 4: a review failing may not undo a stop the user ran while it was running.
 
     The reviewer stand-in disarms the activation from inside the review -- the window in which
-    the user actually runs ``/opencode-review-loop:stop`` -- and then fails. ``_block_counted``
+    the user actually runs ``/adversarial-review-loop:stop`` -- and then fails. ``_block_counted``
     finds ``DISARMED`` on its locked reload and routes through ``_ended`` rather than counting
     the block: with the block limit at zero, escalating over ``DISARMED`` would turn it back
     into a state that denies every mutation, and writing `stop_blocks` into it at all would be
     mutating a mode the user already turned off. ``_ended``'s own message is empty here because
     the committed phase's tree was already approved before this turn began.
     """
-    env = armed_env(clean_env, OCRL_MAX_STOP_BLOCKS="0", OCRL_FINAL_REVIEW="true")
+    env = armed_env(clean_env, ARL_MAX_STOP_BLOCKS="0", ARL_FINAL_REVIEW="true")
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
     state_path = state_dir(env, git_repo, SESSION) / "state.json"
@@ -1687,7 +1687,7 @@ def test_a_late_escalation_does_not_reopen_a_mode_the_user_stopped(git_repo: Pat
         "exit 3\n"
     )
     script.chmod(0o755)
-    env["OCRL_REVIEWER_CMD"] = str(script)
+    env["ARL_REVIEWER_CMD"] = str(script)
 
     message = ended(stop(git_repo, env))
 
@@ -1759,14 +1759,14 @@ def test_an_unreadable_repository_is_reported_at_turn_end(git_repo: Path, tmp_pa
 def test_a_sweep_approval_with_deferred_findings_prefixes_the_outstanding_phase_block(
     git_repo: Path, tmp_path: Path, clean_env: dict[str, str]
 ) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env)
     (git_repo / "unreviewed.txt").write_text("round one\n")
     assert "requires changes" in blocked(stop(git_repo, env))
 
     (git_repo / "other.txt").write_text("round two\n")
-    env["OCRL_FAKE_MODE"] = "medium-file"
-    env["OCRL_FAKE_FILE"] = "unreviewed.txt:1"
+    env["ARL_FAKE_MODE"] = "medium-file"
+    env["ARL_FAKE_FILE"] = "unreviewed.txt:1"
     reason = blocked(stop(git_repo, env))
 
     assert reason.startswith("Deferred findings"), reason
@@ -1778,6 +1778,6 @@ def test_a_sweep_approval_with_deferred_findings_prefixes_the_outstanding_phase_
 
 
 def gitsnap_tree(repo: Path) -> str:
-    from ocrl import gitsnap  # noqa: PLC0415 - test-local helper
+    from arl import gitsnap  # noqa: PLC0415 - test-local helper
 
     return gitsnap.snapshot(str(repo)).tree

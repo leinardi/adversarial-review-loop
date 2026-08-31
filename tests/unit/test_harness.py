@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from ocrl import harness, reviewer
-from ocrl.config import DEFAULTS, Config
+from arl import harness, reviewer
+from arl.config import DEFAULTS, Config
 
 #: Payloads the stdin tests round-trip. Named because ruff counts a bytes literal in a
 #: comparison as a magic value, and because both sides of each assertion must be the one
@@ -234,7 +234,7 @@ def test_is_session_id_refuses_a_trailing_newline_and_a_non_string(implementatio
 
     Every caller takes its value out of ``state.json`` or a CLI's own output, neither of which
     is a trust boundary. A ``$``-anchored pattern accepts a single trailing newline, and such
-    an id travelled as a session id everywhere and rendered a line break into ``ocrl status``;
+    an id travelled as a session id everywhere and rendered a line break into ``arl status``;
     a non-string reaches the same validators from the same document.
     """
     strategy = implementation.sessions()

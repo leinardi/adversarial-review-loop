@@ -17,7 +17,7 @@ from test_commands_arm import armed_env, read_state, state_dir
 from test_commands_posttool import COMMIT, confirm, context
 from test_commands_pretool import SESSION, active, arm, patch_state, pretool
 
-import ocrl
+import arl
 
 
 def accept(repo: Path, env: dict[str, str], *args: str) -> tuple[int, str]:
@@ -31,7 +31,7 @@ def accept(repo: Path, env: dict[str, str], *args: str) -> tuple[int, str]:
 
 
 def test_accept_marks_the_tree_approved_and_touches_nothing_else(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env, "phase one", "phase two")
     (git_repo / "new.txt").write_text("work\n")
 
@@ -51,7 +51,7 @@ def test_accept_marks_the_tree_approved_and_touches_nothing_else(git_repo: Path,
 
 def test_accept_lets_the_exact_tree_through_without_reviewing_it_again(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """The end-to-end case the command exists for: a stuck loop, broken without a review."""
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env, "phase one", "phase two")
     (git_repo / "new.txt").write_text("work\n")
 
@@ -78,7 +78,7 @@ def test_accept_lets_the_exact_tree_through_without_reviewing_it_again(git_repo:
         }
     ]
 
-    # The reviewer is still wired to deny everything (OCRL_FAKE_MODE=changes) -- if this
+    # The reviewer is still wired to deny everything (ARL_FAKE_MODE=changes) -- if this
     # allow came from a fresh review rather than `tree_approved`, it would have failed.
     verdict, reason = pretool(git_repo, env, command=COMMIT)
     assert verdict == "allow"
@@ -117,7 +117,7 @@ def test_accept_clears_a_pending_transient_backoff(git_repo: Path, tmp_path: Pat
     ``pretool._check_retry_backoff`` for up to ``max_transient_failures``' worth of delay --
     exactly the "stuck loop" case ``accept`` exists to break.
     """
-    env = armed_env(clean_env, OCRL_FAKE_MODE="rate-limited")
+    env = armed_env(clean_env, ARL_FAKE_MODE="rate-limited")
     active(git_repo, tmp_path, env, "phase one")
     (git_repo / "new.txt").write_text("work\n")
     pretool(git_repo, env, command='git add -A && git commit -m "x"')
@@ -172,7 +172,7 @@ def test_accept_resets_the_counters_a_stuck_loop_ran_up(git_repo: Path, tmp_path
 
 
 def test_editing_after_an_accept_re_engages_the_gate(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env, "phase one")
     (git_repo / "new.txt").write_text("work\n")
     accept(git_repo, env)
@@ -185,7 +185,7 @@ def test_editing_after_an_accept_re_engages_the_gate(git_repo: Path, tmp_path: P
 
 
 def test_accepting_then_committing_unchanged_confirms_rather_than_reconciling(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env, "phase one")
     (git_repo / "new.txt").write_text("work\n")
     accept(git_repo, env)
@@ -247,7 +247,7 @@ def test_accept_refuses_terminal_statuses(git_repo: Path, tmp_path: Path, clean_
 
 
 def test_accept_refuses_a_stale_activation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_TTL_HOURS="1")
+    env = armed_env(clean_env, ARL_TTL_HOURS="1")
     active(git_repo, tmp_path, env, "phase one")
     before = read_state(env, git_repo, SESSION)
     patch_state(env, git_repo, armed_at=1)
@@ -256,7 +256,7 @@ def test_accept_refuses_a_stale_activation(git_repo: Path, tmp_path: Path, clean
 
     assert code == 1
     assert "past ttl_hours" in out
-    assert "/opencode-review-loop:resume" in out
+    assert "/adversarial-review-loop:resume" in out
     document = read_state(env, git_repo, SESSION)
     assert document["approved_trees"] == before["approved_trees"]
 
@@ -264,7 +264,7 @@ def test_accept_refuses_a_stale_activation(git_repo: Path, tmp_path: Path, clean
 def test_accept_without_an_activation(git_repo: Path, clean_env: dict[str, str]) -> None:
     code, out = accept(git_repo, armed_env(clean_env))
     assert code == 0
-    assert out == "opencode-review-loop: not armed in this worktree.\n"
+    assert out == "adversarial-review-loop: not armed in this worktree.\n"
 
 
 def test_accept_refuses_once_every_frozen_phase_is_committed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -320,14 +320,14 @@ def test_accept_with_an_unknown_session_reports_not_armed(git_repo: Path, tmp_pa
     code, out = accept(git_repo, env, "--session", "does-not-exist")
 
     assert code == 0
-    assert out == "opencode-review-loop: not armed in this worktree.\n"
+    assert out == "adversarial-review-loop: not armed in this worktree.\n"
     assert read_state(env, git_repo, SESSION)["manual_accepts"] == []
 
 
 def _mid_review_accept_script(tmp_path: Path) -> Path:
-    """A reviewer stand-in that runs a *real* ``ocrl accept`` mid-review, then approves.
+    """A reviewer stand-in that runs a *real* ``arl accept`` mid-review, then approves.
 
-    Stands in for a human running ``/opencode-review-loop:accept`` in a second terminal while
+    Stands in for a human running ``/adversarial-review-loop:accept`` in a second terminal while
     a slow review of the same tree is in flight -- the exact race ``activation_generation``
     exists to catch. The nested command inherits this process's environment and working
     directory, which is exactly the same activation the outer review is running against.
@@ -336,7 +336,7 @@ def _mid_review_accept_script(tmp_path: Path) -> Path:
     script.write_text(
         "#!/usr/bin/env bash\n"
         f"{sys.executable} -I {BOOTSTRAP} accept --reason 'concurrent accept from another terminal' >/dev/null\n"
-        "printf 'Fine.\\n\\n<<<OCRL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<OCRL-END>>>\\n'\n"
+        "printf 'Fine.\\n\\n<<<ARL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
     return script
@@ -349,7 +349,7 @@ def test_a_concurrent_accept_stops_a_stale_review_from_landing(git_repo: Path, t
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env, "phase one")
     (git_repo / "new.txt").write_text("work\n")
-    env["OCRL_REVIEWER_CMD"] = str(_mid_review_accept_script(tmp_path))
+    env["ARL_REVIEWER_CMD"] = str(_mid_review_accept_script(tmp_path))
 
     verdict, reason = pretool(git_repo, env, command=COMMIT)
 
@@ -395,7 +395,7 @@ def test_the_acceptance_is_visible_in_status_and_report(git_repo: Path, tmp_path
 
 
 def test_a_later_review_is_told_about_the_acceptance(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env, OCRL_FAKE_MODE="changes")
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
     active(git_repo, tmp_path, env, "phase one", "phase two")
     (git_repo / "new.txt").write_text("work\n")
     accept(git_repo, env, "--reason", "false positive")
@@ -420,7 +420,7 @@ def test_a_later_review_is_told_about_the_acceptance(git_repo: Path, tmp_path: P
 
 
 def test_the_skill_disables_model_invocation() -> None:
-    text = (ocrl.PLUGIN_ROOT / "skills" / "accept" / "SKILL.md").read_text()
+    text = (arl.PLUGIN_ROOT / "skills" / "accept" / "SKILL.md").read_text()
     assert "disable-model-invocation: true" in text
     assert "user-invocable: true" in text
 
@@ -430,7 +430,7 @@ def test_claude_may_not_run_accept_itself(git_repo: Path, tmp_path: Path, clean_
     active(git_repo, tmp_path, env, "phase one")
     before = read_state(env, git_repo, SESSION)
 
-    verdict, reason = pretool(git_repo, env, command='ocrl.sh accept --reason "x"')
+    verdict, reason = pretool(git_repo, env, command='arl.sh accept --reason "x"')
 
     assert verdict == "deny"
     assert "user-only commands" in reason

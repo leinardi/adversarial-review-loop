@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from conftest import SCRIPTS_DIR, SOCKET_STDIN
 
-from ocrl.hookio import (
+from arl.hookio import (
     EXIT_OUTPUT_ERROR,
     Decided,
     Hook,
@@ -21,7 +21,7 @@ from ocrl.hookio import (
     parse_hook_input,
     read_hook_input,
 )
-from ocrl.util import log, log_exception
+from arl.util import log, log_exception
 
 
 class BrokenStream(io.StringIO):
@@ -108,10 +108,7 @@ def test_stdin_on_a_socket_parses(tmp_path: Path) -> None:
     payload = tmp_path / "payload.json"
     payload.write_text(json.dumps({"tool_input": {"command": "git commit -m sock"}}))
     program = (
-        "import sys\n"
-        f"sys.path.insert(0, {str(SCRIPTS_DIR)!r})\n"
-        "from ocrl.hookio import read_hook_input\n"
-        "sys.stdout.write(read_hook_input().command)\n"
+        f"import sys\nsys.path.insert(0, {str(SCRIPTS_DIR)!r})\nfrom arl.hookio import read_hook_input\nsys.stdout.write(read_hook_input().command)\n"
     )
     proc = subprocess.run(
         [str(SOCKET_STDIN), str(payload), sys.executable, "-I", "-c", program],
@@ -361,7 +358,7 @@ def test_output_failure_survives_a_log_that_raises(monkeypatch: pytest.MonkeyPat
     def exploding_log(message: str) -> None:
         raise OSError(5, "I/O error")
 
-    monkeypatch.setattr("ocrl.hookio.log", exploding_log)
+    monkeypatch.setattr("arl.hookio.log", exploding_log)
     hook = Hook(stream=BrokenStream(fail_on="write"))
     hook.arm_failclosed("pretool")
 
@@ -374,7 +371,7 @@ def test_a_short_write_survives_a_log_that_raises(monkeypatch: pytest.MonkeyPatc
     def exploding_log(message: str) -> None:
         raise OSError(5, "I/O error")
 
-    monkeypatch.setattr("ocrl.hookio.log", exploding_log)
+    monkeypatch.setattr("arl.hookio.log", exploding_log)
     hook = Hook(stream=BrokenStream(fail_on="none", short=True))
 
     with pytest.raises(OutputFailure):

@@ -1,7 +1,7 @@
 ---
 name: adversarial-review
 description: >
-  Adversarial code review of opencode-review-loop changes: working tree,
+  Adversarial code review of adversarial-review-loop changes: working tree,
   staged diff, branch, commit range, or PR. Hunt review-gate bypass,
   fail-open hook, wrong Git snapshot, unsafe state transition,
   shell injection, reviewer-contract parse bug, missing isolation test.
@@ -10,7 +10,7 @@ description: >
   poke holes in implementation.
 ---
 
-# Adversarial Review - opencode-review-loop
+# Adversarial Review - adversarial-review-loop
 
 Assume change bypass gate until proven otherwise. Find exact command, repo
 state, hook event, model response, failure point, or interleaving that make
@@ -41,7 +41,7 @@ that work but implement different contract = finding.
 Read every changed file with enough context to know callers and state
 transitions. Gate is Python; inspect module boundaries, exception flow
 (`hookio`'s `Decided`/`OutputFailure` control-flow exceptions), return values.
-Guard shim (`scripts/ocrl.sh`) still Bash, talk through globals, stdout, exit
+Guard shim (`scripts/arl.sh`) still Bash, talk through globals, stdout, exit
 status, captured subshell output — inspect all there. Trace changed commands
 from Claude hook input → policy → snapshot → reviewer invocation → output
 parsing → state persistence → hook response.
@@ -52,10 +52,10 @@ Read `AGENTS.md` or `CLAUDE.md` when present. Load authority for changed paths:
 
 | Changed area | Read | Review focus |
 | --- | --- | --- |
-| command dispatch, hooks, state machine | `scripts/ocrl.sh`, `scripts/ocrl-bootstrap.py`, `scripts/ocrl/hookio.py`, `scripts/ocrl/state.py`, `scripts/ocrl/commands/` | fail-closed behavior, event ordering, transitions, hook JSON, interpreter-invocation hardening |
-| configuration | `scripts/ocrl/config.py`, README configuration table | precedence, validation, executable values, policy mutability |
-| snapshots and commit commands | `scripts/ocrl/gitsnap.py`, `scripts/ocrl/cmdshape.py`, `scripts/ocrl/_vendor/bashlex/` | exact tree coverage, real-index isolation, deny-list/parser agreement, parser bypasses |
-| reviewer or reports | `scripts/ocrl/reviewer.py`, `scripts/ocrl/report.py`, `prompts/*.md` | read-only boundary, complete evidence, strict output parsing |
+| command dispatch, hooks, state machine | `scripts/arl.sh`, `scripts/arl-bootstrap.py`, `scripts/arl/hookio.py`, `scripts/arl/state.py`, `scripts/arl/commands/` | fail-closed behavior, event ordering, transitions, hook JSON, interpreter-invocation hardening |
+| configuration | `scripts/arl/config.py`, README configuration table | precedence, validation, executable values, policy mutability |
+| snapshots and commit commands | `scripts/arl/gitsnap.py`, `scripts/arl/cmdshape.py`, `scripts/arl/_vendor/bashlex/` | exact tree coverage, real-index isolation, deny-list/parser agreement, parser bypasses |
+| reviewer or reports | `scripts/arl/reviewer.py`, `scripts/arl/report.py`, `prompts/*.md` | read-only boundary, complete evidence, strict output parsing |
 | Claude plugin or skills | `.claude-plugin/*.json`, `skills/*/SKILL.md`, `tests/STEP0.md` | host schema, hook registration, user-only commands, expansion assumptions |
 | tests or test infrastructure | `tests/selftest.sh`, `tests/unit/`, `tests/fixtures/fake-reviewer.sh`, `.mk/test.mk` | scratch isolation, failure injection, old-code failure |
 | user-visible behavior | `README.md` and relevant skill body | command contract, recovery guidance, documented limitations |
@@ -122,7 +122,7 @@ Check whenever affected direct or indirect:
   traverse paths. State dirs protect frozen plans, diffs, verification output,
   model output from other users.
 - **Tests touch no live state.** Tests use scratch Git repos, isolated
-  `HOME`/XDG paths, `OCRL_REVIEWER_CMD`. Never call real model, load user
+  `HOME`/XDG paths, `ARL_REVIEWER_CMD`. Never call real model, load user
   OpenCode config, alter real hooks, or leave activation pointers behind.
 - **One live activation per worktree.** Cross-session resume retires predecessor
   before successor exists; retire-first, no automatic rollback. `RESUMED` block
@@ -187,7 +187,7 @@ Check whenever affected direct or indirect:
   never through `uv run`. `sys.pycache_prefix` must resolve outside plugin
   repo, reviewed repo, and `cwd` before any import, else bytecode writing
   must disable itself, not fall back beside source.
-- **The shim never forwards a partial response.** `scripts/ocrl.sh` capture
+- **The shim never forwards a partial response.** `scripts/arl.sh` capture
   stdout, forward only on exit `0`; any other exit (crash, missing
   interpreter, `timeout`'s `124`) discard everything captured and emit that
   event's own fallback. Fallback shape per-event, never reused:
@@ -251,7 +251,7 @@ state and wrong result or broken invariant → dig more or drop it.
 
 ## 5. Verify findings and gates
 
-Respect current capability first. OCRL model reviewer deliberately read-only,
+Respect current capability first. ARL model reviewer deliberately read-only,
 cannot run commands; inspect attached `verify.txt`, never claim you ran it.
 During interactive repo review with Bash permission, run focused tests while
 investigating, then gate owed by changed set.
@@ -266,10 +266,10 @@ investigating, then gate owed by changed set.
 
 `make check` include fix-capable hooks. Inspect `git status --short`, unstaged
 diff, staged diff after, so formatter edits not mistaken for reviewed input.
-`make dry-run` print reviewer argv and prompt without invoking OpenCode, but can
+`make dry-run` print reviewer argv and prompt without invoking the reviewer, but can
 create state bundles and Git objects.
 
-Shell-only diagnosis: `bash -n` and `shellcheck -x` on `scripts/ocrl.sh` and
+Shell-only diagnosis: `bash -n` and `shellcheck -x` on `scripts/arl.sh` and
 `tests/*.sh`. Python-only diagnosis: `ruff check` and `mypy` on changed modules
 direct. Gate cannot run → state why, mark unverified. Failing gate caused by
 reviewed change = finding, not footnote.
@@ -294,7 +294,7 @@ Findings first. Then open questions or assumptions, then one-line verdict:
 run. No findings → say so explicit, name failure modes attempted.
 
 When `prompts/reviewer-phase.md` or `prompts/reviewer-final.md` is active
-instruction, its `<<<OCRL-FINDINGS>>>` contract win. Emit exactly one machine
+instruction, its `<<<ARL-FINDINGS>>>` contract win. Emit exactly one machine
 block with every finding and consistent verdict, including empty approved block
 when no findings. Never omit markers or claim tests were run by read-only
 reviewer.
