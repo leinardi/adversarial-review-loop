@@ -16,10 +16,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      # Needed for the explicit `gh workflow run` call below - a GITHUB_TOKEN-authored
-      # push/PR does not fire other workflows' push/pull_request triggers (GitHub's
-      # loop-prevention), so without dispatching ci.yaml ourselves the opened PR would
-      # show no checks at all.
+      # Needed for the explicit `gh workflow run` call below. See the comment at that step
+      # for why it is still there even though it currently duplicates a run.
       actions: write
     steps:
       - uses: actions/checkout@v7
@@ -86,12 +84,30 @@ jobs:
       - name: Commit and push the bump branch
         id: branch
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           BRANCH="release/v$VERSION"
+
+          # A run that fails after this push - as the first 1.0.0 attempt did, on the PR
+          # step - leaves the branch behind, and every retry then dies on a non-fast-forward
+          # because the branch is cut afresh from a main that has since moved. The branch is
+          # fully derived state (main, plus one generated line), so recreating it is always
+          # correct. An open pull request on it is not derived state: deleting the branch
+          # would close it silently, so stop and say so instead.
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            OPEN_PR=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')
+            if [ -n "$OPEN_PR" ]; then
+              echo "$BRANCH already has an open pull request (#$OPEN_PR). Merge or close it before releasing $VERSION again." >&2
+              exit 1
+            fi
+            echo "Deleting $BRANCH, left behind by an earlier run."
+            git push origin --delete "$BRANCH"
+          fi
+
           git switch -c "$BRANCH"
           git add .claude-plugin/plugin.json
           if git diff --cached --quiet; then
@@ -115,10 +131,14 @@ jobs:
             --title "chore(release): bump version to $VERSION" \
             --body "Automated version bump. Review the diff, then merge — merging triggers \`auto-tag-release.yaml\`, which tags \`adversarial-review-loop--v$VERSION\` and creates the GitHub release."
 
-      # This is the only CI the release PR gets. A GITHUB_TOKEN-authored PR does not fire
-      # `pull_request`, so ci.yaml has to be dispatched by hand - and on a dispatch it runs
-      # only its `test` job, every other job there being gated on the event being a
-      # pull_request. Check that run before merging; nothing in the ruleset requires it.
+      # Belt and braces, and currently redundant. GitHub's loop prevention is documented to
+      # stop a GITHUB_TOKEN-authored pull request from firing `pull_request`, which would
+      # leave the release PR with no CI at all - that is what this dispatch is insurance
+      # against. Measured on PR #5 (run 33443605671) it fired anyway, with all eight
+      # contexts, so this produces a second run that executes only `test` (every other job
+      # in ci.yaml is gated on the event being a pull_request). Keep it until the automatic
+      # run has proven reliable across a few releases, then drop it and `actions: write`
+      # with it.
       - name: Trigger CI checks on the bump branch
         env:
           GH_TOKEN: ${{ github.token }}
