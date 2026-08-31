@@ -701,6 +701,28 @@ class State:
             return ""
         return phases[index]
 
+    def pause_target_display(self) -> str:
+        """``stop_after_phase`` as a human reads it -- including whether it is already spent.
+
+        The Stop gate's pause check is ``phase <= target``, and ``phase`` only ever
+        increases, so once the phase pointer has moved past the target that comparison is
+        false *forever*: the target can never fire again, and every subsequent turn end takes
+        the pause branch instead. Rendering a spent target identically to a pending one
+        ("pause target: 3 of 9" while the phase line above says 4) reads as "the loop will
+        stop at 3", which is the one thing it can no longer do.
+
+        Naming the flag here rather than only in the Stop gate's own message is deliberate:
+        ``status`` and the resume banner are what a human reads a *day* later, in a session
+        that no longer holds the message ``pause`` printed when they set it.
+        """
+        target = self.get_int("stop_after_phase")
+        if not target:
+            return "none"
+        shown = f"{target} of {self.phase_count()}"
+        if self.get_int("phase") > target:
+            return f"{shown} (already reached -- pass --until 0 to clear it, or --until M for a further target)"
+        return shown
+
     def tree_approved(self, tree: str) -> bool:
         return tree in self.get_array("approved_trees")
 

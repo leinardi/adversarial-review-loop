@@ -187,8 +187,7 @@ def status(argv: list[str]) -> int:
     # empty list therefore leaves a blank line exactly where the shell left one.
     phases = "".join(f"  {index + 1}. {phase}\n" for index, phase in enumerate(state.get_array("phases"))).rstrip("\n")
     reports = "".join(f"  {name}\n" for name in report.list_reports(activation.act_dir)).rstrip("\n")
-    stop_after_phase = state.get_int("stop_after_phase")
-    pause_target = f"{stop_after_phase} of {state.phase_count()}" if stop_after_phase else "none"
+    pause_target = state.pause_target_display()
     manual_accepts = state.get_array_of_dicts("manual_accepts")
     accepted_phases = ", ".join(str(entry.get("phase")) for entry in manual_accepts)
     accepts_line = f"{len(manual_accepts)} (phases {accepted_phases})" if manual_accepts else "0"

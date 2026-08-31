@@ -1179,8 +1179,7 @@ def _banner(*, state: State, identity: _Identity, decision: _Decision) -> str:
     reviewer = f"{config.as_str('harness')} {harness.model(config)}{f' (variant {variant})' if variant else ''}"
     total = state.phase_count()
     phase = state.get_int("phase")
-    target = state.get_int("stop_after_phase")
-    pause_target = f"{target} of {total}" if target else "none"
+    pause_target = state.pause_target_display()
     plan_revisions_list = state.data.get("plan_revisions") or []
     revision_count = len(plan_revisions_list) or 1
     # By the time this banner is printed, whichever path got here has already verified the

@@ -651,6 +651,40 @@ def test_phase_desc_in_range(state_env: dict[str, str]) -> None:
     assert st.phase_desc(2) == "two"
 
 
+def test_pause_target_display_without_a_target(state_env: dict[str, str]) -> None:
+    st = state.State(WORKTREE, SESSION)
+    st.new()
+    st.update(phases=["one", "two"], phase=1)
+    assert st.pause_target_display() == "none"
+
+
+@pytest.mark.parametrize("phase", [1, 2])
+def test_pause_target_display_while_the_target_is_still_ahead(phase: int, state_env: dict[str, str]) -> None:
+    """`phase <= target` still holds, so the target can still fire: report it plainly."""
+    st = state.State(WORKTREE, SESSION)
+    st.new()
+    st.update(phases=["one", "two", "three"], phase=phase, stop_after_phase=2)
+    assert st.pause_target_display() == "2 of 3"
+
+
+def test_pause_target_display_once_the_target_is_spent(state_env: dict[str, str]) -> None:
+    """Phase moved past the target, so `phase <= target` is false forever.
+
+    A spent target reads exactly like a pending one without this, while meaning the
+    opposite: not "the loop will stop at 2" but "the loop has stopped at 2 and will keep
+    stopping until you pass --until".
+    """
+    st = state.State(WORKTREE, SESSION)
+    st.new()
+    st.update(phases=["one", "two", "three"], phase=3, stop_after_phase=2)
+
+    shown = st.pause_target_display()
+
+    assert shown.startswith("2 of 3 ")
+    assert "already reached" in shown
+    assert "--until 0" in shown
+
+
 def test_escalation_persists_immediately(state_env: dict[str, str]) -> None:
     st = state.State(WORKTREE, SESSION)
     st.new()

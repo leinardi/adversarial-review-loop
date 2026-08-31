@@ -53,6 +53,10 @@ Telling Claude "pause after this phase" in prose does not work. The pause target
 user-only, Claude has no route to it, and the Stop gate will send it straight back into the
 next phase.
 
+To start again afterwards, clear the target: `/adversarial-review-loop:resume --until 0`. A
+reached target stays set, so a bare `resume` continues the activation but still ends every
+turn paused ([edge-cases.md](edge-cases.md#pausing-is-a-soft-target-not-a-fence)).
+
 ### I quit the session with a dirty worktree. How do I pick it back up?
 
 `/adversarial-review-loop:resume --allow-dirty`. The uncommitted work is folded into the next
