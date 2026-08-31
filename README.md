@@ -58,12 +58,13 @@ The variable is read at process start, so restart Claude Code after setting it. 
 | `/opencode-review-loop:resume [--until N] [--plan <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]` | you | Continues an armed activation — in a new session, or adjusts it in this one — without losing the baseline or any approval. See "Running a long plan across sessions" below |
 | `/opencode-review-loop:status` | anyone | Current state: phase, baseline, approvals, counters, stored reports |
 | `/opencode-review-loop:report [n]` | anyone | Prints a stored review in full, untruncated |
+| `/opencode-review-loop:pause [N \| 0 \| all]` | you | Moves the pause target without a re-arm: with no argument, the loop finishes and commits the phase it is on and then stops instead of continuing. See "Pausing" below |
 | `/opencode-review-loop:finish` | you | Runs the final cumulative review now, even with phases outstanding — and regardless of `final_review`, which makes it the way to get one on a default install |
 | `/opencode-review-loop:accept [reason]` | you | Manually approves the current working tree for the current phase, without a review — see "Breaking a stuck review loop" below |
 | `/opencode-review-loop:stop` | you | Leaves the mode. Nothing is reverted |
 | `/opencode-review-loop:config [<key> <value> [--repo]] [<key> --unset [--repo]]` | you | Reads or writes the review-loop configuration. Unrelated to any armed activation — never registers the gate |
 
-`implement`, `finish`, `stop`, `resume`, `config` and `accept` are `disable-model-invocation: true`. **Claude can never arm, resume, finish, stop, accept, or run the `config` command itself** — no natural-language phrasing invokes any of them, only the exact slash command. That stops the *command*; it does not make `.opencode-review-loop.json` off-limits to ordinary file edits — see "Known limitations" below. That is deliberate: a mode whose whole point is enforcement must not be self-enabling, and the cost is that "use the review loop for this" does nothing.
+`implement`, `finish`, `stop`, `resume`, `config`, `accept` and `pause` are `disable-model-invocation: true`. **Claude can never arm, resume, finish, stop, accept, pause, or run the `config` command itself** — no natural-language phrasing invokes any of them, only the exact slash command. That stops the *command*; it does not make `.opencode-review-loop.json` off-limits to ordinary file edits — see "Known limitations" below. That is deliberate: a mode whose whole point is enforcement must not be self-enabling, and the cost is that "use the review loop for this" does nothing.
 
 ## Breaking a stuck review loop
 
@@ -86,7 +87,21 @@ Before accepting, though: when a finding is just *unclear* — or two rounds see
 - The baseline tree and every approved tree carry forward untouched. If a final cumulative review runs at all — `final_review` is off by default, and `finish` runs one regardless — it covers the whole plan from its *original* baseline, not from wherever the most recent resume happened to start.
 - A commit landed since the last approval but was never reviewed? Resume warns rather than silently treating it as approved, and folds it into the next review.
 
-**Pausing with `--until N`.** Add it to `implement` or `resume` and the loop stops asking for more once phase `N` is committed — the turn ends with a "paused, not an approval of the whole plan" message instead of demanding the next phase. `--until 0` or `--until all` clears the target. It is soft, not a fence: nothing stops Claude from continuing past it if told to, but by default the loop does not push forward on its own.
+**Pausing.** The pause target says which phase the loop stops asking for more after: once phase `N` is committed the turn ends with a "paused, not an approval of the whole plan" message instead of demanding the next one. It is soft, not a fence — nothing stops Claude from continuing past it if told to, but by default the loop does not push forward on its own.
+
+Two ways to set it. `--until N` on `implement` or `resume` chooses it up front. `/opencode-review-loop:pause` changes it **mid-flight**, which is the one you want when you decide partway through a long plan that you'd like to shut the machine down, or upgrade the plugin, at a clean boundary rather than mid-phase:
+
+```console
+  … Claude is halfway through phase 3 of 9 …
+Esc
+$ /opencode-review-loop:pause                  # pause after phase 3
+$ continue
+  … phase 3 is finished, reviewed, committed; the turn ends paused …
+```
+
+With no argument it targets the phase in flight; `N` targets phase `N` (clamped to the last phase); `0` or `all` clears the target. Unlike `resume --until N` it needs no clean worktree and no `--allow-dirty` — it grants nothing and denies nothing, so there is no uncommitted work for it to fold into a review. Continue whenever you like with `/opencode-review-loop:resume --until 0`.
+
+Telling Claude "pause after this phase" in plain prose does **not** work, and never did: the target is user-only, Claude has no route to it, and the Stop gate will keep sending it back into the next phase. This command is that route.
 
 **Revising the plan mid-run.** Pass `--plan <path>` to `resume`, or just edit the plan file resume already has on record — if its bytes changed, resume freezes a new, timestamped copy (`plan.rev<n>.md`) alongside every earlier revision; nothing already frozen is ever edited or replaced. Add `--replan` and the phases from the *current* one onward may be redefined with `set-phases`, exactly as at first arming — every phase already committed stays immutable, since its description was the evidence a review already ran against. Both a decided revision and `--replan` require a clean worktree, regardless of `--allow-dirty`: that boundary is what keeps "redescribe the work to fit the code that's already there" from happening. From that point on, every reviewer is shown the full revision history and every revision file, not just the diff from the last hop — so a phase reviewed under an earlier revision is still explainable to a review of a later one.
 

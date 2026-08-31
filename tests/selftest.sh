@@ -1607,6 +1607,86 @@ if start 'pause: --until stops the loop early with no final review, resume compl
     assert_eq 'the final review ran and the activation completed' "$(sget_for "$NEW_SESSION" status)" 'COMPLETE'
 fi
 
+if start 'pause: set mid-phase with a dirty worktree, the turn ends paused instead of blocking'; then
+    new_case
+    arm_ok && phases_ok
+    assert_eq 'no pause target to begin with' "$(sget stop_after_phase)" '0'
+
+    # Mid-phase, exactly as the user reaches for it: work in the worktree, nothing committed.
+    # `resume --until 1` refuses this without --allow-dirty; `pause` has nothing to protect.
+    printf 'phase one\n' >"$REPO/a.txt"
+    out=$(ocrl pause 2>&1)
+    assert_contains 'pausing after the phase in flight' "$out" 'pausing after phase 1 of 2'
+    assert_eq 'the target was written' "$(sget stop_after_phase)" '1'
+    assert_eq 'and nothing else moved' "$(sget activation_generation)" '0'
+    assert_eq 'the activation is untouched' "$(sget status)" 'ACTIVE'
+
+    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
+    commit_now 'phase 1'
+    out=$(confirm 'git add -A && git commit -m "phase 1"')
+    assert_contains 'the commit lands on the pause target, not on "next phase"' "$out" 'pause target'
+    assert_eq 'phase advanced to 2' "$(sget phase)" '2'
+
+    # Without the pause this blocks with "phases 2..2 are still outstanding". A broken
+    # reviewer command proves nothing was invoked to reach the paused answer.
+    out=$(with_env OCRL_REVIEWER_CMD='/nonexistent/reviewer' stop_gate)
+    assert_contains 'the turn ends paused' "$out" 'paused'
+    assert_contains 'not an approval of the whole plan' "$out" 'NOT an approval'
+    assert_eq 'the activation did not complete' "$(sget status)" 'ACTIVE'
+
+    # Claude's own route to it is denied, like every other user-only command.
+    assert_eq 'claude may not pause itself' "$(pre Bash "$OCRL pause")" 'deny'
+    assert_contains 'and is told why' "$(pre_reason)" 'user-only commands'
+fi
+
+if start 'pause: a reconcile is named as recoverable, an escalation as blocked'; then
+    new_case
+    arm_ok && phases_ok
+    f=$(state_file)
+
+    # RECONCILE is deliberately absent from pretool's terminal-deny list: the recovery is
+    # Claude's own to run, so the note must not tell it to stop.
+    jq '.status = "RECONCILE"' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+    out=$(ocrl pause 2>&1)
+    assert_contains 'the reconcile is named' "$out" 'Note: this activation is RECONCILE'
+    assert_contains 'and the recovery is Claude to run' "$out" 'Carry out the recovery'
+    if printf '%s' "$out" | grep -qF 'do not carry on implementing'; then
+        bad 'a reconcile must not be told to stop' "$out" 'no stop instruction'
+    else
+        ok 'a reconcile is not told to stop'
+    fi
+    # `pass`, not `allow`: non-Bash reaches `hook.pass_()` under RECONCILE, so the edit goes
+    # through on the gate's silence rather than on an explicit grant. Either way it is not denied.
+    assert_eq 'and an edit is still permitted under it' "$(pre Edit)" 'pass'
+
+    # NEEDS_HUMAN is in that list, so here the opposite is required.
+    jq '.status = "NEEDS_HUMAN"' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+    out=$(ocrl pause 2>&1)
+    assert_contains 'the escalation is named' "$out" 'Note: this activation is NEEDS_HUMAN'
+    assert_contains 'and work is denied' "$out" 'do not carry on implementing'
+    assert_eq 'which the gate agrees with' "$(pre Edit)" 'deny'
+fi
+
+if start 'pause: clearing the target lets the same session run to the end'; then
+    new_case
+    arm_ok && phases_ok
+    ocrl pause 1 >/dev/null 2>&1
+    assert_eq 'the target is set' "$(sget stop_after_phase)" '1'
+
+    out=$(ocrl pause all 2>&1)
+    assert_contains 'the target is reported cleared' "$out" 'pause target cleared'
+    assert_eq 'and is gone from state' "$(sget stop_after_phase)" '0'
+
+    printf 'phase one\n' >"$REPO/a.txt"
+    with_env OCRL_FAKE_MODE=approve pre Bash 'git add -A && git commit -m "phase 1"' >/dev/null
+    commit_now 'phase 1'
+    out=$(confirm 'git add -A && git commit -m "phase 1"')
+    assert_contains 'the loop asks for the next phase again' "$out" 'phase 2'
+
+    with_env OCRL_REVIEWER_CMD='/nonexistent/reviewer' assert_eq 'and the turn cannot end' "$(stop_decision)" 'block'
+    assert_contains 'because a phase is outstanding' "$(last_out | jq -r '.reason // ""')" 'still outstanding'
+fi
+
 # --------------------------------------------------------------------------
 # TTL
 # --------------------------------------------------------------------------

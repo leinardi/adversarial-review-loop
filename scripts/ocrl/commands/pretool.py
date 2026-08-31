@@ -112,11 +112,11 @@ Continue in {successor}, or re-arm this worktree from scratch with /opencode-rev
 """
 
 ESCAPE_DENIED: Final = """\
-ocrl finish, deactivate, resume, config and accept are user-only commands. You may not run them yourself.
+ocrl finish, deactivate, resume, config, accept and pause are user-only commands. You may not run them yourself.
 
 If you believe one of them should run, say so and let the user run /opencode-review-loop:finish, \
-/opencode-review-loop:stop, /opencode-review-loop:resume, /opencode-review-loop:config or \
-/opencode-review-loop:accept.
+/opencode-review-loop:stop, /opencode-review-loop:resume, /opencode-review-loop:config, \
+/opencode-review-loop:accept or /opencode-review-loop:pause.
 """
 
 PHASES_NOT_FROZEN: Final = """\

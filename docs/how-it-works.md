@@ -61,8 +61,9 @@ reporter tries again.
 
 ## Some things worth knowing
 
-- **You can pause it.** Tell it to stop after phase 2 of 5, and it will — the loop won't
-  push you into "just one more phase" on its own.
+- **You can pause it**, up front (`--until 2`) or halfway through a phase
+  (`/opencode-review-loop:pause`) — it finishes and commits what it's on, then stops. The
+  loop won't push you into "just one more phase" on its own.
 - **You can pick it back up later**, even days later, in a brand-new conversation, without
   losing any of the approvals already earned or restarting from scratch.
 - **You can revise the plan partway through** if you realize phase 3 needs to change —
@@ -116,6 +117,26 @@ $ /opencode-review-loop:resume --until 10               # fresh context, same ac
 `resume` re-arms the hooks, re-prints the plan path and names the next phase, and every
 approval already earned is kept. Nothing is lost by clearing — the activation lives on disk,
 not in the conversation.
+
+**If you decide to stop partway through a phase, don't just say so.** The pause target is
+one of the user-only controls, so Claude has no way to move it, and asking in prose gets you
+a Stop gate that reports the remaining phases and sends it straight back to work. Interrupt
+and run the command instead:
+
+```console
+  … Claude is deep in phase 3 of 9 …
+Esc
+$ /opencode-review-loop:pause
+$ continue
+  … phase 3 is finished, reviewed and committed, then the turn ends paused …
+```
+
+It needs no clean worktree — it approves nothing and denies nothing, so there is no
+half-finished work for it to fold into a review. That is what makes it the right move before
+turning the machine off, and before upgrading the plugin itself: the upgrade lands between
+phases, on a clean tree, rather than mid-phase. Reinstall the plugin and start a fresh
+session afterwards (a running Claude Code holds the old skill bodies cached), then
+`/opencode-review-loop:resume --until 0` to carry on with every approval intact.
 
 ## Why bother with all this?
 

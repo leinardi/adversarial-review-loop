@@ -48,6 +48,16 @@ instead of demanding the next phase. It adds no new denial: if Claude is told to
 going anyway, nothing stops it. The gate on every commit is exactly as strict either side
 of the pause target; only the Stop-hook's insistence on outstanding phases changes.
 
+`/opencode-review-loop:pause` names the same target mid-flight, and writes nothing else.
+Because it grants nothing it needs no clean worktree, unlike `resume --until N`. Two
+consequences of it being that small are worth knowing. It does **not** bump
+`activation_generation`, deliberately: that bump exists to invalidate a decision whose
+evidence moved underneath a long review, and a pause target is not evidence — bumping it
+would land an in-flight final review as `SUPERSEDED` and discard a real verdict for nothing.
+And the Stop gate reads `stop_after_phase` once, near the top of its run, so a pause that
+races a turn end takes effect at the *next* turn end rather than the one already in
+progress. Both are benign; neither can turn into an approval.
+
 ## Revising the plan mid-run
 
 Editing the plan file, or passing `--plan` to `resume`, only takes effect for phases that

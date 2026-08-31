@@ -204,6 +204,12 @@ Two shapes:
 - **Same-session** (re-running `resume` to change `--until`, the model, or the plan):
   the live document is mutated in place; nothing is retired.
 
+`commands/pausecmd.py` is the narrow case pulled out of that second shape: moving only
+`stop_after_phase`, under one transaction, with no revision detection, no cleanliness
+requirement and no `activation_generation` bump. It is user-only for the same reason
+`resume` is — see the module docstring for why an unbounded, Claude-reachable pause would be
+a strictly better `defer`.
+
 Either way, the baseline tree and every already-approved tree carry forward untouched —
 the successor is built by copying the whole predecessor document and resetting a *named*
 set of fields (session identity, pending state, counters), never by re-listing what to
@@ -265,10 +271,10 @@ and exactly what does and doesn't cross it.
 | `scripts/ocrl/reviewer_probe.py` | the `opencode models` reachability probe, reached through the OpenCode harness; a CLI that cannot enumerate its models has none |
 | `scripts/ocrl/planrev.py` | plan-revision bookkeeping — backfilling revision 0, path/hash verification, the active revision |
 | `scripts/ocrl/report.py` | report storage; the text Claude actually sees |
-| `scripts/ocrl/commands/` | one module per subcommand — `arm`, `resume`, `phases`, `session`, `configcmd`, `completion`, `dryrun`, plus the four hook entrypoints |
+| `scripts/ocrl/commands/` | one module per subcommand — `arm`, `resume`, `phases`, `session`, `configcmd`, `completion`, `dryrun`, `accept`, `clarify`, `pausecmd`, plus the four hook entrypoints |
 | `scripts/ocrl/_vendor/bashlex/` | vendored parser, kept diffable against upstream |
 | `prompts/*.md` | the fixed reviewer prompts — one per review kind, plus `reviewer-efficiency.md`, the working guidance each harness delivers its own way (a system prompt where the CLI has one) |
-| `skills/*/SKILL.md` | the seven slash commands |
+| `skills/*/SKILL.md` | the nine slash commands |
 
 ## Testing
 

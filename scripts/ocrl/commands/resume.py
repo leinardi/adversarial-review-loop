@@ -131,7 +131,7 @@ class _EvidenceCorrupted(_ResumeFailure):
 @dataclass(frozen=True)
 class _Flags:
     allow_dirty: bool = False
-    #: Raw ``--until`` text, resolved through ``arm._resolve_until``.
+    #: Raw ``--until`` text, resolved through ``arm.resolve_until``.
     until: str = ""
     #: ``None`` means "not given"; only an explicit ``--plan`` triggers a forced re-read.
     plan: str | None = None
@@ -655,7 +655,7 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
     until_given = bool(flags.until)
     warnings = ""
     if until_given:
-        until = arm._resolve_until(flags.until)
+        until = arm.resolve_until(flags.until)
         total = prev_state.phase_count()
         if total and until > total:
             warnings += f"\nNote: --until {until} is beyond the {total} frozen phases; clamped to {total}.\n"

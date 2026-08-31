@@ -63,11 +63,16 @@ Everything else in the codebase is detail against these. Paraphrased from `AGENT
    All state lives outside the repo. The one exception — an explicit, user-only
    `config --repo` — is documented, never triggered by a hook, and never reachable from
    Claude.
-4. **The user owns the exits.** `implement`, `finish`, `stop`, `resume`, `config` and
-   `accept` are unreachable through natural language — only the literal slash command
-   invokes them — and Claude's own route to running them via `Bash` is denied. See the
-   honest-agent caveat above for exactly what this does and doesn't guarantee against a
+4. **The user owns the exits.** `implement`, `finish`, `stop`, `resume`, `config`,
+   `accept` and `pause` are unreachable through natural language — only the literal slash
+   command invokes them — and Claude's own route to running them via `Bash` is denied. See
+   the honest-agent caveat above for exactly what this does and doesn't guarantee against a
    hostile model.
+
+   `pause` neither ends nor grants: it only moves the target that decides whether the Stop
+   gate keeps asking for the remaining phases. It is here anyway, because in Claude's hands
+   that is an unbounded escape from being asked for more work — a strictly better `defer`,
+   which is deliberately bounded by `max_defers`.
 
    `accept` is the one exit that grants something rather than only ending or adjusting
    the activation, which is what makes it worth spelling out separately: it mints exactly

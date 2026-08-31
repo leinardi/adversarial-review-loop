@@ -43,7 +43,7 @@ def test_selftest_hands_over_to_the_acceptance_suite(monkeypatch: pytest.MonkeyP
 
 @pytest.mark.parametrize(
     "sub",
-    ["arm", "set-phases", "defer", "status", "report", "finish", "deactivate", "dry-run"],
+    ["arm", "set-phases", "defer", "status", "report", "finish", "deactivate", "pause", "dry-run"],
 )
 def test_every_user_facing_subcommand_is_wired(sub: str, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Not a behaviour test: it asserts the name reaches *something* other than usage.

@@ -35,7 +35,7 @@ from ocrl.config import Config
 from ocrl.state import State, pointer_read, pointer_write
 from ocrl.util import now
 
-__all__ = ["flag_bool", "flag_str", "parse_flag_tokens", "run", "split_args"]
+__all__ = ["flag_bool", "flag_str", "parse_flag_tokens", "resolve_until", "run", "split_args"]
 
 #: Whitespace the shell's ``[[:space:]]`` matches in the C locale. ``str.strip()`` would
 #: also strip Unicode spaces, which the shell would have left in the path.
@@ -112,7 +112,7 @@ class _Flags:
     """The flags ``implement`` accepts, parsed but not yet semantically validated."""
 
     allow_dirty: bool = False
-    #: Raw ``--until`` text -- "", "0", "all" or a digit string -- resolved by ``_resolve_until``.
+    #: Raw ``--until`` text -- "", "0", "all" or a digit string -- resolved by ``resolve_until``.
     until: str = ""
     #: ``None`` means "not given", distinct from an empty string: only a flag the user
     #: actually typed may override the stored harness, model or variant.
@@ -276,13 +276,17 @@ def _parse_flags(tokens: list[str]) -> _Flags:
     )
 
 
-def _resolve_until(raw: str) -> int:
+def resolve_until(raw: str, *, flag: str = "--until") -> int:
     """The pause target from ``--until``'s raw text. Raises ``_ArmFailure`` on nonsense.
 
     ``""``, ``"0"`` and ``"all"`` all mean "no target" -- the flag was not given, or the
     user explicitly cleared it. Anything else must be a plain positive integer; the upper
     bound (``N <= phase_count``) cannot be checked yet, since phases are not frozen at arm
     time, so ``commands/phases.py::run`` checks it again once they are.
+
+    ``flag`` names the channel the text came from, for the rejection message only.
+    ``commands/pausecmd.py`` reads the same grammar off a bare positional, so its rejection
+    has to say ``pause "x"`` rather than blaming a ``--until`` the user never typed.
 
     ``str.isdigit()`` is deliberately not used: it answers ``True`` for Unicode digits that
     ``int()`` cannot parse (superscripts among them), which would raise ``ValueError``
@@ -294,13 +298,13 @@ def _resolve_until(raw: str) -> int:
     if raw in ("", "0", "all"):
         return 0
     if not re.fullmatch(r"[0-9]+", raw):
-        raise _ArmFailure(f'--until "{raw}" is not a positive integer, "0" or "all"')
+        raise _ArmFailure(f'{flag} "{raw}" is not a positive integer, "0" or "all"')
     try:
         value = int(raw)
     except ValueError as exc:
-        raise _ArmFailure(f'--until "{raw}" is not a positive integer, "0" or "all"') from exc
+        raise _ArmFailure(f'{flag} "{raw}" is not a positive integer, "0" or "all"') from exc
     if value < 1:
-        raise _ArmFailure(f'--until "{raw}" is not a positive integer, "0" or "all"')
+        raise _ArmFailure(f'{flag} "{raw}" is not a positive integer, "0" or "all"')
     return value
 
 
@@ -526,7 +530,7 @@ def _arm(state: State, request: _Request) -> _Frozen:
             f"--allow-dirty to fold them into phase 1's review:\n{gitsnap.dirty_summary(repo)}"
         )
 
-    until = _resolve_until(parsed.until)
+    until = resolve_until(parsed.until)
 
     # The candidate overrides are built, and the config reloaded with them applied, *before*
     # the reviewer is probed: probing the stored config would validate a model this run will
