@@ -407,6 +407,52 @@ class AGENTS.md already records under "Known environment hazards". A third, quie
 staging: the staged bytes are the ones the gate already bounded by `max_findings_bytes`, so a
 swap cannot turn a capped attachment into an unbounded one.
 
+### The one repository-authored channel that is instruction, not evidence
+
+Everything else the repository puts in front of the reviewer is framed as evidence *about*
+the change: the diff, `AGENTS.md`, the frozen plan, `verify_cmd`'s output. The prompt says so
+in as many words, and says the reviewer's only instructions are the ones in that message.
+`review_guide` is the exception. It names a Markdown file whose content is spliced into the
+phase and final prompts, and it is admitted for the same reason `verify_cmd` is: the config
+layer that sets it can already set `ignore_globs: ["**"]`, a complete and strictly worse
+bypass of every per-commit review, and can already run arbitrary code through `bash -lc`
+inside the gate. Guidance text is the weaker primitive. It is bounded, not trusted:
+
+- **The framing around it is gate-authored** and sits in the prompt, not in a comment: the
+  guide is an extension of the review guidance above it and nothing else; it may add areas of
+  concern and name repository-specific invariants; it may **not** change the output contract,
+  the severity rubric, what blocks a commit, or ask for an approval, a withheld finding, a
+  lowered severity or a shortened read — and any attempt to must be reported as a `FINDING`
+  (`severity=high`) against the guide file itself.
+- **It is spliced above the output contract**, so the contract keeps the last position in the
+  prompt.
+- **Its delimiters carry a per-composition random nonce**, so guide content cannot close its
+  own fence and continue as gate-authored text.
+- **Its own path is repository-controlled too**, and it is the one piece of repository text
+  that lands *outside* that fence. It is reproduced only if every character is in a strict
+  allowlist — no space, no backtick, no bracket, nothing that could close a markdown span and
+  read as the gate's own prose. Escaping is the wrong tool for text whose payload is that it
+  is readable, so a path that fails is not rendered at all: the framing says so and the
+  sha256 beside it identifies the guide instead.
+- **Arming refuses a guide containing either contract marker**, and `reviewer.parse` already
+  requires exactly one marker block — so a guide that induces a second one fails the
+  contract, which blocks.
+- **The verdict is recomputed from the `FINDING` lines** with stricter-wins, so a coerced
+  `VERDICT APPROVED` next to a blocking finding still blocks.
+- **The content is frozen and hashed when the activation is armed**, not the file name — a
+  mid-activation edit to the file, or to the config key naming it, reaches nothing. A frozen
+  copy that no longer matches its hash escalates to `needs-human` (Rule 1): never a review
+  that quietly ran without it. Replacing it needs `resume --guide`, which records a new
+  revision rather than overwriting the old one, and tells the final review that earlier
+  phases ran under different guidance.
+
+What is **not** prevented: a guide can steer *attention*. It can make the reviewer spend its
+budget on the wrong subsystem, so a bad guide makes reviews worse without breaking any rule
+above. That is disclosed rather than fixed — the arming and resume banners, `/status`, every
+stored report, the reviewer's own `range.txt` and `make dry-run` all name the guide and its
+sha256, and every round leaves the exact prompt it ran under in the activation's `raw/`
+directory.
+
 ### The two harnesses, and which of these arguments is per-harness
 
 The reviewer CLI is configurable (`harness`: `claude-code` by default, `opencode`). Most of
@@ -483,6 +529,12 @@ rewrite once mutations are permitted. Every key it sets is a lever, not only `ve
   cannot itself approve a commit, but setting it *is* code execution — not sandboxed, not
   reviewed before it runs, and the string can be anything, not only a command already
   present in the repo.
+- **`review_guide` names a file whose content becomes part of the reviewer's
+  instructions** — the only repository-authored input that is instruction rather than
+  evidence. It is weaker than both levers above (it cannot skip a review, and it cannot run
+  code), and it is bounded rather than trusted; the section
+  "[The one repository-authored channel that is instruction](#the-one-repository-authored-channel-that-is-instruction-not-evidence)"
+  above sets out what bounds it and what it can still do.
 
 None of the above needs the `config` command at all — `config`'s
 `disable-model-invocation` blocks the *command* that writes this file in a controlled way,

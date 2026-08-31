@@ -1,7 +1,7 @@
 ---
 name: resume
 description: Continue an already-armed adversarial-review-loop plan in a new session (or adjust the pause target, model, or plan in this one), without losing the original baseline or any approvals already recorded.
-argument-hint: "[--until N] [--plan <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]"
+argument-hint: "[--until N] [--plan <path>] [--guide <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]"
 disable-model-invocation: true
 user-invocable: true
 ---
@@ -24,15 +24,16 @@ The gate's hooks are registered by the plugin itself, in every Claude Code sessi
 2. **If phases are not frozen yet** (the banner says so), split the plan and freeze it exactly as `/adversarial-review-loop:implement` describes, then implement phase 1.
 3. **If the banner says `--replan` was granted**, redefine only the phases it names (the current one onward — earlier phases are immutable and already committed) by reading the active plan and running `set-phases` with one `--phase` per replacement phase, exactly as the banner's command shows. Every other mutation is denied until that command has run. Then continue into the (possibly renamed) current phase.
 4. **Otherwise, continue straight into the phase the banner names.** The baseline, every prior approval, and the phase list are all carried forward from the original activation — nothing about them is reset by resuming.
-5. **Commit each phase** the same way as always:
+5. **If the banner's `review guide:` line says the guide changed just now** (`--guide <path>` was passed), read the frozen copy it names: from here on, every review is composed with that guidance instead of the one earlier phases were judged under, and the reviewer is told as much. It is guidance to the reviewer, not to you — implement against the plan.
+6. **Commit each phase** the same way as always:
 
    ```
    git add -A && git commit -m "…"
    ```
 
    The commit is intercepted and reviewed exactly as under `/adversarial-review-loop:implement`.
-6. **If a pause target is set** (the banner names it), stop and report to the user once you reach it — do not continue past it on your own.
-7. **When all phases are committed, end your turn.** The Stop gate sweeps anything unreviewed and then completes the activation. If `final_review` is enabled — by default it is not — it first runs a cumulative review over the whole activation, from the *original* baseline to `HEAD`.
+7. **If a pause target is set** (the banner names it), stop and report to the user once you reach it — do not continue past it on your own.
+8. **When all phases are committed, end your turn.** The Stop gate sweeps anything unreviewed and then completes the activation. If `final_review` is enabled — by default it is not — it first runs a cumulative review over the whole activation, from the *original* baseline to `HEAD`.
 
 ## Rules while the mode is active
 

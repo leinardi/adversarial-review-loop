@@ -41,6 +41,7 @@ guessing.
 | `max_stop_blocks` | `3` | **no-progress** Stop blocks before escalating |
 | `max_defers` | `3` | pause escapes per activation |
 | `verify_cmd` | unset | run by the hook, output attached as evidence |
+| `review_guide` | unset | a Markdown file whose content is spliced into the phase and final reviewer prompts as repo-specific guidance; frozen and hashed when you arm. See "Repo-specific review guidance" |
 | `pure` | `true` | run the reviewer without its ambient extensions — `--pure` on OpenCode, `--safe-mode --disable-slash-commands` on Claude Code |
 | `disable_project_config` | `false` | ignore the repository's own agent config — `OPENCODE_DISABLE_PROJECT_CONFIG` on OpenCode, `--setting-sources user` on Claude Code |
 | `chunk_diff_bytes` | `400000` | per-attachment diff chunk size |
@@ -120,6 +121,9 @@ reviewer on one run, or recovering an activation whose configured model has sinc
 unreachable. They're stored in the activation's own `overrides` and sit above both config
 files in the precedence chain, but below the environment.
 
+`--guide <path>` is in the same family but stronger: it sets `review_guide` for that one
+activation, and what gets pinned is the file's *content*, not its name — see below.
+
 `harness` is the one key that is **pinned** into `overrides` when you arm, whether or not
 you passed `--harness`. `model` and `variant` are not: they keep resolving through the
 config layers on every round. The difference is that `harness` is what decides which binary
@@ -157,6 +161,63 @@ what is now on disk.
 }
 ```
 
+## Repo-specific review guidance
+
+The reviewer's prompt is fixed plugin text, and deliberately generic. `review_guide` is how
+a repository adds to it: a Markdown file whose content is spliced into the phase and final
+prompts as an additive extension of "what to look for".
+
+```json
+{ "review_guide": ".arl/review-guide.md" }
+```
+
+A relative value resolves against the repository root; an absolute one is taken as given, so
+a *user* config can name a guide that lives outside the tree under review. `--guide <path>`
+on `implement` sets it for one activation. Because it is an ordinary key, the usual
+precedence applies (defaults < user < repo < activation override < `ARL_REVIEW_GUIDE`).
+
+**Write it as guidance, not as rules for the gate.** What belongs in it: the invariants that
+matter in this repository, the subsystems where a regression is expensive, the shapes of bug
+that keep coming back, and the classes of finding that are noise here. What does not belong,
+and what the prompt's own framing tells the reviewer to reject and report as a `high`
+finding against the guide file: anything that redefines the output contract or the severity
+rubric, changes what blocks a commit, or asks for an approval, a withheld finding, a lowered
+severity, or a shortened read.
+
+Four things get it refused outright, while you are watching the command that armed it: a
+path that does not resolve to a readable regular file, a file that is empty or only
+whitespace, one larger than 64 KiB (a hard constant, deliberately not a config key — a cap
+this layer could raise would bound nothing), and one containing either reviewer contract
+marker.
+
+### What "frozen" means here
+
+The file is read once, when you arm, copied into the activation directory as
+`guide.frozen.md`, and hashed. Every later round reads only that copy and re-verifies the
+hash. Editing the source file, or editing `.adversarial-review-loop.json` to name a
+different one, changes nothing about a running activation — the same property the frozen
+plan has, and for the same reason.
+
+`/adversarial-review-loop:resume --guide <path>` replaces it mid-activation. That records a
+new revision (`guide.rev1.md`, then `guide.rev2.md`, …) beside the old one; nothing already
+frozen is renamed or overwritten, and `range.txt` tells a final cumulative review that
+earlier phases were judged under different guidance, with each revision's hash. There is no
+way to remove a guide mid-activation: `--guide` only ever replaces, so dropping bad guidance
+means abandoning the activation and re-arming — the same weight a change to the frozen
+plan's provenance carries.
+
+If the frozen copy no longer matches its recorded hash, the review escalates to
+`needs-human`. It never runs without the guide every disclosure says was in force.
+
+### Where it is disclosed
+
+`- review guide:` on the arming and resume banners (with the frozen copy's path and the
+first 12 hex of its sha256), a `review guide:` line in `/adversarial-review-loop:status`
+carrying the revision count, a header line in every stored report so
+`/adversarial-review-loop:report` shows it retroactively, a `## Project review guidance`
+section in the reviewer's own `range.txt`, and the composed block itself in `make dry-run`.
+Every round also leaves the exact prompt it ran under in the activation's `raw/` directory.
+
 ## Repo config is not trusted for policy
 
 `.adversarial-review-loop.json` lives inside the repository under review, which the rest of
@@ -185,6 +246,14 @@ off from a self-serving edit:
   `bash -lc` in the repository. Its output is only evidence — it can't itself approve a
   commit — but setting it *is* code execution, and the string can be anything, not only a
   command already present in the repo.
+- **`review_guide` is the first key whose value becomes *instruction* to the reviewer**
+  rather than evidence about the change. It is admissible for the same reason `verify_cmd`
+  is — this layer can already set `ignore_globs: ["**"]`, a complete and strictly worse
+  bypass — and it is bounded rather than trusted: gate-authored framing says the guide may
+  not change the contract, the rubric, what blocks or the verdict, the guide is fenced with
+  a per-review nonce below that framing and above the output contract, and its content is
+  frozen at arm so an edit mid-activation reaches nothing. What it can still do is steer
+  attention, which is why every surface that reports a review names the guide and its hash.
 
 None of this needs the `config` command at all. `/adversarial-review-loop:config --repo` is
 the controlled, user-only way to write this file; the file itself is an ordinary one, and

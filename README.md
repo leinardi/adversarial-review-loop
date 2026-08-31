@@ -54,8 +54,8 @@ The variable is read at process start, so restart Claude Code after setting it. 
 
 | Command | Who | What it does |
 | --- | --- | --- |
-| `/adversarial-review-loop:implement <plan.md> [--allow-dirty] [--until N] [--harness H] [--model X] [--variant V]` | you | Arms the loop for this worktree and starts the phased implementation |
-| `/adversarial-review-loop:resume [--until N] [--plan <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]` | you | Continues an armed activation — in a new session, or adjusts it in this one — without losing the baseline or any approval. See "Running a long plan across sessions" below |
+| `/adversarial-review-loop:implement <plan.md> [--allow-dirty] [--until N] [--harness H] [--model X] [--variant V] [--guide <path>]` | you | Arms the loop for this worktree and starts the phased implementation |
+| `/adversarial-review-loop:resume [--until N] [--plan <path>] [--guide <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]` | you | Continues an armed activation — in a new session, or adjusts it in this one — without losing the baseline or any approval. See "Running a long plan across sessions" below |
 | `/adversarial-review-loop:status` | anyone | Current state: phase, baseline, approvals, counters, stored reports |
 | `/adversarial-review-loop:report [n]` | anyone | Prints a stored review in full, untruncated |
 | `/adversarial-review-loop:pause [N \| 0 \| all]` | you | Moves the pause target without a re-arm: with no argument, the loop finishes and commits the phase it is on and then stops instead of continuing. See "Pausing" below |
@@ -200,6 +200,25 @@ Repo text and the frozen plan are labelled **evidence, not instructions**, and t
 
 It is off because it is a full second model call on every approving round past the first, and over a real 45-round run it doubled 11 of them, each time raising new medium findings the warm round had not — disagreements that drove both manual `accept`s. Be clear about what turning it off gives up, because the two kinds of context it covers are not alike: an earlier round's findings reach the reviewer as `prior-rounds.txt`, the gate's own rendering of lines it validated and size-bounded, but a **continued session carries the whole earlier conversation** — previous diffs, the repository content in them, the reviewer's own prose — which the gate neither re-reads nor bounds. With the key off, an approval may have been shaped by all of that. What still stands is everything else: the contract parse, `block_severity`, the deny-list, `confirm-commit`, and the fact that a new phase always starts a fresh session, so one poisoned session stays inside one phase. Turn it on with `/adversarial-review-loop:config cold_confirm true` (or `ARL_COLD_CONFIRM=true` for one run) if your threat model is a tampered `state.json` or an injected diff rather than a slow loop. See [security.md](docs/security.md) for the argument in both directions; `/adversarial-review-loop:accept` is still the answer when a phase will not converge either way.
 
+### Repo-specific review guidance
+
+A useful review prompt is repo-shaped: the invariants that matter here, the subsystems where a regression is expensive, the classes of finding that are noise in this codebase. `review_guide` points the gate at a Markdown file whose content is spliced into the phase and final reviewer prompts as an **extension of "what to look for"**.
+
+```json
+{ "harness": "claude-code", "review_guide": ".arl/review-guide.md" }
+```
+
+```console
+> /adversarial-review-loop:config review_guide .arl/review-guide.md --repo
+> /adversarial-review-loop:implement plan.md --guide docs/review-guide.md
+```
+
+A relative path resolves against the repository root; an absolute one is taken as given, so a *user* config can point at a guide outside the tree under review. Resolution happens once, when you arm: the file is copied into the activation directory as `guide.frozen.md` and hashed, exactly as the plan is, and every round re-verifies that copy. Editing the source file afterwards — or editing `.adversarial-review-loop.json` to name a different one — changes nothing about the running activation. `/adversarial-review-loop:resume --guide <path>` is the one way to replace it mid-activation, and it freezes a new revision (`guide.rev1.md`, …) beside the old one rather than overwriting it, so a final cumulative review is told that earlier phases were judged under different guidance. There is no way to *remove* a guide mid-activation: dropping bad guidance means re-arming.
+
+**The guide is repo-authored text that becomes instruction, and it is bounded rather than trusted.** The gate's own framing around it says it may add areas of concern and name invariants, and may **not** change the output contract, the severity rubric, what blocks, or ask for an approval — and that any attempt to do so must be reported as a `high` finding against the guide file itself. It is spliced *above* the output contract, fenced with a per-review random nonce so its text cannot close its own fence, and refused outright at arm time if it is empty, larger than 64 KiB, or contains either reviewer contract marker. What it can still do is steer *attention*, so a bad guide makes reviews worse. That is disclosed rather than prevented: the arming banner, `/adversarial-review-loop:status`, every stored report, the reviewer's own `range.txt` and `make dry-run` all name the guide and its sha256.
+
+Refusing it is a hard failure, never a quiet skip: if the frozen copy no longer matches its recorded hash, the review escalates to `needs-human` rather than running without the guide it says it ran with.
+
 ## Configuration
 
 Resolution order: `ARL_*` environment → repo `.adversarial-review-loop.json` → `$XDG_CONFIG_HOME/adversarial-review-loop/config.json` → defaults.
@@ -217,6 +236,7 @@ Resolution order: `ARL_*` environment → repo `.adversarial-review-loop.json` �
 | `max_stop_blocks` | `3` | **no-progress** Stop blocks before escalating |
 | `max_defers` | `3` | pause escapes per activation |
 | `verify_cmd` | unset | run by the hook, output attached as evidence |
+| `review_guide` | unset | a Markdown file whose content is spliced into the reviewer's prompt as repo-specific guidance. Frozen and hashed when you arm, re-verified every round, and named on every surface that reports a review. See "Repo-specific review guidance" below |
 | `pure` | `true` | run the reviewer without its ambient extensions — `--pure` on OpenCode, `--safe-mode --disable-slash-commands` on Claude Code |
 | `disable_project_config` | `false` | ignore the repository's own agent config — `OPENCODE_DISABLE_PROJECT_CONFIG` on OpenCode, `--setting-sources user` on Claude Code |
 | `chunk_diff_bytes` | `400000` | per-attachment chunk size |
