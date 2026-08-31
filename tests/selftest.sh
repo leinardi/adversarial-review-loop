@@ -295,6 +295,25 @@ if start 'command shape: allowlist table, through an armed pretool'; then
     shape_no 'git commit -m x; rm -rf /'
     shape_no 'git commit -m x > out.txt'
     shape_no 'git commit -m x | tee log'
+    shape_no 'git add -A && git commit -m "x" 2>&1 | tail -40'
+    shape_no 'git commit -m x &>out.log'
+    shape_no 'git commit -m x &>>out.log'
+
+    # A pipe or a redirection on a commit sequence is refused with its own
+    # reason, not as a bare metacharacter: a pipeline exits with its last
+    # command's status, so a failed commit would report success and land the
+    # activation in RECONCILE rather than a clean retry.
+    pre Bash 'git add -A && git commit -m "x" 2>&1 | tail -40' >/dev/null
+    assert_contains 'a piped commit is denied for the real reason' "$(pre_reason)" 'piped or redirected'
+    assert_contains 'and names the consequence' "$(pre_reason)" 'RECONCILE'
+    pre Bash 'git commit -m x; rm -rf /' >/dev/null
+    assert_contains 'a sequenced commit keeps the generic message' "$(pre_reason)" 'shell metacharacter'
+    # `&>` is one redirect operator, not `&` plus `>`; the deny-list used to call it
+    # backgrounding, which never reached the denial above.
+    pre Bash 'git commit -m x &>out.log' >/dev/null
+    assert_contains 'an &> redirect is named as a redirect' "$(pre_reason)" 'piped or redirected'
+    pre Bash 'git commit -m x &' >/dev/null
+    assert_contains 'a bare & is still backgrounding' "$(pre_reason)" 'backgrounds a process'
     shape_no 'git commit --only src -m x'
     shape_no 'git commit --include src -m x'
     shape_no 'git commit src/main.go -m x'

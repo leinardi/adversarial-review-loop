@@ -51,6 +51,7 @@ __all__ = [
     "PARSE_TIMEOUT_SECONDS",
     "CommandShapeError",
     "CommandShapeTimeout",
+    "ShellMetacharacterError",
     "detection_form",
     "is_escape",
     "is_set_phases",
@@ -72,6 +73,20 @@ class CommandShapeError(OcrlError):
     Caught by the gate, which denies with this message. Uncaught it still denies, through
     the fail-closed guard: there is no path on which an unclassifiable command is allowed.
     """
+
+
+class ShellMetacharacterError(CommandShapeError):
+    """One of :data:`_METACHARACTERS` was found outside quotes.
+
+    A ``CommandShapeError`` carrying the character, so every caller already denies on it and
+    the message is unchanged; the character is exposed so :func:`validate_commit` can say
+    something more useful about the two that a commit sequence actually gets written with.
+    Adding this class refuses nothing new -- see :func:`_deny_shell_grammar`.
+    """
+
+    def __init__(self, message: str, character: str) -> None:
+        super().__init__(message)
+        self.character = character
 
 
 # --------------------------------------------------------------------------
@@ -142,6 +157,12 @@ def _deny_shell_grammar(command: str) -> None:  # noqa: PLR0912 - one branch per
     quotes and escapes exactly as the splitting loop used to -- it *is* that loop, with the
     token accumulation removed and ``started`` kept, since a ``#`` is a comment only where a
     word is not already open.
+
+    **One message differs from the shell's deliberately, and no verdict does.** ``&>`` and
+    ``&>>`` are bash's "redirect stdout and stderr" operators; the shell's ``&`` arm caught
+    them first and called them backgrounding. Both were refused then and are refused now --
+    what changed is only that they are now named as the redirection they are, which is also
+    what lets :func:`validate_commit` give them the redirect denial it gives ``>`` and ``|``.
     """
     if "$" in command:
         raise CommandShapeError('the command contains "$" (variable or command substitution)')
@@ -172,12 +193,26 @@ def _deny_shell_grammar(command: str) -> None:  # noqa: PLR0912 - one branch per
             index += 1
             started = True
         elif char == "&":
-            if command[index + 1 : index + 2] != "&":
+            following = command[index + 1 : index + 2]
+            if following == ">":
+                # `&>` and `&>>` are bash's "redirect stdout and stderr" operators, not a
+                # background `&` that happens to be followed by one. The refusal is the same
+                # either way -- both are refused, and were before this arm existed -- but the
+                # `&` message named the wrong construct, and a redirection reported as
+                # backgrounding cannot reach the commit path's redirect denial below.
+                operator = "&>>" if command[index + 2 : index + 3] == ">" else "&>"
+                raise ShellMetacharacterError(f'the command contains the shell metacharacter "{operator}" (redirection)', operator)
+            if following != "&":
                 raise CommandShapeError('the command backgrounds a process ("&")')
             started = False
             index += 1
         elif char in _METACHARACTERS:
-            raise CommandShapeError(f'the command contains the shell metacharacter "{char}" (pipeline, redirection, subshell or sequencing)')
+            # A `ShellMetacharacterError`, not a bare `CommandShapeError`: same message, same
+            # characters, same order -- it only carries the character along so the commit path
+            # can add context to a pipe or a redirection. Nothing here refuses more or less.
+            raise ShellMetacharacterError(
+                f'the command contains the shell metacharacter "{char}" (pipeline, redirection, subshell or sequencing)', char
+            )
         elif char in _GLOB_CHARACTERS:
             raise CommandShapeError(f'the command contains an unquoted glob character "{char}"')
         elif char == "#":
@@ -1170,9 +1205,40 @@ def _validate_segment(tokens: Sequence[str]) -> None:  # noqa: PLR0912 - one bra
         index += 1
 
 
+#: The metacharacters a commit sequence is actually written with by mistake, as opposed to the
+#: ones (``;``, subshells, braces) that read as somebody scripting. They get their own denial
+#: because "the command contains the shell metacharacter" says what was found and not why it
+#: matters -- and here it matters twice over. See :data:`_PIPELINE_DENIED`.
+_PIPELINE_CHARACTERS: Final = frozenset({"|", "<", ">", "&>", "&>>"})
+
+#: Why a pipe or a redirection is refused *on a commit sequence specifically*.
+#:
+#: The measured shape is ``git add -A && git commit -m "…" 2>&1 | tail -40``, written to keep
+#: a long commit's output readable. It was refused as a bare ``>`` metacharacter, which tells
+#: the model what character to remove and nothing about the consequence it just avoided.
+#:
+#: A pipeline exits with its **last** command's status, so a failed ``git commit`` reports
+#: success. Claude Code then sees a successful tool call, ``PostToolUseFailure`` never fires,
+#: and the clean path in ``posttool._posttool_failure`` -- which simply clears the pending
+#: approval -- is never taken. What runs instead is ``confirm-commit``: ``posttool._verify``
+#: finds HEAD did not move and calls ``_reconcile``, so a mistyped commit message leaves the
+#: activation in ``RECONCILE`` needing a recovery reset rather than a retry.
+_PIPELINE_DENIED: Final = (
+    'the commit sequence is piped or redirected ("{char}"). A redirection can write a file after the snapshot was taken, and a pipeline '
+    "exits with its last command's status rather than git's -- so a commit that failed would report success, the gate would never be told "
+    "the call failed, and the check that follows would find HEAD had not moved and put this activation into RECONCILE instead of simply "
+    "clearing the approval. Run the commit on its own; read or trim its output in a separate Bash call"
+)
+
+
 def validate_commit(command: str) -> None:
     """Accept a commit sequence, or raise ``CommandShapeError`` explaining the refusal."""
-    tokens = tokenize(command)
+    try:
+        tokens = tokenize(command)
+    except ShellMetacharacterError as exc:
+        if exc.character in _PIPELINE_CHARACTERS:
+            raise CommandShapeError(_PIPELINE_DENIED.format(char=exc.character)) from exc
+        raise
     if not tokens:
         raise CommandShapeError("empty command")
 

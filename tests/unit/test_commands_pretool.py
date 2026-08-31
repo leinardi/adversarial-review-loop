@@ -550,6 +550,8 @@ def test_a_non_bash_tool_is_left_to_the_normal_flow(git_repo: Path, tmp_path: Pa
         pytest.param("make build && git commit -m x", 'segment starts with "make"', id="build-first"),
         pytest.param("git commit -m 'a message' extra.txt", "partial commit", id="second-pathspec"),
         pytest.param("git commit -m x; rm -rf /", "shell metacharacter", id="sequencing"),
+        pytest.param('git add -A && git commit -m "x" 2>&1 | tail -40', "piped or redirected", id="piped-to-trim-the-output"),
+        pytest.param("git commit -m x &>out.log", "piped or redirected", id="ampersand-redirect"),
     ],
 )
 def test_a_commit_command_that_cannot_be_shown_safe_is_denied(

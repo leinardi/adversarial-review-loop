@@ -89,7 +89,23 @@ Whether a `Bash` command is allowed to run is decided by a deny-list of raw shel
 before anything else runs) plus a real bash-grammar parser (a vendored copy of `bashlex`)
 over whatever's left. The deny-list runs first and is the actual security boundary; the
 parser only turns the small surviving language into words correctly — it doesn't widen what
-the gate accepts. Two things make a bypass here recoverable rather than catastrophic — but
+the gate accepts.
+
+A third check, `unresolved_expansion`, runs on **every** `Bash` call rather than only on the
+commit path, and it is *not* the boundary. It exists so textual detection cannot go blind on
+a command **name**: `$(printf git) commit` runs `git commit` and contains no `git` for the
+detector to match, so a name an expansion decides is refused outright. It is scoped to that
+and no wider — an expansion in an *argument* is allowed (`echo "exit=$?"` runs `echo`), and so
+is anything inside a heredoc body whose delimiter is quoted, which bash does not expand at
+all. Still refused beyond the name: an *unquoted* heredoc body, which bash does expand, and an
+argument to a known exec wrapper such as `sh -c "$CMD"` — the latter a speed bump rather than a
+boundary, since `python3 -c "$CODE"` walks through it exactly as `python3 script.py` always
+did. **Narrowing that check did not move the deny-list**: on the commit path `$`, backticks,
+`;`, `|`, redirection, subshells, globs and newlines are all still refused, `git commit -m
+"$(x)"` is denied exactly as before, and a heredoc whose body contains the words `git commit`
+is still detected and refused as a commit shape.
+
+Two things make a bypass here recoverable rather than catastrophic — but
 only the first of them is unconditional:
 
 - `PostToolUse` independently re-verifies `HEAD^{tree}` against the approved tree and a

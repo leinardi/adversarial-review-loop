@@ -172,6 +172,9 @@ def test_a_trailing_backslash_is_refused_rather_than_guessed_at() -> None:
         ("git commit -m x\nrm -rf /", "multiple lines"),
         ("git commit -m x\rrm -rf /", "multiple lines"),
         ("git commit -m x & ", "backgrounds"),
+        ("git commit -m x & ls", "backgrounds"),
+        ("git commit -m x &>out", "redirection"),
+        ("git commit -m x &>>out", "redirection"),
         ("git commit -m x; ls", "metacharacter"),
         ("git commit -m x | ls", "metacharacter"),
         ("git commit -m x < f", "metacharacter"),
@@ -192,9 +195,84 @@ def test_the_tokenizer_refuses_the_shell_grammar(command: str, fragment: str) ->
         cmdshape.tokenize(command)
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('git add -A && git commit -m "x" 2>&1 | tail -40', id="the-measured-shape"),
+        pytest.param("git commit -m x | tee log", id="pipe"),
+        pytest.param("git commit -m x > out.txt", id="redirect-out"),
+        pytest.param("git commit -m x < in.txt", id="redirect-in"),
+        pytest.param("git commit -m x &>out", id="ampersand-redirect"),
+        pytest.param("git commit -m x &>>out", id="ampersand-append-redirect"),
+    ],
+)
+def test_a_piped_or_redirected_commit_is_denied_for_the_real_reason(command: str) -> None:
+    """``git add -A && git commit -m "…" 2>&1 | tail -40`` is what a model writes to keep a long
+    commit's output readable. It stays refused -- but "the command contains the shell
+    metacharacter" names the character and not the consequence.
+
+    A pipeline exits with its *last* command's status, so a failed commit reports success:
+    ``PostToolUseFailure`` never fires, the clean pending-clear in ``posttool`` is never taken,
+    and ``confirm-commit`` finds HEAD did not move and drives the activation into ``RECONCILE``.
+
+    ``&>`` and ``&>>`` belong here too. Both are bash redirections -- verified: ``echo hi
+    &>file`` writes the file and backgrounds nothing -- but the deny-list's ``&`` arm reached
+    them first and called them backgrounding, which is both the wrong diagnosis and a way past
+    this denial. They were always refused; only the explanation was wrong.
+    """
+    with pytest.raises(CommandShapeError, match="piped or redirected") as caught:
+        cmdshape.validate_commit(command)
+    assert "RECONCILE" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git commit -m x; ls", id="sequencing"),
+        pytest.param("git commit -m x && (ls)", id="subshell"),
+        pytest.param("git commit -m {x}", id="braces"),
+    ],
+)
+def test_the_other_metacharacters_keep_the_generic_message(command: str) -> None:
+    """Only a pipe and a redirection get the specific denial. A ``;`` or a subshell reads as
+    somebody scripting, and there is no single consequence to name for it."""
+    with pytest.raises(CommandShapeError, match="shell metacharacter"):
+        cmdshape.validate_commit(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('git add -A && git commit -m "x" 2>&1 | tail -40', id="the-measured-shape"),
+        pytest.param("git commit -m x | tee log", id="pipe"),
+        pytest.param("git commit -m x > out.txt", id="redirect-out"),
+    ],
+)
+def test_the_deny_list_itself_did_not_move(command: str) -> None:
+    """The specific message is added by ``validate_commit``, not by the deny-list. Driven
+    through ``tokenize``, every one of these still refuses with the character it always named --
+    the same characters, in the same order, with the same words."""
+    with pytest.raises(CommandShapeError, match="shell metacharacter"):
+        cmdshape.tokenize(command)
+
+
 def test_quoting_hides_metacharacters_from_the_deny_list() -> None:
     """Quoted metacharacters are data, so they are allowed -- and stay one token."""
     assert cmdshape.tokenize('git commit -m "a;b|c(d)"') == ["git", "commit", "-m", "a;b|c(d)"]
+
+
+def test_an_ampersand_redirect_is_named_as_a_redirect_not_as_backgrounding() -> None:
+    """``&>`` is one operator, and the deny-list must not read it as ``&`` plus ``>``.
+
+    Verified against bash: ``echo hi &>file`` writes the file and backgrounds nothing. The
+    verdict never changed -- both forms were refused before -- but a redirection reported as
+    backgrounding is a wrong diagnosis, and it never reached the commit path's redirect denial.
+    ``&&`` and a genuine trailing ``&`` must be untouched by the fix.
+    """
+    assert cmdshape.tokenize("git add -A && git commit -m x") == ["git", "add", "-A", "&&", "git", "commit", "-m", "x"]
+    with pytest.raises(CommandShapeError, match="backgrounds"):
+        cmdshape.tokenize("git commit -m x &")
+    cmdshape.validate_commit('git commit -m "a&>b"')  # quoted, so it is message text
 
 
 def test_a_quoted_ampersand_is_not_a_segment_separator() -> None:
