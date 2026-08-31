@@ -1347,14 +1347,22 @@ def active_guide(state: State) -> ActiveGuide:
 
     Rule 1 in one line: a guide that cannot be verified is a hard failure, never a review
     that quietly ran without it.
+
+    The **raw** recorded value is what is verified, not ``get_array_of_dicts``'s normalised
+    view of it: that one answers ``[]`` for a non-list and drops non-object members, and here
+    ``[]`` means "no guide" -- so a malformed field would compose a review that runs without
+    the guide, or under a superseded revision, while every disclosure still names the active
+    one. See :func:`arl.guide.validated_revisions`.
     """
+    recorded = state.data.get("guide_revisions")
     try:
-        content = guide.verified_active(state.act_dir, state.get_array_of_dicts("guide_revisions"))
+        entries = guide.validated_revisions(recorded)
+        content = guide.verified_active(state.act_dir, entries)
     except planrev.EvidenceCorrupted as exc:
         raise PlanEvidenceCorrupted(str(exc)) from exc
     if content is None:
         return ActiveGuide()
-    return ActiveGuide(content=content, path=state.get("guide_path"), revisions=tuple(state.get_array_of_dicts("guide_revisions")))
+    return ActiveGuide(content=content, path=state.get("guide_path"), revisions=tuple(entries))
 
 
 def _guide_section(active: ActiveGuide) -> str:

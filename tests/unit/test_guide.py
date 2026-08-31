@@ -286,7 +286,26 @@ def test_a_revision_with_no_usable_hash_is_refused(act_dir: Path, recorded: obje
 
 def test_a_revision_entry_that_is_not_an_object_is_refused(act_dir: Path) -> None:
     with pytest.raises(planrev.EvidenceCorrupted, match="not an object"):
-        guide.verified_active(act_dir, ["guide.frozen.md"])  # type: ignore[list-item]
+        guide.verified_active(act_dir, ["guide.frozen.md"])
+
+
+@pytest.mark.parametrize("mangled", [5, "guide.frozen.md", {"file": "guide.frozen.md"}, True])
+def test_a_revisions_field_that_is_not_a_list_is_refused_rather_than_read_as_no_guide(act_dir: Path, mangled: object) -> None:
+    """``[]`` is the whole encoding of "no guide", so coercing a malformed field into it turns
+    corrupted evidence into a review that silently runs without the guide. ``state.json`` is
+    not a trust boundary; this is where its shape is decided rather than assumed."""
+    guide.freeze(b"real guidance\n", act_dir, guide.GUIDE_FROZEN_NAME, phase=1)
+
+    with pytest.raises(planrev.EvidenceCorrupted, match="not a list"):
+        guide.verified_active(act_dir, mangled)
+
+
+def test_a_missing_revisions_field_is_read_as_no_guide(act_dir: Path) -> None:
+    """The one lenient case: a document with no such key predates the guide, and anyone able
+    to delete the key could equally have written ``[]``, which no strictness can tell apart
+    from an activation that genuinely has no guide."""
+    assert guide.verified_active(act_dir, None) is None
+    assert guide.validated_revisions(None) == []
 
 
 def test_a_guide_failure_never_blames_the_plan(act_dir: Path) -> None:

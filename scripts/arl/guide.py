@@ -73,6 +73,7 @@ __all__ = [
     "read_source",
     "resolve",
     "revision_filename",
+    "validated_revisions",
     "verified_active",
 ]
 
@@ -299,13 +300,48 @@ def freeze(raw: bytes, act_dir: Path, filename: str, *, phase: int) -> dict[str,
     return {"at": now(), "phase": phase, "sha256": hashlib.sha256(raw).hexdigest(), "file": filename}
 
 
-def verified_active(act_dir: Path, revisions: list[dict[str, Any]]) -> bytes | None:
+def validated_revisions(revisions: object) -> list[dict[str, Any]]:
+    """``guide_revisions`` exactly as recorded, with its *shape* checked rather than coerced.
+
+    ``state.json`` is not a trust boundary, so this takes the raw value and decides what it
+    is. The rule is deliberately **not** ``State.get_array_of_dicts``, which drops anything
+    that is not an object and answers ``[]`` for anything that is not a list: for the plan
+    that degradation is safe, because every caller then fails a length check against the
+    shorter list, but an empty ``guide_revisions`` is *meaningful* here -- it is the whole
+    encoding of "this activation has no guide". Coercing a malformed value into it would turn
+    corrupted evidence into a review that silently runs without the guide every other surface
+    says is in force, and a resume would then write the coerced value back, destroying the
+    record. Rule 1: that is a hard failure, not a skipped guide.
+
+    ``None`` (the key absent) is the one lenient case, and it costs nothing: a document with
+    no such key predates the guide, and anyone able to delete it could equally have written
+    ``[]``, which is indistinguishable from "no guide" no matter how strict this is.
+    """
+    if revisions is None:
+        return []
+    if not isinstance(revisions, list):
+        raise planrev.EvidenceCorrupted(
+            f"the recorded review guide revisions are not a list ({revisions!r}); the guide this activation runs under cannot be determined."
+        )
+    validated: list[dict[str, Any]] = []
+    for raw_entry in revisions:
+        if not isinstance(raw_entry, dict):
+            raise planrev.EvidenceCorrupted(f"a review guide revision entry is not an object ({raw_entry!r}); its integrity cannot be verified.")
+        validated.append(raw_entry)
+    return validated
+
+
+def verified_active(act_dir: Path, revisions: object) -> bytes | None:
     """The active guide's bytes, with **every** recorded revision re-verified first.
 
     ``None`` -- not an error, and not a synthesized revision 0 -- when ``revisions`` is empty:
     that is the ordinary "this activation has no guide" case, and the backfill
     :func:`arl.planrev.verified_revisions` performs for plans would here invent a guide from
     whatever happens to sit at :data:`GUIDE_FROZEN_NAME`.
+
+    The raw recorded value is taken, not a pre-filtered list: see
+    :func:`validated_revisions` for why coercing its shape is the one degradation this field
+    cannot survive.
 
     Every entry is re-verified on every call, not only the last one, for the same reason plan
     revisions are: the reviewer reads whichever revision is active, so a replaced earlier
@@ -314,12 +350,11 @@ def verified_active(act_dir: Path, revisions: list[dict[str, Any]]) -> bytes | N
     Raises :class:`arl.planrev.EvidenceCorrupted` on the first problem -- never a placeholder,
     and never a review that quietly ran without the guide it says it ran with (Rule 1).
     """
-    if not revisions:
+    entries = validated_revisions(revisions)
+    if not entries:
         return None
     content = b""
-    for raw_entry in revisions:
-        if not isinstance(raw_entry, dict):
-            raise planrev.EvidenceCorrupted(f"a review guide revision entry is not an object ({raw_entry!r}); its integrity cannot be verified.")
+    for raw_entry in entries:
         recorded_hash = raw_entry.get("sha256")
         if not isinstance(recorded_hash, str) or not _SHA256_HEX_RE.fullmatch(recorded_hash):
             raise planrev.EvidenceCorrupted(
