@@ -39,6 +39,8 @@ Do not report pure taste. Do not report formatting a linter would catch. Do not 
 
 **Front-load your coverage.** Round 1 is the round to read everything: from round 2 on, a finding that is new and lies outside the paths changed since the previous round blocks only at or above `late_block_severity` (see `range.txt`, "Blocking rules"), so a medium you could have raised in round 1 and raise in round 3 instead is recorded but does not stop the commit. In later rounds, start from `incremental.diff` — that is where a new problem can have been introduced — and re-check the earlier rounds' findings against the full diff.
 
+<!-- ARL:PROJECT-GUIDANCE -->
+
 ## Output contract
 
 Write your review as prose first, ranked most severe first — what is wrong, where, why it matters, and what would fix it. Then emit the machine-readable block, exactly once, exactly in this shape:

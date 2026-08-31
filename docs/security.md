@@ -359,6 +359,17 @@ it does while running. Three layers, and the third is a genuine limit rather tha
   **not** close the window. An unpredictable staging path does not help either: the attacker is
   the same user and can list the directory.
 
+The gate's own *instructions* live in that directory too, since a review's prompt is composed
+per round and written to `raw/<label>-prompt.md` (`review_guide`, see below). Those are a
+stronger primitive than the evidence: a substituted prompt telling the reviewer to emit no
+findings yields a genuine `APPROVED`, because the verdict is recomputed from the `FINDING`
+lines and there would be none. So the prompt is **not** re-read at invocation time — the bytes
+this process composed are carried in memory and handed to the harness as text, so a swap
+changes nothing about what the reviewer is told. `_confirm_prompt_unchanged` runs beside
+`_confirm_staged_unchanged` as well, to *notice* the swap (`OP_FAILURE`) and to cover the
+`ARL_REVIEWER_CMD` test seam, which is handed the pathname; that half carries the same racy
+caveat as the staged-attachment check.
+
 Closing that last one needs the child to receive a descriptor rather than a pathname, which
 `-f` has no way to accept, or `verify_cmd` to run somewhere it cannot reach the state root at
 all — a sandbox, which this gate has no portable way to build. Until then it is a known limit

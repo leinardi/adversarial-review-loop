@@ -284,6 +284,25 @@ case "$mode" in
         printf 'VERDICT CHANGES_REQUIRED\n'
         printf '<<<ARL-END>>>\n'
         ;;
+    echo-prompt)
+        # Dumps the prompt file the gate handed over, so the selftest can assert what the
+        # reviewer was actually instructed to do -- including a repo-supplied review guide
+        # spliced in by `arl.guide.compose`. Blocking, so the denial carries the dump back.
+        printf 'Prompt seen by this reviewer:\n'
+        # The prompt documents the contract by example, so it contains the markers itself.
+        # Echoed verbatim they would be a second block and the round would fail the contract
+        # instead of testing what it means to test -- so they are redacted here, and only
+        # here. Everything else, the spliced project guidance included, is verbatim.
+        if [ -n "$prompt" ] && [ -f "$prompt" ]; then
+            sed 's/<<<ARL-/<<<REDACTED-/g' "$prompt"
+        else
+            printf '(no prompt file was passed)\n'
+        fi
+        printf '\n<<<ARL-FINDINGS>>>\n'
+        printf 'FINDING severity=high actionable=yes file=a.txt:1 | Returns success on a failed lookup\n'
+        printf 'VERDICT CHANGES_REQUIRED\n'
+        printf '<<<ARL-END>>>\n'
+        ;;
     echo-bundle)
         printf 'Bundle contents:\n'
         ls -1 "$bundle"

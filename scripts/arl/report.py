@@ -250,6 +250,12 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
     out.append(f"- harness: `{config.as_str('harness')}`\n")
     out.append(f"- model: `{harness.display_model(config)}`{f' (variant `{variant}`)' if variant else ''}\n")
     out.append(f"- block_severity: `{config.as_str('block_severity')}`\n")
+    # Retroactive disclosure: `/adversarial-review-loop:report` is where a human goes to ask
+    # what a past review was told to do, and a repo-supplied guide is part of that answer.
+    # Carried on the `Review` rather than re-read from state, so the report names the guide
+    # *this* round was composed with -- a later `resume --guide` must not rewrite history.
+    if review.guide:
+        out.append(f"- review guide: {review.guide}\n")
     if target.is_phase:
         out.append(f"- late_block_severity: `{config.as_str('late_block_severity')}`\n")
     out.append(f"- generated: {_timestamp()}\n")

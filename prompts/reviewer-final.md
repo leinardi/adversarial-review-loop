@@ -37,6 +37,8 @@ Per-phase reviews already covered local correctness. Concentrate on what they st
 
 Do not re-litigate findings a phase review already accepted unless the end state makes them wrong. Do not report formatting or taste.
 
+<!-- ARL:PROJECT-GUIDANCE -->
+
 ## Output contract
 
 Write your review as prose first, ranked most severe first. Then emit the machine-readable block, exactly once, exactly in this shape:

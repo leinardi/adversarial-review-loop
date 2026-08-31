@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Final
 
 import arl
-from arl import commands, gitsnap, harness, paths, planrev, reviewer
+from arl import commands, gitsnap, guide, harness, paths, planrev, reviewer
 from arl import config as config_module
 from arl.atomic import write_private_atomic
 from arl.gitsnap import SnapshotError
@@ -119,7 +119,7 @@ def run(argv: list[str]) -> int:
         return 1
 
     try:
-        implementation, command = _compose(repo, state.act_dir, dest, attachments, config=config)
+        implementation, command = _compose(repo, state, dest, attachments, config=config)
     except (harness.UnknownHarness, harness.PayloadError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 1
@@ -135,7 +135,7 @@ def run(argv: list[str]) -> int:
 
 def _compose(
     repo: str,
-    act_dir: Path,
+    state: State,
     bundle_dir: Path,
     attachments: Sequence[tuple[Path, str]],
     *,
@@ -153,13 +153,13 @@ def _compose(
     implementation = harness.selected(config)
     spec = harness.ReviewSpec(
         repo=repo,
-        prompt_text=_prompt_text().rstrip("\n"),
+        prompt_text=_prompt_text(state).rstrip("\n"),
         # The real path passes this, so the dry run must too -- its whole contract is that
         # what it prints is the invocation a review would actually make.
         system_prompt=reviewer.efficiency_text(),
         title=DRY_RUN_TITLE,
         bundle_dir=bundle_dir,
-        act_dir=act_dir,
+        act_dir=state.act_dir,
         config=config,
         attachments=tuple(harness.Attachment(path, digest) for path, digest in attachments),
         # A fresh run's id, minted the same way a real one is ("" for a harness that cannot
@@ -236,9 +236,25 @@ def _stdin_section(stdin: bytes | None) -> str:
     return f"\n# stdin ({len(stdin)} bytes, verbatim)\n{text}" + ("" if text.endswith("\n") else "\n")
 
 
-def _prompt_text() -> str:
+def _prompt_text(state: State) -> str:
+    """The phase prompt as a real review would compose it, guide and all.
+
+    Composed rather than read straight off disk, for the reason the whole command exists: what
+    it prints has to be the invocation a review would actually make. Against a live activation
+    with a guide armed, that includes the guide -- and against one without, it includes the
+    placeholder being stripped, so the dry run also shows there is no residue.
+
+    Degrades to a note rather than raising, like the read failure below it: this command spends
+    no model call and decides nothing, so an unreadable prompt or an unverifiable guide is
+    something to *print*, not something to escalate.
+    """
     path: Path = arl.prompt_path("reviewer-phase")
     try:
-        return path.read_bytes().decode("utf-8", "surrogateescape")
+        text = path.read_bytes().decode("utf-8", "surrogateescape")
     except OSError as exc:
         return f"(the prompt could not be read: {exc})\n"
+    try:
+        active = reviewer.active_guide(state)
+    except reviewer.PlanEvidenceCorrupted as exc:
+        return f"(the frozen review guide could not be verified, so this prompt is not what a review would run: {exc})\n{text}"
+    return guide.compose(text, guide=active.content, path=active.path, sha256=active.sha256)

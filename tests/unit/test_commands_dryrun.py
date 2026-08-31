@@ -20,6 +20,7 @@ from conftest import run_bootstrap
 from test_commands_arm import armed_env, plan_file, state_dir
 
 import arl
+from arl import guide
 
 ARGV_HEADER = "# argv (one element per line)\n"
 STDIN_HEADER = "# stdin ("
@@ -58,8 +59,12 @@ def test_dry_run_prints_the_default_harnesss_whole_invocation(git_repo: Path, tm
 
     bundle = state_dir(env, git_repo, "s1") / "bundles" / "dry-run"
     payload = proc.stdout.split(STDIN_HEADER, 1)[1].split("\n", 1)[1].split("\n# bundle: ", 1)[0]
-    prompt = arl.prompt_path("reviewer-phase").read_text()
+    # Composed, not the plugin file: with no guide armed that is the same text minus the
+    # `<!-- ARL:PROJECT-GUIDANCE -->` placeholder, and the dry run's whole contract is that it
+    # prints the invocation a real review would make.
+    prompt = guide.compose(arl.prompt_path("reviewer-phase").read_text(), guide=None)
     assert prompt.rstrip("\n") in payload
+    assert guide.PLACEHOLDER not in payload, "the placeholder must never reach the reviewer"
     assert "BEGIN ATTACHMENT" in payload and "range.txt =====" in payload
     assert str(bundle) not in payload, "attachments arrive as bytes, never as a path the reviewer could re-open"
     assert f"\n# bundle: {bundle}\n" in proc.stdout
@@ -98,7 +103,8 @@ def test_dry_run_prints_the_opencode_invocation_including_its_permission_documen
     # The prompt is a multi-line argv element, so it is moved below the argv rather than
     # printed inside it -- under the index it came from, so the argv can still be reassembled.
     assert argv[2].startswith("<element 2:")
-    assert arl.prompt_path("reviewer-phase").read_text().rstrip("\n") in proc.stdout.split("\n# argv element 2, in full\n", 1)[1]
+    composed = guide.compose(arl.prompt_path("reviewer-phase").read_text(), guide=None)
+    assert composed.rstrip("\n") in proc.stdout.split("\n# argv element 2, in full\n", 1)[1]
     assert "# stdin: nothing -- this harness reads no standard input\n" in proc.stdout
 
 

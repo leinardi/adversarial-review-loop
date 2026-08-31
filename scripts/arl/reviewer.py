@@ -99,12 +99,12 @@ import signal
 import subprocess
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Final
 
 import arl
-from arl import harness, oscillation, paths, planrev, report
+from arl import guide, harness, oscillation, paths, planrev, report
 from arl.atomic import FILE_MODE, ensure_private_dir, read_verified_file, verified_file
 from arl.config import Config, late_threshold_rank, severity_rank, threshold_rank
 from arl.errors import OcrlError
@@ -658,6 +658,11 @@ class Invocation:
     cold: bool = False
     timeout_sec: int = 0
     allow_supersedes: bool = True
+    #: The prompt's bytes as this process composed them. **This, not ``prompt_file``, is what
+    #: the reviewer is actually told**, whenever it is set -- see :func:`invoke`. Empty for the
+    #: two invocations whose prompt is a fixed plugin file (contract repair, clarify), which
+    #: are read from disk as before.
+    prompt_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -720,6 +725,12 @@ class Review:
     report: str = ""
     #: Path of the raw reviewer output.
     raw: str = ""
+    #: The repo-supplied review guide this round was composed with, already rendered for
+    #: display (``<path> (sha256 <digest>)``), or "" when none was in force. Rendered at
+    #: ``execute`` time and carried on the review rather than re-read from state when the
+    #: report is written, so a later ``resume --guide`` cannot rewrite what a stored report
+    #: says an earlier round ran under.
+    guide: str = ""
     #: The report sequence ``_reserve_round`` allocated for this review, which is also the
     #: ``seq`` of the ``round_history`` entry it records. ``0`` for a ``Review`` that never
     #: reserved one -- a stalled or busy short-circuit -- and never for a parsed verdict.
@@ -1304,6 +1315,82 @@ def _bundle_contents_section(*, chunks: int, revisions: int, incremental: bool, 
     return "".join(out)
 
 
+@dataclass(frozen=True)
+class ActiveGuide:
+    """The repo-supplied review guide this activation runs under, verified.
+
+    ``content`` is ``None`` when no guide is in force, which is the common case and not an
+    error. Everything else is disclosure: ``path`` is the source ``review_guide`` resolved to
+    at arm, and ``revisions`` the recorded entries, whose hashes ``range.txt`` names so the
+    final review can see that earlier phases ran under different guidance.
+    """
+
+    content: bytes | None = None
+    path: str = ""
+    revisions: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.content).hexdigest() if self.content is not None else ""
+
+
+def active_guide(state: State) -> ActiveGuide:
+    """The active guide, with every recorded revision re-verified. Raises on corruption.
+
+    Called from :func:`build_bundle` -- so a guide that cannot be verified fails the bundle
+    exactly as a corrupted plan revision does, reaching ``execute``'s existing
+    :class:`PlanEvidenceCorrupted` arm and returning ``NEEDS_HUMAN`` with the reservations
+    released -- and again from :func:`execute`, which composes the prompt from what it
+    returns. The second call is not redundant: it is the read the prompt is actually built
+    from, and verifying once and then composing from a separately-read copy is exactly the
+    gap that would let a review disclose one guide and run under another.
+
+    Rule 1 in one line: a guide that cannot be verified is a hard failure, never a review
+    that quietly ran without it.
+    """
+    try:
+        content = guide.verified_active(state.act_dir, state.get_array_of_dicts("guide_revisions"))
+    except planrev.EvidenceCorrupted as exc:
+        raise PlanEvidenceCorrupted(str(exc)) from exc
+    if content is None:
+        return ActiveGuide()
+    return ActiveGuide(content=content, path=state.get("guide_path"), revisions=tuple(state.get_array_of_dicts("guide_revisions")))
+
+
+def _guide_section(active: ActiveGuide) -> str:
+    """``## Project review guidance``, disclosing that a guide is in force and which one.
+
+    Empty when none is. Written **before** :data:`PLAN_HEADING`, like every other section, for
+    the reason recorded there.
+
+    The reviewer already has the guide's text -- spliced into its prompt by
+    :func:`arl.guide.compose` -- so this is not the guidance itself. It is the audit trail: a
+    review's own bundle should say what instructions it ran under, and, once a
+    ``resume --guide`` has replaced the guide, *that the earlier phases ran under different
+    ones*. A final cumulative review judging work done across several revisions has no other
+    way to learn that.
+
+    The path goes through :func:`arl.guide.display_path`: ``review_guide`` is
+    repository-controlled, and ``range.txt`` is an attachment the reviewer reads.
+    """
+    if active.content is None:
+        return ""
+    out = ["\n## Project review guidance\n\n"]
+    out.append(
+        f"This repository supplied a review guide, frozen when this activation was armed and "
+        f"spliced into the instructions above: {guide.display_path(active.path)}, sha256 "
+        f"{active.sha256}.\n"
+    )
+    if len(active.revisions) > 1:
+        out.append(
+            f"\nIt has been replaced {len(active.revisions) - 1} time(s) since arming, so earlier phases were reviewed under different guidance:\n\n"
+        )
+        for index, entry in enumerate(active.revisions):
+            recorded = str(entry.get("sha256") or "")
+            out.append(f"- revision {index}: recorded at phase {entry.get('phase')}, {_format_at(entry.get('at'))} -- sha256 {recorded}\n")
+    return "".join(out)
+
+
 #: ``range.txt``'s final heading. **The plan section is deliberately last**, and
 #: :func:`_downgrade_bundle_round` depends on that: restoring an omitted plan is then a
 #: truncate-at-the-heading and re-append, which cannot be confused by anything the plan text
@@ -1392,12 +1479,14 @@ def _range_text(  # noqa: PLR0913 - one independently meaningful piece of eviden
     scope: LateScope | None = None,
     chunks: int = 1,
     plan_in_session: bool = False,
+    active_guide_for_range: ActiveGuide | None = None,
 ) -> str:
     """The bundle's ``range.txt``: what is under review, and what is *not* represented.
 
     ``plan_in_session`` replaces the frozen plan excerpt with a one-line note. See
     :data:`_PLAN_IN_SESSION` for when that is true and why it is safe.
     """
+    active_guide_for_range = active_guide_for_range or ActiveGuide()
     repo, base, head = target.repo, target.base, target.head
     out: list[str] = ["# Review range\n\n"]
     out.append(f"scope: {target.scope}\n")
@@ -1473,6 +1562,8 @@ def _range_text(  # noqa: PLR0913 - one independently meaningful piece of eviden
     out.append(_manual_accepts_section(state))
 
     out.append(_plan_revisions_section(revisions))
+
+    out.append(_guide_section(active_guide_for_range))
 
     out.append(_plan_section(revisions, plan_in_session=plan_in_session))
     return "".join(out)
@@ -1747,6 +1838,13 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
     except planrev.EvidenceCorrupted as exc:
         raise PlanEvidenceCorrupted(str(exc)) from exc
 
+    # The repo-supplied review guide, on exactly the same footing: it is spliced into the
+    # reviewer's own instructions, so a frozen copy that no longer verifies is a review that
+    # would run under something other than what every surface says it ran under. Verified here
+    # as well as in `execute` so the failure lands where the plan's does, on the arm that
+    # already releases the reservations.
+    active = active_guide(state)
+
     # `incremental.diff` -- only when an earlier round of this label already ran.
     # `round_history[*].tree` is untrusted (state.json is not a trust boundary), so it is
     # resolved through `checked_tree` before it ever reaches a git argv, exactly like
@@ -1790,6 +1888,7 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
         scope=scope,
         chunks=total,
         plan_in_session=plan_in_session,
+        active_guide_for_range=active,
     )
     _write_private(dest / "range.txt", _encode(range_text))
 
@@ -2360,6 +2459,36 @@ def _reduce_transcript(implementation: harness.Harness, out_path: Path) -> harne
     return usage
 
 
+def _confirm_prompt_unchanged(run: Invocation) -> None:
+    """Refuse to invoke when the composed prompt on disk is not what this process composed.
+
+    :func:`invoke` uses ``run.prompt_text`` rather than re-reading the file, so a substitution
+    cannot change what a real harness is told. This is the other half: it *notices*. A
+    ``raw/<label>-prompt.md`` that no longer matches means something running as this user
+    rewrote the gate's own instructions between composing and invoking -- the ``verify_cmd``
+    descendant case ``_run_verify`` and ``docs/security.md`` describe -- and continuing would
+    at best leave a false audit trail beside a review that ran under something else.
+
+    It is also what protects the ``ARL_REVIEWER_CMD`` seam, which is handed the *path* and
+    opens it itself. That check is inherently racy, exactly as :func:`_confirm_staged_unchanged`
+    documents for ``-f`` attachments: nothing ending in a pathname can close the window, and
+    this moves the check as close to the open as this process can get.
+
+    Raises :class:`BundleError`, which reaches the caller as ``OP_FAILURE`` -- a refusal to
+    review, never a review under instructions nobody wrote.
+    """
+    if not run.prompt_text:
+        return
+    try:
+        on_disk = _decode(run.prompt_file.read_bytes())
+    except OSError as exc:
+        raise BundleError(
+            f"the composed reviewer prompt at {run.prompt_file} could not be read back ({exc}); nothing was sent to the reviewer"
+        ) from exc
+    if on_disk != run.prompt_text:
+        raise BundleError(f"the composed reviewer prompt at {run.prompt_file} changed after it was written; nothing was sent to the reviewer")
+
+
 def _confirm_staged_unchanged(attachments: Sequence[tuple[Path, str]]) -> None:
     """Refuse if a staged attachment no longer holds the bytes it was staged with.
 
@@ -2398,6 +2527,7 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
     # close the window (nothing that ends in a pathname can), it moves the check as close to
     # the open as this process can get. See `stage_attachments`.
     _confirm_staged_unchanged(run.attachments)
+    _confirm_prompt_unchanged(run)
 
     stdin: bytes | None = None
     cwd: str | None = None
@@ -2412,8 +2542,13 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
             env["ARL_CONTEXT_FILES"] = "\n".join(str(path) for path in run.context_files)
         command = [reviewer_cmd, str(run.bundle_dir), str(run.prompt_file)]
     else:
-        # `$(cat …)` strips trailing newlines; the prompt is a fixed file in the plugin.
-        message = _decode(run.prompt_file.read_bytes()).rstrip("\n")
+        # `$(cat …)` strips trailing newlines. **The composed bytes are used from memory**,
+        # not re-read: `run.prompt_file` for a phase or final review is a file this gate wrote
+        # into the activation directory, which `docs/security.md` records as reachable by a
+        # `verify_cmd` descendant that outlived `_run_verify` -- and instructions are a
+        # stronger primitive than the evidence `_confirm_staged_unchanged` already protects.
+        # Only the two fixed plugin prompts (contract repair, clarify) are read from disk.
+        message = (run.prompt_text or _decode(run.prompt_file.read_bytes())).rstrip("\n")
         spec = harness.ReviewSpec(
             repo=target.repo,
             prompt_text=message,
@@ -3649,6 +3784,63 @@ class _ReviewRun:
     #: Computed once, before the bundle, so `range.txt`'s disclosure and `parse`'s decision
     #: are the same object.
     scope: LateScope | None = None
+    #: The repo-supplied guide this run's ``prompt_file`` was composed with, for the stored
+    #: report's disclosure. ``ActiveGuide()`` -- content ``None`` -- when there is none.
+    guide: ActiveGuide = field(default_factory=ActiveGuide)
+    #: The composed prompt's own bytes. Carried so every invocation this run makes -- warm and
+    #: the cold confirmation alike -- is told exactly what this process composed, rather than
+    #: whatever ``prompt_file`` holds by the time each one opens it. See
+    #: :func:`_confirm_prompt_unchanged`.
+    prompt_text: str = ""
+
+
+def guide_disclosure(active: ActiveGuide) -> str:
+    """``<path> (sha256 <digest>)`` for a stored report, or "" when no guide is in force.
+
+    The path goes through :func:`arl.guide.display_path` for the reason every other surface
+    does: ``review_guide`` is repository-controlled, and a report is read in a terminal.
+    """
+    if active.content is None:
+        return ""
+    return f"{guide.display_path(active.path)} (sha256 {active.sha256})"
+
+
+def _compose_prompt(state: State, raw_dir: Path, label: str, *, is_phase: bool) -> tuple[Path, str, ActiveGuide]:
+    """Write this round's actual prompt to ``raw/<label>-prompt.md`` and answer its path.
+
+    **Composition always runs, guide or no guide.** With none active it only strips the
+    placeholder line, so there is one code path rather than two, the raw
+    ``<!-- ARL:PROJECT-GUIDANCE -->`` comment never reaches the reviewer, and every round
+    leaves on disk the exact instructions it ran under -- which is what makes "what was this
+    review told to do" answerable afterwards rather than reconstructable.
+
+    The composed file is written once per ``execute`` and reused by everything downstream:
+    :func:`invoke`, :func:`run_clarify` and, above all, :func:`_confirm_cold`, which reuses
+    the same :class:`_ReviewRun`. Warm and cold therefore share one file and one nonce --
+    required, not incidental: the cold confirmation exists to check the same work, and it
+    cannot do that under different instructions.
+
+    ``reviewer-repair.md`` and ``reviewer-clarify.md`` carry no placeholder, so they are never
+    composed into and are used from the plugin directory as before: a contract repair must not
+    carry extra instructions, and a clarify answers a question about a review already given.
+
+    Raises :class:`BundleError` when the file cannot be written -- reaching ``execute``'s
+    ``BundleError`` arm, which releases the reservations and returns ``OP_FAILURE``
+    (``kind="bundle"``). Never a review that ran under the uncomposed plugin prompt: that
+    would silently drop the guide every disclosure says was in force.
+    """
+    active = active_guide(state)
+    source = arl.prompt_path("reviewer-phase" if is_phase else "reviewer-final")
+    try:
+        composed = guide.compose(_decode(source.read_bytes()), guide=active.content, path=active.path, sha256=active.sha256)
+    except OSError as exc:
+        raise BundleError(f"the reviewer prompt at {source} could not be read: {exc}") from exc
+    destination = raw_dir / f"{label}-prompt.md"
+    try:
+        _write_private(destination, _encode(composed))
+    except OSError as exc:
+        raise BundleError(f"the composed reviewer prompt could not be written to {destination}: {exc}") from exc
+    return destination, composed, active
 
 
 def _settle_pointer(rr: _ReviewRun, ref: SessionRef, *, started_ms: int, invoked: bool) -> str:
@@ -3784,6 +3976,9 @@ def _confirm_cold(rr: _ReviewRun, continued: Review) -> Review:
     cold_run = Invocation(
         bundle_dir=rr.bundle_dir,
         prompt_file=rr.prompt_file,
+        # The warm call's own composed bytes, not a re-read: the cold confirmation exists to
+        # check the same work, and it cannot do that under instructions that may have moved.
+        prompt_text=rr.prompt_text,
         title=rr.title,
         out_path=rr.raw_dir / f"{rr.label}-{rr.target.label}-cold.out",
         session_id="",
@@ -4033,6 +4228,12 @@ def _publish(rr: _ReviewRun, review: Review, *, round_number: int) -> bool:
                     # transaction, so it sees this round's own entry -- and before the store, so
                     # the report carries it.
                     review.oscillating = _render_oscillating(state, target, config)
+            # Set here, from the guide this run actually composed with, so the stored report
+            # names it even on the failure paths -- and so a later `resume --guide` cannot
+            # change what an already-written report says an earlier round ran under. One line
+            # for the pair under `cold_confirm`: warm and cold share the composed prompt, so a
+            # per-sub-review line would say the same thing twice.
+            review.guide = guide_disclosure(rr.guide)
             report.store(review, target, seq=rr.label, act_dir=state.act_dir, config=config)
             if not record:
                 raise _TransactionAborted
@@ -4528,6 +4729,7 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
         digest = build_bundle(
             target, bundle_dir, state=state, config=config, warnings=warnings, round_number=ref.round, scope=scope, plan_in_session=plan_in_session
         )
+        prompt_file, prompt_text, active = _compose_prompt(state, raw_dir, label, is_phase=target.is_phase)
     except (BundleTooLarge, PlanEvidenceCorrupted) as exc:
         _release_reservations(state, ref, claim_id=claim_id, expected=expected, config=config)
         return Review(verdict="NEEDS_HUMAN", error=str(exc))
@@ -4543,7 +4745,9 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
         title=title,
         bundle_dir=bundle_dir,
         raw_dir=raw_dir,
-        prompt_file=arl.prompt_path("reviewer-phase" if target.is_phase else "reviewer-final"),
+        prompt_file=prompt_file,
+        prompt_text=prompt_text,
+        guide=active,
         expected=expected,
         claim_id=claim_id,
         bundle_digest=digest,
@@ -4610,6 +4814,7 @@ def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expec
     run = Invocation(
         bundle_dir=bundle_dir,
         prompt_file=rr.prompt_file,
+        prompt_text=rr.prompt_text,
         title=title,
         out_path=raw_dir / f"{label}-{target.label}.out",
         session_id=ref.session_id,
