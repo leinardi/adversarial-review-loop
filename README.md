@@ -28,11 +28,11 @@ The review is not advice Claude may weigh up. It is a `PreToolUse` gate on the c
 
 ## 📦 Install
 
-Add this repository as a local plugin marketplace, then install the plugin:
+Add this repository as a plugin marketplace, then install the plugin:
 
 ```console
 $ claude
-> /plugin marketplace add ~/Workspace/github/adversarial-review-loop
+> /plugin marketplace add leinardi/adversarial-review-loop
 > /plugin install adversarial-review-loop
 ```
 

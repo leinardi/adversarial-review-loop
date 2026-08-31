@@ -1,5 +1,6 @@
 {
   "name": "adversarial-review-loop",
+  "description": "Home of adversarial-review-loop: adversarial review as a commit-time enforcement gate.",
   "owner": {
     "name": "Roberto Leinardi"
   },
