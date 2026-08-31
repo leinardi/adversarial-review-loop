@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.13.0 or v0.13.0). Leave empty to derive it from the Conventional Commits since the last release tag."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      # Needed for the explicit `gh workflow run` call below - a GITHUB_TOKEN-authored
+      # push/PR does not fire other workflows' push/pull_request triggers (GitHub's
+      # loop-prevention), so without dispatching ci.yaml ourselves the opened PR would
+      # show no checks at all.
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # commitizen's scm version provider reads the current version from the highest
+          # matching git tag, so the tags have to be fetched, not just the history.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dev dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Resolve the version to release
+        id: version
+        env:
+          RAW: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RAW" ]; then
+            VERSION="${RAW#v}"
+            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Version must look like X.Y.Z (got '$RAW')" >&2
+              exit 1
+            fi
+          else
+            # --get-next prints only the computed version on stdout. Two exit codes are
+            # routine rather than broken, and both mean the same thing to us - measured
+            # against commitizen 4.18.0, not read off the docs:
+            #   3  NO_COMMITS_FOUND    - nothing at all since the last tag
+            #   21 NoneIncrementExit   - commits exist but none are eligible (a docs-only
+            #                            or chore-only stretch, which is common here)
+            # stderr is left attached so commitizen's own [NO_COMMITS_TO_BUMP] line lands
+            # in the log next to the message below.
+            set +e
+            VERSION=$(cz bump --get-next)
+            STATUS=$?
+            set -e
+            case "$STATUS" in
+              0) ;;
+              3 | 21)
+                echo "No feat/fix/perf/refactor or breaking-change commit since the last release tag, so there is nothing to bump. Re-run this workflow with an explicit version to force one." >&2
+                exit 1
+                ;;
+              *)
+                echo "cz bump --get-next failed with exit code $STATUS" >&2
+                exit "$STATUS"
+                ;;
+            esac
+          fi
+          echo "Releasing $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # The ci.yaml run dispatched at the end of this job executes only its `test` job -
+      # every other job there is gated `if: github.event_name == 'pull_request'` - so this
+      # is the gate that actually runs before a version ships.
+      - name: Run the self-tests
+        run: make test
+
+      - name: Bump the version in plugin.json
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" .claude-plugin/plugin.json
+
+      - name: Commit and push the bump branch
+        id: branch
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BRANCH="release/v$VERSION"
+          git switch -c "$BRANCH"
+          git add .claude-plugin/plugin.json
+          if git diff --cached --quiet; then
+            echo "Nothing changed - is $VERSION already the current version?" >&2
+            exit 1
+          fi
+          git commit -m "chore(release): bump version to $VERSION"
+          git push origin "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+        run: |
+          set -euo pipefail
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(release): bump version to $VERSION" \
+            --body "Automated version bump. Review the diff, then merge — merging triggers \`auto-tag-release.yaml\`, which tags \`adversarial-review-loop--v$VERSION\` and creates the GitHub release."
+
+      - name: Trigger CI checks on the bump branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yaml --ref "$BRANCH"

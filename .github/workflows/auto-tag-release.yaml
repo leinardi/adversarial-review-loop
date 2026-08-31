@@ -1,0 +1,61 @@
+name: Auto Tag Release
+
+# Fires on every push to main, but only acts on the one that actually changed the version in
+# .claude-plugin/plugin.json (release.yaml's bump-and-PR flow, or any future manual bump) -
+# every other push exits at the first check below.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  auto-tag-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Detect a version bump
+        id: detect
+        run: |
+          set -euo pipefail
+          CURRENT=$(python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])")
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            PREVIOUS=$(git show HEAD~1:.claude-plugin/plugin.json | python3 -c "import sys, json; print(json.load(sys.stdin)['version'])")
+          else
+            PREVIOUS=""
+          fi
+          if [ "$CURRENT" = "$PREVIOUS" ]; then
+            echo "Version unchanged ($CURRENT) - not a release commit."
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version changed: $PREVIOUS -> $CURRENT."
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+            echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag and release
+        if: steps.detect.outputs.bumped == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.detect.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The `<plugin-name>--v<version>` shape is what Claude Code's plugin dependency
+          # resolver looks for, and is what `claude plugin tag` produces. See .cz.toml.
+          TAG="adversarial-review-loop--v$VERSION"
+          if gh api "repos/$REPOSITORY/git/refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists - skipping (safe re-run)."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "adversarial-review-loop $VERSION"
+          git push origin "$TAG"
+          gh release create "$TAG" --title "v$VERSION" --generate-notes

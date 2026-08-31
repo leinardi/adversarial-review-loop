@@ -1,8 +1,8 @@
 # Development dependencies. NOT runtime dependencies: the plugin itself needs only
 # python3 >= 3.12 from the standard library, and must work straight from a checkout.
 #
-# Only tools invoked directly belong here. ruff and mypy are pinned by rev in
-# .pre-commit-config.yaml and run in pre-commit's own environments.
+# Only tools invoked directly belong here, plus commitizen (see below). ruff and mypy are
+# pinned by rev in .pre-commit-config.yaml and run in pre-commit's own environments.
 #
 # Install with: make dev-deps
 pytest==9.0.2
@@ -10,3 +10,7 @@ pytest==9.0.2
 # process -- so it is bound by process startup rather than by CPU: 80s serial against 14s on
 # 32 cores. Optional at runtime: `make test-unit` falls back to a serial run without it.
 pytest-xdist==3.8.0
+# Derives the next version from the Conventional Commits since the last release tag, for
+# .github/workflows/release.yaml. Configured in .cz.toml. Not a locally invoked tool -- it lives
+# here rather than pinned inline in the workflow so Dependabot's pip ecosystem keeps it current.
+commitizen==4.18.0

@@ -1,0 +1,23 @@
+# Commitizen configuration. Its only job here is to derive the next version from the
+# Conventional Commits since the last release tag, for .github/workflows/release.yaml.
+# Commit messages are enforced separately, by conventional-pre-commit in
+# .pre-commit-config.yaml; commitizen is never used to *write* a commit in this repository.
+#
+# major_version_zero is deliberately left at its default of false: a feat!: or a
+# BREAKING CHANGE: footer bumps the major even from a 0.x version.
+[tool.commitizen]
+name = "cz_conventional_commits"
+
+# The current version is the highest matching git tag, so there is no second copy of the
+# version string to drift out of sync with .claude-plugin/plugin.json (which the release
+# workflow writes). A tag_format typo shows up as commitizen reporting the version as 0.0.0.
+version_provider = "scm"
+
+# Required by Claude Code's plugin dependency resolver, which lists the repository's tags and
+# filters to those starting with "<plugin-name>--v". Identical to what `claude plugin tag`
+# produces, so tagging by hand and tagging from CI stay interchangeable.
+# https://code.claude.com/docs/en/plugin-dependencies#tag-plugin-releases-for-version-resolution
+tag_format = "adversarial-review-loop--v$version"
+
+# Release notes come from `gh release create --generate-notes`; this repository has no CHANGELOG.md.
+update_changelog_on_bump = false
