@@ -203,14 +203,20 @@ If you believe the loop should end, say so and let the user run /opencode-review
 """
 
 EXPANSION_DENIED: Final = """\
-This command contains {expansion}, so the gate cannot tell what it will run.
+This command contains {expansion}, so the gate cannot tell what program it will run.
 
 That is not a guess it may make: a command name produced by an expansion can be `git`, and a
-commit created that way would never reach the review gate at all. Substitutions and variable
-expansions are therefore refused while this worktree is under review.
+commit created that way would never reach the review gate at all.
 
-Write the command out literally, or split it into separate Bash calls and use the results
-yourself. A `$` inside single quotes is literal to bash and is not affected.
+Only the **command name** is refused. An expansion in an argument is fine -- `echo "exit=$?"`
+runs `echo` -- and so is anything inside the body of a heredoc whose delimiter is quoted
+(`<<'EOF'`, `<<"EOF"`), which bash does not expand at all. A `$` inside single quotes is
+literal to bash and is not affected. Two things beyond the name are still refused: the body of
+a heredoc whose delimiter is *unquoted*, which bash does expand, and an argument to a program
+whose job is to run it (`sh -c`, `env`, `xargs`, `eval`, ...).
+
+So: quote the heredoc delimiter, write the command name out literally, or split it into
+separate Bash calls and use the results yourself.
 """
 
 ACTIVATION_MOVED: Final = """\
@@ -559,9 +565,11 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
         _guard_state_root(hook, payload)
         hook.pass_()
 
-    # Words this gate cannot read are refused before anything is classified. `$(printf git)`
-    # runs `git commit`, and no textual pass -- nor bashlex, which now reads the shape -- can
-    # resolve it to a command name. See `cmdshape.unresolved_expansion`.
+    # A command *name* this gate cannot read is refused before anything is classified.
+    # `$(printf git)` runs `git commit`, and no textual pass can resolve it to a command name.
+    # Scoped to the name: an expansion in an argument, or in a quoted heredoc body, is left
+    # alone, and the commit path's own deny-list is what refuses `$` there.
+    # See `cmdshape.unresolved_expansion`.
     expansion = cmdshape.unresolved_expansion(command)
     if expansion:
         hooks.deny(hook, EXPANSION_DENIED.format(expansion=expansion))

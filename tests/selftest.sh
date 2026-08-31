@@ -328,6 +328,111 @@ if start 'command shape: allowlist table, through an armed pretool'; then
     # "reconcile: a bad phase-1 commit is recoverable ..." below.
 fi
 
+if start 'expansion pre-check: scoped to a command name, and not a way past the commit gate'; then
+    new_case
+    arm_ok && phases_ok
+
+    # The pre-check refuses a command *name* an expansion decides. It is not the
+    # commit gate, and the point of this section is that narrowing it did not
+    # make it one: everything it now allows through still meets the commit gate
+    # exactly as before.
+
+    # Allowed: a quoted heredoc body. Bash expands nothing in it, so no `$` or
+    # backtick in it can decide a command name. These are the shapes a live run
+    # measured -- each one previously cost a scratchpad file plus a second Bash
+    # call. None mentions a commit, so none is routed to the commit gate at all.
+    runs() {
+        local d
+        d=$(pre Bash "$1")
+        if [ "$d" = 'pass' ]; then ok "runs: $2"; else bad "runs: $2" "$d ($(pre_reason))"; fi
+    }
+    # shellcheck disable=SC2016  # the unexpanded text is exactly what is sent
+    runs 'python3 - <<'"'"'PY'"'"'
+if re.match(r"/^\/api$/", line):
+    print("$HOME")
+PY' 'a quoted heredoc carrying a regex and a $'
+    # shellcheck disable=SC2016
+    runs 'cat <<'"'"'TS'"'"'
+const q = `SELECT ${id}`;
+TS' 'a quoted heredoc carrying a template literal'
+    # shellcheck disable=SC2016
+    runs 'fallow > /dev/null 2>&1; echo "exit=$?"' 'an expansion in an argument'
+
+    # Denied, and by the *commit gate*, not the pre-check: `mentions_commit`
+    # reads the raw text multiline, so a heredoc body naming a commit is still
+    # routed to `validate_commit`, which refuses the shape. The heredoc
+    # allowance must never change this -- over-detection is the safe direction.
+    approved_before=$(jq -r '(.approved_trees // []) | length' "$(state_file)")
+    naming=$(pre Bash 'cat <<'"'"'PY'"'"'
+subprocess.run("git commit -m x")
+PY')
+    assert_eq 'a heredoc body naming a commit is denied' "$naming" 'deny'
+    reason=$(pre_reason)
+    assert_contains 'denied as a commit shape, not as an expansion' "$reason" 'This commit command was not accepted'
+
+    # And that denial is inert: it consumed no approval and left no pending state.
+    assert_eq 'the denial left no pending approval' "$(sget pending_approved_tree)" ''
+    assert_eq 'and approved no tree' \
+        "$(jq -r '(.approved_trees // []) | length' "$(state_file)")" "$approved_before"
+    assert_eq 'and the phase did not move' "$(sget phase)" '1'
+
+    # Still refused by the pre-check: a command name an expansion decides, and
+    # an *unquoted* heredoc body, which bash does expand.
+    refused() {
+        local d
+        d=$(pre Bash "$1")
+        if [ "$d" = 'deny' ]; then ok "refused: $2"; else bad "refused: $2" "$d"; fi
+    }
+    # shellcheck disable=SC2016
+    refused '$(printf git) commit -m x' 'a command name that is a substitution'
+    # shellcheck disable=SC2016
+    refused 'cat <<EOF
+$(printf hi)
+EOF' 'an unquoted heredoc body'
+    # shellcheck disable=SC2016
+    refused 'sh -c "$CMD"' 'an argument to an exec wrapper'
+
+    # The scan may only skip a heredoc body, and only once it knows exactly where
+    # that body ends. Both of these were verified against real bash: it runs
+    # `$(printf git) commit -m x`, and neither carries a literal "git commit" for
+    # detection to match, so the pre-check is the only thing in the way.
+    # shellcheck disable=SC2016
+    refused '# <<'"'"':'"'"'
+$(printf git) commit -m x
+:' 'a heredoc opened inside a comment'
+    # shellcheck disable=SC2016
+    refused 'cat <<E'"'"'OF'"'"'
+body
+EOF
+$(printf git) commit -m x' 'a delimiter quoted in the middle'
+    # shellcheck disable=SC2016
+    refused '\
+# <<'"'"':'"'"'
+$(printf git) commit -m x
+:' 'a comment after a line continuation'
+    # shellcheck disable=SC2016
+    refused '((1 << '"'"'true'"'"'))
+$(printf git) commit -m x
+true' 'a left shift read as a redirect'
+    # shellcheck disable=SC2016
+    refused 'cat <<"E\qOF"
+body
+E\qOF
+$(printf git) commit -m x' 'a backslash bash keeps in a delimiter'
+    # shellcheck disable=SC2016
+    refused 'cat <<E\
+OF
+body
+EOF
+$(printf git) commit -m x' 'a delimiter spliced by a line continuation'
+    # shellcheck disable=SC2016
+    refused 'cat <<\
+EOF
+body
+EOF
+$(printf git) commit -m x' 'a continuation immediately after <<'
+fi
+
 # --------------------------------------------------------------------------
 # Arming
 # --------------------------------------------------------------------------

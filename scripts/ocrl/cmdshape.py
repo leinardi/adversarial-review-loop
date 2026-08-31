@@ -22,6 +22,15 @@ otherwise: it runs on commands the deny-list *would* refuse, so there may be not
 parseable to work with. See :func:`detection_form` and :func:`is_set_phases`, which document
 the two bypasses that the shell's raw-string matching left open.
 
+A third check, :func:`unresolved_expansion`, runs on **every** Bash call rather than only on
+the commit path, and is not the boundary either. It exists so textual detection cannot go
+blind on a command *name*, and it is scoped to exactly that: a name whose value an expansion
+decides. It deliberately does not refuse an expansion in an argument or in a quoted heredoc
+body -- refusing those bought no part of the guarantee and cost the loop a Bash call every
+time it wanted to write a script. **The deny-list did not move for it**: on the commit path
+``$``, backticks, ``;``, ``|``, redirection, subshells, globs and newlines are all still
+refused, so ``git commit -m "$(x)"`` is denied exactly as before.
+
 Every rejection raises ``CommandShapeError``; its message is the explanation the shell kept
 in ``OCRL_CMD_ERROR`` and the gate shows to the model.
 """
@@ -246,11 +255,25 @@ def _parse_deadline() -> Iterator[None]:
 
 
 def _parse(command: str) -> Any:
-    """Parse one command with bashlex, or raise ``CommandShapeError`` saying why not.
+    """Parse one command with bashlex and insist it is a single statement, or raise.
+
+    The commit path's entry point. :func:`unresolved_expansion` uses :func:`_parse_trees`
+    directly: "more than one statement" is a *commit-shape* policy, and a pre-check that runs
+    on every Bash call has no business enforcing it.
+    """
+    trees = _parse_trees(command)
+    if len(trees) != 1:
+        raise CommandShapeError("the command is more than one statement")
+    return trees[0]
+
+
+def _parse_trees(command: str) -> Sequence[Any]:
+    """Parse a command with bashlex, or raise ``CommandShapeError`` saying why not.
 
     bashlex is imported here rather than at module scope: it builds its LALR tables at
-    import time, which costs ~55 ms, and only a command that already looks like a commit
-    ever reaches this function. A ``Read`` must not pay for a parser it never runs.
+    import time, which costs ~55 ms, and only a command that already looks like a commit --
+    or that a textual scan has already flagged as unreadable -- ever reaches this function.
+    A ``Read`` must not pay for a parser it never runs.
 
     Every failure is a refusal. ``ParsingError`` is the ordinary one -- the command is not
     valid bash -- and anything else coming out of the parser is a defect in it, which is
@@ -272,9 +295,7 @@ def _parse(command: str) -> Any:
         log_exception()
         raise CommandShapeError(f"the command could not be parsed ({type(exc).__name__})") from exc
 
-    if len(_nodes(trees, "a parse that is not a list of nodes")) != 1:
-        raise CommandShapeError("the command is more than one statement")
-    return trees[0]
+    return _nodes(trees, "a parse that is not a list of nodes")
 
 
 def _nodes(value: Any, what: str) -> Sequence[Any]:
@@ -412,8 +433,9 @@ def detection_form(command: str) -> str:
 
     **The vendored parser does not close this, and no parser can.** bashlex reports a
     command whose *name is a substitution node*; what the node evaluates to is decided when
-    it runs. What closes it is the deny-list refusing ``$`` and backticks outright while the
-    gate is enforcing -- see :func:`unresolved_expansion`.
+    it runs. What closes it is :func:`unresolved_expansion` refusing such a name outright
+    while the gate is enforcing, and -- on the commit path specifically -- the deny-list
+    refusing ``$`` and backticks anywhere at all.
     """
     out: list[str] = []
     quote = ""
@@ -497,29 +519,226 @@ _EXPANSIONS: Final = {
     "$'": "an ANSI-C quoted string ($' … ')",
 }
 
+#: What a non-``tilde`` part of a parsed word means, by bashlex node kind. Every one of them
+#: has a value only the shell knows at exec time; the mapping exists so the denial names the
+#: construct the model actually wrote.
+_PART_EXPANSIONS: Final = {
+    "commandsubstitution": "a command substitution ($( … ) or backticks)",
+    "parameter": "a variable expansion ($NAME, ${ … } or $' … ')",
+    "processsubstitution": "a process substitution (<( … ))",
+}
+
+#: Programs whose whole job is to run a command line handed to them as an argument. The
+#: name-only rule below would clear ``sh -c "$CMD"`` -- a literal name, an argument the gate
+#: cannot read -- and that argument is a command name in every sense that matters here, so
+#: these are the one case where an argument is still refused.
+#:
+#: **A speed bump, not a boundary.** ``python3 -c "$CODE"`` walks straight through it, as
+#: ``python3 script.py`` always did; so does any interpreter not on this list, and so does a
+#: shell function. What actually catches a commit made that way is ``confirm-commit``
+#: noticing afterwards that HEAD moved to a tree no review approved. This list buys one
+#: specific thing: ``sh -c 'git commit'`` is caught today by ``detection_form``'s quote
+#: stripping, and ``sh -c "$CMD"`` must not become the trivial way around that.
+_EXEC_WRAPPERS: Final = frozenset({"sh", "bash", "zsh", "env", "xargs", "eval", "timeout", "nohup", "command", "sudo"})
+
 
 def unresolved_expansion(command: str) -> str:
-    """Name the expansion that makes this command's words unknowable, or return "".
+    """Name the expansion that makes this command's **name** unknowable, or return "".
 
     Detection reads text, and ``$(printf git) commit -m x`` contains no word this or any
     other textual pass can resolve to ``git``. It runs ``git commit`` all the same. A real
-    parser does not fix this either: bashlex would report a command whose *name is a
-    substitution node*, and the only sound answer to that is still refusal.
+    parser does not fix that by itself: bashlex reports a command whose *name is a
+    substitution node*, and the only sound answer to that is still refusal. This function is
+    what makes the refusal, on every Bash call, before anything is classified.
 
-    So the deny-list absorbs it, which is the same trade the tokenizer already makes -- the
-    parser is defensible only because almost the whole grammar is refused before it runs.
-    A ``$`` or a backtick outside single quotes is refused while the gate is enforcing;
-    inside single quotes both are literal to bash and are left alone, so ordinary
-    ``grep '$foo'`` still works.
+    **Its guarantee is about a command name, and nothing wider.** An expansion in an
+    *argument* was never part of it: ``echo "exit=$?"`` runs ``echo``, which is exactly what
+    it says. Refusing those cost a real loop a scratchpad file and a second Bash call roughly
+    six times in one session -- once forcing a ``$`` to be written ``chr(36)`` in Python
+    source, an obfuscation that made the script less readable and nothing safer. This function
+    already says as much about the wider hole it cannot close: ``eval``, ``xargs``, ``env``
+    and a shell function all reach ``git`` with a literal command name, and what catches those
+    is ``confirm-commit`` noticing afterwards that HEAD moved to a tree no review approved.
 
-    This does not make the gate a complete barrier, and nothing textual can: ``eval``,
-    ``xargs``, ``env`` and a shell function all reach ``git`` with a literal command name.
-    What catches those is ``confirm-commit`` noticing afterwards that HEAD moved to a tree no
-    review ever approved.
+    Four steps, in order:
+
+    1. **A textual scan, heredoc-aware.** ``$`` and backticks outside single quotes are
+       located exactly as before, with one addition: a heredoc opened with a *quoted*
+       delimiter (``<<'EOF'``, ``<<"EOF"``, ``<<-'EOF'``) has a body bash expands **nothing**
+       in, so that body is skipped whole. Finding nothing returns ``""`` with no parse, which
+       is every ordinary command -- the ~55 ms bashlex import stays off the hot path.
+    2. **An unquoted heredoc body is refused outright.** ``<<EOF`` *is* expanded by bash, and
+       bashlex hides that body in a ``heredoc`` node rather than in a word, so step 3 would
+       clear it while bash cheerfully ran the substitution inside it. Quote the delimiter and
+       the body is data again.
+    3. **Parse, then refuse only a name.** Only a command that today is denied outright gets
+       this far, so no call that currently succeeds starts paying for the parser. Every
+       ``command`` node in the tree is walked -- a pipeline and a ``;`` list both hold several
+       -- and its name is its first ``word`` part, ``assignment`` prefixes skipped and
+       ``redirect`` parts ignored. A name word carrying any non-``tilde`` part is refused, by
+       :func:`_reject_unreadable_word`'s own rule applied to the name alone. A parse failure
+       or a :class:`CommandShapeTimeout` denies with the message the textual scan already had.
+    4. **The wrapper guard**, ``_EXEC_WRAPPERS`` -- see there for why it is a speed bump
+       rather than a boundary.
+
+    A ``$`` inside single quotes is literal to bash and is left alone at every step, so
+    ordinary ``grep '$foo'`` still works.
+    """
+    found = _scan_expansion(command)
+    if found is None:
+        return ""
+    index, in_expanded_heredoc = found
+    if in_expanded_heredoc:
+        return f"{_expansion_at(command, index)} in the body of a heredoc whose delimiter is unquoted, which bash expands"
+    try:
+        trees = _parse_trees(command)
+    except CommandShapeError:
+        # Including the deadline. Neither leaves anything to reason about, so the refusal is
+        # the one the scan already justified.
+        return _expansion_at(command, index)
+    for node in _command_nodes(trees):
+        reason = _unreadable_command_name(node)
+        if reason:
+            return reason
+    return ""
+
+
+def _unreadable_command_name(node: Any) -> str:
+    """Why this one ``command`` node's name cannot be read, or ``""``.
+
+    The name is the first part that is neither an ``assignment`` prefix (``VAR=x git commit``
+    keeps ``git`` as its name) nor a ``redirect`` (``> /dev/null`` can sit anywhere in a
+    command's parts, including before the name). A node with no word part at all runs no
+    program -- a bare assignment, a bare redirection -- so there is nothing to refuse.
+    """
+    name_word: Any = None
+    arguments: list[Any] = []
+    for part in _nodes(getattr(node, "parts", ()), "a command whose parts are not a list of nodes"):
+        kind = getattr(part, "kind", "")
+        if kind == "redirect" or (name_word is None and kind == "assignment"):
+            continue
+        if name_word is None:
+            if kind != "word":
+                # Unreachable with today's grammar; a name this module cannot even identify
+                # is the one case where guessing would be worst.
+                return f'a "{kind}" where the command name should be'
+            name_word = part
+            continue
+        if kind == "word":
+            arguments.append(part)
+
+    if name_word is None:
+        return ""
+    name = getattr(name_word, "word", "")
+    expansion = _word_expansion(name_word)
+    if expansion:
+        return f"{expansion} in the command name"
+    if not isinstance(name, str) or name.rsplit("/", 1)[-1] not in _EXEC_WRAPPERS:
+        return ""
+    for argument in arguments:
+        expansion = _word_expansion(argument)
+        if expansion:
+            return f"{expansion} in an argument to `{name}`, which runs the command line it is given"
+    return ""
+
+
+def _word_expansion(word: Any) -> str:
+    """The first non-``tilde`` part of a parsed word, described, or ``""`` if it is literal.
+
+    ``tilde`` is the one exception, for :func:`_reject_unreadable_word`'s reason: ``~/x``
+    reaches the program as written and expands there.
+    """
+    for part in _nodes(getattr(word, "parts", ()), "a word whose parts are not a list of nodes"):
+        kind = getattr(part, "kind", "")
+        if kind != "tilde":
+            return _PART_EXPANSIONS.get(kind, f'a "{kind}" whose value the gate cannot know')
+    return ""
+
+
+def _command_nodes(trees: Sequence[Any]) -> list[Any]:
+    """Every ``command`` node anywhere in ``trees``, found by walking node attributes.
+
+    Iterative rather than recursive on purpose: the input is a repository-supplied command
+    line, and ``$( $( $( …`` nests as deeply as it likes. A recursive walk would answer a
+    deep nest with a ``RecursionError`` -- a crash for the fail-closed guard to catch rather
+    than the denial with a reason this module promises.
+
+    Attributes are read generically instead of by name (``parts``, ``command``, ``output``,
+    ``list``, ``heredoc``, ...) because bashlex spells a child differently in almost every
+    node kind, and a walk that enumerated them would silently stop finding command names the
+    day a kind was missed.
+    """
+    found: list[Any] = []
+    stack = list(trees)
+    while stack:
+        node = stack.pop()
+        if getattr(node, "kind", "") == "command":
+            found.append(node)
+        for value in vars(node).values() if hasattr(node, "__dict__") else ():
+            if isinstance(value, (list, tuple)):
+                stack.extend(item for item in value if _is_ast_node(item))
+            elif _is_ast_node(value):
+                stack.append(value)
+    return found
+
+
+def _is_ast_node(value: Any) -> bool:
+    return hasattr(value, "__dict__") and isinstance(getattr(value, "kind", None), str)
+
+
+def _expansion_at(command: str, index: int) -> str:
+    if command[index] == "`":
+        return "a backtick (command substitution)"
+    return _EXPANSIONS.get(command[index : index + 2], "a variable expansion ($ … )")
+
+
+def _scan_expansion(command: str) -> tuple[int, bool] | None:  # noqa: PLR0912, PLR0915 - see `_deny_shell_grammar`: one flat scanner, one branch per character class
+    """``(index of the first unresolved expansion, is it in an expanded heredoc body)``, or
+    ``None`` when the text holds none.
+
+    The same quote-and-escape tracking :func:`unresolved_expansion` has always done, plus line
+    continuations, comments, arithmetic and heredocs. A heredoc body is not shell text -- bash
+    reads it as data -- and whether it is *expanded* data is decided by one thing: whether any
+    part of the delimiter was quoted.
+
+    **The invariant this function must not break: never skip text bash executes.** The only
+    thing it ever skips is a heredoc body, so every rule below exists to stop a ``<<`` being
+    read as one where bash does not read it as one, or as one that ends later than bash ends it.
+    Each was a live bypass, each verified by running the payload under real bash:
+
+    - **A line continuation carries the logical line on.** ``\\`` + newline is removed by bash
+      before anything else is parsed, so the next character is *not* at the start of a line and
+      no heredoc body starts there. Treating it as an ordinary escape set ``started``, which
+      turned the ``#`` after it into an ordinary word instead of a comment -- and then
+      ``\\``-newline-``# <<':'`` opened a heredoc out of commented text and swallowed the
+      command on the next line.
+    - **A comment is skipped, so a ``<<`` inside one cannot open a heredoc.** ``# <<':'``
+      queued a delimiter of ``:`` and read the substitution on the next line as body, while
+      bash discarded the comment and ran it. ``#`` opens a comment only where a word is not
+      already open, which is bash's own rule and the one ``_deny_shell_grammar`` implements;
+      ``echo a#b`` has no comment in it.
+    - **``<<`` inside ``(( ))`` is a left shift, not a redirect.** ``((1 << 'true'))`` queued a
+      delimiter of ``true`` and skipped to the next line saying so -- and bash, whose
+      arithmetic merely fails there, went on to execute what had been skipped. Heredocs are
+      not recognised while an arithmetic command is open. ``$((`` needs no such rule: the ``$``
+      is flagged before the ``((`` is ever reached.
+    - **A heredoc body is skipped only once its delimiter is fully known.** See
+      :func:`_heredoc_delimiter`, which answers ``None`` -- no heredoc, keep scanning as shell
+      text -- for anything it cannot resolve exactly.
+
+    Delimiters are queued rather than consumed on sight, because bash queues them too:
+    ``cmd <<'A' <<'B'`` takes A's body first and then B's, both starting on the line after the
+    ``<<``. Consuming the first one where it appears would skip past the second's ``<<`` and
+    read its body as shell text.
     """
     quote = ""
+    pending: list[tuple[str, bool, bool]] = []
+    started = False
+    arithmetic = 0
     index = 0
-    while index < len(command):
+    length = len(command)
+
+    while index < length:
         char = command[index]
         if quote == "'":
             if char == "'":
@@ -530,21 +749,220 @@ def unresolved_expansion(command: str) -> str:
             elif char == '"':
                 quote = ""
             elif char in "$`":
-                return _expansion_at(command, index)
+                return index, False
         elif char == "\\":
+            if command[index + 1 : index + 2] == "\n":
+                # A line continuation. Bash removes both characters before parsing, so the
+                # logical line -- and `started` with it -- carries on unbroken and no heredoc
+                # body starts here.
+                index += 2
+                continue
             index += 1
+            started = True
         elif char in ("'", '"'):
             quote = char
+            started = True
+        elif char == "\n":
+            started = False
+            if pending:
+                index, found = _consume_heredocs(command, index + 1, pending)
+                pending = []
+                if found is not None:
+                    return found, True
+                continue
+        elif char == "(" and command[index + 1 : index + 2] == "(":
+            arithmetic += 1
+            started = False
+            index += 2
+            continue
+        elif char == ")" and command[index + 1 : index + 2] == ")" and arithmetic:
+            arithmetic -= 1
+            started = False
+            index += 2
+            continue
+        elif char in " \t;&|()":
+            started = False
+        elif char == "#" and not started:
+            # Bash discards the rest of the line, so nothing in it can open a heredoc or
+            # decide a command name. The newline is deliberately left unconsumed: a `<<`
+            # earlier on this line still has a body starting after it.
+            newline = command.find("\n", index)
+            index = length if newline == -1 else newline
+            continue
+        elif char == "<" and command[index + 1 : index + 2] == "<" and command[index + 2 : index + 3] != "<":
+            start = None if arithmetic else _heredoc_delimiter(command, index)
+            if start is not None:
+                delimiter, strip_tabs, expands, index = start
+                pending.append((delimiter, strip_tabs, expands))
+                started = False
+                continue
+            started = True
         elif char in "$`":
-            return _expansion_at(command, index)
+            return index, False
+        else:
+            started = True
         index += 1
-    return ""
+    return None
 
 
-def _expansion_at(command: str, index: int) -> str:
-    if command[index] == "`":
-        return "a backtick (command substitution)"
-    return _EXPANSIONS.get(command[index : index + 2], "a variable expansion ($ … )")
+def _heredoc_delimiter(command: str, index: int) -> tuple[str, bool, bool, int] | None:
+    """``(delimiter, strips leading tabs, expands its body, index after the delimiter)`` for
+    the ``<<`` at ``index``, or ``None`` when the delimiter cannot be resolved exactly.
+
+    The delimiter is a whole word, read with bash's quote removal rather than by looking at
+    its first character: ``<<E'OF'`` delimits on ``EOF``, not on ``E'OF'``. Getting that wrong
+    is not cosmetic -- a delimiter this function resolves *later* than bash does would make
+    :func:`_scan_expansion` swallow the lines between the two terminators, which bash executes.
+
+    Quoting **any** part of the word turns expansion off for the whole body, which is why
+    ``quoted`` accumulates across the word instead of being decided by the first character.
+    ``<<-`` strips leading tabs from the body *and* from the terminator line, so that flag
+    travels with the delimiter.
+
+    A ``\\``-newline inside the word is a **line continuation**, not an escape: bash removes
+    both characters and the word carries on, so ``<<E\\``-newline-``OF`` delimits on ``EOF``
+    and is not quoted by it. Reading it as an escape produced a delimiter with a newline in
+    it -- something no line can ever equal -- so the terminator was never found and every
+    line to the end of the text was skipped as body, bash executing all of it.
+
+    ``None`` -- meaning "this is not a heredoc, keep scanning as shell text" -- for an empty
+    word, an unterminated quote, and a word containing ``$`` or a backtick. That last one is
+    the fail-closed direction: the scan cannot prove where such a delimiter ends, and refusing
+    to skip means the body is read as shell text and any expansion in it is flagged.
+    """
+    index += 2
+    strip_tabs = command[index : index + 1] == "-"
+    if strip_tabs:
+        index += 1
+    while command[index : index + 1] in (" ", "\t"):
+        index += 1
+
+    delimiter: list[str] = []
+    quoted = False
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if char == "\\" and command[index + 1 : index + 2] == "\n":
+            # A line continuation: both characters go, and the word is no more quoted for it.
+            index += 2
+            continue
+        if char in " \t\n;&|()<>":
+            break
+        if char in "$`":
+            return None
+        if char == "\\":
+            if index + 1 >= length:
+                return None
+            delimiter.append(command[index + 1])
+            quoted = True
+            index += 2
+            continue
+        if char in ("'", '"'):
+            end = _closing_quote(command, index)
+            if end is None:
+                return None
+            delimiter.append(_unquote(command[index + 1 : end], char))
+            quoted = True
+            index = end + 1
+            continue
+        delimiter.append(char)
+        index += 1
+
+    if not delimiter:
+        return None
+    return "".join(delimiter), strip_tabs, not quoted, index
+
+
+def _closing_quote(command: str, index: int) -> int | None:
+    """The index of the quote that closes the one at ``index``, or ``None`` if none does.
+
+    A backslash escapes the next character inside double quotes and nothing at all inside
+    single quotes, exactly as in bash.
+    """
+    quote = command[index]
+    index += 1
+    while index < len(command):
+        if quote == '"' and command[index] == "\\":
+            index += 2
+            continue
+        if command[index] == quote:
+            return index
+        index += 1
+    return None
+
+
+def _unquote(body: str, quote: str) -> str:
+    r"""One quoted run of a delimiter word with its quoting removed, exactly as bash removes it.
+
+    Inside single quotes nothing is special, backslash included.
+
+    Inside double quotes a backslash is special **only** before ``$``, a backtick, ``"``,
+    another backslash, or a newline; before anything else bash keeps both characters. Removing
+    it unconditionally made ``<<"E\qOF"`` resolve to ``EqOF`` where bash delimits on ``E\qOF``,
+    so the real terminator was never recognised and every line after it -- which bash
+    executes -- was skipped as heredoc body. A backslash-newline is a line continuation and
+    both characters go.
+    """
+    if quote == "'":
+        return body
+    out: list[str] = []
+    index = 0
+    while index < len(body):
+        char = body[index]
+        following = body[index + 1 : index + 2]
+        if char == "\\" and following == "\n":
+            index += 2
+            continue
+        if char == "\\" and following in ("$", "`", '"', "\\"):
+            out.append(following)
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _consume_heredocs(command: str, position: int, pending: Sequence[tuple[str, bool, bool]]) -> tuple[int, int | None]:
+    """Walk past every queued heredoc body, answering ``(index after them, offending index)``.
+
+    The second element is the position of the first ``$`` or backtick found in a body bash
+    *expands*, or ``None``. A body whose delimiter was quoted is skipped without being read
+    at all: bash performs no expansion in it, so nothing in it can decide a command name.
+
+    A backslash still escapes ``$`` and a backtick inside an expanded body, as in bash. An
+    unterminated heredoc runs to the end of the text -- bash would refuse the command outright,
+    so there is nothing left to protect.
+    """
+    for delimiter, strip_tabs, expands in pending:
+        while position <= len(command):
+            end = command.find("\n", position)
+            stop = len(command) if end == -1 else end
+            line = command[position:stop]
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                position = stop if end == -1 else end + 1
+                break
+            if expands:
+                offset = _expansion_in_body(line)
+                if offset is not None:
+                    return position, position + offset
+            if end == -1:
+                position = len(command)
+                break
+            position = end + 1
+    return position, None
+
+
+def _expansion_in_body(line: str) -> int | None:
+    """The offset of the first unescaped ``$`` or backtick in one expanded heredoc line."""
+    index = 0
+    while index < len(line):
+        if line[index] == "\\":
+            index += 2
+            continue
+        if line[index] in "$`":
+            return index
+        index += 1
+    return None
 
 
 # --------------------------------------------------------------------------

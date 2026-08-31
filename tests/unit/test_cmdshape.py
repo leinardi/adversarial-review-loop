@@ -446,13 +446,15 @@ def test_only_the_trusted_set_phases_command_is_the_armed_exception(command: str
         pytest.param("`printf git` commit -m x", id="backtick"),
         pytest.param("$'\\x67it' commit -m x", id="ansi-c-quoting"),
         pytest.param("${GIT} commit -m x", id="braced-variable"),
-        pytest.param('echo "$HOME"', id="expansion-in-double-quotes"),
-        pytest.param("make test && echo $?", id="anywhere-in-the-command"),
+        pytest.param("VAR=x $(printf git) commit", id="behind-an-assignment-prefix"),
+        pytest.param("> /dev/null $(printf git) commit", id="behind-a-redirect"),
+        pytest.param("make test | $(printf git) commit", id="second-command-of-a-pipeline"),
+        pytest.param("make test; $(printf git) commit", id="second-command-of-a-list"),
     ],
 )
-def test_a_command_whose_words_are_unknowable_is_named(command: str) -> None:
+def test_a_command_whose_name_is_unknowable_is_named(command: str) -> None:
     """``$(printf git) commit`` runs ``git commit`` and contains no ``git`` to match on."""
-    assert cmdshape.unresolved_expansion(command)
+    assert "in the command name" in cmdshape.unresolved_expansion(command)
 
 
 @pytest.mark.parametrize(
@@ -467,6 +469,192 @@ def test_a_command_whose_words_are_unknowable_is_named(command: str) -> None:
 def test_a_command_with_no_expansion_is_left_alone(command: str) -> None:
     """A ``$`` bash treats as literal is literal here too, so ordinary regexes still work."""
     assert cmdshape.unresolved_expansion(command) == ""
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('echo "exit=$?"', id="status-in-an-argument"),
+        pytest.param('fallow > /dev/null 2>&1; echo "exit=$?"', id="status-after-a-failing-command"),
+        pytest.param("make test && echo $?", id="status-after-a-chain"),
+        pytest.param('echo "$HOME"', id="variable-in-an-argument"),
+        pytest.param("python3 - <<'PY'\nif re.match(r'/^\\/api$/', line):\n    print(1)\nPY", id="quoted-heredoc-with-a-regex"),
+        pytest.param("cat <<'TS'\nconst q = `SELECT ${id}`;\nTS", id="quoted-heredoc-with-a-template-literal"),
+        pytest.param("cat <<-'EOF'\n\t$x\n\tEOF", id="tab-stripping-quoted-heredoc"),
+        pytest.param('cat <<"EOF"\n$x\nEOF', id="double-quoted-delimiter"),
+        pytest.param("cat <<'A'\n$1\nA\ncat <<'B'\n`x`\nB", id="two-queued-heredocs"),
+        pytest.param('python3 -c "$CODE"', id="an-interpreter-is-not-a-wrapper"),
+    ],
+)
+def test_an_expansion_outside_the_command_name_is_allowed(command: str) -> None:
+    """The measured friction this narrowing exists for.
+
+    Every one of these was refused before, and none of them buys the guarantee the check
+    makes: each runs a program named by a literal word. The heredoc cases matter twice over
+    -- bash expands **nothing** in a body whose delimiter is quoted, so refusing them was
+    protecting against a substitution that cannot happen, and it cost a scratchpad file and a
+    second Bash call every time the loop wanted to write a script.
+    """
+    assert cmdshape.unresolved_expansion(command) == ""
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("cat <<EOF\n$x\nEOF", id="unquoted-delimiter"),
+        pytest.param("cat <<EOF\n`date`\nEOF", id="unquoted-delimiter-backtick"),
+        pytest.param("cat <<-EOF\n\t$x\n\tEOF", id="unquoted-tab-stripping-delimiter"),
+        pytest.param("cat << EOF\n$x\nEOF", id="unquoted-delimiter-after-a-space"),
+        pytest.param("cat <<E\\\nOF\n$x\nEOF", id="spliced-delimiter-is-unquoted"),
+    ],
+)
+def test_an_unquoted_heredoc_body_is_still_refused(command: str) -> None:
+    """``<<EOF`` *is* expanded by bash, and bashlex files that body under a ``heredoc`` node
+    rather than a word -- so the name-only rule would clear it while bash ran the substitution
+    inside it. The textual scan has to answer this one, and it denies."""
+    assert "heredoc" in cmdshape.unresolved_expansion(command)
+
+
+def test_an_escaped_dollar_in_an_expanded_heredoc_body_is_not_an_expansion() -> None:
+    """A backslash escapes ``$`` inside an unquoted heredoc body, as it does in bash."""
+    assert cmdshape.unresolved_expansion("cat <<EOF\n\\$x\nEOF") == ""
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('sh -c "$CMD"', id="sh"),
+        pytest.param('/bin/sh -c "$CMD"', id="sh-by-path"),
+        pytest.param('bash -c "${CMD}"', id="bash"),
+        pytest.param("env $(printf FOO=1) make", id="env"),
+        pytest.param("xargs $CMD", id="xargs"),
+        pytest.param('eval "$CMD"', id="eval"),
+    ],
+)
+def test_an_expansion_in_an_argument_to_an_exec_wrapper_is_refused(command: str) -> None:
+    """``sh -c 'git commit'`` is caught today by ``detection_form``'s quote stripping;
+    ``sh -c "$CMD"`` must not become the trivial way around that. A speed bump, not a
+    boundary -- ``python3 -c "$CODE"`` walks straight through, as ``python3 script.py``
+    always did."""
+    assert "in an argument to" in cmdshape.unresolved_expansion(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("# <<':'\n$(printf git) commit -m x\n:", id="heredoc-opened-inside-a-comment"),
+        pytest.param("echo a;# <<':'\n$(printf git) commit -m x\n:", id="comment-after-a-separator"),
+        pytest.param("cat <<E'OF'\nbody\nEOF\n$(printf git) commit -m x", id="delimiter-quoted-in-the-middle"),
+        pytest.param('cat <<E"OF"\nbody\nEOF\n$(printf git) commit -m x', id="delimiter-double-quoted-in-the-middle"),
+        pytest.param("cat <<E\\OF\nbody\nEOF\n$(printf git) commit -m x", id="delimiter-with-a-backslash"),
+        pytest.param("cat <<$E\nbody\n$E\n$(printf git) commit -m x", id="delimiter-holding-an-expansion"),
+        pytest.param("\\\n# <<':'\n$(printf git) commit -m x\n:", id="comment-after-a-line-continuation"),
+        pytest.param("((1 << 'true'))\n$(printf git) commit -m x\ntrue", id="left-shift-in-an-arithmetic-command"),
+        pytest.param("((1 << (2 << 'true')))\n$(printf git) commit -m x\ntrue", id="left-shift-in-nested-arithmetic"),
+        pytest.param('cat <<"E\\qOF"\nbody\nE\\qOF\n$(printf git) commit -m x', id="backslash-kept-in-a-double-quoted-delimiter"),
+        pytest.param('cat <<"E\\\\OF"\nbody\nE\\OF\n$(printf git) commit -m x', id="escaped-backslash-in-a-delimiter"),
+        pytest.param("cat <<'EOF' \\\n arg\nbody\nEOF\n$(printf git) commit -m x", id="continuation-inside-a-heredoc-opener"),
+        pytest.param("cat <<E\\\nOF\nbody\nEOF\n$(printf git) commit -m x", id="continuation-inside-the-delimiter"),
+        pytest.param("cat <<\\\nEOF\nbody\nEOF\n$(printf git) commit -m x", id="continuation-immediately-after-the-operator"),
+        pytest.param("cat << \\\nEOF\nbody\nEOF\n$(printf git) commit -m x", id="continuation-after-the-operator-and-a-space"),
+        pytest.param("cat <<-\\\nEOF\nbody\n\tEOF\n$(printf git) commit -m x", id="continuation-after-a-tab-stripping-operator"),
+        pytest.param("cat <<E\\\nO\\\nF\nbody\nEOF\n$(printf git) commit -m x", id="two-continuations-in-one-delimiter"),
+        pytest.param("cat <<E\\\n'OF'\nbody\nEOF\n$(printf git) commit -m x", id="continuation-then-a-quoted-run"),
+    ],
+)
+def test_the_scan_never_skips_text_bash_executes(command: str) -> None:
+    """The scanner may only skip a heredoc body, and only once it knows exactly where that
+    body ends. Two ways it could get that wrong, both of which hid a live command name:
+
+    - a ``<<`` inside a **comment** is not a heredoc at all. ``# <<':'`` queued a delimiter of
+      ``:``, so the substitution on the next line was read as body and never seen -- while bash
+      discarded the comment and ran it. Verified against bash: it executes.
+    - a delimiter must be read as a whole word with bash's quote removal. ``<<E'OF'`` delimits
+      on ``EOF``; resolving it as ``E'OF'`` runs past the real terminator and swallows the
+      lines after it, which bash executes. Quote removal has to be bash's exactly: inside
+      double quotes a backslash is dropped only before ``$``, a backtick, ``"``, ``\\`` or a
+      newline, so ``<<"E\\qOF"`` delimits on ``E\\qOF`` and not on ``EqOF``.
+    - a ``\\``-newline is a line continuation, not an escape, both in the command text and
+      *inside the delimiter word*. In the text, treating it as an escape left a word open, so
+      the ``#`` that followed was not read as a comment and the ``<<`` inside that comment
+      opened a heredoc. In the delimiter, it produced a delimiter with a newline in it --
+      which no line can ever equal -- so the terminator was never found and everything to the
+      end of the text was skipped as body. ``<<E\\``-newline-``OF`` delimits on ``EOF``.
+    - ``<<`` inside ``(( ))`` is a left shift. bash's arithmetic merely fails on
+      ``((1 << 'true'))`` and carries on to the next line; a scan that read it as a redirect
+      skipped that line instead.
+
+    Every payload here was run under real bash: each one executes ``$(printf git) commit -m x``,
+    and none carries a literal ``git commit`` for detection to match. Each is a command whose
+    *name* is an expansion, so each must be refused.
+    """
+    assert cmdshape.unresolved_expansion(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("echo a#b", id="hash-inside-a-word-is-not-a-comment"),
+        pytest.param("grep '#' file", id="hash-inside-quotes-is-not-a-comment"),
+        pytest.param("make build  # runs the build", id="an-ordinary-trailing-comment"),
+        pytest.param("cat <<'EOF'\n# <<':'\nEOF", id="a-comment-inside-a-quoted-heredoc-body"),
+        pytest.param("cat <<'EOF' # why\n$x\nEOF", id="a-comment-after-a-heredoc-opener"),
+        pytest.param("((1+1)) && cat <<'EOF'\n$x\nEOF", id="a-heredoc-after-a-closed-arithmetic-command"),
+        pytest.param("make a \\\n  && make b", id="an-ordinary-line-continuation"),
+        pytest.param('cat <<"E\\qOF"\n$x\nE\\qOF', id="a-double-quoted-delimiter-keeping-its-backslash"),
+        pytest.param("cat <<E\\\nOF\nplain body\nEOF", id="a-delimiter-spliced-by-a-continuation"),
+        pytest.param("python3 - \\\n  --flag <<'PY'\n$x\nPY", id="a-continuation-before-a-heredoc-opener"),
+    ],
+)
+def test_comment_handling_matches_bash(command: str) -> None:
+    """``#`` opens a comment only where a word is not already open -- bash's own rule, and the
+    one ``_deny_shell_grammar`` already implements. A comment after a heredoc opener must not
+    consume the newline: the body still starts on the next line.
+
+    The last four are the other direction of the same rules: closing ``))`` re-enables heredoc
+    recognition, an ordinary continuation is not a heredoc opener, a delimiter whose backslash
+    bash *keeps* must still match its own terminator, and one spliced by a continuation must
+    match the terminator bash splices it into.
+    """
+    assert cmdshape.unresolved_expansion(command) == ""
+
+
+def test_a_delimiter_the_scan_cannot_resolve_is_not_a_heredoc() -> None:
+    """An unterminated quote leaves the delimiter's end unknowable, so ``_heredoc_delimiter``
+    answers ``None`` and no body is skipped.
+
+    What the text then reads as is an unterminated single quote running to the end -- which is
+    exactly what bash reads it as. Verified against bash: it refuses the command outright
+    (``unexpected EOF while looking for "'"``, exit 2) and runs nothing, so there is no
+    expansion here for the gate to have missed.
+    """
+    assert cmdshape.unresolved_expansion("cat <<'EOF\nbody\n$(printf git) commit") == ""
+
+
+def test_a_quoted_heredoc_plus_a_stray_expansion_denies_on_the_parse() -> None:
+    """The scan clears the heredoc body and flags the ``$`` after it, but bashlex cannot parse
+    a multi-line heredoc at all, so there is nothing to reason about and the refusal stands.
+    Over-refusal is the safe direction here."""
+    assert cmdshape.unresolved_expansion("cat <<'PY'\n$x\nPY\necho $Y")
+
+
+def test_the_narrowing_does_not_reach_the_commit_deny_list() -> None:
+    """The deny-list did not move. ``unresolved_expansion`` lets this through -- the name is
+    the literal word ``git`` -- and ``validate_commit`` refuses it exactly as before."""
+    assert cmdshape.unresolved_expansion('git commit -m "$(x)"') == ""
+    with pytest.raises(cmdshape.CommandShapeError, match=r'contains "\$"'):
+        cmdshape.validate_commit('git commit -m "$(x)"')
+
+
+def test_a_heredoc_naming_a_commit_still_routes_to_the_commit_gate() -> None:
+    """The heredoc allowance must not become a way to hide a commit. ``mentions_commit`` reads
+    the raw text multiline, so a body containing the words ``git commit`` is still detected --
+    and ``validate_commit`` then refuses the shape."""
+    command = "cat <<'PY'\nsubprocess.run('git commit -m x')\nPY"
+    assert cmdshape.unresolved_expansion(command) == ""
+    assert cmdshape.mentions_commit(command)
+    with pytest.raises(cmdshape.CommandShapeError):
+        cmdshape.validate_commit(command)
 
 
 # --------------------------------------------------------------------------

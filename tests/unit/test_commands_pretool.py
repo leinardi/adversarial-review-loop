@@ -1239,7 +1239,8 @@ def test_a_command_whose_name_is_an_expansion_is_denied(
     verdict, reason = pretool(git_repo, env, command=command)
 
     assert verdict == "deny"
-    assert "the gate cannot tell what it will run" in reason
+    assert "the gate cannot tell what program it will run" in reason
+    assert "in the command name" in reason
 
 
 def test_an_ordinary_command_with_no_expansion_is_untouched(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -1251,6 +1252,77 @@ def test_an_ordinary_command_with_no_expansion_is_untouched(git_repo: Path, tmp_
         proc = run_hook("pretool", payload(git_repo, command=command), cwd=git_repo, env=env)
         assert proc.returncode == 0
         assert proc.stdout == "", command
+
+
+def test_a_quoted_heredoc_carrying_expansions_runs(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The measured friction: a script written into a quoted heredoc. Bash expands nothing in
+    that body, so a ``$`` or a backtick in it decides no command name -- and refusing it cost a
+    scratchpad file plus a second Bash call every time."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    for command in (
+        "python3 - <<'PY'\nif re.match(r'/^\\/api$/', line):\n    print(1)\nPY",
+        "cat <<'TS'\nconst q = `SELECT ${id}`;\nTS",
+        'fallow > /dev/null 2>&1; echo "exit=$?"',
+    ):
+        proc = run_hook("pretool", payload(git_repo, command=command), cwd=git_repo, env=env)
+        assert proc.returncode == 0
+        assert proc.stdout == "", command
+
+
+def test_a_heredoc_body_naming_a_commit_is_still_denied(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The heredoc allowance must not become a way to hide a commit. ``mentions_commit`` reads
+    the raw text multiline, so this still routes into the commit gate -- where ``validate_commit``
+    refuses the shape. Over-detection stays the safe direction."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command="cat <<'PY'\nsubprocess.run('git commit -m x')\nPY")
+
+    assert verdict == "deny"
+    assert "the gate cannot tell what program it will run" not in reason, "this is the commit gate refusing a shape, not the expansion pre-check"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("# <<':'\n$(printf git) commit -m x\n:", id="heredoc-opened-inside-a-comment"),
+        pytest.param("cat <<E'OF'\nbody\nEOF\n$(printf git) commit -m x", id="delimiter-quoted-in-the-middle"),
+        pytest.param("\\\n# <<':'\n$(printf git) commit -m x\n:", id="comment-after-a-line-continuation"),
+        pytest.param("((1 << 'true'))\n$(printf git) commit -m x\ntrue", id="left-shift-in-an-arithmetic-command"),
+        pytest.param('cat <<"E\\qOF"\nbody\nE\\qOF\n$(printf git) commit -m x', id="backslash-kept-in-a-double-quoted-delimiter"),
+        pytest.param("cat <<E\\\nOF\nbody\nEOF\n$(printf git) commit -m x", id="continuation-inside-the-delimiter"),
+        pytest.param("cat <<\\\nEOF\nbody\nEOF\n$(printf git) commit -m x", id="continuation-immediately-after-the-operator"),
+    ],
+)
+def test_a_heredoc_the_scan_misreads_cannot_smuggle_a_command_name(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
+    """Both were verified against real bash: it runs ``$(printf git) commit -m x``.
+
+    Neither contains a literal ``git commit`` for detection to match, so the expansion
+    pre-check is the only thing standing between them and an ungated commit. It must not skip
+    them as heredoc body -- a ``<<`` inside a comment opens nothing, and ``<<E'OF'`` delimits
+    on ``EOF``.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "the gate cannot tell what program it will run" in reason
+
+
+def test_an_unquoted_heredoc_body_with_an_expansion_is_denied(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``<<EOF`` is expanded by bash and bashlex files the body under a ``heredoc`` node rather
+    than a word, so only the textual scan can answer for it."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command="cat <<EOF\n$(printf hi)\nEOF")
+
+    assert verdict == "deny"
+    assert "heredoc" in reason
 
 
 # --------------------------------------------------------------------------
