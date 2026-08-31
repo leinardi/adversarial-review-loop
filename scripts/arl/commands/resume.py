@@ -43,7 +43,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
-from arl import commands, gitsnap, harness, paths, planrev
+from arl import commands, gitsnap, guide, harness, paths, planrev
 from arl import config as config_module
 from arl.atomic import DIR_MODE, FILE_MODE, ensure_private_dir, write_private_atomic
 from arl.commands import arm
@@ -54,7 +54,7 @@ from arl.util import now
 __all__ = ["run"]
 
 _BOOL_FLAGS: Final = ("--allow-dirty", "--abandon-pending", "--replan")
-_VALUE_FLAGS: Final = ("--until", "--plan", "--harness", "--model", "--variant")
+_VALUE_FLAGS: Final = ("--until", "--plan", "--harness", "--model", "--variant", "--guide")
 
 #: The only stored statuses resume may continue from -- deliberately an allow-list, not a
 #: deny-list of terminal ones. A deny-list fails open the moment a new status is added and
@@ -141,6 +141,11 @@ class _Flags:
     harness: str | None = None
     model: str | None = None
     variant: str | None = None
+    #: ``None`` means "not given", and that is the *only* way the guide stays as it is: an
+    #: activation keeps the guide it was armed with across a resume, and a repo config edited
+    #: to name another one mid-activation changes nothing. Only a flag the user actually typed
+    #: freezes a new revision -- the same rule ``harness`` follows, for the same reason.
+    guide: str | None = None
     #: Permission to redefine the remaining, not-yet-committed phases. See ``_Decision.replan``.
     replan: bool = False
 
@@ -148,6 +153,19 @@ class _Flags:
 @dataclass(frozen=True)
 class _RevisionChange:
     """A plan revision that was decided but not yet written anywhere."""
+
+    content: bytes
+    sha256: str
+    source_path: str
+
+
+@dataclass(frozen=True)
+class _GuideChange:
+    """A review guide revision that was decided but not yet frozen anywhere.
+
+    The same shape as :class:`_RevisionChange`, and deliberately a separate type: the two are
+    decided independently, and a single resume can carry one, both or neither.
+    """
 
     content: bytes
     sha256: str
@@ -183,6 +201,14 @@ class _Decision:
     #: document still carries this; otherwise the pair that would land is one nothing probed.
     stored_overrides: dict[str, str]
     revision: _RevisionChange | None
+    #: The guide path ``--guide`` resolved to, or ``None`` when the flag was not given -- the
+    #: only input to the under-lock re-decision, which re-reads that path rather than trusting
+    #: :attr:`guide` (decided before the lock) for the write.
+    guide_source: str | None
+    #: The guide revision this resume decided, or ``None`` for "the guide is unchanged".
+    #: Replaced by the under-lock re-decision before it is reported, exactly as
+    #: :attr:`revision` is.
+    guide: _GuideChange | None
     #: The warning from deciding ``revision`` -- kept apart from ``warnings`` because a
     #: same-session (and, for the retirement window, a cross-session) resume re-decides the
     #: revision under the lock and must replace *only* this part of the banner, not every
@@ -237,7 +263,7 @@ def _parse_flags(tokens: list[str]) -> _Flags:
         tokens,
         bool_flags=_BOOL_FLAGS,
         value_flags=_VALUE_FLAGS,
-        usage="--until, --plan, --allow-dirty, --abandon-pending, --replan, --harness, --model, --variant",
+        usage="--until, --plan, --guide, --allow-dirty, --abandon-pending, --replan, --harness, --model, --variant",
     )
     return _Flags(
         allow_dirty=arm.flag_bool(raw, "--allow-dirty"),
@@ -248,6 +274,7 @@ def _parse_flags(tokens: list[str]) -> _Flags:
         harness=arm.flag_str(raw, "--harness"),
         model=arm.flag_str(raw, "--model"),
         variant=arm.flag_str(raw, "--variant"),
+        guide=arm.flag_str(raw, "--guide"),
     )
 
 
@@ -274,9 +301,15 @@ def _merged_overrides(stored: dict[str, str], flags: _Flags) -> dict[str, str]:
     armed with unless this call names another. The harness this returns is therefore the
     *requested* one; ``_resume`` overwrites it with the one ``_check_reviewer`` really probed,
     for the reason ``arm._arm`` documents at length.
+
+    ``review_guide`` is in here so ``guide.resolve`` sees a ``--guide`` the same way ``arm``
+    does -- through the ordinary config chain, where ``ARL_REVIEW_GUIDE`` still outranks it --
+    and so the overlay keeps naming the guide this activation actually runs under. It has no
+    effect on any later round: the guide is read exactly once per ``--guide``, and every
+    review afterwards reads only the frozen copy.
     """
     merged = dict(stored)
-    for key, value in (("harness", flags.harness), ("model", flags.model), ("variant", flags.variant)):
+    for key, value in (("harness", flags.harness), ("model", flags.model), ("variant", flags.variant), ("review_guide", flags.guide)):
         if value is not None:
             merged[key] = value
     return merged
@@ -391,6 +424,85 @@ def _apply_revision(*, act_dir: Path, existing: list[dict[str, Any]], change: _R
 
 
 # --------------------------------------------------------------------------
+# Review guide revision: deciding, then writing
+# --------------------------------------------------------------------------
+
+
+def _verified_guide_revisions(state: State) -> list[dict[str, Any]]:
+    """Every recorded guide revision, re-verified against its hash. May be empty.
+
+    Verified on **every** resume, not only one carrying ``--guide``: the frozen guide is
+    evidence in exactly the sense the frozen plan is -- what every review to date was run
+    against -- so a resume is the right place to catch it having been replaced, rather than
+    leaving it for whichever commit's review reaches ``reviewer.build_bundle`` next.
+
+    An empty list is the ordinary "this activation has no guide" answer and never an error;
+    there is no revision-0 backfill (``arl.guide.verified_active``), because backfilling would
+    invent a guide for an activation that never ran under one. A failure is re-raised as
+    :class:`_EvidenceCorrupted`, so it escalates the live activation the same way corrupted
+    plan evidence does.
+
+    The **raw** recorded value is validated, never ``get_array_of_dicts``'s normalised view:
+    that one answers ``[]`` for a non-list and drops non-object members, and ``[]`` is exactly
+    how "no guide" is encoded -- so a malformed field would resume cleanly, get written back
+    normalised (destroying the record), and leave every later review running without the guide
+    it is supposed to run under. See :func:`arl.guide.validated_revisions`.
+    """
+    try:
+        revisions = guide.validated_revisions(state.data.get("guide_revisions"))
+        guide.verified_active(state.act_dir, revisions)
+    except planrev.EvidenceCorrupted as exc:
+        raise _EvidenceCorrupted(str(exc)) from exc
+    return revisions
+
+
+def _decide_guide(state: State, *, source: str | None) -> _GuideChange | None:
+    """Whether a new guide revision is called for. Never writes anything.
+
+    ``source`` is ``None`` unless ``--guide`` was given, and only that flag can change the
+    guide: a repo config edited mid-activation to name another one is exactly what freezing
+    the guide at arm exists to defeat.
+
+    Every refusal ``arl.guide`` knows -- unreadable, empty, oversized, carrying a contract
+    marker -- applies here too, and fails the resume rather than the next review, because a
+    guide the gate will not accept must be reported while the user is watching. That is also
+    why a guide cannot be *dropped* mid-activation: there is no value for ``--guide`` that
+    means "none", so removing bad guidance means abandoning the activation and re-arming.
+
+    A guide whose bytes *and* path both match the active revision decides nothing: a resume
+    that renames its argument at the same content still records a revision, because the path
+    is what every disclosure names, but re-running the same command twice does not.
+    """
+    revisions = _verified_guide_revisions(state)
+    if source is None:
+        return None
+    try:
+        raw = guide.read_source(source)
+    except guide.GuideRejected as exc:
+        raise _ResumeFailure(str(exc)) from exc
+    digest = hashlib.sha256(raw).hexdigest()
+    if revisions and digest == revisions[-1].get("sha256") and source == state.get("guide_path"):
+        return None
+    return _GuideChange(content=raw, sha256=digest, source_path=source)
+
+
+def _apply_guide(*, act_dir: Path, existing: list[dict[str, Any]], change: _GuideChange, phase: int) -> list[dict[str, Any]]:
+    """Freeze the new guide revision and return the updated ``guide_revisions`` list.
+
+    Immutable and additive, exactly like ``_apply_revision``: nothing already frozen is
+    renamed or overwritten, and the file lands before any document names it. The first
+    revision an activation ever records is ``guide.frozen.md`` whether ``arm`` or a later
+    ``resume --guide`` wrote it -- ``guide.revision_filename`` decides that from the position,
+    so an activation armed without a guide and given one later still reads as revision 0.
+    """
+    try:
+        entry = guide.freeze(change.content, act_dir, guide.revision_filename(len(existing)), phase=phase)
+    except guide.GuideRejected as exc:
+        raise _ResumeFailure(str(exc)) from exc
+    return [*existing, entry]
+
+
+# --------------------------------------------------------------------------
 # Materialising the successor
 # --------------------------------------------------------------------------
 
@@ -416,7 +528,12 @@ def _copy_activation_tree(src: Path, dst: Path) -> None:
 #: "the inverted carry-forward rule": this is an allow-list of what to *reset*, not of what to
 #: keep, so a field added to ``new_state_document`` later is carried forward by default.
 def _build_successor_document(
-    *, snapshot: dict[str, Any], identity: _Identity, decision: _Decision, revisions: list[dict[str, Any]]
+    *,
+    snapshot: dict[str, Any],
+    identity: _Identity,
+    decision: _Decision,
+    revisions: list[dict[str, Any]],
+    guide_revisions: list[dict[str, Any]],
 ) -> dict[str, Any]:
     data = copy.deepcopy(snapshot)
     if data.get("status") in ("DISARMED", "STALE"):
@@ -456,11 +573,16 @@ def _build_successor_document(
         # this one was probed, so `snapshot` still carries the base it was merged from.
         overrides=decision.overrides,
         plan_revisions=revisions,
+        # Carried forward unchanged when this resume decided no new guide -- the successor
+        # reviews under exactly the guide its predecessor did.
+        guide_revisions=guide_revisions,
     )
     if decision.until_given:
         data["stop_after_phase"] = decision.until
     if decision.revision is not None:
         data["plan_path"] = decision.revision.source_path
+    if decision.guide is not None:
+        data["guide_path"] = decision.guide.source_path
     if decision.replan:
         # Not in the reset table above: it is not a per-resume default, it is a permission
         # explicitly requested by this call. A resume that did *not* pass --replan leaves
@@ -626,6 +748,14 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
 
     revision, revision_warning = _decide_revision(prev_state, explicit_plan=flags.plan)
 
+    # Resolved through the same fully-merged config `arm` resolves it through, so a `--guide`
+    # behaves identically on both arming paths -- `ARL_REVIEW_GUIDE` included, which outranks
+    # the overlay there and here alike. Decided (and therefore read and validated) before
+    # anything is written, so a guide the gate will not accept costs nothing: the activation is
+    # left exactly as it was found, and the refusal names the file while the user is watching.
+    guide_source = guide.resolve(probe_config, repo) if flags.guide is not None else None
+    guide_change = _decide_guide(prev_state, source=guide_source)
+
     # `--replan` grants permission to redefine the phases from the current one onward; there
     # is nothing to redefine until a first `set-phases` has run, and granting the token on an
     # unfrozen (`ARMED`) activation would leave it lying around for whatever `set-phases`
@@ -670,6 +800,8 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
         overrides=overrides,
         stored_overrides=stored_overrides,
         revision=revision,
+        guide_source=guide_source,
+        guide=guide_change,
         revision_warning=revision_warning,
         until=until,
         until_given=until_given,
@@ -680,6 +812,33 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
     if identity.same_session:
         return _resume_same_session(state=prev_state, identity=identity, flags=flags, decision=decision)
     return _resume_cross_session(prev_state=prev_state, identity=identity, flags=flags, decision=decision)
+
+
+def _apply_guide_revision(state: State, *, decision: _Decision) -> _GuideChange | None:
+    """Decide and freeze a guide revision against the document the caller just reloaded.
+
+    Decided again here rather than trusting ``decision.guide``, for exactly the reason
+    :func:`_apply_revision_and_replan` documents for the plan: two concurrent resumes can both
+    decide "changed" outside the lock, and the second one -- reloading a document that already
+    carries the first one's revision -- must see it and record nothing, instead of appending a
+    duplicate that inflates every disclosure with a change that happened once.
+
+    Also what re-verifies the existing revisions inside the transaction, so a guide that was
+    tampered with after ``_resume``'s own check cannot be appended to.
+
+    Called on every same-session resume, guide or no guide: with no ``--guide`` it verifies and
+    returns ``None``. What is written back is what ``_decide_guide`` just *validated* -- never
+    a normalised view of a malformed field, which is the one way a resume could quietly erase
+    the record of a guide (see :func:`_verified_guide_revisions`) -- and never a backfill, so
+    "no guide" stays "no guide".
+    """
+    change = _decide_guide(state, source=decision.guide_source)
+    revisions = _verified_guide_revisions(state)
+    if change is not None:
+        revisions = _apply_guide(act_dir=state.act_dir, existing=revisions, change=change, phase=state.get_int("phase"))
+        state.update(guide_path=change.source_path)
+    state.update(guide_revisions=revisions)
+    return change
 
 
 def _apply_revision_and_replan(state: State, *, repo: str, flags: _Flags, decision: _Decision) -> tuple[_RevisionChange | None, str]:
@@ -736,11 +895,21 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
     head_warning = ""
     revision: _RevisionChange | None = None
     revision_warning = ""
+    guide_change: _GuideChange | None = None
     try:
         with state.transaction():
             # Re-checked against the reloaded document -- a concurrent escalation or `deactivate`
             # may have moved it since `_resume`'s own check, before this took the lock.
             _refuse_unless_resumable(state)
+            # Checked against the *reloaded* document, and **before anything is frozen to
+            # disk**: a concurrent same-session resume may have switched the harness since this
+            # call probed, and storing this overlay on top of that would leave a harness/model
+            # pair nothing ever validated. Refusing here rather than after the writes below is
+            # what makes "the live activation was left untouched" literally true -- a refusal
+            # taken later still leaves the plan and guide revisions this call decided sitting
+            # in the activation directory, unreferenced by any document. The cross-session path
+            # already refuses in this position, inside `_retire`, for the same reason.
+            _refuse_if_the_overlay_moved(state.data, decision)
             # `armed_at` is refreshed on every resume, cross-session included, and that alone
             # is what un-stales a TTL-expired activation: `effective_status` derives STALE from
             # it, so nothing else needs to change for a stale activation to resume. `DISARMED`
@@ -765,12 +934,9 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
                     pending_command="",
                 )
             revision, revision_warning = _apply_revision_and_replan(state, repo=repo, flags=flags, decision=decision)
+            guide_change = _apply_guide_revision(state, decision=decision)
             if decision.until_given:
                 state.update(stop_after_phase=decision.until)
-            # Checked against the *reloaded* document before writing: a concurrent same-session
-            # resume may have switched the harness since this call probed, and storing this
-            # overlay on top of that would leave a harness/model pair nothing ever validated.
-            _refuse_if_the_overlay_moved(state.data, decision)
             state.update(overrides=decision.overrides, activation_generation=state.get_int("activation_generation") + 1)
             # Convergence counters are per-run, exactly as in `_build_successor_document`: a
             # resume is a fresh start, so an inherited retry backoff (`retry_not_before` is a
@@ -805,7 +971,7 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
     # two can legitimately differ under a concurrent same-session resume. `decision.warnings`
     # (the --until clamp note, if any) is carried through untouched -- only the revision part
     # is replaced, and `head_warning` is appended to the "other" bucket, same as cross-session.
-    fresh = replace(decision, revision=revision, revision_warning=revision_warning, warnings=decision.warnings + head_warning)
+    fresh = replace(decision, revision=revision, guide=guide_change, revision_warning=revision_warning, warnings=decision.warnings + head_warning)
     return _banner(state=state, identity=identity, decision=fresh)
 
 
@@ -816,9 +982,11 @@ def _resume_cross_session(*, prev_state: State, identity: _Identity, flags: _Fla
     #: everything downstream -- see `_retire`'s own comment for why.
     fresh_revision: _RevisionChange | None = None
     fresh_revision_warning = ""
+    #: Recomputed inside `_retire`'s transaction too, and for the same reason.
+    fresh_guide: _GuideChange | None = None
 
     def _retire() -> None:
-        nonlocal snapshot, fresh_revision, fresh_revision_warning
+        nonlocal snapshot, fresh_revision, fresh_revision_warning, fresh_guide
         _refuse_unless_resumable(prev_state)
         # Before the retirement write below, so a refusal here leaves the predecessor live and
         # `retired=False` correct: a same-session resume against this *same* predecessor can
@@ -835,6 +1003,11 @@ def _resume_cross_session(*, prev_state: State, identity: _Identity, flags: _Fla
         # would then be stale. Trusting it would have `_publish_successor` append a second,
         # duplicate revision for a change the reloaded document already carries.
         fresh_revision, fresh_revision_warning = _decide_revision(prev_state, explicit_plan=flags.plan)
+        # Decided again here for the same reason, and before the retirement write below, so a
+        # refused guide leaves the predecessor live and `retired=False` correct. The frozen
+        # copy is written later, into the successor's own directory -- nothing about the
+        # predecessor's activation directory changes on this path.
+        fresh_guide = _decide_guide(prev_state, source=decision.guide_source)
         # Enforced here, before retirement, not only in `_publish_successor`'s later recheck:
         # the pre-lock check in `_resume` ran against the *old* decision (no revision, say,
         # with `allow_dirty` in play), so it can pass while this fresh one needs a clean
@@ -883,7 +1056,7 @@ def _resume_cross_session(*, prev_state: State, identity: _Identity, flags: _Fla
 
     # `decision.revision`, decided before the lock, is not used again from here on -- only the
     # fresh one `_retire` just decided against the document it actually reloaded.
-    decision = replace(decision, revision=fresh_revision, revision_warning=fresh_revision_warning)
+    decision = replace(decision, revision=fresh_revision, guide=fresh_guide, revision_warning=fresh_revision_warning)
 
     # The predecessor is retired from here on: any further failure records ARM_FAILED on the
     # successor rather than trying to undo the retirement (module docstring, "No automatic
@@ -924,7 +1097,25 @@ def _publish_successor(*, prev_state: State, snapshot: dict[str, Any], identity:
     else:
         revisions = _revisions_with_backfill(new_dir, revisions)
 
-    new_data = _build_successor_document(snapshot=snapshot, identity=identity, decision=decision, revisions=revisions)
+    # Into the successor's directory, which already carries the predecessor's frozen guides
+    # byte for byte (`_copy_activation_tree`) -- so the revision index the new file is named
+    # from counts the copies that are actually there. No backfill: an activation with no guide
+    # keeps an empty list, and one given its first guide here records it as revision 0.
+    #
+    # Validated rather than filtered: dropping a malformed member here would hand the successor
+    # a shorter history than the predecessor was reviewed under. `_retire` already validated
+    # this exact document under the lock, so this cannot fire -- but the alternative if it ever
+    # did is silent evidence loss, which is the one outcome this field must never have.
+    try:
+        guide_revisions = guide.validated_revisions(snapshot.get("guide_revisions"))
+    except planrev.EvidenceCorrupted as exc:
+        raise _ResumeFailure(str(exc)) from exc
+    if decision.guide is not None:
+        guide_revisions = _apply_guide(act_dir=new_dir, existing=guide_revisions, change=decision.guide, phase=int(snapshot.get("phase") or 1))
+
+    new_data = _build_successor_document(
+        snapshot=snapshot, identity=identity, decision=decision, revisions=revisions, guide_revisions=guide_revisions
+    )
 
     # Re-run the git-facing checks immediately before publication. The predecessor was live
     # for the whole window since they were first checked above: a tool call it had already
@@ -1011,6 +1202,26 @@ def _banner(*, state: State, identity: _Identity, decision: _Decision) -> str:
         else ""
     )
 
+    # Named here for the reason `arm._armed_message` names it: the guide is the one input the
+    # repository supplies that becomes *instruction* to the reviewer, a bad one makes reviews
+    # worse, and that is disclosed rather than prevented. A resume needs it doubly -- `--guide`
+    # can have just replaced it, and a resume is where a human finds out that the phases from
+    # here on are reviewed under different guidance than the ones behind them. The path goes
+    # through `guide.display_path` because `review_guide` is repository-controlled and this
+    # banner is both printed to a terminal and read by the model as what to do next.
+    guide_revisions = state.get_array_of_dicts("guide_revisions")
+    if not guide_revisions:
+        guide_line = "none"
+    else:
+        guide_index = len(guide_revisions) - 1
+        guide_digest = str(guide_revisions[-1].get("sha256") or "")
+        guide_source = guide.display_path(state.get("guide_path")) if state.get("guide_path") else "<unrecorded>"
+        guide_line = (
+            f"{guide_source} (frozen copy: {state.act_dir}/{guide.revision_filename(guide_index)}, "
+            f"sha256 {guide_digest[:12] or '<unrecorded>'}, revision {guide_index}"
+            f"{', changed just now' if decision.guide is not None else ''})"
+        )
+
     # The unapproved-HEAD warning is not computed here: both callers already fold it into
     # `decision.warnings` themselves, using `gitsnap.head_tree_checked` at the point each
     # actually publishes -- a lenient re-read here, after the fact, could silently drop it if
@@ -1045,5 +1256,6 @@ def _banner(*, state: State, identity: _Identity, decision: _Decision) -> str:
 - phase: {phase} of {total or "?"}
 - pause target: {pause_target}
 - reviewer: {reviewer}
+- review guide: {guide_line}
 {warnings}
 {next_steps}"""

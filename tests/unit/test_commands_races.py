@@ -21,6 +21,7 @@ precisely the window being closed.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -687,3 +688,55 @@ def test_a_refused_concurrent_resume_succeeds_when_run_again(git_repo: Path, tmp
 
     assert proc.returncode == 0, proc.stdout
     assert read_state(env, git_repo, "s1")["overrides"] == {"harness": "claude-code", "model": "vendor/other"}
+
+
+def test_a_refused_concurrent_resume_freezes_nothing_into_the_activation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A refused resume says the live activation was left untouched; the directory must agree.
+
+    **Fails on a resume that freezes its revisions before the overlay compare-and-swap.** Each
+    worker names a different guide, so each also moves the overlay: the first to take the lock
+    wins, and every later one reloads a document already carrying that revision, decides its
+    own guide is a *further* change, writes ``guide.rev<n>.md`` for it -- and only then is
+    refused. The document never names those files, so what is left behind is unreferenced
+    frozen evidence inside an activation reporting that nothing happened, and the next real
+    revision silently reuses one of their names.
+
+    The invariant is exact: every ``guide.*.md`` in the activation directory is one the stored
+    ``guide_revisions`` names, and hashes to what that entry recorded.
+    """
+    env = armed_env(clean_env)
+    first = git_repo / "guide-one.md"
+    first.write_text("# One\n\nthe guidance armed with\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "guide")
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --guide {first}"], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    set_phases(git_repo, env, "one")
+
+    others = []
+    for index in range(4):
+        path = git_repo / f"guide-{index}.md"
+        path.write_text(f"# Guide {index}\n\nlook at subsystem {index}\n")
+        others.append(path)
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "more guides")
+
+    with activation_lock(env, git_repo):
+        workers = [spawn(["resume", "--session", "s1", "--args", f"--guide {path}"], cwd=git_repo, env=env) for path in others]
+        settle(workers, env, git_repo)
+
+    results = [(worker.wait(), *worker.communicate()) for worker in workers]
+    assert any(code == 0 for code, _out, _err in results), results
+    for code, out, _err in results:
+        if code != 0:
+            assert "changed while this resume was preparing" in out, out
+            assert "the live activation was left untouched" in out
+
+    revisions = read_state(env, git_repo, "s1")["guide_revisions"]
+    assert isinstance(revisions, list)
+    named = {str(entry["file"]): str(entry["sha256"]) for entry in revisions}
+    act_dir = state_dir(env, git_repo, "s1")
+    on_disk = sorted(path.name for path in act_dir.glob("guide.*.md"))
+    assert on_disk == sorted(named), f"unreferenced frozen guides left behind: {sorted(set(on_disk) - set(named))}"
+    for name, recorded in named.items():
+        assert hashlib.sha256((act_dir / name).read_bytes()).hexdigest() == recorded
