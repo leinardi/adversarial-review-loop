@@ -306,6 +306,84 @@ def test_the_plan_revision_wording_is_unchanged(act_dir: Path) -> None:
         planrev.read_verified(act_dir, "plan.frozen.md", expected_sha256="a" * 64)
 
 
+# -- display_path: the human-facing surfaces ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("hostile", "escaped"),
+    [
+        pytest.param("guide\u202e.md", "\\u202e", id="rtl-override"),
+        pytest.param("guide\u202d.md", "\\u202d", id="ltr-override"),
+        pytest.param("guide\u202b.md", "\\u202b", id="rtl-embedding"),
+        pytest.param("guide\u2066x\u2069.md", "\\u2066", id="first-strong-isolate"),
+        pytest.param("guide\u2067.md", "\\u2067", id="rtl-isolate"),
+        pytest.param("guide\u2069.md", "\\u2069", id="pop-directional-isolate"),
+        pytest.param("guide\u200f.md", "\\u200f", id="rtl-mark"),
+        pytest.param("guide\u200b.md", "\\u200b", id="zero-width-space"),
+        pytest.param("guide\u200d.md", "\\u200d", id="zero-width-joiner"),
+        pytest.param("guide\u00ad.md", "\\u00ad", id="soft-hyphen"),
+        pytest.param("guide\ufff9.md", "\\ufff9", id="interlinear-annotation"),
+        pytest.param("guide\U000e0041.md", "\\U000e0041", id="tag-character-astral"),
+        pytest.param("guide\x85.md", "\\u0085", id="next-line-c1"),
+        pytest.param("guide\u2028.md", "\\u2028", id="line-separator"),
+        pytest.param("guide\u2029.md", "\\u2029", id="paragraph-separator"),
+        pytest.param("guide\x1b[2J.md", "\\u001b", id="ansi-escape"),
+        pytest.param("guide\x00.md", "\\u0000", id="nul"),
+        pytest.param("guide\n.md", "\\n", id="newline"),
+        pytest.param("guide\r.md", "\\r", id="carriage-return"),
+    ],
+)
+def test_display_path_escapes_every_invisible_and_reordering_character(hostile: str, escaped: str) -> None:
+    """Not only the ones that break a line.
+
+    U+202E and the isolate controls carry no newline and no ESC, and reorder what follows them
+    on the line -- so a path can misrepresent itself in a disclosure whose entire purpose is to
+    say which file the gate used. The rule is therefore the Unicode category (every ``C*``,
+    plus ``Zl``/``Zp``), not a list of characters someone remembered.
+    """
+    shown = guide.display_path(hostile)
+    assert escaped in shown
+    assert not any(guide._escapes(char) for char in shown), f"an unescaped control survived: {shown!r}"
+    assert len(shown.splitlines()) == 1
+
+
+@pytest.mark.parametrize("path", ["docs/review-guide.md", "oké-café.md", "guía/revisión.md", "ガイド.md", "a b/c d.md", "with'quote.md"])
+def test_display_path_leaves_every_visible_character_alone(path: str) -> None:
+    """A non-ASCII path stays readable -- which is why this is a category test, not ``ensure_ascii``.
+
+    Escaping every non-ASCII character would make an ordinary Cyrillic, Japanese or accented
+    filename unreadable on the one surface that exists to tell a human which file was used.
+    """
+    assert guide.display_path(path) == f'"{path}"'
+
+
+def test_display_path_escapes_its_own_delimiters() -> None:
+    """A quote or backslash in a filename must not be able to end the quoted span."""
+    assert guide.display_path('a"b\\c.md') == '"a\\"b\\\\c.md"'
+
+
+def test_display_path_escapes_with_one_backslash_throughout() -> None:
+    """One rendering per category of character, not two depending on who caught it.
+
+    ``json.dumps`` escapes what *it* recognises with one backslash; a hand-escape layered on
+    top of it comes back with two, so the same class of character would be shown two different
+    ways. Nothing here goes through ``json``, so every escape is single.
+    """
+    shown = guide.display_path("a\nb\u202ec\x1bd")
+    assert "\\\\" not in shown
+    assert shown == '"a\\nb\\u202ec\\u001bd"'
+
+
+def test_display_path_truncates_but_stays_quoted() -> None:
+    shown = guide.display_path("x" * 5000)
+    assert shown.startswith('"xxx') and shown.endswith('…"')
+    assert len(shown) < 300
+
+
+def test_display_path_says_so_when_there_is_no_path() -> None:
+    assert guide.display_path("") == '""'
+
+
 # -- composition -------------------------------------------------------------
 
 

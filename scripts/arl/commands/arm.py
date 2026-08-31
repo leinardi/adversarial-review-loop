@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from arl import commands, gitsnap, harness, paths, planrev, reviewer_probe
+from arl import commands, gitsnap, guide, harness, paths, planrev, reviewer_probe
 from arl import config as config_module
 from arl.atomic import ensure_private_dir, locked, write_private_atomic
 from arl.config import Config
@@ -123,6 +123,10 @@ class _Flags:
     harness: str | None = None
     model: str | None = None
     variant: str | None = None
+    #: ``--guide``: a repo-supplied reviewer guide, resolved and frozen once, here. ``None``
+    #: means "not given", so the value keeps resolving through ``review_guide``'s ordinary
+    #: config chain -- a repository or user default reaches the gate with no flag at all.
+    guide: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,13 @@ class _Frozen:
     allow_dirty: bool
     until: int
     overrides: dict[str, str]
+    #: The review guide's source path as resolved at arm, or ``""`` when none is in force.
+    #: Disclosure only -- the source file is never read again, and the frozen copy beside
+    #: ``plan.frozen.md`` is what every review is shown.
+    guide_path: str
+    #: sha256 of the frozen guide, or ``""``. Shown in the banner so the value a human can
+    #: check against the activation directory is on screen at arm time.
+    guide_sha256: str
     #: The config actually probed and armed with -- defaults < user < repo < overrides < env
     #: already resolved. The one source of truth for "what does this activation actually
     #: run with", since env may itself outrank a --model/--variant override.
@@ -220,7 +231,7 @@ def _parse(argv: list[str]) -> tuple[str, str, list[str]]:
 
 #: Flags accepted by ``implement``, and whether each one takes a value.
 _BOOL_FLAGS: Final = ("--allow-dirty",)
-_VALUE_FLAGS: Final = ("--until", "--harness", "--model", "--variant")
+_VALUE_FLAGS: Final = ("--until", "--harness", "--model", "--variant", "--guide")
 
 
 def parse_flag_tokens(tokens: list[str], *, bool_flags: tuple[str, ...], value_flags: tuple[str, ...], usage: str) -> dict[str, str | bool]:
@@ -266,13 +277,16 @@ def flag_bool(raw: dict[str, str | bool], key: str) -> bool:
 
 def _parse_flags(tokens: list[str]) -> _Flags:
     """Turn raw flag tokens into ``_Flags``. Raises ``_ArmFailure`` on the first problem."""
-    raw = parse_flag_tokens(tokens, bool_flags=_BOOL_FLAGS, value_flags=_VALUE_FLAGS, usage="--allow-dirty, --until, --harness, --model, --variant")
+    raw = parse_flag_tokens(
+        tokens, bool_flags=_BOOL_FLAGS, value_flags=_VALUE_FLAGS, usage="--allow-dirty, --until, --harness, --model, --variant, --guide"
+    )
     return _Flags(
         allow_dirty=flag_bool(raw, "--allow-dirty"),
         until=flag_str(raw, "--until") or "",
         harness=flag_str(raw, "--harness"),
         model=flag_str(raw, "--model"),
         variant=flag_str(raw, "--variant"),
+        guide=flag_str(raw, "--guide"),
     )
 
 
@@ -428,6 +442,20 @@ def _armed_message(request: _Request, frozen: _Frozen) -> str:
     # `_check_reviewer` has already accepted the harness by the time this runs, so resolving
     # the model through it cannot raise here.
     reviewer = f"{config.as_str('harness')} {harness.model(config)}{f' (variant {variant})' if variant else ''}"
+    # Named on screen at arm time, and by every other surface afterwards, because this is the
+    # one input the repository supplies that becomes *instruction* to the reviewer. A guide can
+    # steer attention, so a bad one makes reviews worse -- that is disclosed rather than
+    # prevented, and disclosure only works if it is unmissable.
+    #
+    # The path itself goes through `guide.display_path`: it comes from `review_guide`, which is
+    # repository-controlled, and this banner is both printed to a terminal and read by the model
+    # as its instructions for what to do next. Raw, a newline in a filename writes further
+    # bullets into it and an ESC sequence reaches the terminal.
+    guide_line = (
+        f"{guide.display_path(frozen.guide_path)} (frozen copy: {frozen.act_dir}/{guide.GUIDE_FROZEN_NAME}, sha256 {frozen.guide_sha256[:12]})"
+        if frozen.guide_path
+        else "none"
+    )
     return f"""\
 **adversarial-review-loop is ARMED for this worktree.**
 
@@ -436,6 +464,7 @@ def _armed_message(request: _Request, frozen: _Frozen) -> str:
 - baseline tree: {frozen.baseline}
 - activation commit: {frozen.head_commit or "<empty repository>"}
 - reviewer: {reviewer}
+- review guide: {guide_line}
 - pre-existing uncommitted work folded into phase 1: {"true" if frozen.allow_dirty else "false"}
 - pause target: {frozen.until if frozen.until else "none"} (checked again once phases are frozen)
 - block_severity: {config.as_str("block_severity")}
@@ -538,10 +567,25 @@ def _arm(state: State, request: _Request) -> _Frozen:
     # same argument is why `--harness` is in here: the binary checked and the model list
     # probed have to be the ones this activation will actually run against.
     overrides = {
-        key: value for key, value in (("harness", parsed.harness), ("model", parsed.model), ("variant", parsed.variant)) if value is not None
+        key: value
+        for key, value in (("harness", parsed.harness), ("model", parsed.model), ("variant", parsed.variant), ("review_guide", parsed.guide))
+        if value is not None
     }
     probe_config = config_module.load(repo, overrides=overrides)
     _check_reviewer(probe_config)
+
+    # Resolved and read **before** the lock, so a guide the gate will not accept costs nothing:
+    # nothing is created, nothing is frozen, and the activation directory is left exactly as it
+    # was found. Only the write happens under the lock, beside the plan's. Read once here and
+    # frozen from those same bytes, rather than re-read inside the lock -- re-reading would
+    # validate one file and freeze another.
+    guide_path = guide.resolve(probe_config, repo)
+    guide_bytes: bytes | None = None
+    if guide_path:
+        try:
+            guide_bytes = guide.read_source(guide_path)
+        except guide.GuideRejected as exc:
+            raise _ArmFailure(str(exc)) from exc
     # The harness is pinned to whatever was actually probed, whether or not `--harness` was
     # typed -- unlike `model` and `variant`, which stay unpinned and keep resolving through the
     # config layers on every round.
@@ -573,6 +617,8 @@ def _arm(state: State, request: _Request) -> _Frozen:
         allow_dirty=allow_dirty,
         until=until,
         overrides=overrides,
+        guide_path=guide_path if guide_bytes is not None else "",
+        guide_sha256=hashlib.sha256(guide_bytes).hexdigest() if guide_bytes is not None else "",
         effective_config=probe_config,
     )
 
@@ -591,6 +637,12 @@ def _arm(state: State, request: _Request) -> _Frozen:
             raise _VersionConflict(state.version_conflict_value)
 
         plan_bytes = _freeze_plan(plan, state.act_dir)
+        guide_revisions = []
+        if guide_bytes is not None:
+            try:
+                guide_revisions = [guide.freeze(guide_bytes, state.act_dir, guide.GUIDE_FROZEN_NAME, phase=1)]
+            except guide.GuideRejected as exc:
+                raise _ArmFailure(str(exc)) from exc
 
         # A fresh document: re-arming the same session starts a new activation, and carrying
         # the old one's approved trees forward would approve a tree nobody reviewed for it.
@@ -612,6 +664,10 @@ def _arm(state: State, request: _Request) -> _Frozen:
             # entry" -- without this baseline there is nothing to compare a first revision
             # against, and `reviewer._range_text`'s disclosure has no honest form.
             plan_revisions=[{"at": now(), "phase": 1, "sha256": hashlib.sha256(plan_bytes).hexdigest(), "file": planrev.PLAN_FROZEN_NAME}],
+            # Empty when no guide is in force, and that is the whole encoding of "off": there
+            # is no revision 0 to synthesize, and `guide.verified_active` will not invent one.
+            guide_path=frozen.guide_path,
+            guide_revisions=guide_revisions,
         )
         state.mark_tree_approved(frozen.baseline)
         state.save()

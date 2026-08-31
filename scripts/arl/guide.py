@@ -53,6 +53,7 @@ import os
 import re
 import secrets
 import stat
+import unicodedata
 from pathlib import Path
 from typing import Any, Final
 
@@ -67,6 +68,7 @@ __all__ = [
     "PLACEHOLDER",
     "GuideRejected",
     "compose",
+    "display_path",
     "freeze",
     "read_source",
     "resolve",
@@ -217,20 +219,20 @@ def _read_capped(path: str) -> bytes:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     except OSError as exc:
         if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.EISDIR, errno.ELOOP, errno.ENAMETOOLONG):
-            raise GuideRejected(f'the review guide path does not resolve to an existing regular file: "{path}"') from exc
+            raise GuideRejected(f"the review guide path does not resolve to an existing regular file: {display_path(path)}") from exc
         if exc.errno in (errno.EACCES, errno.EPERM):
-            raise GuideRejected(f'the review guide file is not readable: "{path}"') from exc
-        raise GuideRejected(f'the review guide file could not be opened: "{path}" ({exc})') from exc
+            raise GuideRejected(f"the review guide file is not readable: {display_path(path)}") from exc
+        raise GuideRejected(f"the review guide file could not be opened: {display_path(path)} ({exc})") from exc
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise GuideRejected(f'the review guide path does not resolve to an existing regular file: "{path}"')
+            raise GuideRejected(f"the review guide path does not resolve to an existing regular file: {display_path(path)}")
         chunks: list[bytes] = []
         remaining = MAX_GUIDE_BYTES + 1
         while remaining > 0:
             try:
                 chunk = os.read(fd, remaining)
             except OSError as exc:
-                raise GuideRejected(f'the review guide file could not be read: "{path}" ({exc})') from exc
+                raise GuideRejected(f"the review guide file could not be read: {display_path(path)} ({exc})") from exc
             if not chunk:
                 break
             chunks.append(chunk)
@@ -252,14 +254,14 @@ def read_source(path: str) -> bytes:
         raise GuideRejected("no review guide path was supplied")
     raw = _read_capped(path)
     if len(raw) > MAX_GUIDE_BYTES:
-        raise GuideRejected(f'the review guide file is larger than {MAX_GUIDE_BYTES} bytes: "{path}"')
+        raise GuideRejected(f"the review guide file is larger than {MAX_GUIDE_BYTES} bytes: {display_path(path)}")
     text = raw.decode("utf-8", "surrogateescape")
     if not text.strip():
-        raise GuideRejected(f'the review guide file is empty or contains only whitespace: "{path}"')
+        raise GuideRejected(f"the review guide file is empty or contains only whitespace: {display_path(path)}")
     for marker in _CONTRACT_MARKERS:
         if marker in text:
             raise GuideRejected(
-                f'the review guide contains the reviewer contract marker "{marker}": "{path}". '
+                f'the review guide contains the reviewer contract marker "{marker}": {display_path(path)}. '
                 "A guide that emits a findings block would make every review of this repository "
                 "fail its contract, so it is refused here rather than blamed on the reviewer later."
             )
@@ -325,6 +327,74 @@ def verified_active(act_dir: Path, revisions: list[dict[str, Any]]) -> bytes | N
             )
         content = planrev.read_verified(act_dir, str(raw_entry.get("file")), expected_sha256=recorded_hash, what="review guide revision")
     return content
+
+
+#: The two separator categories, which are not ``C*`` but break a line all the same
+#: (``\u2028``, ``\u2029``). Everything else :func:`_escapes` refuses is decided by category.
+_SEPARATOR_CATEGORIES: Final = frozenset({"Zl", "Zp"})
+
+#: The three escapes worth spelling readably. Everything else :func:`_escapes` refuses becomes
+#: a numeric escape, which is unambiguous but says less to the person reading it.
+_NAMED_ESCAPES: Final = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _escapes(char: str) -> bool:
+    """Whether ``char`` must be shown as an escape rather than printed.
+
+    Every character in a ``C*`` category -- ``Cc`` (the C0 and C1 controls, ESC among them),
+    ``Cf``, ``Cs``, ``Co``, ``Cn`` -- plus the two separator categories. A category test rather
+    than a character list, because the list is the thing that keeps being incomplete: escaping
+    ``\n`` and ESC still leaves ``Cf``, where U+202E RIGHT-TO-LEFT OVERRIDE reorders everything
+    after it on the line and U+2066-2069 do it in a scope, so a path can misrepresent itself in
+    a disclosure whose whole purpose is to say which file was used -- with no newline and no
+    ESC anywhere in it.
+
+    ``Cf`` includes ZWJ and ZWNJ, which appear in perfectly ordinary Persian, Indic and emoji
+    filenames; those come back as ``\u200d``/``\u200c`` here. That is the deliberate side of
+    the trade: on this surface a character that is *invisible* is worse than one that is ugly.
+    Everything visible is left exactly as it is, so a non-ASCII path stays readable -- which is
+    why this is a category test and not ``ensure_ascii=True``.
+    """
+    category = unicodedata.category(char)
+    return category[0] == "C" or category in _SEPARATOR_CATEGORIES
+
+
+def display_path(path: str) -> str:
+    """A guide path as one quoted line, safe to print. For humans, not for the reviewer.
+
+    ``review_guide`` is repository-controlled, and on the refusal paths its value never has to
+    name a real file at all -- so an arbitrary string reaches the arming banner, ``/status``
+    and every :class:`GuideRejected` message. Printed raw that is a terminal-control primitive
+    (ESC sequences, and the bidi overrides :func:`_escapes` describes) and a line-forging one:
+    a newline lets it write further ``- reviewer: ...`` bullets into a banner the model reads
+    as instructions about what to do next.
+
+    Escaped rather than withheld, unlike :func:`_display_path`: these surfaces exist to tell a
+    human which file the gate used, and a path they typed a moment ago must still be legible.
+    Escaping is enough here, because within a single line nothing can forge a banner bullet or
+    a status row. The reviewer prompt is the stricter case -- there the payload is readable
+    prose, which no escape set catches -- and it uses the allowlist instead.
+
+    Quoted and escaped here rather than by ``json.dumps``: it renders what *it* escapes with
+    one backslash and what this function escapes with two, so the same category of character
+    would be shown two different ways depending on which of them happened to catch it.
+    """
+    if not path:
+        return '""'
+    shown = path if len(path) <= _MAX_PATH_DISPLAY else path[:_MAX_PATH_DISPLAY] + "…"
+    out = ['"']
+    for char in shown:
+        if char in ('"', "\\"):
+            out.append("\\" + char)
+        elif char in _NAMED_ESCAPES:
+            out.append(_NAMED_ESCAPES[char])
+        elif _escapes(char):
+            code = ord(char)
+            out.append(f"\\U{code:08x}" if code > 0xFFFF else f"\\u{code:04x}")
+        else:
+            out.append(char)
+    out.append('"')
+    return "".join(out)
 
 
 def _showable(path: str) -> bool:

@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Final
 
-from arl import commands, gitsnap, harness, hookio, oscillation, paths, planrev, report, reviewer
+from arl import commands, gitsnap, guide, harness, hookio, oscillation, paths, planrev, report, reviewer
 from arl.commands import completion, hooks
 from arl.commands.completion import Completion
 from arl.config import Config
@@ -148,6 +148,27 @@ def _cost_line(history: list[dict[str, Any]], phase_history: list[dict[str, Any]
     return f"reviewer cost:       ${total:.2f} over {rounds} round(s), ${phase_total:.2f} this phase ({phase_rounds})\n"
 
 
+def _revision_list(state: State, key: str) -> list[dict[str, Any]] | None:
+    """A revisions field as a list of objects, or ``None`` when it is not one.
+
+    ``state.json`` is not a trust boundary (AGENTS.md), and every revisions field is read here
+    only to *describe* the activation. The distinction ``None`` draws is between "nothing
+    recorded", which is ordinary, and "recorded as something that is not a list of objects",
+    which is corruption worth naming -- so this is not ``get_array_of_dicts``, which answers
+    ``[]`` to both and would report a mangled field as an activation with no revisions.
+
+    Nothing downstream may index or count the raw value before this runs: an object or a number
+    is truthy, and ``status`` is the one command a human runs *because* something is wrong. It
+    must not be the thing that crashes.
+    """
+    value = state.data.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(entry, dict) for entry in value):
+        return None
+    return value
+
+
 def status(argv: list[str]) -> int:
     """Print everything the gate is currently deciding on. Never changes anything."""
     del argv
@@ -171,15 +192,40 @@ def status(argv: list[str]) -> int:
     manual_accepts = state.get_array_of_dicts("manual_accepts")
     accepted_phases = ", ".join(str(entry.get("phase")) for entry in manual_accepts)
     accepts_line = f"{len(manual_accepts)} (phases {accepted_phases})" if manual_accepts else "0"
-    plan_revisions = state.data.get("plan_revisions") or []
     # `status` never changes anything (see the docstring above), so a corrupted revision
     # entry is reported inline rather than escalated the way `pretool`/`gate-stop` do --
     # there is no mutation here to gate, only a diagnostic to print honestly.
-    try:
-        active_plan_file = planrev.active_filename(plan_revisions)
-    except planrev.EvidenceCorrupted as exc:
-        active_plan_file = f"<corrupted: {exc}>"
-    revision_count = len(plan_revisions) or 1
+    #
+    # The *shape* is checked before anything indexes or counts it. `state.json` is not a trust
+    # boundary, and a revisions field holding an object or a number is truthy: it would reach
+    # `active_filename`'s `existing[-1]` and `len()` and raise straight out of `status`, so the
+    # one command a human runs to find out what went wrong would itself be what fails.
+    plan_revisions = _revision_list(state, "plan_revisions")
+    if plan_revisions is None:
+        active_plan_file = "<corrupted: plan_revisions is not a list of objects>"
+        revision_count = 1
+    else:
+        try:
+            active_plan_file = planrev.active_filename(plan_revisions)
+        except planrev.EvidenceCorrupted as exc:
+            active_plan_file = f"<corrupted: {exc}>"
+        revision_count = len(plan_revisions) or 1
+
+    # The repo-supplied reviewer guide, beside the frozen plan for the same reason it is in the
+    # arming banner: it is the one repository input that becomes instruction to the reviewer, so
+    # "what was this review run under" has to be answerable without opening state.json. An empty
+    # `guide_revisions` is "no guide" -- never a backfilled revision 0 (`arl.guide`).
+    guide_revisions = _revision_list(state, "guide_revisions")
+    if guide_revisions is None:
+        guide_line = "<corrupted: guide_revisions is not a list of objects>"
+    elif not guide_revisions:
+        guide_line = "none"
+    else:
+        recorded = str(guide_revisions[-1].get("sha256") or "")
+        # `guide_path` is repository-controlled (`review_guide`), and this is printed to a
+        # terminal -- see `guide.display_path`.
+        source = guide.display_path(state.get("guide_path")) if state.get("guide_path") else "<unrecorded>"
+        guide_line = f"{source} (sha256 {recorded[:12] or '<unrecorded>'}, revision {len(guide_revisions) - 1}, {len(guide_revisions)} recorded)"
 
     # Phase 5: how many rounds this phase's own label has run at the current generation, and
     # whether any of its anchors have stopped moving. Mirrors exactly the scope
@@ -220,6 +266,7 @@ reason:              {state.get("reason")}
 plan:                {state.get("plan_path")}
 frozen plan:         {activation.act_dir}/{active_plan_file}
 plan revision:       {revision_count - 1} ({revision_count} recorded)
+review guide:        {guide_line}
 baseline tree:       {state.get("baseline_tree")}
 activation commit:   {state.get("activation_commit")}
 last approved tree:  {state.get("last_approved_tree")}
