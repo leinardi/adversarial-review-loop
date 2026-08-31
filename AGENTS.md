@@ -197,6 +197,7 @@ make test-unit               # the pytest half only
 make test-accept             # tests/selftest.sh only
 make test-filter FILTER=stop # one selftest section
 make check                   # pre-commit: shellcheck, markdownlint, yamllint, actionlint, ruff, mypy
+make sync-pins               # propagate requirements-dev.txt into .pre-commit-config.yaml
 make dry-run                 # print the exact reviewer command and prompt without invoking it
 ARL_HARNESS=opencode make dry-run   # the same, for the other harness
 ```
@@ -206,6 +207,8 @@ CI installs from the same file, so a local run and a CI run see the same version
 *development* dependency only — the plugin's own runtime needs nothing beyond `python3`, the
 standard library, and the vendored bashlex under `scripts/arl/_vendor/`, and must keep working
 straight from a checkout with no install step.
+
+pytest is pinned in two places — `requirements-dev.txt` and the `additional_dependencies` of the mypy hooks in `.pre-commit-config.yaml`, which is what gives mypy pytest's `py.typed`. Dependabot bumps the first and never the second, so `tests/unit/test_pins.py` fails when they drift. `make sync-pins` propagates `requirements-dev.txt` into the hook config; run it on a Dependabot bump and commit the result alongside.
 
 `make test` must pass before any commit. A change to the gate needs a test that **fails on the old code** — a test that only asserts a helper's return value while the end-to-end bypass survives is not a regression test.
 

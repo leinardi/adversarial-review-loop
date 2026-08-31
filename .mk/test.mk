@@ -34,6 +34,12 @@ else
 	@$(PYTHON) -m pip install -r $(REPO_ROOT)/requirements-dev.txt
 endif
 
+# Plain $(PYTHON), never uv: the script imports nothing outside the standard library, and it
+# edits the repository, so it must not depend on a resolver being installed.
+.PHONY: sync-pins
+sync-pins: ## Rewrite the .pre-commit-config.yaml pins to match requirements-dev.txt
+	@$(PYTHON) $(REPO_ROOT)/scripts/sync_pins.py
+
 .PHONY: test
 test: test-unit test-accept ## Run the unit tests and the arl selftest (no model is called)
 
