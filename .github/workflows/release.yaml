@@ -76,12 +76,6 @@ jobs:
           echo "Releasing $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # The ci.yaml run dispatched at the end of this job executes only its `test` job -
-      # every other job there is gated `if: github.event_name == 'pull_request'` - so this
-      # is the gate that actually runs before a version ships.
-      - name: Run the self-tests
-        run: make test
-
       - name: Bump the version in plugin.json
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -121,6 +115,10 @@ jobs:
             --title "chore(release): bump version to $VERSION" \
             --body "Automated version bump. Review the diff, then merge — merging triggers \`auto-tag-release.yaml\`, which tags \`adversarial-review-loop--v$VERSION\` and creates the GitHub release."
 
+      # This is the only CI the release PR gets. A GITHUB_TOKEN-authored PR does not fire
+      # `pull_request`, so ci.yaml has to be dispatched by hand - and on a dispatch it runs
+      # only its `test` job, every other job there being gated on the event being a
+      # pull_request. Check that run before merging; nothing in the ruleset requires it.
       - name: Trigger CI checks on the bump branch
         env:
           GH_TOKEN: ${{ github.token }}
