@@ -1,0 +1,11 @@
+<component name="CopyrightManager">
+  <settings>
+    <module2copyright>
+      <element module="Own Code" copyright="GNU GPLv3" />
+    </module2copyright>
+    <LanguageOptions name="SQL">
+      <option name="fileTypeOverride" value="3" />
+      <option name="block" value="false" />
+    </LanguageOptions>
+  </settings>
+</component>

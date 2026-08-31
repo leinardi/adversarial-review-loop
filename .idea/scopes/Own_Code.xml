@@ -1,0 +1,3 @@
+<component name="DependencyValidationManager">
+  <scope name="Own Code" pattern="file:*//*&amp;&amp;!file:scripts/arl/_vendor//*" />
+</component>
