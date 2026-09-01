@@ -1773,14 +1773,21 @@ fi
 # TTL
 # --------------------------------------------------------------------------
 
-if start 'ttl: an expired activation blocks and never silently disarms'; then
+if start 'ttl: an expired activation ends the turn uncounted and never silently disarms'; then
     new_case
     arm_ok && phases_ok
     f=$(state_file)
     jq '.armed_at = 1' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
     assert_eq 'a mutation is denied' "$(pre Edit)" 'deny'
     assert_contains 'and asks for a re-arm' "$(pre_reason)" 'Re-arm with'
-    with_env ARL_REVIEWER_CMD='/nonexistent/reviewer' assert_eq 'the turn cannot end' "$(stop_decision)" 'block'
+    # The turn ends rather than blocking: only the user's resume refreshes armed_at, so a
+    # counted block would escalate to NEEDS_HUMAN -- which resume then refuses by design.
+    with_env ARL_REVIEWER_CMD='/nonexistent/reviewer' assert_eq 'the turn ends' "$(stop_decision)" 'ok'
+    assert_contains 'naming the TTL' "$(jq -r '.systemMessage // ""' "$ROOT/last.json")" 'ttl_hours'
+    assert_contains 'and the recovery' "$(jq -r '.systemMessage // ""' "$ROOT/last.json")" 'resume'
+    with_env ARL_REVIEWER_CMD='/nonexistent/reviewer' assert_eq 'every time' "$(stop_decision)" 'ok'
+    assert_eq 'nothing was counted' "$(sget stop_blocks)" '0'
+    assert_eq 'and the stored status is untouched' "$(sget status)" 'ACTIVE'
 fi
 
 # --------------------------------------------------------------------------

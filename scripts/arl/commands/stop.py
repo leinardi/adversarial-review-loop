@@ -12,6 +12,10 @@ Two shapes of answer, and the difference matters:
 - ``stop_ok`` lets the turn end. It is used for every terminal state -- including the
   escalations, which end the turn while leaving every mutation denied. **Letting a turn end
   is not an approval**, and the messages say so wherever it could be misread.
+
+A block is only worth sending when Claude could act on it. ``STALE`` is the one non-terminal
+status where it cannot -- only the user's ``resume`` refreshes ``armed_at`` -- so it ends the
+turn too, through the same reasoning an unscopable intent does in :func:`_gate_stop`.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -136,11 +140,32 @@ Reason: {reason}
 Tell the user. They can re-run /adversarial-review-loop:implement <plan.md> or /adversarial-review-loop:stop. Do not attempt to implement the plan.
 """
 
+#: Addressed to the **user**, not to Claude: this one goes out as a ``systemMessage`` rather
+#: than as a block reason, because Claude has nothing to do about it.
 STALE: Final = (
-    "adversarial-review-loop: this activation is past ttl_hours ({ttl_hours}) and blocks rather than silently disarming. "
-    "Tell the user to continue with /adversarial-review-loop:resume, which keeps the baseline and every approval -- that is "
-    "usually the right recovery. Re-arm with /adversarial-review-loop:implement <plan.md> only to start over from scratch, "
-    "or leave the mode with /adversarial-review-loop:stop.\n"
+    "adversarial-review-loop: this activation is past ttl_hours ({ttl_hours}), so it is STALE and blocks rather than "
+    "silently disarming: every mutation is denied, and nothing in this turn was reviewed -- this is NOT an approval. "
+    "Continue with /adversarial-review-loop:resume, which refreshes the activation and keeps the baseline and every "
+    "approval -- that is usually the right recovery. Re-arm with /adversarial-review-loop:implement <plan.md> only to "
+    "start over from scratch, or leave the mode with /adversarial-review-loop:stop."
+)
+
+#: The same recovery, for a turn that was still ``ACTIVE`` when it started. ``reason`` carries
+#: whatever this turn had already found -- often a real review's findings -- because unlike the
+#: constant above, this one cannot claim nothing was reviewed.
+STALE_MIDTURN: Final = """\
+{reason}
+
+adversarial-review-loop: the activation passed ttl_hours ({ttl_hours}) while this turn was running, so it is now STALE: every mutation is denied and nothing above was approved. The turn ends rather than being sent back, and it was not counted against max_stop_blocks -- only you can clear a STALE activation. Continue with /adversarial-review-loop:resume, which refreshes the activation and keeps the baseline and every approval -- that is usually the right recovery. Re-arm with /adversarial-review-loop:implement <plan.md> only to start over from scratch, or leave the mode with /adversarial-review-loop:stop.
+"""
+
+#: What an escalation refused by an expiry says before :data:`STALE_MIDTURN`. The escalation
+#: genuinely did not stick, so this says so rather than implying the loop is now NEEDS_HUMAN --
+#: and it keeps ``reason``, which is the only place the reviewer's own finding survives.
+STALE_ESCALATION: Final = (
+    "adversarial-review-loop: this turn escalated to NEEDS_HUMAN ({reason}), but the escalation was NOT recorded: the "
+    "activation expired first, and an expired activation is not written to. This is NOT an approval -- the work was not "
+    "reviewed to completion, and the same review runs again once you resume."
 )
 
 NOT_FROZEN: Final = """\
@@ -187,7 +212,7 @@ adversarial-review-loop: STALLED — {blocks} no-progress Stop blocks in a row (
 
 Last reason: {reason}
 
-Every mutation stays denied until you run /adversarial-review-loop:stop.
+Every mutation stays denied until you run /adversarial-review-loop:accept, which clears the escalation and approves the current tree without another review, or /adversarial-review-loop:stop, which leaves the mode.
 """
 
 SNAPSHOT_FAILED: Final = "adversarial-review-loop: the working state could not be snapshotted ({error}), so the turn cannot be approved."
@@ -384,6 +409,10 @@ class _Terminal(Exception):
     resave it, not even with an unchanged ``self.data`` (``transaction()``'s exit calls
     ``save()`` unconditionally, regardless of whether anything called ``update()``), because
     that document may belong to a *retired* activation AGENTS.md forbids mutating again.
+
+    ``STALE`` is raised through here too, on a different ground: nothing forbids writing to a
+    stale document, but the counters are exactly what must not be written into one -- see
+    :func:`_uncountable_status_or_none`. The caller sorts the two apart by ``status``.
     """
 
     def __init__(self, status: str) -> None:
@@ -405,6 +434,40 @@ def _terminal_status_or_none(state: State, config: Config) -> str:
         return ""
     status = state.effective_status(config)
     return status if status in ("COMPLETE", "DISARMED", "RESUMED") else ""
+
+
+def _uncountable_status_or_none(state: State, config: Config) -> str:
+    """A plain, unlocked read of the current status, if it is one no block may be counted in.
+
+    :func:`_terminal_status_or_none`'s three, for the reason it documents, **plus ``STALE``**.
+    Stale is not terminal, but it is equally not Claude's to fix, and the TTL is a wall clock:
+    ``_by_status`` only reads the status once, at the top of the hook, so a turn that began
+    ``ACTIVE`` can arrive here stale after a review that took minutes. Counting that block put
+    the loop straight back on the path this gate stopped taking -- an escalation to
+    ``NEEDS_HUMAN`` that only ``accept`` can clear -- and left a ``stop_marker`` behind that
+    the next genuine block resumed counting from.
+
+    Kept separate from :func:`_terminal_status_or_none` rather than widening it: ``_sweep``'s
+    approving path routes its result straight into :func:`_ended`, which is the wrong answer
+    for a status that has not disarmed anything. That path reaches this one anyway -- a stale
+    crossing moves ``completion.fingerprint``, so it lands in :func:`_block_counted` through
+    ``SWEEP_ACTIVATION_MOVED``.
+    """
+    if not state.load():
+        return ""
+    status = state.effective_status(config)
+    return status if status in ("COMPLETE", "DISARMED", "RESUMED", "STALE") else ""
+
+
+def _stale_end(gate: _Gate, reason: str) -> NoReturn:
+    """End the turn on an activation that expired *during* it, carrying ``reason`` with it.
+
+    A separate message from ``_by_status``'s, which can honestly say nothing was reviewed. By
+    the time this runs a review may well have run and found something, and ``reason`` is what
+    it found -- reported rather than dropped, since ending the turn is not an approval and
+    those findings are the user's to read before they decide to resume.
+    """
+    gate.hook.stop_ok(STALE_MIDTURN.format(reason=reason, ttl_hours=gate.config.as_int("ttl_hours")).rstrip("\n"))
 
 
 def _say(gate: _Gate, text: str) -> str:
@@ -455,7 +518,9 @@ def _block_counted(gate: _Gate, reason: str, *, after_completion_refusal: bool =
     """
     reason = _say(gate, reason)
     state = gate.state
-    peeked = _terminal_status_or_none(state, gate.config)
+    peeked = _uncountable_status_or_none(state, gate.config)
+    if peeked == "STALE":
+        _stale_end(gate, reason)
     if peeked:
         if peeked != "COMPLETE" or after_completion_refusal:
             _ended(gate, peeked)
@@ -465,12 +530,14 @@ def _block_counted(gate: _Gate, reason: str, *, after_completion_refusal: bool =
     try:
         with state.transaction():
             status = state.effective_status(gate.config)
-            if status in ("COMPLETE", "DISARMED", "RESUMED"):
+            if status in ("COMPLETE", "DISARMED", "RESUMED", "STALE"):
                 raise _Terminal(status)
             marker = f"{state.get('last_approved_tree')}:{state.get('phase')}:{state.get('status')}"
             blocks = state.get_int("stop_blocks") + 1 if marker == state.get("stop_marker") else 1
             state.update(stop_blocks=blocks, stop_marker=marker)
     except _Terminal as exc:
+        if exc.status == "STALE":
+            _stale_end(gate, reason)
         if exc.status != "COMPLETE" or after_completion_refusal:
             _ended(gate, exc.status)
         gate.hook.stop_block(reason)
@@ -542,11 +609,22 @@ def _escalate(gate: _Gate, reason: str) -> None:
     touched again. ``load()`` reads the whole file in one go against an atomically-renamed
     writer, so the snapshot is internally consistent even without the lock; a stale-by-
     microseconds label in a message is not worth a write to somebody else's activation.
+
+    **An expiry is reported as an expiry.** ``hooks.Activation`` carries the effective status,
+    so a TTL crossed during a minutes-long review refuses the escalation here exactly as a
+    genuine move does -- and it is right to refuse, since nothing may be written. But
+    ``ACTIVATION_MOVED`` then blames "whatever moved it", drops ``reason`` (the reviewer's own
+    finding, which nothing else in this response carries) and names no way out. The recovery is
+    the ordinary stale one, so it is the ordinary stale message that goes out, with ``reason``
+    kept in front of it. Narrowed to the case where the TTL is the *only* difference: anything
+    else that moved underneath this turn is the more important fact and still reports as a move.
     """
     if hooks.escalate(gate.state, gate.config, gate.expected, reason):
         return
     gate.state.load()
     current = hooks.activation(gate.state, gate.config)
+    if current.effective_status == "STALE" and dataclasses.replace(current, effective_status=current.status) == gate.expected:
+        _stale_end(gate, STALE_ESCALATION.format(reason=reason))
     gate.hook.stop_ok(ACTIVATION_MOVED.format(change=hooks.describe_move(gate.expected, current), now=current.summary))
 
 
@@ -564,7 +642,17 @@ def _by_status(gate: _Gate) -> None:
     if status == "ARM_FAILED":
         _block_counted(gate, ARM_FAILED.format(reason=state.get("reason")).rstrip("\n"))
     if status == "STALE":
-        _block_counted(gate, STALE.format(ttl_hours=config.as_int("ttl_hours")).rstrip("\n"))
+        # Ends the turn rather than blocking, for the reasons an unscopable intent already
+        # does in `_gate_stop`: every mutation was denied by `pretool._gate_terminal_status`,
+        # so nothing went unreviewed, and **nothing Claude can do resolves it** -- only the
+        # user's `resume` refreshes `armed_at`. `session.reorient` already classifies STALE
+        # with NEEDS_HUMAN on exactly that ground ("needs the user, not another attempt").
+        #
+        # Counting it was worse than useless: the marker below is built from the *stored*
+        # status, which a TTL expiry never changes, so every turn end counted and the
+        # activation escalated to NEEDS_HUMAN within one user turn -- an escalation `resume`
+        # refuses by design, so reaching it took away the very recovery this message names.
+        hook.stop_ok(STALE.format(ttl_hours=config.as_int("ttl_hours")))
     if status == "ARMED":
         plan_file = _named_plan_file(gate)
         _block_counted(gate, NOT_FROZEN.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file).rstrip("\n"))

@@ -127,6 +127,11 @@ def test_the_unstarted_arm_block_is_counted_rather_than_endless(git_repo: Path, 
     message = ended(stop(git_repo, env))
 
     assert "STALLED" in message
+    # Both exits, not just one: `accept` clears the escalation and keeps the loop going, and
+    # it is the only code in the tree that does -- a message naming only `stop` reads as
+    # "throw the activation away" for a loop that merely needs a nudge.
+    assert "/adversarial-review-loop:accept" in message
+    assert "/adversarial-review-loop:stop" in message
     assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
 
 
@@ -212,14 +217,141 @@ def test_an_unfinished_reconcile_blocks_the_turn(git_repo: Path, tmp_path: Path,
     assert "git reset --soft abc123" in reason
 
 
-def test_an_expired_activation_blocks_rather_than_disarming(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env)
+def test_an_expired_activation_ends_the_turn_uncounted_and_never_escalates(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """STALE is the user's to clear, so blocking over it only wedges the session.
+
+    Nothing Claude can do refreshes ``armed_at`` -- only the user's ``resume`` does -- so a
+    counted block escalates to ``NEEDS_HUMAN`` within one turn, and ``resume`` refuses that by
+    design: naming the recovery in the message is exactly what would take it away. The turn
+    ends instead, with every mutation still denied by ``pretool._gate_terminal_status``.
+    """
+    env = {**armed_env(clean_env), "ARL_MAX_STOP_BLOCKS": "1"}
     active(git_repo, tmp_path, env)
     patch_state(env, git_repo, armed_at=1)
 
-    reason = blocked(stop(git_repo, env))
+    for _ in range(5):
+        message = ended(stop(git_repo, env))
+        assert "past ttl_hours" in message
+        assert "/adversarial-review-loop:resume" in message
+        assert "NOT an approval" in message
 
-    assert "past ttl_hours" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["status"] == "ACTIVE", "a stale activation must never escalate on its own"
+    assert document["stop_blocks"] == 0
+    assert document["stop_marker"] == ""
+
+
+#: Seconds a mid-turn-expiry reviewer stub spends "reviewing", and the margin
+#: :func:`_expiring` leaves before the activation goes stale. The stub must outlast the margin.
+_EXPIRY_MARGIN = 2
+_EXPIRY_SLEEP = 4
+
+
+def _slow_reviewer(tmp_path: Path, name: str, verdict: str, findings: int = 0) -> Path:
+    """A reviewer slow enough for the wall clock to cross the TTL while it "reviews".
+
+    The real thing takes minutes, and the TTL is a wall clock, so an activation that was ACTIVE
+    when the Stop hook read its status can be STALE by the time the verdict comes back.
+
+    Deliberately **not** simulated by rewriting ``armed_at`` from inside the stub: ``armed_at``
+    is half of ``hooks.Activation.identity``, so moving it reads as a *re-arm* rather than an
+    expiry and ``describe_move`` says so. Only real elapsed time reproduces the real thing.
+    """
+    stub = tmp_path / f"slow-reviewer-{name}.py"
+    lines = "".join(f"print('FINDING severity=high actionable=yes file=work{n}.txt | needs work {n}')\n" for n in range(findings))
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import time\n"
+        f"time.sleep({_EXPIRY_SLEEP})\n"
+        "print('Reviewed the whole diff.')\n"
+        "print()\n"
+        "print('<<<ARL-FINDINGS>>>')\n"
+        f"{lines}"
+        f"print('VERDICT {verdict}')\n"
+        "print('<<<ARL-END>>>')\n"
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _expiring(env: dict[str, str], repo: Path) -> None:
+    """Age the activation so a 1h TTL expires ``_EXPIRY_MARGIN`` seconds from now.
+
+    Still comfortably ACTIVE when ``_by_status`` reads it at the top of the hook, and stale by
+    the time a ``_slow_reviewer`` answers.
+    """
+    patch_state(env, repo, armed_at=int(time.time()) - 3600 + _EXPIRY_MARGIN)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        # (stub name, verdict, findings emitted, the text the block reason must carry through)
+        ("changes", "CHANGES_REQUIRED", 1, "needs work 0"),
+        ("approved", "APPROVED", 0, "its approval is discarded rather than trusted"),
+    ],
+    ids=["changes-required", "approved"],
+)
+def test_an_activation_that_expires_mid_turn_is_not_counted_either(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], case: tuple[str, str, int, str]
+) -> None:
+    """The TTL can be crossed *during* the turn, and the same contract has to hold there.
+
+    ``_by_status`` reads the status once, at the top of the hook; the sweep's reviewer call is
+    where the minutes go. An activation that was ACTIVE at that first read can be STALE by the
+    time the verdict comes back -- and the count is taken after it, so a stale activation was
+    counted anyway. Both sweep verdicts reach the counter: ``CHANGES_REQUIRED`` directly, and
+    ``APPROVED`` through the moved-fingerprint branch, since the fingerprint carries the
+    effective status.
+    """
+    name, verdict, findings, carried = case
+    env = {**armed_env(clean_env), "ARL_MAX_STOP_BLOCKS": "1", "ARL_TTL_HOURS": "1"}
+    active(git_repo, tmp_path, env, "phase one", "phase two")
+    env["ARL_REVIEWER_CMD"] = str(_slow_reviewer(tmp_path, name, verdict, findings))
+    (git_repo / "work.txt").write_text("unreviewed\n")
+    _expiring(env, git_repo)
+
+    message = ended(stop(git_repo, env))
+
+    assert "passed ttl_hours" in message
+    assert "it is now STALE" in message
+    assert "/adversarial-review-loop:resume" in message
+    # What the turn had already found is reported, not swallowed: ending the turn is not an
+    # approval, and this is the last chance the user has to read it.
+    assert carried in message
+    document = read_state(env, git_repo, SESSION)
+    assert document["stop_blocks"] == 0, "a turn that ended stale must not be counted"
+    assert document["stop_marker"] == ""
+    assert document["status"] == "ACTIVE", "and it must not escalate"
+
+
+def test_a_review_that_escalates_as_the_activation_expires_still_names_the_recovery(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str]
+) -> None:
+    """The third mid-turn verdict, and the one that does not reach the counter at all.
+
+    ``NEEDS_HUMAN`` goes to ``_escalate``, whose fingerprint guard refuses once the effective
+    status has moved ``ACTIVE -> STALE`` -- correctly, since nothing may be written. What it
+    used to say was the generic "the activation moved", which blames the wrong thing, drops the
+    reviewer's own reason, and names no way out. The escalation genuinely did not stick, so the
+    message has to say that *and* still hand back the recovery.
+    """
+    env = {**armed_env(clean_env), "ARL_MAX_FINDINGS": "1", "ARL_TTL_HOURS": "1"}
+    active(git_repo, tmp_path, env, "phase one", "phase two")
+    env["ARL_REVIEWER_CMD"] = str(_slow_reviewer(tmp_path, "ceiling", "CHANGES_REQUIRED", findings=2))
+    (git_repo / "work.txt").write_text("unreviewed\n")
+    _expiring(env, git_repo)
+
+    message = ended(stop(git_repo, env))
+
+    assert "max_findings" in message, "the reviewer's own reason survives"
+    assert "was NOT recorded" in message
+    assert "passed ttl_hours" in message
+    assert "/adversarial-review-loop:resume" in message
+
+    document = read_state(env, git_repo, SESSION)
+    assert document["status"] == "ACTIVE", "the escalation was refused, so nothing was written"
+    assert document["stop_blocks"] == 0
 
 
 def test_arm_failed_blocks_and_names_the_reason(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

@@ -36,7 +36,7 @@ from conftest import git, run_bootstrap, run_hook
 from test_commands_arm import _path_without_opencode, guide_file, plan_file, probe_env, read_state, state_dir
 from test_commands_posttool import COMMIT, confirm
 from test_commands_pretool import armed, patch_state, payload, pretool
-from test_commands_stop import ended, stop
+from test_commands_stop import blocked, ended, stop
 
 from arl import gitsnap, paths
 from arl.commands import hooks
@@ -136,7 +136,15 @@ def test_resume_carries_round_history_but_resets_the_convergence_counters(git_re
     ]
     predecessor_path = state_dir(env, git_repo, S1) / "state.json"
     document = json.loads(predecessor_path.read_text())
-    document.update(round_history=history, transient_failures=3, retry_not_before=9999999999, clarifications=2)
+    document.update(
+        round_history=history,
+        transient_failures=3,
+        retry_not_before=9999999999,
+        clarifications=2,
+        stop_blocks=2,
+        stop_marker="a-marker",
+        defer_pending=True,
+    )
     predecessor_path.write_text(json.dumps(document))
 
     code, banner = resume(git_repo, env)
@@ -147,6 +155,9 @@ def test_resume_carries_round_history_but_resets_the_convergence_counters(git_re
     assert after["transient_failures"] == 0
     assert after["retry_not_before"] == 0
     assert after["clarifications"] == 0
+    assert after["stop_blocks"] == 0
+    assert after["stop_marker"] == ""
+    assert after["defer_pending"] is False
 
 
 def test_the_predecessor_is_retired_and_denies_every_mutation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -344,13 +355,27 @@ def test_same_session_resume_resets_the_convergence_counters_but_keeps_round_his
     git_repo: Path, tmp_path: Path, clean_env: dict[str, str]
 ) -> None:
     """The in-place path is a fresh start too: an inherited retry backoff or an exhausted
-    clarification budget must not survive it. ``round_history`` is evidence and stays."""
+    clarification budget must not survive it. ``round_history`` is evidence and stays.
+
+    The Stop counters are on the same footing, and the two resume paths must agree on them:
+    the no-progress marker is ``last_approved_tree:phase:status``, none of which an in-place
+    resume changes, so an inherited count would carry straight into the next counted block and
+    escalate on it.
+    """
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
     history = [{"seq": 1, "label": "phase1", "phase": 1, "verdict": "CHANGES_REQUIRED"}]
     path = state_dir(env, git_repo, S1) / "state.json"
     document = json.loads(path.read_text())
-    document.update(round_history=history, transient_failures=4, retry_not_before=9999999999, clarifications=2)
+    document.update(
+        round_history=history,
+        transient_failures=4,
+        retry_not_before=9999999999,
+        clarifications=2,
+        stop_blocks=2,
+        stop_marker="a-marker",
+        defer_pending=True,
+    )
     path.write_text(json.dumps(document))
 
     code, banner = resume_argv(git_repo, env, S1, ["--until", "2"])
@@ -360,6 +385,9 @@ def test_same_session_resume_resets_the_convergence_counters_but_keeps_round_his
     assert after["transient_failures"] == 0
     assert after["retry_not_before"] == 0
     assert after["clarifications"] == 0
+    assert after["stop_blocks"] == 0
+    assert after["stop_marker"] == ""
+    assert after["defer_pending"] is False
     assert after["round_history"] == history
 
 
@@ -730,6 +758,35 @@ def test_same_session_resume_un_stales_an_expired_activation(git_repo: Path, tmp
 
     verdict, _ = pretool(git_repo, env, command=COMMIT, session=S1)
     assert verdict == "allow"
+
+
+def test_a_stale_activation_survives_a_turn_end_and_resumes_with_a_clean_count(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The whole STALE recovery, end to end: turn end, resume, back to ordinary gating.
+
+    Fails on both halves of the old behaviour. The turn end used to be a *counted* block, so
+    with ``ARL_MAX_STOP_BLOCKS=1`` it escalated to ``NEEDS_HUMAN`` -- which ``resume`` refuses
+    by design, stranding the activation. And the in-place resume used to leave ``stop_blocks``
+    alone, so the next genuine block resumed the old count instead of starting a new one.
+    """
+    env = armed(clean_env, ARL_TTL_HOURS="1", ARL_MAX_STOP_BLOCKS="1")
+    active(git_repo, tmp_path, env)
+    before = read_state(env, git_repo, S1)
+    marker = f"{before['last_approved_tree']}:{before['phase']}:{before['status']}"
+    patch_state(env, git_repo, armed_at=1, stop_blocks=1, stop_marker=marker)
+
+    message = ended(stop(git_repo, env, session=S1))
+    assert "past ttl_hours" in message
+    assert read_state(env, git_repo, S1)["status"] == "ACTIVE", "the turn end must not escalate a stale activation"
+
+    code, banner = resume_argv(git_repo, env, S1, [])
+    assert code == 0, banner
+
+    # Ordinary gating again: the outstanding phases block, and it is the *first* such block.
+    reason = blocked(stop(git_repo, env, session=S1))
+    assert "still outstanding" in reason
+    after = read_state(env, git_repo, S1)
+    assert after["stop_blocks"] == 1, "the resume restarted the count rather than inheriting it"
+    assert after["status"] == "ACTIVE"
 
 
 @pytest.mark.parametrize("missing", ["deleted", "symlinked-outside"])

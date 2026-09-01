@@ -368,8 +368,10 @@ def _refuse_unless_finishable(state: State, config: Config) -> None:
     if status == "STALE":
         raise commands.Refused(
             f"adversarial-review-loop: this activation is past ttl_hours ({config.as_int('ttl_hours')}), so its baseline can no longer "
-            "be trusted and it blocks rather than silently disarming. The final review did not run. Re-arm with "
-            "/adversarial-review-loop:implement <plan.md>, or leave the mode with /adversarial-review-loop:stop.\n"
+            "be trusted and it blocks rather than silently disarming. The final review did not run. Continue with "
+            "/adversarial-review-loop:resume, which refreshes the activation and keeps the baseline and every approval, then "
+            "finish again; re-arm with /adversarial-review-loop:implement <plan.md> only to start over from scratch, or leave "
+            "the mode with /adversarial-review-loop:stop.\n"
         )
     if status == "COMPLETE":
         raise commands.Refused(

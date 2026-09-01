@@ -88,7 +88,7 @@ The keys most people touch:
 | `review_guide` | unset | a Markdown file spliced into the reviewer's prompt as repo-specific guidance — see [configuration.md](docs/configuration.md#repo-specific-review-guidance) |
 | `ignore_globs` | `[]` | paths whose sole change skips a review. A full bypass, not a relaxation |
 | `final_review` | `false` | run the final cumulative review at `Stop` |
-| `ttl_hours` | `24` | after this, gates block and ask for a re-arm — `resume` is usually the fix, not `implement` |
+| `ttl_hours` | `24` | after this, every mutation is denied and each turn ends with a message — `resume` is usually the fix, not `implement` |
 | `timeout_sec` | `900` | per review run |
 
 ```json

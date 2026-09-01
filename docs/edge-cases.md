@@ -22,7 +22,7 @@ gate working as designed against a scenario worth understanding before you hit i
 | Diff above `hard_diff_ceiling` | `NEEDS_HUMAN` |
 | Commit lands ≠ reviewed tree, or is an amend | `RECONCILE` with a prescribed, non-automatic recovery |
 | `git reset --soft` before the activation commit | Denied (equal to it is allowed — that is the phase-1 recovery) |
-| Activation older than `ttl_hours` | `STALE`: gates block and ask for a re-arm. **Never a silent disarm** |
+| Activation older than `ttl_hours` | `STALE`: every mutation is denied and the turn ends with a message naming `resume`. **Never a silent disarm**, and never counted as a no-progress block |
 | No-progress `Stop` blocks past `max_stop_blocks` | `NEEDS_HUMAN`, loud system message. **Not** an approval |
 | Claude tries `arl finish` / `deactivate` / `resume` / `config` via Bash | Denied — user-only |
 | Any mutation against a `RESUMED` activation | Denied, naming the session that took over; re-arm with `implement` is the only way out |
@@ -38,7 +38,18 @@ gate working as designed against a scenario worth understanding before you hit i
 
 Every activation has `armed_at`. Once `ttl_hours` (default 24) has passed, every gate
 answers `STALE` instead of the stored status — derived at read time, never a separate
-timer, and it never silently disarms; it blocks and tells you what to do.
+timer, and it never silently disarms; it denies every mutation and tells you what to do.
+
+The turn end is the one place `STALE` deliberately does *not* block. Nothing Claude can do
+refreshes `armed_at`, so a counted block would escalate to `NEEDS_HUMAN` within a single
+turn — and `resume` refuses a `NEEDS_HUMAN`, so reaching it would take away the very recovery
+the message names. The Stop gate ends the turn with a system message to you instead, and
+nothing is counted.
+
+That holds for a turn that goes stale *during* itself, too. The TTL is a wall clock and a
+review takes minutes, so a turn can begin `ACTIVE` and reach the counter stale. It ends the
+same way, and the message carries whatever that turn had already found — a review's findings
+included — since ending a turn is never an approval.
 
 The fix is `/adversarial-review-loop:resume`, not a fresh `implement`. `resume` refreshes
 `armed_at` — which is what un-stales it — while `implement` re-baselines from scratch,
@@ -194,8 +205,9 @@ the turn ends, not later. If you want the pass, ask for it *before* that —
 `/adversarial-review-loop:finish`, which ignores `final_review`.
 
 **Refusals on this path escalate much faster.** When a completion is refused (the activation
-moved underneath it, the TTL shrank mid-turn, the recorded phase evidence doesn't hold up),
-that becomes a counted no-progress block. With the review enabled there was a minutes-long
+moved underneath it, the recorded phase evidence doesn't hold up), that becomes a counted
+no-progress block. The one exception is an expiry: a refusal because the activation went
+`STALE` mid-turn ends the turn uncounted, like any other stale turn end. With the review enabled there was a minutes-long
 reviewer call between attempts; without it, a worktree something else is rewriting can burn
 through `max_stop_blocks` in seconds and escalate to `NEEDS_HUMAN`. That escalation is the
 fail-closed direction and is working as intended — but it arrives sooner than it would with

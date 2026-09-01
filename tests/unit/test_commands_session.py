@@ -262,7 +262,11 @@ def test_status_shows_the_stored_reviewer_session(git_repo: Path, tmp_path: Path
 
 
 def test_status_shows_the_effective_status_alongside_the_stored_one(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    """An expired activation reads as STALE, and STALE blocks -- it never silently disarms."""
+    """An expired activation reads as STALE, and STALE denies -- it never silently disarms.
+
+    "Denies" rather than "blocks": every mutation is refused by ``pretool``, but the Stop gate
+    deliberately *ends* a stale turn rather than blocking it, since only the user can clear it.
+    """
     env = armed_env(clean_env, ARL_TTL_HOURS="1")
     arm(git_repo, tmp_path, env)
 

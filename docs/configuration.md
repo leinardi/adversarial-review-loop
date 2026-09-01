@@ -54,7 +54,7 @@ guessing.
 | `stall_rounds` | `3` | consecutive rounds a **blocking** finding (`actionable=yes`, at or above `block_severity`) must persist before `needs-human`; `0` disables |
 | `max_session_rounds` | `3` | rounds one reviewer session may carry before the next round starts a fresh one; `0` never resets |
 | `allow_dirty` | `false` | alternative to passing `--allow-dirty` every time |
-| `ttl_hours` | `24` | after this, gates block and ask for a re-arm — `resume` is usually the right fix, not a fresh `implement` |
+| `ttl_hours` | `24` | after this, every mutation is denied and each turn ends with a message — `resume` is usually the right fix, not a fresh `implement` |
 | `ignore_globs` | `[]` | paths whose sole change skips a review entirely |
 | `final_review` | `false` | run the final cumulative review at `Stop` |
 | `cold_confirm` | `false` | re-review an approving round cold — no session, no prior-round attachment — and act on that verdict instead |

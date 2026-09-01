@@ -340,6 +340,8 @@ Inducing the condition needed more care than expected, and the detours are worth
 - **`ARMED` is not a stable blocking state**, because the block message tells Claude to run `set-phases`, which it then does — that is progress, and the counter resets by design.
 - **`STALE` is the reliable lever.** Nothing Claude can do resolves it, since only the user can re-arm. Arm normally, then from a *second terminal* (the session must stay open) backdate the activation with `jq '.armed_at = 1'`, and every subsequent turn end blocks with no progress in between.
 
+  *Superseded 2026-09-01:* that same sentence — nothing Claude can do resolves it — is why `STALE` was a bug, not a lever. The Stop gate now ends a stale turn with a system message and counts nothing (`stop.py`, `_by_status`), because counting escalated it to `NEEDS_HUMAN` within one turn and `resume` refuses that. Levers that still count: a `RECONCILE` (commit from a second terminal so `HEAD` diverges from the approved tree), an `ARM_FAILED` from a re-arm that fails once Claude already has turns, or phases left outstanding while Claude is told not to implement them.
+
 ### The Claude Code harness, 2026-08-29
 
 Probed against `claude` 2.1.251, before `scripts/arl/harness/claudecode.py` was written. Three of the four things that module depends on are not what the flag help implies, and each one changed the design.
