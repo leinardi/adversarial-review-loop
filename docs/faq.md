@@ -118,7 +118,8 @@ phase boundary, clear, and resume with a fresh context rather than relying on co
 ### It says `STALE`. What happened?
 
 `ttl_hours` (default 24) elapsed since the activation was armed. It never silently disarms —
-it blocks and asks for a re-arm. The fix is `/adversarial-review-loop:resume`, which refreshes
+every mutation is denied, and each turn ends with a message naming the fix. That message is
+`/adversarial-review-loop:resume`, which refreshes
 `armed_at`, **not** a fresh `implement`, which re-baselines from the current `HEAD` and throws
 away the phase list and every approval
 ([edge-cases.md](edge-cases.md#a-stale-activation)).
@@ -232,6 +233,10 @@ Two routes out, both user-only: `/adversarial-review-loop:accept [reason]`, whic
 escalation and leaves the mode armed, or `/adversarial-review-loop:stop`, which leaves the
 mode entirely. `resume` deliberately refuses — an escalation that a resume could clear would
 not be an escalation.
+
+A `STALE` activation never lands here: the Stop gate ends those turns rather than counting
+them, precisely so the TTL cannot manufacture an escalation only `accept` could clear
+([edge-cases.md](edge-cases.md#a-stale-activation)).
 
 ### The review timed out, or hit a rate limit
 

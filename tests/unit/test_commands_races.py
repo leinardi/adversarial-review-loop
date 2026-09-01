@@ -498,7 +498,12 @@ def test_a_stale_finish_names_the_recovery_the_other_gates_name(
     tmp_path: Path,
     clean_env: dict[str, str],
 ) -> None:
-    """One recovery contract across the loop: re-arm, or stop."""
+    """One recovery contract across the loop: resume, re-arm, or stop.
+
+    ``resume`` leads, as it does in the ``pretool`` and Stop-gate messages: it is the recovery
+    that keeps the baseline and every approval, and a refusal naming only ``implement`` reads
+    as "start over" for an activation that just needs its clock refreshed.
+    """
     env = armed_env(clean_env, ARL_TTL_HOURS="2")
     armed_and_committed(git_repo, tmp_path, env)
     path = state_dir(env, git_repo, "s1") / "state.json"
@@ -510,6 +515,7 @@ def test_a_stale_finish_names_the_recovery_the_other_gates_name(
 
     assert proc.returncode == 1
     assert "past ttl_hours (2)" in proc.stdout
+    assert "/adversarial-review-loop:resume" in proc.stdout
     assert "/adversarial-review-loop:implement <plan.md>" in proc.stdout
     assert "/adversarial-review-loop:stop" in proc.stdout
 

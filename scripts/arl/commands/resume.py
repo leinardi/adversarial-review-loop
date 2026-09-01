@@ -961,7 +961,22 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
             # `round_history` is evidence and is left untouched. `active_review` is reset for
             # the same hygiene, even though the generation bump above already makes
             # `_claim_active_review`'s own generation check ignore any stale claim on its own.
-            state.update(transient_failures=0, retry_not_before=0, clarifications=0, active_review={}, review_attempts={})
+            #
+            # `stop_blocks`/`stop_marker`/`defer_pending` are in that same reset table for the
+            # cross-session path, and the two must agree: the Stop gate's no-progress marker is
+            # `last_approved_tree:phase:status`, none of which an in-place resume changes, so an
+            # inherited count would carry straight into the next block and escalate on it --
+            # after a resume the user ran precisely to get the loop moving again.
+            state.update(
+                transient_failures=0,
+                retry_not_before=0,
+                clarifications=0,
+                active_review={},
+                review_attempts={},
+                stop_blocks=0,
+                stop_marker="",
+                defer_pending=False,
+            )
 
             # Verified with the *checked* read, inside the transaction, so a genuine git
             # failure aborts the whole resume rather than silently skipping the warning: the
