@@ -21,19 +21,19 @@ repos:
     hooks:
       - id: checkmake
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.19.0
+    rev: v2.3.1
     hooks:
       - id: mypy
         additional_dependencies:
           # pytest ships py.typed; without it every @fixture and @parametrize is an
           # untyped decorator and mypy reports the test it decorates as untyped.
-          - pytest==9.0.2
+          - pytest==9.1.1
         exclude: ^scripts/arl/_vendor/
       - id: mypy
         alias: mypy-json-output
         name: mypy (json output)
         additional_dependencies:
-          - pytest==9.0.2
+          - pytest==9.1.1
         args:
           [
             "--output",
@@ -48,7 +48,7 @@ repos:
         exclude: ^scripts/arl/_vendor/
         stages: [manual]
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.7
+    rev: v0.16.5
     hooks:
       - id: ruff-check
         args: ["--fix"]
@@ -61,7 +61,7 @@ repos:
         exclude: ^scripts/arl/_vendor/
         stages: [manual]
   - repo: https://github.com/rhysd/actionlint
-    rev: v1.7.9
+    rev: v1.7.12
     hooks:
       - id: actionlint
         name: actionlint
@@ -74,7 +74,7 @@ repos:
         args: ["-oneline", "-shellcheck", "shellcheck -S error"]
         stages: [manual]
   - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: v0.22.1
+    rev: v0.23.2
     hooks:
       - id: markdownlint-cli2
         additional_dependencies:
@@ -111,7 +111,7 @@ repos:
         files: \.(yml|yaml)$
         args: ["--write"]
   - repo: https://github.com/adrienverge/yamllint
-    rev: v1.37.1
+    rev: v1.38.0
     hooks:
       - id: yamllint
       - id: yamllint
