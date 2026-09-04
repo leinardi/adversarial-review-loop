@@ -1277,6 +1277,11 @@ def _banner(*, state: State, identity: _Identity, decision: _Decision) -> str:
     else:
         next_steps = f"Continue with phase {phase} of {total or '?'}:\n\n    {state.phase_desc(phase)}\n"
 
+    # The same block the arming banner ends with, and for a stronger reason than symmetry: a
+    # resumed session is precisely the one that has *not* read `skills/implement/SKILL.md`, so
+    # this banner is where its commit rules have to come from. `skills/resume/SKILL.md` says
+    # the same things, but a stale cached skill body is a measured failure mode (AGENTS.md,
+    # "The install cache") and the banner is served from the working tree either way.
     resumed_from_line = "" if same_session else f"- resumed from session: {prev_session}\n"
     return f"""\
 **adversarial-review-loop is RESUMED for this worktree.**
@@ -1292,4 +1297,5 @@ def _banner(*, state: State, identity: _Identity, decision: _Decision) -> str:
 - reviewer: {reviewer}
 - review guide: {guide_line}
 {warnings}
-{next_steps}"""
+{next_steps}
+{arm.COMMIT_CONSTRAINTS}"""

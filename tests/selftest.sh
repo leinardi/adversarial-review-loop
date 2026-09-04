@@ -336,6 +336,12 @@ if start 'command shape: allowlist table, through an armed pretool'; then
     shape_ok 'git commit -am "both"'
     shape_ok 'git add -u && git commit --message="long form"'
     shape_ok 'git add src lib && git commit -m x'
+    # A commit body. Repeated -m is the only supported way to write one -- a real
+    # newline is refused by the deny-list and -F is off the allowlist -- so it is
+    # what every banner and denial now tells the model to use. Proven here through
+    # a real armed pretool, not just the validator, because that is the claim.
+    shape_ok 'git commit -m "subject" -m "body"'
+    shape_ok 'git add -A && git commit -m "s" -m "b1" -m "b2"'
 
     shape_no 'make build && git commit -m x'
     shape_no 'git rm f && git commit -m x'
@@ -372,6 +378,7 @@ if start 'command shape: allowlist table, through an armed pretool'; then
     shape_no 'git commit --include src -m x'
     shape_no 'git commit src/main.go -m x'
     shape_no 'git commit -F msg.txt'
+    shape_no 'git commit --message "s"'
     shape_no 'git add -p && git commit -m x'
     shape_no 'sed -i s/a/b/ f && git commit -m x'
     shape_no 'git add -A & git commit -m x'
@@ -1238,6 +1245,10 @@ if start 'reorient: a compacted session is handed back the phase, the plan and t
     assert_contains 'restates the phase description' "$out" 'Phase one: the thing'
     assert_contains 'points at the frozen plan' "$out" 'plan.frozen.md'
     assert_contains 'restates the commit rule' "$out" 'git add -A && git commit'
+    # The one commit rule a compacted session cannot guess from the shape above: a body is
+    # repeated -m, and both obvious alternatives are refused.
+    assert_contains 'says how to write a commit body' "$out" '-m "subject" -m "body"'
+    assert_contains 'and names what is refused instead' "$out" 'both refused'
     assert_contains 'and tells it to carry on' "$out" 'Continue with phase 1.'
 
     # Plain text, not JSON: SessionStart injects a hook's plain stdout as context, and a JSON
@@ -1638,6 +1649,9 @@ if start 'resume: continues in a new session, baseline and approvals survive'; t
 
     out=$(cd "$REPO" && "$ARL" resume --session "$NEW_SESSION" 2>&1)
     assert_contains 'the resume banner confirms' "$out" 'RESUMED for this worktree'
+    # A resumed session has not read skills/implement/SKILL.md, and its own skill body is
+    # served from the install cache. The banner is the copy that comes from the working tree.
+    assert_contains 'and states how to write a commit body' "$out" '-m "subject" -m "body"'
 
     assert_eq 'the baseline tree is unchanged' "$(sget_for "$NEW_SESSION" baseline_tree)" "$baseline_before"
     assert_eq 'approved_trees is unchanged' "$(jq -c '.approved_trees' "$(state_file_for "$NEW_SESSION")")" "$approved_before"

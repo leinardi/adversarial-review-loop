@@ -59,6 +59,9 @@ REORIENT_RULES: Final = """\
 - Commit with `git add -A && git commit -m "..."` only. No --amend, no pathspecs, no `--only`
   or `--include`, no command substitution. Builds, tests and formatters go in their own Bash
   calls, never chained into the commit.
+- A multi-paragraph message is repeated `-m`, one per paragraph (`-m "subject" -m "body"`);
+  git joins them with a blank line. A real newline inside one `-m`, and `-F`/`--file`, are
+  both refused.
 - Every commit is intercepted and reviewed. A denial lists the blocking findings: fix all of
   them and commit again. A failed or malformed review is never an approval.
 - Each phase ends with one commit and a clean worktree.

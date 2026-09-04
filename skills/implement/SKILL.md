@@ -49,7 +49,7 @@ The block above is the output of arming, which ran **before you had a turn**. It
 
 - Run builds, tests, formatters, and `git rm` as their **own** Bash calls. Commit commands may only be `git commit`, or a chain of `git add` / `git status` / `git commit` — anything that could change files after the snapshot is denied.
 - `git commit --amend`, partial commits (pathspecs, `--only`, `--include`) and command substitution inside the commit command are denied. Commit the whole reviewed tree or nothing.
-- A multi-paragraph commit message is written as repeated `-m`, one per paragraph (`-m "subject" -m "body"`) — git joins them with a blank line. A real newline inside a single `-m` is refused by the deny-list, so this is the way to write one, not a workaround.
+- A multi-paragraph commit message is repeated `-m`, one per paragraph (`-m "subject" -m "body"`) — git joins them with a blank line. A real newline inside one `-m`, and `-F`/`--file`, are both refused; repeated `-m` is the way to write a body here, not a workaround.
 - Every phase leaves a clean worktree. Uncommitted leftovers block the turn.
 - You cannot end the mode. `/adversarial-review-loop:finish` and `/adversarial-review-loop:stop` are the user's; running them yourself via Bash is denied.
 - If a blocking finding is ambiguous, or contradicts an earlier round of the same phase, ask the reviewer **before** guessing: `${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh clarify --question "…"`. It is one prose question against the review that just ran — no new commit attempt, no new round, and it changes no state you depend on. A wrong guess costs a whole round; a question costs one of a small allowance, and the denial itself tells you how many are left. Prefer it over re-running the same fix twice.

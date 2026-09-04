@@ -885,6 +885,22 @@ def test_the_harness_is_persisted_as_an_override(git_repo: Path, tmp_path: Path,
     assert "claude-code" in proc.stdout, "the armed banner must say which reviewer this activation runs"
 
 
+def test_the_armed_banner_states_how_to_write_a_commit_body(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A rule that lives in only one surface is a rule some session will not have read.
+
+    This one lived in ``skills/implement/SKILL.md`` alone, and a resumed session -- which does
+    not have that body -- rediscovered the deny-list by hitting it twice. Both banners now carry
+    it; asserted separately in each, on the literal text, so dropping it from either is a
+    failure rather than a silent narrowing.
+    """
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert '`-m "subject" -m "body"`' in proc.stdout
+    assert "`-F`/`--file`, are both refused" in proc.stdout
+
+
 def test_the_armed_banner_names_the_harnesss_own_default_model(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """``model`` is unset by default, and its real default belongs to the harness -- a banner
     that printed the raw config value would show a blank where the reviewer is named."""
