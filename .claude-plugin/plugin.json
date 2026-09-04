@@ -1,7 +1,7 @@
 {
   "name": "adversarial-review-loop",
   "description": "Implement an agreed plan with an enforced adversarial review loop: every phase commit is gated on an external review.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": {
     "name": "Roberto Leinardi"
   },
