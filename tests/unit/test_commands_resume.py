@@ -101,6 +101,24 @@ def commit_phase(repo: Path, env: dict[str, str], text: str = "work\n", session:
 # --------------------------------------------------------------------------
 
 
+def test_the_resume_banner_states_how_to_write_a_commit_body(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The resume banner is where a resumed session's commit rules have to come from.
+
+    It is the one surface on this path served from the working tree: ``skills/resume/SKILL.md``
+    says the same things, but a stale cached skill body is a measured failure mode. This banner
+    carried no commit constraints at all before -- unlike the arming one -- which is how a real
+    resumed session came to try ``git commit -F`` and then a newline inside ``-m``.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    code, banner = resume(git_repo, env)
+
+    assert code == 0, banner
+    assert '`-m "subject" -m "body"`' in banner
+    assert "`-F`/`--file`, are both refused" in banner
+
+
 def test_cross_session_resume_preserves_baseline_and_approvals(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed(clean_env)
     active(git_repo, tmp_path, env)

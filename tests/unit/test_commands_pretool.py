@@ -590,6 +590,36 @@ def test_a_commit_command_that_cannot_be_shown_safe_is_denied(
     assert expected in reason
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git commit -F msg.txt", id="message-from-a-file"),
+        pytest.param('git commit -m "subject\n\nbody"', id="newline-inside-the-message"),
+    ],
+)
+def test_a_refused_commit_body_is_told_how_to_write_one(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    command: str,
+) -> None:
+    """The denial is the surface a model reaches when it wants a multi-paragraph message.
+
+    Both of these are the obvious ways to write one and both are refused, so the denial has to
+    carry the form that is not: a real run tried them in this order and burned a round on each,
+    because the shapes it listed were all single-line and it named no alternative. Asserted on
+    the emitted text rather than on the constant, since it is the emission that has to carry it.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "This commit command was not accepted" in reason
+    assert 'git add -A && git commit -m "subject" -m "first para" -m "second para"' in reason
+
+
 def test_an_unchanged_tree_needs_no_review(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)

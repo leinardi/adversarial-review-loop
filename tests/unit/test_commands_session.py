@@ -656,6 +656,11 @@ def test_reorient_restates_the_phase_and_the_plan_after_a_compaction(git_repo: P
     assert "plan.frozen.md" in out
     assert "git add -A && git commit" in out
     assert "Continue with phase 1." in out
+    # A compacted session has lost `skills/implement/SKILL.md` along with everything else, so
+    # the one commit rule that is not guessable from the shapes above has to be restated here
+    # too -- otherwise it rediscovers the deny-list by hitting it, which is what happened.
+    assert '`-m "subject" -m "body"`' in out
+    assert "`-F`/`--file`, are" in out
 
 
 def test_reorient_is_plain_text_because_that_is_what_gets_injected(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

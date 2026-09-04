@@ -1094,8 +1094,11 @@ def _long_reason(option: str) -> str:  # noqa: PLR0911 - one return per shell `c
     the shell did not list in a given form fell through to the generic "not on the
     allowlist" message, and that wording is asserted on.
 
-    Also consulted for short flags, as ``-<char>``. None of the keys below are single-dash
-    today, so a rejected short flag always gets the generic message -- as in the shell.
+    Also consulted for short flags, as ``-<char>``. ``-F`` is the one single-dash key, and it
+    is here because it is not a different option from ``--file`` -- it is the same option
+    spelled short, and a model that reached for it deserves the same explanation and the same
+    way out. The shell gave every short flag the generic message; this is a second deliberate
+    divergence from it, alongside the ``printf`` bug below, and the verdict is unchanged.
 
     **One shell bug is not reproduced.** ``_arl_long_reason`` emitted these strings with
     ``printf '<reason>'``, so the four whose text begins with ``--`` -- ``--file``,
@@ -1112,8 +1115,8 @@ def _long_reason(option: str) -> str:  # noqa: PLR0911 - one return per shell `c
         return f"partial commits ({option}) commit something other than the reviewed snapshot"
     if option in ("--interactive", "--patch"):
         return "interactive staging cannot be reconciled with the snapshot that was reviewed"
-    if option == "--file" or option.startswith("--file="):
-        return "--file reads the message from a path that may change after the snapshot"
+    if option in ("--file", "-F") or option.startswith("--file="):
+        return "--file / -F reads the message from a path that may change after the snapshot; write a multi-paragraph message as repeated -m instead"
     if option in ("--fixup", "--squash") or option.startswith(("--fixup=", "--squash=")):
         return f"{option} produces a commit that is meant to be rewritten later"
     if option == "--template" or option.startswith("--template="):

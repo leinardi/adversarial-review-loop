@@ -210,6 +210,20 @@ redirection and command substitution are all denied. Run builds, tests and `git 
 own Bash calls — the next snapshot picks up the result
 ([security.md](security.md#the-accepted-shapes)).
 
+### How do I write a multi-paragraph commit message?
+
+Repeated `-m`, one per paragraph — git joins them with a blank line:
+
+```console
+git add -A && git commit -m "feat(x): subject" -m "First paragraph." -m "Second paragraph."
+```
+
+The two obvious alternatives are both denied. A real newline inside `-m "…"` is refused
+before the parser even runs, because a newline is a statement separator in shell and the
+deny-list will not try to tell the two uses apart. `git commit -F msg.txt` is refused
+because it reads the message from a path that may change after the snapshot. Repeated `-m`
+is the supported form, not a workaround.
+
 ### The gate says `RECONCILE`. What do I do?
 
 A commit landed that is not the one that was approved: `HEAD` moved more than once, its

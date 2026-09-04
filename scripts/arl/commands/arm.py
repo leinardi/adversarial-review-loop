@@ -53,7 +53,30 @@ from arl.config import Config
 from arl.state import State, pointer_read, pointer_write
 from arl.util import now
 
-__all__ = ["flag_bool", "flag_str", "parse_flag_tokens", "resolve_until", "run", "split_args"]
+__all__ = ["COMMIT_CONSTRAINTS", "flag_bool", "flag_str", "parse_flag_tokens", "resolve_until", "run", "split_args"]
+
+#: The commit rules, as both arming banners state them.
+#:
+#: Shared rather than written twice because the two banners are read by sessions that have
+#: exactly the same problem -- what may I run to commit -- and a rule present in one and
+#: missing from the other is how a resumed session ends up rediscovering the deny-list by
+#: hitting it. That is not hypothetical: the multi-paragraph bullet lived only in
+#: ``skills/implement/SKILL.md``, which a resumed session does not have, and a real run
+#: burned two rounds on ``git commit -F`` and then on a newline inside ``-m``.
+#:
+#: Rules only, in the plugin's own words: nothing here is derived from the repository or
+#: the plan, so both banners can splice it without widening what repository-controlled text
+#: can write into them.
+COMMIT_CONSTRAINTS: Final = """\
+Constraints while the mode is active:
+- each phase must commit all of its work and leave a clean worktree
+- `git commit --amend`, partial commits, and compound commands that build or
+  mutate files before committing are denied
+- a multi-paragraph message is repeated `-m`, one per paragraph
+  (`-m "subject" -m "body"`) — git joins them with a blank line. A real newline
+  inside one `-m`, and `-F`/`--file`, are both refused
+- run builds and tests as their own Bash calls, then commit separately
+"""
 
 #: Whitespace the shell's ``[[:space:]]`` matches in the C locale. ``str.strip()`` would
 #: also strip Unicode spaces, which the shell would have left in the path.
@@ -606,12 +629,7 @@ The commit is intercepted, the working tree goes to the reviewer named above, an
 commit only proceeds when the review passes. Findings come back as a denial with
 the full list; fix them and commit again.
 
-Constraints while the mode is active:
-- each phase must commit all of its work and leave a clean worktree
-- `git commit --amend`, partial commits, and compound commands that build or
-  mutate files before committing are denied
-- run builds and tests as their own Bash calls, then commit separately
-"""
+{COMMIT_CONSTRAINTS}"""
 
 
 def run(argv: list[str]) -> int:

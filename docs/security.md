@@ -121,11 +121,18 @@ so classification inspects **arguments**, not just the executable:
 | `git add -A && git commit -m "…"` | `git rm f && git commit -m x` (deletes from the worktree) |
 | `git add -A && git status && git commit -m "…"` | `git diff --output=… && git commit -m x` (writes files) |
 | `git commit -am "…"` | `git commit --amend`, `--only`, `--include`, pathspecs |
+| `git commit -m "sub" -m "body"` (multi-paragraph) | `git commit -F msg.txt` (reads the message from a path) |
 |  | `git -C … commit`, `$(…)`, backticks, pipes, redirection |
 
 Each subcommand is matched against a flag allowlist with **default-deny on unknown
 options**. Run builds, tests and `git rm` as their own Bash calls; the next snapshot picks up
 the result.
+
+A commit **body** is written as repeated message options, one per paragraph — git joins them
+with a blank line. Both alternatives to that are refused: a real newline anywhere in the
+command dies before the parser runs, and `-F`/`--file` reads the message from a path that may
+change after the snapshot. `--message="…"` works as well as `-m`, but only in that attached
+form; `--message "…"` with a space is not on the allowlist.
 
 ### Why a bypass is not catastrophic
 

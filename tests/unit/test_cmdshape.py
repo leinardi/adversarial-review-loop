@@ -59,6 +59,12 @@ ACCEPTED = [
     "git commit --no-verify --signoff -m x",
     "git add -- src && git commit -m x",
     'git commit --author="A U Thor <a@example.invalid>" -m x',
+    # A commit body: repeated -m is the only way to write one, since a real newline is
+    # refused by the deny-list and -F/--file is off the allowlist. Pinned here because
+    # every banner and denial message now tells the model to use it.
+    'git commit -m "subject" -m "body"',
+    'git add -A && git commit -m "s" -m "b1" -m "b2"',
+    'git commit --message="s" --message="b"',
 ]
 
 DENIED = [
@@ -105,6 +111,9 @@ DENIED = [
     "git status --porcelain && git add -A",
     "GIT_DIR=/x git commit -m x",
     "git commit -m x && git checkout -- . && git commit -m y",
+    # Only the attached `--message=` form is on the allowlist; the space form is not, and
+    # the asymmetry is pinned so it stays deliberate rather than becoming a surprise.
+    'git commit --message "s"',
     " && ".join(["git add -A"] * 9 + ["git commit -m x"]),
 ]
 
@@ -144,6 +153,20 @@ def test_the_reasons_the_shell_lost_to_printf_are_restored(command: str, fragmen
     """These four denials say *why*; the plugin's retired Bash port lost the reason to `printf`."""
     with pytest.raises(CommandShapeError, match=fragment):
         cmdshape.validate_commit(command)
+
+
+def test_the_short_spelling_of_file_gets_the_same_reason_as_the_long_one() -> None:
+    """``-F`` is ``--file``, so it may not be refused with less than ``--file`` is refused with.
+
+    The shell gave every short flag the generic "not on the allowlist" message, and this one
+    inherited it: a model that reached for ``-F msg.txt`` was told it was off the allowlist and
+    told nothing about what to do instead, which is how a real run went on to try a newline
+    inside ``-m`` and lose a second round. The verdict was always the same; only the
+    explanation is new, and it carries the way out.
+    """
+    with pytest.raises(CommandShapeError, match="reads the message from a path") as denial:
+        cmdshape.validate_commit("git commit -F msg.txt")
+    assert "repeated -m" in str(denial.value), "the denial must name the form that does work"
 
 
 @pytest.mark.parametrize(

@@ -174,6 +174,14 @@ content after the gate has snapshotted it:
   git add -A && git commit -m "…"
   git add -A && git status && git commit -m "…"
 
+A multi-paragraph message is repeated -m, one per paragraph — git joins them
+with a blank line:
+
+  git add -A && git commit -m "subject" -m "first para" -m "second para"
+
+A real newline inside one -m, and -F/--file, are both refused. Repeated -m is
+the way to write a body here, not a workaround.
+
 Run builds, tests, formatters and `git rm` as their own separate Bash calls
 first; the next snapshot picks their result up. Then commit with one of the
 shapes above.

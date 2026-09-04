@@ -37,7 +37,12 @@ The gate's hooks are registered by the plugin itself, in every Claude Code sessi
 
 ## Rules while the mode is active
 
-Identical to `/adversarial-review-loop:implement`: only `git commit`, or a chain of `git add` / `git status` / `git commit`, may create a commit; `--amend` and partial commits are denied; every phase leaves a clean worktree; you cannot end the mode yourself.
+Identical to `/adversarial-review-loop:implement`, spelled out here because a resumed session has not read that skill:
+
+- Only `git commit`, or a chain of `git add` / `git status` / `git commit`, may create a commit. Run builds, tests, formatters and `git rm` as their **own** Bash calls — anything that could change files after the snapshot is denied.
+- `--amend`, partial commits (pathspecs, `--only`, `--include`) and command substitution inside the commit command are denied. Commit the whole reviewed tree or nothing.
+- A multi-paragraph commit message is repeated `-m`, one per paragraph (`-m "subject" -m "body"`) — git joins them with a blank line. A real newline inside one `-m`, and `-F`/`--file`, are both refused; repeated `-m` is the way to write a body here, not a workaround.
+- Every phase leaves a clean worktree, and you cannot end the mode yourself.
 
 When a blocking finding is ambiguous or contradicts an earlier round, ask `${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh clarify --question "…"` instead of guessing — one prose question against the review that just ran, no new round, and the denial names how many questions are left.
 
