@@ -37,6 +37,9 @@ set -uo pipefail
 TESTS_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SELFTEST="$TESTS_DIR/selftest.sh"
 
+# A literal ESC, for stripping the shards' colour codes portably below.
+ESC=$(printf '\033')
+
 JOBS=${ARL_SELFTEST_JOBS:-}
 if [ -z "$JOBS" ]; then
 	JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -71,7 +74,11 @@ for ((shard = 0; shard < JOBS; shard++)); do
 	log=$LOGS/$shard.log
 	# Everything but each shard's own summary line, which is replaced by the total below.
 	grep -av 'passed, .* failed' "$log"
-	counts=$(sed -e 's/\x1b\[[0-9;]*m//g' "$log" | sed -n 's/^\([0-9]\{1,\}\) passed, \([0-9]\{1,\}\) failed$/\1 \2/p' | tail -1)
+	# The escape is built with printf rather than written as \x1b: that spelling is a GNU sed
+	# extension, and BSD sed (macOS) matches it literally instead -- which strips nothing, so
+	# the summary line never matches below and the tally comes back empty rather than wrong-
+	# looking. A silent zero is a worse failure than a loud one.
+	counts=$(sed -e "s/${ESC}\[[0-9;]*m//g" "$log" | sed -n 's/^\([0-9]\{1,\}\) passed, \([0-9]\{1,\}\) failed$/\1 \2/p' | tail -1)
 	if [ -z "$counts" ]; then
 		printf '\033[31mshard %s produced no summary; its output is above\033[0m\n' "$shard"
 		status=1

@@ -37,10 +37,24 @@ FILTER=${1:-}
 export CLAUDE_PLUGIN_ROOT=$PLUGIN_ROOT
 export ARL_REVIEWER_CMD=$FAKE
 
+# jq is a test-only dependency -- the gate itself parses JSON in-process (see the note at the
+# top of scripts/arl.sh) -- but this suite reads every hook response with it. Say so once, here,
+# rather than as dozens of empty comparisons that look like real failures.
+if ! command -v jq >/dev/null 2>&1; then
+    printf 'tests/selftest.sh needs jq (a test-only dependency; the gate itself does not use it).\n' >&2
+    printf 'Install it: "brew install jq" on macOS, "apt install jq" on Debian/Ubuntu.\n' >&2
+    exit 1
+fi
+
 PASS=0
 FAIL=0
 CURRENT=''
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/arl-selftest.XXXXXX")
+# Resolved to its physical path, because the state directory is addressed by the *hash* of the
+# worktree path: macOS puts TMPDIR behind a symlink (/tmp -> /private/tmp), so git and the gate
+# would report the resolved path while these helpers hashed the symlinked one, and every lookup
+# would land in a directory that does not exist.
+ROOT=$(cd "$ROOT" && pwd -P)
 trap 'rm -rf "$ROOT"' EXIT
 
 # Run only every Nth section, offset by I: ARL_SELFTEST_SHARD=I/N. Sections share nothing
@@ -222,8 +236,25 @@ sget() {
 # (a resumed predecessor plus its successor), where the plain helpers above are ambiguous.
 # paths.sha256_hex documents itself as matching `printf '%s' … | sha256sum`, so this reproduces
 # the same hash the Python side computes for the worktree directory.
+# BSD `wc` (macOS) right-aligns its count in a field of blanks -- "       0" rather than "0" --
+# which every assert_eq against a bare number would read as a mismatch. The count is what these
+# callers want, not its spelling.
+count_lines() {
+    wc -l | tr -d '[:space:]'
+}
+
+# macOS ships BSD `shasum` and no `sha256sum`; both print the digest first, so the callers'
+# `cut -d' ' -f1` is unchanged either way.
+arl_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum
+    else
+        shasum -a 256
+    fi
+}
+
 state_file_for() {
-    printf '%s/worktrees/%s/%s/state.json' "$ARL_STATE_DIR" "$(printf '%s' "$REPO" | sha256sum | cut -d' ' -f1)" "$1"
+    printf '%s/worktrees/%s/%s/state.json' "$ARL_STATE_DIR" "$(printf '%s' "$REPO" | arl_sha256 | cut -d' ' -f1)" "$1"
 }
 
 sget_for() {
@@ -615,7 +646,7 @@ if start 'rule 0: a session that never armed is not gated'; then
     assert_eq 'Edit passes' "$(pre Edit)" 'pass'
     assert_eq 'Bash passes' "$(pre Bash 'git add -A && git commit -m x')" 'pass'
     assert_eq 'the turn ends cleanly' "$(stop_decision)" 'ok'
-    assert_eq 'and no state was written' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+    assert_eq 'and no state was written' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | count_lines)" '0'
 fi
 
 if start 'rule 0: an arm that never executed still denies'; then
@@ -625,7 +656,7 @@ if start 'rule 0: an arm that never executed still denies'; then
     # failure to start, so the next hook call has to.
     new_case
     intent_ok '/adversarial-review-loop:implement plan.md'
-    assert_eq 'no state exists yet' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+    assert_eq 'no state exists yet' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | count_lines)" '0'
 
     assert_eq 'Edit is denied rather than silently passing' "$(pre Edit)" 'deny'
     assert_contains 'and says arming never ran' "$(pre_reason)" 'Arming never ran'
@@ -667,7 +698,7 @@ if start 'rule 0: an intent is scoped to the worktree it was submitted from'; th
     mkdir -p "$other"
     git -C "$other" init -q -b main
     assert_eq 'a mutation in another repo passes' "$(pre_at "$other" Edit)" 'pass'
-    assert_eq 'and records nothing' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+    assert_eq 'and records nothing' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | count_lines)" '0'
     assert_eq 'the armed repo is still denied' "$(pre Edit)" 'deny'
     assert_eq 'and now recorded' "$(sget status)" 'ARM_FAILED'
 fi
@@ -681,7 +712,10 @@ if start 'rule 0: a bound session cannot be scoped out by a git that cannot run'
     mkdir -p "$REPO/sub"
     nogit="$CASE_DIR/no-git-path"
     mkdir -p "$nogit"
-    for b in bash sh cat printf timeout env python3 grep sed cut mktemp true false ls find head tr; do
+    # gtimeout and perl alongside timeout: this PATH must still carry a watchdog, or the shim
+    # denies for *that* reason first and the assertion below stops covering git resolution at
+    # all. macOS has only the last of the three.
+    for b in bash sh cat printf timeout gtimeout perl env python3 grep sed cut mktemp true false ls find head tr; do
         p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$nogit/$b"
     done
     out=$(jq -nc --arg s "$SESSION" --arg c "$REPO/sub" \
@@ -742,7 +776,7 @@ if start 'rule 0: a marker that cannot be scoped denies without being consumed';
     printf '' >"$ARL_STATE_DIR/intents/$SESSION"
     assert_eq 'Edit is denied' "$(pre Edit)" 'deny'
     assert_contains 'because the request cannot be scoped' "$(pre_reason)" 'cannot tell which repository'
-    assert_eq 'nothing was recorded against this repo' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | wc -l)" '0'
+    assert_eq 'nothing was recorded against this repo' "$(find "$ARL_STATE_DIR" -name state.json 2>/dev/null | count_lines)" '0'
     assert_eq 'and the marker is still there' "$(test -f "$ARL_STATE_DIR/intents/$SESSION" && echo yes)" 'yes'
     assert_eq 'Read is still allowed' "$(pre Read)" 'pass'
 
@@ -755,7 +789,7 @@ if start 'rule 0: prose mentioning the command is not an intent'; then
     new_case
     intent_ok 'yesterday /adversarial-review-loop:implement worked fine, continue'
     assert_eq 'Edit still passes' "$(pre Edit)" 'pass'
-    assert_eq 'and nothing was recorded' "$(find "$ARL_STATE_DIR" -type f 2>/dev/null | wc -l)" '0'
+    assert_eq 'and nothing was recorded' "$(find "$ARL_STATE_DIR" -type f 2>/dev/null | count_lines)" '0'
 fi
 
 if start 'rule 0: an unbound session in an armed worktree is denied'; then
@@ -779,7 +813,7 @@ if start 'rule 0: an unbound session in an armed worktree is denied'; then
     assert_contains 'the turn ends with a warning, not a block' "$out" 'systemMessage'
     assert_contains 'that names resume' "$out" '/adversarial-review-loop:resume'
     assert_eq 'the other activation is untouched' "$(sget status)" 'ACTIVE'
-    assert_eq 'and the unbound session recorded nothing' "$(find "$ARL_STATE_DIR" -path '*unbound-session*' 2>/dev/null | wc -l)" '0'
+    assert_eq 'and the unbound session recorded nothing' "$(find "$ARL_STATE_DIR" -path '*unbound-session*' 2>/dev/null | count_lines)" '0'
 
     arl deactivate >/dev/null 2>&1
     assert_eq 'once the loop ends, the unbound session passes' "$(SESSION=unbound-session pre Edit)" 'pass'
@@ -845,7 +879,7 @@ if start 'hook input: a payload with no session id denies rather than guessing' 
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason')" 'no session id'
     # It must not leave junk state keyed by an empty session.
     assert_eq 'no state was written under an empty session key' \
-        "$(find "$ARL_STATE_DIR/worktrees" -maxdepth 2 -name state.json 2>/dev/null | wc -l)" '0'
+        "$(find "$ARL_STATE_DIR/worktrees" -maxdepth 2 -name state.json 2>/dev/null | count_lines)" '0'
 fi
 
 # --------------------------------------------------------------------------
@@ -1874,7 +1908,9 @@ if start 'interpreter probe: a missing python3 fails closed, not open, on every 
     # this same PATH.
     nopy="$CASE_DIR/no-python-path"
     mkdir -p "$nopy"
-    for b in bash sh cat printf timeout env grep sed cut git mktemp true false ls find head tr; do
+    # A watchdog is included for the same reason git is: without one the shim would deny for
+    # that reason instead, and this case is about the interpreter.
+    for b in bash sh cat printf timeout gtimeout perl env grep sed cut git mktemp true false ls find head tr; do
         p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$nopy/$b"
     done
 
@@ -1924,13 +1960,13 @@ PYEOF
 
     out=$(hook_payload PreToolUse | (cd "$REPO" && PATH="$fakepy:$PATH" "$ARL" pretool))
     assert_eq 'pretool: exactly one valid JSON object, not the fragment' \
-        "$(printf '%s' "$out" | jq -c . 2>/dev/null | wc -l)" '1'
+        "$(printf '%s' "$out" | jq -c . 2>/dev/null | count_lines)" '1'
     assert_eq 'and it denies' \
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
 
     out=$(hook_payload PostToolUse | (cd "$REPO" && PATH="$fakepy:$PATH" "$ARL" confirm-commit))
     assert_eq 'confirm-commit: exactly one valid JSON object, not the fragment' \
-        "$(printf '%s' "$out" | jq -c . 2>/dev/null | wc -l)" '1'
+        "$(printf '%s' "$out" | jq -c . 2>/dev/null | count_lines)" '1'
     assert_contains 'and it reports the failure' \
         "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // ""')" 'could not run'
 
@@ -1939,7 +1975,7 @@ PYEOF
 
     out=$(hook_payload Stop | (cd "$REPO" && PATH="$fakepy:$PATH" "$ARL" gate-stop))
     assert_eq 'gate-stop: exactly one valid JSON object, not the fragment' \
-        "$(printf '%s' "$out" | jq -c . 2>/dev/null | wc -l)" '1'
+        "$(printf '%s' "$out" | jq -c . 2>/dev/null | count_lines)" '1'
     assert_eq 'and it blocks' \
         "$(printf '%s' "$out" | jq -r '.decision // "ok"')" 'block'
 fi
@@ -2045,6 +2081,304 @@ PYEOF
     assert_eq '00 does not disable the timeout' "$(logged 00)" '1150'
     assert_eq '0000 does not disable the timeout' "$(logged 0000)" '1150'
     assert_eq 'a legitimate value with a leading zero still passes through' "$(logged 0005)" '5'
+fi
+
+if start 'watchdog: the shim resolves timeout, then gtimeout, then perl'; then
+    new_case
+    arm_ok && phases_ok
+
+    # Resolution order is asserted with no ARL_WATCHDOG anywhere: setting it would bypass the
+    # very `command -v` ordering under test, so a regression that reversed the order or dropped
+    # a layer would still pass. The layers are selected by what is on PATH instead.
+    wdbase="$CASE_DIR/wd-base"
+    mkdir -p "$wdbase"
+    for b in bash sh cat printf env grep sed cut git mktemp true false ls find head tr date python3; do
+        p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$wdbase/$b"
+    done
+
+    # Spies, not stubs: each records that it was the one chosen, then runs the real command so
+    # the hook still completes and produces a real decision.
+    wdspy="$CASE_DIR/wd-spies"
+    mkdir -p "$wdspy"
+    for name in timeout gtimeout; do
+        cat >"$wdspy/$name" <<EOF
+#!/usr/bin/env bash
+printf '%s' '$name' >"\$ARL_TEST_WATCHDOG_LOG"
+shift
+exec "\$@"
+EOF
+        chmod +x "$wdspy/$name"
+    done
+    # The perl layer is invoked as: perl -e <script> <seconds> <argv...>
+    cat >"$wdspy/perl" <<'EOF'
+#!/usr/bin/env bash
+printf 'perl' >"$ARL_TEST_WATCHDOG_LOG"
+shift 3
+exec "$@"
+EOF
+    chmod +x "$wdspy/perl"
+
+    picked() {
+        local dir name
+        dir=$(mktemp -d "$CASE_DIR/wd.XXXXXX")
+        ln -sf "$wdbase"/* "$dir/"
+        for name in "$@"; do ln -sf "$wdspy/$name" "$dir/$name"; done
+        rm -f "$CASE_DIR/wd.txt"
+        hook_payload PreToolUse |
+            (cd "$REPO" && PATH="$dir" ARL_TEST_WATCHDOG_LOG="$CASE_DIR/wd.txt" "$ARL" pretool) >/dev/null
+        cat "$CASE_DIR/wd.txt" 2>/dev/null
+    }
+
+    assert_eq 'timeout wins when every layer is available' "$(picked timeout gtimeout perl)" 'timeout'
+    assert_eq 'gtimeout is next, for a Homebrew coreutils install' "$(picked gtimeout perl)" 'gtimeout'
+    assert_eq 'perl is the last layer, which is what macOS lands on' "$(picked perl)" 'perl'
+
+    # The regression this whole change exists for: on a stock macOS there is no timeout(1) at
+    # all, and the bare call to it exited 127, so every hook fail-closed and the session was
+    # unusable until the plugin was uninstalled.
+    out=$(hook_payload PreToolUse | (cd "$REPO" && PATH="$wdbase" "$ARL" pretool))
+    rc=$?
+    assert_eq 'with no watchdog at all the shim still exits 0' "$rc" '0'
+    assert_eq 'and denies rather than failing open' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
+    assert_contains 'and names the missing dependency instead of an opaque 127' \
+        "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')" 'perl'
+fi
+
+if start 'watchdog: ARL_WATCHDOG selects a layer but can never disable one'; then
+    new_case
+    arm_ok && phases_ok
+
+    wdbase="$CASE_DIR/wd-base"
+    mkdir -p "$wdbase"
+    for b in bash sh cat printf env grep sed cut git mktemp true false ls find head tr date python3; do
+        p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$wdbase/$b"
+    done
+    wdspy="$CASE_DIR/wd-spies"
+    mkdir -p "$wdspy"
+    for name in timeout gtimeout; do
+        cat >"$wdspy/$name" <<EOF
+#!/usr/bin/env bash
+printf '%s' '$name' >"\$ARL_TEST_WATCHDOG_LOG"
+shift
+exec "\$@"
+EOF
+        chmod +x "$wdspy/$name"
+    done
+    cat >"$wdspy/perl" <<'EOF'
+#!/usr/bin/env bash
+printf 'perl' >"$ARL_TEST_WATCHDOG_LOG"
+shift 3
+exec "$@"
+EOF
+    chmod +x "$wdspy/perl"
+
+    dir=$(mktemp -d "$CASE_DIR/wd.XXXXXX")
+    ln -sf "$wdbase"/* "$dir/"
+    for name in timeout gtimeout perl; do ln -sf "$wdspy/$name" "$dir/$name"; done
+
+    chose() {
+        rm -f "$CASE_DIR/wd.txt"
+        hook_payload PreToolUse |
+            (cd "$REPO" && PATH="$dir" ARL_TEST_WATCHDOG_LOG="$CASE_DIR/wd.txt" ARL_WATCHDOG="$1" "$ARL" pretool) >/dev/null
+        cat "$CASE_DIR/wd.txt" 2>/dev/null
+    }
+
+    assert_eq 'an explicit layer is honoured' "$(chose perl)" 'perl'
+    assert_eq 'and so is the middle one' "$(chose gtimeout)" 'gtimeout'
+    # Like ARL_SHIM_TIMEOUT_*, this is a test seam that can narrow but never remove: every
+    # value that does not name an available layer falls back to auto-detection, and there is
+    # deliberately no spelling of "run without a watchdog".
+    assert_eq 'an unknown value falls back to auto-detection' "$(chose none)" 'timeout'
+    assert_eq 'so does the empty value' "$(chose '')" 'timeout'
+    assert_eq 'and so does a layer that is not installed' "$(chose nosuchwatchdog)" 'timeout'
+fi
+
+if start 'watchdog: the perl layer enforces the deadline with no added grace'; then
+    new_case
+    arm_ok && phases_ok
+
+    hangpy="$CASE_DIR/hang-python"
+    mkdir -p "$hangpy"
+    cat >"$hangpy/python3" <<'PYEOF'
+#!/usr/bin/env bash
+sleep 300
+PYEOF
+    chmod +x "$hangpy/python3"
+
+    if ! command -v perl >/dev/null 2>&1; then
+        ok 'perl watchdog checks skipped (perl unavailable)'
+    else
+        t0=$(date +%s)
+        out=$(hook_payload PreToolUse |
+            (cd "$REPO" && PATH="$hangpy:$PATH" ARL_WATCHDOG=perl ARL_SHIM_TIMEOUT_PRETOOL=1 "$ARL" pretool))
+        elapsed=$(($(date +%s) - t0))
+        assert_eq 'pretool: a hung interpreter still denies under the perl layer' \
+            "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
+        assert_contains 'and names the timeout' \
+            "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')" 'timed out'
+
+        # The margin regression. Each shim ceiling sits just under the timeout Claude Code
+        # itself enforces -- intent 8s under 10s, reorient 25s under 30s -- so a watchdog that
+        # added a SIGTERM grace period before its SIGKILL would push those two past the point
+        # where the host tears the hook down with nothing, and the fallback would never be
+        # read. Returning within a second or two of the deadline is what keeps that headroom.
+        if [ "$elapsed" -le 3 ]; then
+            ok "perl layer returned in ${elapsed}s, at its deadline rather than after a grace period"
+        else
+            bad 'perl layer returned at its deadline' "${elapsed}s" '<=3s'
+        fi
+
+        # The gate is killed by process group, so a descendant that outlived it -- the case a
+        # direct-pid kill leaves behind, still holding the response pipe -- cannot stall the
+        # shim past its deadline either.
+        cat >"$hangpy/python3" <<'PYEOF'
+#!/usr/bin/env bash
+sleep 300 &
+sleep 300
+PYEOF
+        chmod +x "$hangpy/python3"
+        t0=$(date +%s)
+        out=$(hook_payload PreToolUse |
+            (cd "$REPO" && PATH="$hangpy:$PATH" ARL_WATCHDOG=perl ARL_SHIM_TIMEOUT_PRETOOL=1 "$ARL" pretool))
+        elapsed=$(($(date +%s) - t0))
+        assert_eq 'a hung gate with a live descendant still denies' \
+            "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
+        if [ "$elapsed" -le 5 ]; then
+            ok "descendant reaped with the group in ${elapsed}s, not left holding the response"
+        else
+            bad 'descendant reaped with the process group' "${elapsed}s" '<=5s'
+        fi
+    fi
+fi
+
+if start 'watchdog: the perl layer loads no module the repository can supply'; then
+    new_case
+    arm_ok && phases_ok
+
+    if ! command -v perl >/dev/null 2>&1; then
+        ok 'perl isolation checks skipped (perl unavailable)'
+    else
+        # The supervisor runs with the repository under review as its cwd, so it needs the same
+        # isolation `python3 -I` gives the gate. PERL5LIB and PERLLIB prepend to @INC and so
+        # shadow even a core module; PERL5OPT injects `-M` directly. A hostile POSIX.pm here
+        # returns WNOHANG as 0, which would turn the poll into a blocking wait and disarm the
+        # deadline entirely -- the gate would hang until the host killed it with no response.
+        hostile="$CASE_DIR/hostile-perl"
+        mkdir -p "$hostile"
+        cat >"$hostile/POSIX.pm" <<'PMEOF'
+package POSIX;
+sub import { }
+sub WNOHANG { 0 }
+1;
+PMEOF
+        mkdir -p "$hostile/Time"
+        cat >"$hostile/Time/HiRes.pm" <<'PMEOF'
+package Time::HiRes;
+sub import { }
+sub time { 0 }
+sub sleep { CORE::sleep(1) }
+1;
+PMEOF
+
+        # A hostile module dropped in the repository itself, for the perls that still carry
+        # `.` in @INC (before 5.26).
+        cp "$hostile/POSIX.pm" "$REPO/POSIX.pm"
+
+        hangpy="$CASE_DIR/hang-python"
+        mkdir -p "$hangpy"
+        cat >"$hangpy/python3" <<'PYEOF'
+#!/usr/bin/env bash
+sleep 300
+PYEOF
+        chmod +x "$hangpy/python3"
+
+        for vector in PERL5LIB PERLLIB; do
+            t0=$(date +%s)
+            out=$(hook_payload PreToolUse | (
+                cd "$REPO" && PATH="$hangpy:$PATH" ARL_WATCHDOG=perl ARL_SHIM_TIMEOUT_PRETOOL=1 \
+                    env "$vector=$hostile" "$ARL" pretool
+            ))
+            elapsed=$(($(date +%s) - t0))
+            assert_eq "$vector cannot replace the supervisor's modules" \
+                "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
+            if [ "$elapsed" -le 3 ]; then
+                ok "$vector: the deadline still fired in ${elapsed}s"
+            else
+                bad "$vector: the deadline still fires" "${elapsed}s" '<=3s'
+            fi
+        done
+
+        t0=$(date +%s)
+        out=$(hook_payload PreToolUse | (
+            cd "$REPO" && PATH="$hangpy:$PATH" ARL_WATCHDOG=perl ARL_SHIM_TIMEOUT_PRETOOL=1 \
+                env "PERL5LIB=$hostile" "PERL5OPT=-MPOSIX" "$ARL" pretool
+        ))
+        elapsed=$(($(date +%s) - t0))
+        assert_eq 'PERL5OPT cannot inject a module either' \
+            "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
+        if [ "$elapsed" -le 3 ]; then
+            ok "PERL5OPT: the deadline still fired in ${elapsed}s"
+        else
+            bad 'PERL5OPT: the deadline still fires' "${elapsed}s" '<=3s'
+        fi
+
+        assert_contains 'the interpreter environment is scrubbed before perl starts' \
+            "$(cat "$PLUGIN_ROOT/scripts/arl.sh")" "PERL5LIB='' PERL5OPT='' PERLLIB=''"
+    fi
+fi
+
+if start 'watchdog: a perl without CLOCK_MONOTONIC is refused, not run on the wall clock'; then
+    new_case
+    arm_ok && phases_ok
+
+    if ! command -v perl >/dev/null 2>&1; then
+        ok 'monotonic-clock checks skipped (perl unavailable)'
+    else
+        # A deadline on the wall clock is not a deadline: a backwards NTP step stretches it past
+        # the host's own hook timeout, and Claude Code then tears the hook down before the
+        # fail-closed response is written -- the one failure mode that produces *no* answer at
+        # all rather than a denial. Falling back to wall time would leave that open while
+        # looking like it works, so the supervisor refuses instead.
+        #
+        # A stand-in perl whose Time::HiRes has everything except CLOCK_MONOTONIC, which is what
+        # a platform lacking it looks like from here.
+        nomono="$CASE_DIR/perl-no-monotonic"
+        mkdir -p "$nomono"
+        # The real interpreter, with only that one constant made to fail -- the shim calls it as
+        # `perl -e <script> <seconds> <argv...>`, so the wrapper injects a prelude ahead of the
+        # supervisor's own -e and passes the rest through untouched.
+        cat >"$nomono/perl" <<PERLEOF
+#!/usr/bin/env bash
+script=\$2
+shift 2
+exec $(command -v perl) -e 'require Time::HiRes; *Time::HiRes::CLOCK_MONOTONIC = sub { die "unsupported" };' -e "\$script" -- "\$@"
+PERLEOF
+        chmod +x "$nomono/perl"
+
+        out=$(hook_payload PreToolUse | (
+            cd "$REPO" && PATH="$nomono:$PATH" ARL_WATCHDOG=perl "$ARL" pretool
+        ))
+        assert_eq 'the hook denies rather than running unbounded on the wall clock' \
+            "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "pass"')" 'deny'
+        assert_contains 'and names the missing clock rather than a bare exit status' \
+            "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')" 'CLOCK_MONOTONIC'
+
+        # And the same capability is a precondition for arming, so this is one refusal while the
+        # user is watching rather than a denial per tool call. `timeout`/`gtimeout` are kept off
+        # this PATH so perl really is the layer that would be chosen.
+        armdir="$CASE_DIR/arm-no-monotonic"
+        mkdir -p "$armdir"
+        for b in bash sh cat printf env python3 grep sed cut git mktemp true false ls find head tr date; do
+            p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$armdir/$b"
+        done
+        ln -sf "$nomono/perl" "$armdir/perl"
+
+        arm_out=$( (cd "$REPO" && PATH="$armdir" "$ARL" arm --session "no-mono" --plan "$PLAN") 2>&1)
+        arm_rc=$?
+        assert_eq 'arming is refused' "$arm_rc" '1'
+        assert_contains 'and says which capability is missing' "$arm_out" 'CLOCK_MONOTONIC'
+    fi
 fi
 
 # --------------------------------------------------------------------------

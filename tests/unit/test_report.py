@@ -363,8 +363,10 @@ def test_rendering_a_report_never_touches_stdout(act_dir: Path, capsys: pytest.C
 def test_the_report_listing_matches_the_shell(report_env: dict[str, str], act_dir: Path, git_repo: Path) -> None:
     """Both implementations must find the same files, since one may have written them."""
     store_seq(act_dir, "001", "APPROVED")
+    # `-exec basename {} \;` rather than `-printf %f`: the latter is a GNU extension that BSD
+    # find (macOS) does not have, and this test only needs the leaf names.
     listing = subprocess.run(
-        ["find", str(act_dir / "reports"), "-maxdepth", "1", "-name", "*.md", "-printf", "%f\n"],
+        ["find", str(act_dir / "reports"), "-maxdepth", "1", "-name", "*.md", "-exec", "basename", "{}", ";"],
         capture_output=True,
         check=True,
         text=True,

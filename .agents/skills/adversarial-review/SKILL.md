@@ -179,9 +179,11 @@ Check whenever affected direct or indirect:
   destination's mode across a replace; only a genuinely new file gets the
   umask default.
 - **Portability claims stay honest.** Gate need Python 3.12+, stdlib plus
-  vendored bashlex; guard shim need Bash 4.4+ and `timeout` binary (GNU or
-  uutils). No accidental reliance on current Python, locale, filesystem, or Git
-  behavior without declaring and testing it.
+  vendored bashlex; guard shim need Bash 3.2+ and an outer watchdog --
+  `timeout`/`gtimeout` (GNU or uutils) or `perl`, in that order. No accidental
+  reliance on current Python, locale, filesystem, or Git behavior without
+  declaring and testing it. macOS ship no `timeout` and Bash 3.2, so a change
+  that reintroduce either requirement break every Mac.
 - **Interpreter invocation stays hardened.** Gate invoked only as
   `python3 -I <absolute bootstrap path>`, never `-m`, never relative path,
   never through `uv run`. `sys.pycache_prefix` must resolve outside plugin

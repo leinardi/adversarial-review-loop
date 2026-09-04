@@ -191,11 +191,17 @@ def test_read_verified_file_leaks_no_descriptors(tmp_path: Path) -> None:
     good.write_text("x")
     (root / "context" / "link.txt").symlink_to(tmp_path / "absent")
 
-    before = len(os.listdir("/proc/self/fd"))
+    # /proc on Linux, /dev/fd on macOS and the BSDs -- both list this process's open
+    # descriptors, which is all this needs.
+    fd_dir = next((path for path in ("/proc/self/fd", "/dev/fd") if os.path.isdir(path)), None)
+    if fd_dir is None:
+        pytest.skip("no way to enumerate this process's open descriptors on this platform")
+
+    before = len(os.listdir(fd_dir))
     for _ in range(200):
         read_verified_file(good, root=root)
         read_verified_file(root / "context", root=root)
         read_verified_file(root / "context" / "link.txt", root=root)
         read_verified_file(root / "context" / "missing.txt", root=root)
 
-    assert len(os.listdir("/proc/self/fd")) == before
+    assert len(os.listdir(fd_dir)) == before

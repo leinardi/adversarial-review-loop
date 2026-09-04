@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,6 +74,19 @@ Ways out:
   - fix the cause and run `/adversarial-review-loop:implement <plan.md>` again
   - abandon the mode with `/adversarial-review-loop:stop`
 """
+
+#: Appended wherever a failure is one an over-tight sandbox produces, because the raw errno is
+#: nearly useless on its own: EPERM writing into `.git`, or into a state directory that has
+#: nothing to do with the repository, reads as a broken plugin rather than a policy decision.
+SANDBOX_HINT: Final = (
+    "If Claude Code's sandbox is enabled, it has to permit writes inside this repository's `.git` and "
+    "under the review loop's state directory; a blanket `denyWrite` of your home directory covers both "
+    "and cannot be re-opened by `allowWrite`. See the sandbox notes in the plugin's README."
+)
+
+#: Raised into a message rather than a traceback: the state directory being unwritable is a
+#: configuration problem with an obvious fix, not a bug worth forty lines of stack.
+STATE_UNWRITABLE_REASON: Final = "the review loop's state directory ({root}) could not be written ({error}). " + SANDBOX_HINT
 
 NO_SESSION_MESSAGE: Final = (
     "**adversarial-review-loop: ARMING FAILED** — no session id was supplied, so no state could be recorded. "
@@ -354,6 +368,68 @@ def _resolve_plan(plan: str) -> str:
     return plan
 
 
+#: The watchdog the shim runs every hook under, in the order ``arl_watchdog_pick`` tries them.
+#: Kept here so ``arm`` and ``resume`` refuse up front rather than arming into a gate whose every
+#: hook would fail closed; ``tests/unit/test_commands_arm.py`` asserts this list still matches the
+#: shell's, since the two drifting apart is how the refusal would start lying.
+WATCHDOGS: Final = ("timeout", "gtimeout", "perl")
+
+
+#: Asks perl the one question that decides whether it can be the watchdog. Run with the same
+#: scrubbed environment the shim uses, so the answer describes the interpreter the hook will
+#: actually get rather than one dressed up by ``PERL5LIB``.
+_PERL_MONOTONIC_PROBE: Final = "use Time::HiRes; eval { Time::HiRes::clock_gettime(Time::HiRes::CLOCK_MONOTONIC()); 1 } or exit 1;"
+_PERL_PROBE_TIMEOUT: Final = 10
+
+
+def _perl_has_monotonic() -> bool:
+    """Whether this perl can measure a deadline against ``CLOCK_MONOTONIC``."""
+    try:
+        probe = subprocess.run(
+            ["perl", "-e", _PERL_MONOTONIC_PROBE],
+            env={**os.environ, "PERL5LIB": "", "PERL5OPT": "", "PERLLIB": ""},
+            capture_output=True,
+            timeout=_PERL_PROBE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
+
+
+def _check_watchdog() -> None:
+    """Refuse to arm when no usable outer watchdog exists. Raises ``_ArmFailure``.
+
+    ``scripts/arl.sh`` runs every hook under one of :data:`WATCHDOGS`, and without one the gate
+    cannot be bounded: the blocking ``flock`` in :mod:`arl.atomic` has no deadline of its own, so
+    a wedged lock holder would hang the hook until Claude Code tore it down with nothing. The
+    shim already fails closed by name in that case; refusing here means the user finds out while
+    they are watching the slash command, instead of one denied tool call at a time.
+
+    "Usable" is why this resolves the layer rather than just counting: the perl supervisor needs
+    ``CLOCK_MONOTONIC``, because a deadline measured on the wall clock can be stretched past the
+    host's own hook timeout by a backwards clock adjustment -- and a stretched deadline means the
+    fail-closed response is never written at all. The shim refuses to run on a wall clock (125),
+    so a perl without it would arm cleanly and then deny every tool call; this turns that into
+    one refusal, here.
+
+    Checked ahead of the ``ARL_REVIEWER_CMD`` seam below, and never skipped by it: that seam
+    stands in for the reviewer, but the watchdog is needed whichever reviewer runs.
+    """
+    chosen = next((name for name in WATCHDOGS if paths.have(name)), None)
+    if chosen is None:
+        raise _ArmFailure(
+            "no `timeout`, `gtimeout` or `perl` is on PATH, so the review gate cannot be bounded. "
+            "Install GNU coreutils (`brew install coreutils` on macOS) or perl."
+        )
+    if chosen == "perl" and not _perl_has_monotonic():
+        raise _ArmFailure(
+            "`perl` is the only watchdog available and its Time::HiRes has no CLOCK_MONOTONIC, so "
+            "the review gate's deadline could be stretched by a clock adjustment and its response "
+            "lost. Install GNU coreutils (`brew install coreutils` on macOS)."
+        )
+
+
 def _check_reviewer(config: Config) -> None:
     """Refuse to arm when the reviewer cannot be reached. Raises ``_ArmFailure``.
 
@@ -367,7 +443,12 @@ def _check_reviewer(config: Config) -> None:
     against, and that is not a reason to refuse: a name it does not know exits non-zero, which
     is an ``OP_FAILURE`` that blocks, so nothing is ever approved on the strength of a model
     that was never reached (Rule 1).
+
+    The watchdog check rides along here because this is the one preflight both arming paths
+    share -- ``resume`` reaches it at ``resume.py:738`` -- so a check added here cannot be armed
+    around by resuming instead.
     """
+    _check_watchdog()
     # Checked ahead of the test seam, and never skipped by it: the seam replaces the reviewer
     # *command*, not the harness -- session minting, id validation and every lease are still
     # sized from whatever `harness` names, so an unimplemented value would reach the review
@@ -430,6 +511,28 @@ def _freeze_plan(plan: str, act_dir: Path) -> bytes:
     except OSError as exc:
         raise _ArmFailure(f"the plan could not be frozen into the activation directory ({exc})") from exc
     return raw
+
+
+def record_failure_best_effort(state: State, *, session: str, repo: str, reason: str, publish_latest: bool = True) -> str:
+    """:func:`_record_failure`, but a state directory that cannot be written is reported, not raised.
+
+    Recording ``ARM_FAILED`` is itself a write, so the environments that make arming fail are
+    exactly the ones that can make *recording* the failure fail too -- and an exception here
+    replaces the real reason with a stack trace ending in ``PermissionError``, which is the
+    least useful form of the truth. Nothing is weakened by continuing: the caller still exits
+    non-zero and still reports ARMING FAILED, and a missing record leaves the next tool call
+    reading "arming never executed", which denies (Rule 0).
+
+    Returns a sentence to append to the reason, or ``""`` when the record was written.
+    """
+    try:
+        _record_failure(state, session=session, repo=repo, reason=reason, publish_latest=publish_latest)
+    except OSError as exc:
+        note = f"\n\nThe refusal could not be recorded either: the state directory ({paths.state_root()}) could not be written ({exc})."
+        # The hint is worth saying once, not twice: these two failures usually have one cause,
+        # and the reason above will already carry it when it does.
+        return note if SANDBOX_HINT in reason else f"{note} {SANDBOX_HINT}"
+    return ""
 
 
 def _record_failure(state: State, *, session: str, repo: str, reason: str, publish_latest: bool = True) -> None:
@@ -549,8 +652,14 @@ def run(argv: list[str]) -> int:
         sys.stdout.write(VERSION_CONFLICT_MESSAGE.format(act_dir=state.act_dir, version=exc.version))
         return 1
     except _ArmFailure as exc:
-        _record_failure(state, session=session, repo=repo, reason=str(exc))
-        sys.stdout.write(ARM_FAILED_MESSAGE.format(reason=str(exc)))
+        note = record_failure_best_effort(state, session=session, repo=repo, reason=str(exc))
+        sys.stdout.write(ARM_FAILED_MESSAGE.format(reason=f"{exc}{note}"))
+        return 1
+    except OSError as exc:
+        # Arming writes: the frozen plan, state.json, the pointers. When the state directory
+        # itself refuses them there is nothing to record the failure *into*, so this reports and
+        # exits rather than unwinding into a traceback. Nothing is armed, which is the safe end.
+        sys.stdout.write(ARM_FAILED_MESSAGE.format(reason=STATE_UNWRITABLE_REASON.format(root=paths.state_root(), error=exc)))
         return 1
 
     sys.stdout.write(_armed_message(request, frozen))
@@ -570,11 +679,20 @@ def _arm(state: State, request: _Request) -> _Frozen:
         )
 
     allow_dirty = parsed.allow_dirty or config.as_bool("allow_dirty")
-    if not allow_dirty and not gitsnap.worktree_clean(repo):
-        raise _ArmFailure(
-            "the worktree is dirty. Either commit or stash the existing changes, or re-run with "
-            f"--allow-dirty to fold them into phase 1's review:\n{gitsnap.dirty_summary(repo)}"
-        )
+    if not allow_dirty:
+        status = gitsnap.worktree_status(repo)
+        if status.undetermined:
+            # Reported as what it is. Saying "dirty" here sends the user hunting for changes
+            # that are not there -- and the usual cause is not their worktree at all, but an
+            # environment that will not let `git add -A` write blobs into .git.
+            raise _ArmFailure(
+                f"whether the worktree is clean could not be established ({status.undetermined}), so it is treated as dirty. {SANDBOX_HINT}"
+            )
+        if not status.clean:
+            raise _ArmFailure(
+                "the worktree is dirty. Either commit or stash the existing changes, or re-run with "
+                f"--allow-dirty to fold them into phase 1's review:\n{gitsnap.dirty_summary(repo)}"
+            )
 
     until = resolve_until(parsed.until)
 

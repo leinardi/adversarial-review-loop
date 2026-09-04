@@ -23,8 +23,8 @@ The review is not advice Claude may weigh up. It is a `PreToolUse` gate on the c
 
 - Claude Code 2.1.x or newer (the plugin registers `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `SessionStart` and `UserPromptSubmit` hooks in `hooks/hooks.json`)
 - the reviewer CLI on `PATH` and authenticated: `claude` by default (you already have it), or [`opencode`](https://opencode.ai) with `harness` set to `opencode`. Arming refuses if the configured one is missing.
-- `python3` 3.12 or newer — the gate itself. No install step: the standard library plus a vendored, lint-excluded copy of [bashlex](https://github.com/idank/bashlex) is everything it needs.
-- `git`, `bash` 4.4+ and `timeout` (GNU or uutils coreutils)
+- `python3` 3.12 or newer — the gate itself. No install step: the standard library plus a vendored, lint-excluded copy of [bashlex](https://github.com/idank/bashlex) is everything it needs. **On macOS the bundled `/usr/bin/python3` is 3.9 and will not do**; install one from Homebrew or python.org.
+- `git`, `bash` 3.2 or newer, and an outer watchdog for the hooks: `timeout`/`gtimeout` (GNU or uutils coreutils) **or** `perl`. macOS ships `perl` and no `timeout`, so it is covered out of the box. Arming refuses if none of them is present.
 
 ## 📦 Install
 
@@ -45,6 +45,31 @@ Then raise the Stop-hook block cap so a long loop is not cut short. Claude Code 
   }
 }
 ```
+
+### If you use Claude Code's sandbox
+
+Sandboxing is off unless you turned it on, so most people can skip this. If you did enable it, the loop needs two write permissions that a default-deny setup will refuse, and the symptoms do not look like permissions:
+
+| It needs to write | Because | What it looks like when denied |
+| --- | --- | --- |
+| the repository's `.git` | the snapshot layer runs `git add -A` against a throwaway index, which writes blobs | arming refuses a **clean** worktree, saying it cannot establish whether it is clean |
+| `$XDG_STATE_HOME/adversarial-review-loop` | every activation, approval and report lives there, never inside the repo under review | `ARMING FAILED`, naming the state directory |
+
+A blanket `"denyWrite": ["~/"]` covers both, and **`allowWrite` does not re-open it** — measured: paths listed in `allowWrite` are still refused when the home directory is denied. Narrow the deny instead of adding exceptions:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "denyWrite": ["~/.ssh", "~/.aws", "~/.gnupg"],
+      "allowWrite": ["~/.local/state/adversarial-review-loop/**"]
+    }
+  }
+}
+```
+
+`excludedCommands` does not help here: the loop's git runs inside the gate process, not as a `git …` command the sandbox can pattern-match. If you would rather not loosen anything, run the loop in a session with the sandbox off — it is a per-session setting under `/sandbox`.
 
 ## 🚀 Quick start
 
@@ -143,7 +168,9 @@ make dry-run                 # print the exact reviewer argv and prompt, without
 make check                   # pre-commit (shellcheck, yamllint, markdownlint, …)
 ```
 
-The selftest drives the hook entrypoints with synthetic payloads and replaces the reviewer with `tests/fixtures/fake-reviewer.sh` (`ARL_REVIEWER_CMD`), so loop logic costs nothing to iterate on. It covers the snapshot layer, the command-shape table, every arm-failure mode, the fail-closed guards, commit divergence and reconcile, the findings cap, the Stop accounting, and the TTL.
+The selftest drives the hook entrypoints with synthetic payloads and replaces the reviewer with `tests/fixtures/fake-reviewer.sh` (`ARL_REVIEWER_CMD`), so loop logic costs nothing to iterate on. It covers the snapshot layer, the command-shape table, every arm-failure mode, the fail-closed guards, commit divergence and reconcile, the findings cap, the Stop accounting, the watchdog layers, and the TTL.
+
+Running the tests needs `jq`, and comparing the chunker against the real GNU `split` needs GNU coreutils (`gsplit`); both are **development-only** — the gate itself uses neither, and those comparisons skip cleanly where coreutils is absent, as on a stock Mac.
 
 [`AGENTS.md`](AGENTS.md) is the contract any change to this project has to honour — the five non-negotiable rules, the invariants, and the hazards that silently reopen a closed hole if reverted. Before the first real run, work through [`tests/STEP0.md`](tests/STEP0.md): the harness assumptions that only a live Claude Code session can settle.
 

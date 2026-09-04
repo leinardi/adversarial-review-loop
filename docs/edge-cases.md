@@ -9,6 +9,7 @@ gate working as designed against a scenario worth understanding before you hit i
 | Condition | Behaviour |
 | --- | --- |
 | Dirty worktree at arm time | `ARM_FAILED`; `--allow-dirty` folds the dirt into phase 1's review |
+| Whether the worktree is clean cannot be established (writes into `.git` denied) | `ARM_FAILED`, saying so rather than claiming the worktree is dirty — see [below](#a-sandbox-that-denies-git-or-the-state-directory) |
 | `opencode` missing or model unreachable | `ARM_FAILED`, naming the failure |
 | Any arm failure | Persisted **before** exit; all mutations and commits denied until re-armed or stopped |
 | Arming never executes (refused sandbox, unreadable script) | The `UserPromptSubmit` hook recorded that arming was asked for; the next hook call records `ARM_FAILED` itself and denies |
@@ -431,6 +432,41 @@ coming back.
 
 `/adversarial-review-loop:status` answers "bound or not" without changing anything, and is
 worth running before trusting either branch.
+
+## A sandbox that denies `.git` or the state directory
+
+Claude Code's sandbox is opt-in. With it on and a default-deny filesystem policy, the loop cannot
+run, and neither failure names the sandbox on its own — so both messages now name it for you.
+
+The loop writes in exactly two places, and a sandbox typically refuses both:
+
+- **The repository's `.git`.** The snapshot layer captures the working tree by pointing
+  `GIT_INDEX_FILE` at a throwaway index and running `git add -A`, which writes blobs into
+  `.git/objects`. The temporary index itself lives in `$TMPDIR` and is fine; the object writes
+  are what get refused.
+- **`$XDG_STATE_HOME/adversarial-review-loop`.** Every activation, approval, bundle and report
+  lives there, deliberately outside the repository under review (Rule 3).
+
+The first one is the confusing one, because the failure does not look like a permission problem:
+`git add -A` fails, `worktree_status` cannot answer the question, and — since an unanswerable
+question is never permission to proceed (Rule 1) — arming refuses. Until this was made explicit
+it reported a **clean** worktree as dirty, sending you looking for changes that were not there.
+It now says that cleanliness could not be established, and names the likely cause.
+
+The second compounds it: recording `ARM_FAILED` is itself a write, so the environment that broke
+arming can also break the record of it. That used to surface as a `PermissionError` traceback
+burying the real reason. `arm.record_failure_best_effort` now reports it as a sentence and exits
+non-zero instead. Nothing is weakened — a missing record leaves the next tool call reading
+"arming never executed", which denies.
+
+Two things worth knowing before you try to fix it with configuration:
+
+- **`allowWrite` does not re-open a blanket `denyWrite`.** Measured: with `"denyWrite": ["~/"]`,
+  paths added to `allowWrite` are still refused. Narrow the deny rather than adding exceptions.
+- **`excludedCommands` does not apply.** It matches Bash commands, and the loop's git runs inside
+  the gate process rather than as a `git …` command the sandbox can pattern-match.
+
+The README's [sandbox section](../README.md#if-you-use-claude-codes-sandbox) has the settings.
 
 ## Hooks are plugin-level, not skill-level
 
