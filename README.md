@@ -46,6 +46,31 @@ Then raise the Stop-hook block cap so a long loop is not cut short. Claude Code 
 }
 ```
 
+### If you use Claude Code's sandbox
+
+Sandboxing is off unless you turned it on, so most people can skip this. If you did enable it, the loop needs two write permissions that a default-deny setup will refuse, and the symptoms do not look like permissions:
+
+| It needs to write | Because | What it looks like when denied |
+| --- | --- | --- |
+| the repository's `.git` | the snapshot layer runs `git add -A` against a throwaway index, which writes blobs | arming refuses a **clean** worktree, saying it cannot establish whether it is clean |
+| `$XDG_STATE_HOME/adversarial-review-loop` | every activation, approval and report lives there, never inside the repo under review | `ARMING FAILED`, naming the state directory |
+
+A blanket `"denyWrite": ["~/"]` covers both, and **`allowWrite` does not re-open it** — measured: paths listed in `allowWrite` are still refused when the home directory is denied. Narrow the deny instead of adding exceptions:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "denyWrite": ["~/.ssh", "~/.aws", "~/.gnupg"],
+      "allowWrite": ["~/.local/state/adversarial-review-loop/**"]
+    }
+  }
+}
+```
+
+`excludedCommands` does not help here: the loop's git runs inside the gate process, not as a `git …` command the sandbox can pattern-match. If you would rather not loosen anything, run the loop in a session with the sandbox off — it is a per-session setting under `/sandbox`.
+
 ## 🚀 Quick start
 
 1. Write a plan as a Markdown file — whatever describes the work; there is no required format.

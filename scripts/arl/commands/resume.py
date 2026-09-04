@@ -682,9 +682,12 @@ def _fail(*, session: str, repo: str, reason: str, same_session: bool, retired: 
     if same_session:
         sys.stdout.write(SAME_SESSION_FAILURE.format(reason=reason))
         return 1
-    arm._record_failure(State(repo, session), session=session, repo=repo, reason=reason, publish_latest=retired)
+    # Best-effort for the same reason as `arm`'s: the environments that make a resume fail are
+    # often the ones that cannot record the failure either, and a traceback there would bury
+    # the reason the user actually needs.
+    note = arm.record_failure_best_effort(State(repo, session), session=session, repo=repo, reason=reason, publish_latest=retired)
     suffix = WEDGED_SUFFIX if retired else ""
-    sys.stdout.write(NEW_SESSION_FAILURE.format(reason=reason) + suffix)
+    sys.stdout.write(NEW_SESSION_FAILURE.format(reason=f"{reason}{note}") + suffix)
     return 1
 
 

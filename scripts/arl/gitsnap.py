@@ -41,7 +41,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, NamedTuple
 
 from arl import globmatch
 from arl.config import Config
@@ -74,6 +74,7 @@ __all__ = [
     "stageable",
     "submodule_warnings",
     "worktree_clean",
+    "worktree_status",
 ]
 
 #: How long any one ``git`` metadata call is given. Generous by design -- it is a ceiling on
@@ -413,19 +414,41 @@ def snapshot(repo: str) -> Snapshot:
     return Snapshot(tree=tree, warnings=submodule_warnings(repo))
 
 
-def worktree_clean(repo: str) -> bool:
-    """True when the worktree holds nothing beyond HEAD.
+class WorktreeStatus(NamedTuple):
+    """Whether the worktree is clean, and -- when that could not be established -- why not."""
 
-    A snapshot failure answers False -- "not clean" -- which is what the shell's non-zero
-    return meant. Callers refuse to arm, or refuse to finish, on False; the failure never
-    becomes permission to proceed.
+    clean: bool
+    #: The snapshot failure that stopped the question being answered, or ``None`` when it was
+    #: answered. ``clean`` is always ``False`` when this is set: an unanswerable question is
+    #: never permission to proceed (Rule 1).
+    undetermined: str | None
+
+
+def worktree_status(repo: str) -> WorktreeStatus:
+    """Whether the worktree holds nothing beyond HEAD, and whether that was knowable.
+
+    A snapshot failure answers "not clean", which is what the shell's non-zero return meant --
+    but it is *not* the same fact, and callers that report it as one send the user looking for
+    changes that are not there. The commonest cause is an environment that denies writes into
+    ``.git`` (a sandbox), where ``git add -A`` cannot write blobs and a pristine worktree looks
+    dirty. Keeping the reason lets the caller say which of the two it is.
     """
     try:
         snap = snapshot(repo)
     except SnapshotError as exc:
-        log(f"treating {repo} as dirty: {exc}")
-        return False
-    return bool(snap.tree) and snap.tree == head_tree(repo)
+        log(f"cannot tell whether {repo} is clean, so treating it as dirty: {exc}")
+        return WorktreeStatus(clean=False, undetermined=str(exc))
+    return WorktreeStatus(clean=bool(snap.tree) and snap.tree == head_tree(repo), undetermined=None)
+
+
+def worktree_clean(repo: str) -> bool:
+    """True when the worktree holds nothing beyond HEAD.
+
+    A snapshot failure answers False -- "not clean". Callers refuse to arm, or refuse to
+    finish, on False; the failure never becomes permission to proceed. Use
+    :func:`worktree_status` where the *reason* has to be reported.
+    """
+    return worktree_status(repo).clean
 
 
 def dirty_summary(repo: str) -> str:

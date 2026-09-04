@@ -75,6 +75,19 @@ Ways out:
   - abandon the mode with `/adversarial-review-loop:stop`
 """
 
+#: Appended wherever a failure is one an over-tight sandbox produces, because the raw errno is
+#: nearly useless on its own: EPERM writing into `.git`, or into a state directory that has
+#: nothing to do with the repository, reads as a broken plugin rather than a policy decision.
+SANDBOX_HINT: Final = (
+    "If Claude Code's sandbox is enabled, it has to permit writes inside this repository's `.git` and "
+    "under the review loop's state directory; a blanket `denyWrite` of your home directory covers both "
+    "and cannot be re-opened by `allowWrite`. See the sandbox notes in the plugin's README."
+)
+
+#: Raised into a message rather than a traceback: the state directory being unwritable is a
+#: configuration problem with an obvious fix, not a bug worth forty lines of stack.
+STATE_UNWRITABLE_REASON: Final = "the review loop's state directory ({root}) could not be written ({error}). " + SANDBOX_HINT
+
 NO_SESSION_MESSAGE: Final = (
     "**adversarial-review-loop: ARMING FAILED** — no session id was supplied, so no state could be recorded. "
     "The review loop is NOT active; do not implement anything."
@@ -500,6 +513,28 @@ def _freeze_plan(plan: str, act_dir: Path) -> bytes:
     return raw
 
 
+def record_failure_best_effort(state: State, *, session: str, repo: str, reason: str, publish_latest: bool = True) -> str:
+    """:func:`_record_failure`, but a state directory that cannot be written is reported, not raised.
+
+    Recording ``ARM_FAILED`` is itself a write, so the environments that make arming fail are
+    exactly the ones that can make *recording* the failure fail too -- and an exception here
+    replaces the real reason with a stack trace ending in ``PermissionError``, which is the
+    least useful form of the truth. Nothing is weakened by continuing: the caller still exits
+    non-zero and still reports ARMING FAILED, and a missing record leaves the next tool call
+    reading "arming never executed", which denies (Rule 0).
+
+    Returns a sentence to append to the reason, or ``""`` when the record was written.
+    """
+    try:
+        _record_failure(state, session=session, repo=repo, reason=reason, publish_latest=publish_latest)
+    except OSError as exc:
+        note = f"\n\nThe refusal could not be recorded either: the state directory ({paths.state_root()}) could not be written ({exc})."
+        # The hint is worth saying once, not twice: these two failures usually have one cause,
+        # and the reason above will already carry it when it does.
+        return note if SANDBOX_HINT in reason else f"{note} {SANDBOX_HINT}"
+    return ""
+
+
 def _record_failure(state: State, *, session: str, repo: str, reason: str, publish_latest: bool = True) -> None:
     """Persist ``ARM_FAILED`` and make it findable, then leave the message to the caller.
 
@@ -617,8 +652,14 @@ def run(argv: list[str]) -> int:
         sys.stdout.write(VERSION_CONFLICT_MESSAGE.format(act_dir=state.act_dir, version=exc.version))
         return 1
     except _ArmFailure as exc:
-        _record_failure(state, session=session, repo=repo, reason=str(exc))
-        sys.stdout.write(ARM_FAILED_MESSAGE.format(reason=str(exc)))
+        note = record_failure_best_effort(state, session=session, repo=repo, reason=str(exc))
+        sys.stdout.write(ARM_FAILED_MESSAGE.format(reason=f"{exc}{note}"))
+        return 1
+    except OSError as exc:
+        # Arming writes: the frozen plan, state.json, the pointers. When the state directory
+        # itself refuses them there is nothing to record the failure *into*, so this reports and
+        # exits rather than unwinding into a traceback. Nothing is armed, which is the safe end.
+        sys.stdout.write(ARM_FAILED_MESSAGE.format(reason=STATE_UNWRITABLE_REASON.format(root=paths.state_root(), error=exc)))
         return 1
 
     sys.stdout.write(_armed_message(request, frozen))
@@ -638,11 +679,20 @@ def _arm(state: State, request: _Request) -> _Frozen:
         )
 
     allow_dirty = parsed.allow_dirty or config.as_bool("allow_dirty")
-    if not allow_dirty and not gitsnap.worktree_clean(repo):
-        raise _ArmFailure(
-            "the worktree is dirty. Either commit or stash the existing changes, or re-run with "
-            f"--allow-dirty to fold them into phase 1's review:\n{gitsnap.dirty_summary(repo)}"
-        )
+    if not allow_dirty:
+        status = gitsnap.worktree_status(repo)
+        if status.undetermined:
+            # Reported as what it is. Saying "dirty" here sends the user hunting for changes
+            # that are not there -- and the usual cause is not their worktree at all, but an
+            # environment that will not let `git add -A` write blobs into .git.
+            raise _ArmFailure(
+                f"whether the worktree is clean could not be established ({status.undetermined}), so it is treated as dirty. {SANDBOX_HINT}"
+            )
+        if not status.clean:
+            raise _ArmFailure(
+                "the worktree is dirty. Either commit or stash the existing changes, or re-run with "
+                f"--allow-dirty to fold them into phase 1's review:\n{gitsnap.dirty_summary(repo)}"
+            )
 
     until = resolve_until(parsed.until)
 

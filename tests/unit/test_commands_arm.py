@@ -385,6 +385,67 @@ def test_an_unreadable_plan_is_refused(git_repo: Path, tmp_path: Path, clean_env
     assert "the plan file is not readable" in proc.stdout
 
 
+def test_an_undeterminable_worktree_is_refused_as_such_not_as_dirty(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A clean worktree reported as dirty sends the user hunting for changes that do not exist.
+
+    This is what a sandbox denying writes into ``.git`` produces: ``git add -A`` cannot write
+    blobs, the snapshot fails, and the question "is this clean?" has no answer. Refusing is
+    right (Rule 1), but it has to be refused as what it is. Simulated with a read-only object
+    store, which is the same failure without needing a sandbox.
+    """
+    # A `git` that fails only on `add`, which is what the denial looks like from here. Making
+    # .git/objects read-only does not reproduce it: on an already-clean worktree git has no new
+    # blob to write and succeeds anyway.
+    bindir = tmp_path / "failing-git"
+    bindir.mkdir()
+    real_git = shutil.which("git")
+    assert real_git
+    shim = bindir / "git"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        'for arg in "$@"; do\n'
+        '    [ "$arg" = add ] && { echo "error: unable to create temporary file: Operation not permitted" >&2; exit 128; }\n'
+        "done\n"
+        f'exec {real_git} "$@"\n'
+    )
+    shim.chmod(0o755)
+    env = armed_env(clean_env, PATH=f"{bindir}:{os.environ['PATH']}")
+
+    refused = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+
+    assert refused.returncode == 1
+    assert "could not be established" in refused.stdout
+    assert "the worktree is dirty" not in refused.stdout, "a clean worktree must not be reported as dirty"
+    assert "sandbox" in refused.stdout, "the likeliest cause is named, since the errno alone explains nothing"
+    assert read_state(env, git_repo, "s1")["status"] == "ARM_FAILED"
+
+
+def test_an_unwritable_state_directory_is_a_message_not_a_traceback(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Recording ARM_FAILED is itself a write, so it can fail exactly when arming does.
+
+    Letting that escape replaced the real reason with a stack trace ending in PermissionError.
+    Nothing is weakened by reporting instead: arming still fails, and the missing record leaves
+    the next tool call reading "arming never executed", which denies.
+    """
+    # The *parent* is made read-only, not the state root itself: `atomic` deliberately tightens
+    # the root to 0700 when it opens it, which would hand write permission straight back.
+    parent = tmp_path / "read-only-parent"
+    parent.mkdir()
+    original = parent.stat().st_mode
+    parent.chmod(0o500)
+    env = armed_env(clean_env, ARL_STATE_DIR=str(parent / "state"))
+    try:
+        refused = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+    finally:
+        parent.chmod(original)
+
+    assert refused.returncode == 1
+    assert "Traceback" not in refused.stdout and "Traceback" not in refused.stderr
+    assert "PermissionError" not in refused.stdout
+    assert "could not be written" in refused.stdout
+    assert "ARMING FAILED" in refused.stdout
+
+
 def test_a_dirty_worktree_is_refused_unless_allowed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed_env(clean_env)
     plan = plan_file(tmp_path)
