@@ -23,8 +23,8 @@ The review is not advice Claude may weigh up. It is a `PreToolUse` gate on the c
 
 - Claude Code 2.1.x or newer (the plugin registers `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `SessionStart` and `UserPromptSubmit` hooks in `hooks/hooks.json`)
 - the reviewer CLI on `PATH` and authenticated: `claude` by default (you already have it), or [`opencode`](https://opencode.ai) with `harness` set to `opencode`. Arming refuses if the configured one is missing.
-- `python3` 3.12 or newer — the gate itself. No install step: the standard library plus a vendored, lint-excluded copy of [bashlex](https://github.com/idank/bashlex) is everything it needs.
-- `git`, `bash` 4.4+ and `timeout` (GNU or uutils coreutils)
+- `python3` 3.12 or newer — the gate itself. No install step: the standard library plus a vendored, lint-excluded copy of [bashlex](https://github.com/idank/bashlex) is everything it needs. **On macOS the bundled `/usr/bin/python3` is 3.9 and will not do**; install one from Homebrew or python.org.
+- `git`, `bash` 3.2 or newer, and an outer watchdog for the hooks: `timeout`/`gtimeout` (GNU or uutils coreutils) **or** `perl`. macOS ships `perl` and no `timeout`, so it is covered out of the box. Arming refuses if none of them is present.
 
 ## 📦 Install
 
@@ -143,7 +143,9 @@ make dry-run                 # print the exact reviewer argv and prompt, without
 make check                   # pre-commit (shellcheck, yamllint, markdownlint, …)
 ```
 
-The selftest drives the hook entrypoints with synthetic payloads and replaces the reviewer with `tests/fixtures/fake-reviewer.sh` (`ARL_REVIEWER_CMD`), so loop logic costs nothing to iterate on. It covers the snapshot layer, the command-shape table, every arm-failure mode, the fail-closed guards, commit divergence and reconcile, the findings cap, the Stop accounting, and the TTL.
+The selftest drives the hook entrypoints with synthetic payloads and replaces the reviewer with `tests/fixtures/fake-reviewer.sh` (`ARL_REVIEWER_CMD`), so loop logic costs nothing to iterate on. It covers the snapshot layer, the command-shape table, every arm-failure mode, the fail-closed guards, commit divergence and reconcile, the findings cap, the Stop accounting, the watchdog layers, and the TTL.
+
+Running the tests needs `jq`, and comparing the chunker against the real GNU `split` needs GNU coreutils (`gsplit`); both are **development-only** — the gate itself uses neither, and those comparisons skip cleanly where coreutils is absent, as on a stock Mac.
 
 [`AGENTS.md`](AGENTS.md) is the contract any change to this project has to honour — the five non-negotiable rules, the invariants, and the hazards that silently reopen a closed hole if reverted. Before the first real run, work through [`tests/STEP0.md`](tests/STEP0.md): the harness assumptions that only a live Claude Code session can settle.
 

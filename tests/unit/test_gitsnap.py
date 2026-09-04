@@ -537,7 +537,13 @@ def test_changed_paths_strict_refuses_a_path_with_a_newline(git_repo: Path) -> N
 
 def test_changed_paths_strict_decodes_a_non_utf8_path_with_surrogateescape(git_repo: Path) -> None:
     raw = b"caf\xe9.txt"
-    (git_repo / os.fsdecode(raw)).write_bytes(b"latin-1 name\n")
+    try:
+        (git_repo / os.fsdecode(raw)).write_bytes(b"latin-1 name\n")
+    except OSError as exc:
+        # APFS (macOS) enforces valid UTF-8 in filenames and answers EILSEQ, so the input this
+        # test is about cannot be created there at all. The decoding itself is filesystem-
+        # independent; what is untestable here is only getting git to report such a name.
+        pytest.skip(f"this filesystem refuses non-UTF-8 filenames ({exc.strerror})")
     base, head = _trees(git_repo)
     assert raw.decode("utf-8", "surrogateescape") in gitsnap.changed_paths_strict(str(git_repo), base, head)
 

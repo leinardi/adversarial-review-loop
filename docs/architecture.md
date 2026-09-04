@@ -421,17 +421,30 @@ it) — it just shows up as less work inside the one Python process, not as fewe
 around it.
 
 Latency does not track the process count, and the reason is `scripts/arl.sh` itself: every
-hook call is wrapped in `timeout <N>` (below the timeout Claude Code enforces — see
-"Interpreter invocation" in [`AGENTS.md`](../AGENTS.md)), so a hung parser still denies
-before the host tears the hook down with nothing. On this machine that wrapper alone
-measured **~90 ms**, flat, on every call — `timeout` here is `uutils-coreutils`' Rust
+hook call is wrapped in an outer watchdog at `<N>` seconds (below the timeout Claude Code
+enforces — see "Interpreter invocation" in [`AGENTS.md`](../AGENTS.md)), so a hung parser
+still denies before the host tears the hook down with nothing. On this machine that wrapper
+alone measured **~90 ms**, flat, on every call — `timeout` here is `uutils-coreutils`' Rust
 reimplementation, and it appears to poll on a fixed interval rather than waking when the
 child exits (confirmed with `strace`: the child exits immediately, `timeout` still sleeps
 out the rest of its interval). The raw interpreter cost underneath it, `python3 -I` running
 the gate directly with no wrapper, measured **~45 ms**. Neither the wrapper's cost nor its
 presence is optional — Rule 1's "a hung parser must deny" needs it — but which number you
-see depends on which `timeout` your system runs: GNU coreutils' does not have this
-behaviour.
+see depends on which watchdog your system runs: GNU coreutils' `timeout` does not have this
+behaviour, and the perl supervisor used where there is no `timeout` at all (macOS) measured
+**~23 ms** over a bare exec, its cost being interpreter startup rather than polling.
+
+One invariant sits underneath all of this and is easy to break by accident. The shim reads
+the gate's decision through `out=$(…)`, and a command substitution does not finish until
+*every* holder of the pipe's write end closes it — not just the direct child. So a
+descendant that inherited the gate's stdout and outlived it would hang the hook past any
+deadline: the watchdog kills the gate, and the shim still waits. Nothing on the hook path
+does this today, and that is deliberate — every spawn passes an explicit `stdout=`, a
+gate-opened file (`run_bounded`, `_run_diff`) or a `capture_output=True` pipe (`gitsnap`,
+`paths`, `reviewer_probe`), with `close_fds` left at its default. **A new `Popen` on the
+hook path must pass `stdout=` for this reason**, not for tidiness. Note this protects the
+hook's *response*; a descendant's continued *execution* is a separate property, and what
+covers that is the watchdog killing the process group rather than the direct child alone.
 
 A commit pays two things more. The bash parser builds its LALR tables at import, measured at
 **~55 ms**, and it is imported only when a command already looks like a commit — a `Read`

@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -354,6 +355,68 @@ def _resolve_plan(plan: str) -> str:
     return plan
 
 
+#: The watchdog the shim runs every hook under, in the order ``arl_watchdog_pick`` tries them.
+#: Kept here so ``arm`` and ``resume`` refuse up front rather than arming into a gate whose every
+#: hook would fail closed; ``tests/unit/test_commands_arm.py`` asserts this list still matches the
+#: shell's, since the two drifting apart is how the refusal would start lying.
+WATCHDOGS: Final = ("timeout", "gtimeout", "perl")
+
+
+#: Asks perl the one question that decides whether it can be the watchdog. Run with the same
+#: scrubbed environment the shim uses, so the answer describes the interpreter the hook will
+#: actually get rather than one dressed up by ``PERL5LIB``.
+_PERL_MONOTONIC_PROBE: Final = "use Time::HiRes; eval { Time::HiRes::clock_gettime(Time::HiRes::CLOCK_MONOTONIC()); 1 } or exit 1;"
+_PERL_PROBE_TIMEOUT: Final = 10
+
+
+def _perl_has_monotonic() -> bool:
+    """Whether this perl can measure a deadline against ``CLOCK_MONOTONIC``."""
+    try:
+        probe = subprocess.run(
+            ["perl", "-e", _PERL_MONOTONIC_PROBE],
+            env={**os.environ, "PERL5LIB": "", "PERL5OPT": "", "PERLLIB": ""},
+            capture_output=True,
+            timeout=_PERL_PROBE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
+
+
+def _check_watchdog() -> None:
+    """Refuse to arm when no usable outer watchdog exists. Raises ``_ArmFailure``.
+
+    ``scripts/arl.sh`` runs every hook under one of :data:`WATCHDOGS`, and without one the gate
+    cannot be bounded: the blocking ``flock`` in :mod:`arl.atomic` has no deadline of its own, so
+    a wedged lock holder would hang the hook until Claude Code tore it down with nothing. The
+    shim already fails closed by name in that case; refusing here means the user finds out while
+    they are watching the slash command, instead of one denied tool call at a time.
+
+    "Usable" is why this resolves the layer rather than just counting: the perl supervisor needs
+    ``CLOCK_MONOTONIC``, because a deadline measured on the wall clock can be stretched past the
+    host's own hook timeout by a backwards clock adjustment -- and a stretched deadline means the
+    fail-closed response is never written at all. The shim refuses to run on a wall clock (125),
+    so a perl without it would arm cleanly and then deny every tool call; this turns that into
+    one refusal, here.
+
+    Checked ahead of the ``ARL_REVIEWER_CMD`` seam below, and never skipped by it: that seam
+    stands in for the reviewer, but the watchdog is needed whichever reviewer runs.
+    """
+    chosen = next((name for name in WATCHDOGS if paths.have(name)), None)
+    if chosen is None:
+        raise _ArmFailure(
+            "no `timeout`, `gtimeout` or `perl` is on PATH, so the review gate cannot be bounded. "
+            "Install GNU coreutils (`brew install coreutils` on macOS) or perl."
+        )
+    if chosen == "perl" and not _perl_has_monotonic():
+        raise _ArmFailure(
+            "`perl` is the only watchdog available and its Time::HiRes has no CLOCK_MONOTONIC, so "
+            "the review gate's deadline could be stretched by a clock adjustment and its response "
+            "lost. Install GNU coreutils (`brew install coreutils` on macOS)."
+        )
+
+
 def _check_reviewer(config: Config) -> None:
     """Refuse to arm when the reviewer cannot be reached. Raises ``_ArmFailure``.
 
@@ -367,7 +430,12 @@ def _check_reviewer(config: Config) -> None:
     against, and that is not a reason to refuse: a name it does not know exits non-zero, which
     is an ``OP_FAILURE`` that blocks, so nothing is ever approved on the strength of a model
     that was never reached (Rule 1).
+
+    The watchdog check rides along here because this is the one preflight both arming paths
+    share -- ``resume`` reaches it at ``resume.py:738`` -- so a check added here cannot be armed
+    around by resuming instead.
     """
+    _check_watchdog()
     # Checked ahead of the test seam, and never skipped by it: the seam replaces the reviewer
     # *command*, not the harness -- session minting, id validation and every lease are still
     # sized from whatever `harness` names, so an unimplemented value would reach the review

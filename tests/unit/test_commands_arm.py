@@ -431,10 +431,18 @@ def test_arming_outside_a_repository_is_refused(tmp_path: Path, clean_env: dict[
 
 
 def _path_without_opencode(tmp_path: Path) -> str:
-    """A PATH carrying git -- which arming needs -- and nothing else."""
+    """A PATH carrying what arming needs -- git, and a watchdog -- and nothing else.
+
+    The watchdog belongs here even though these tests are about the *reviewer*: ``arm``
+    refuses without one before it ever probes the reviewer, so a PATH lacking both would fail
+    for the earlier reason and these tests would stop covering what they say they cover.
+    Whichever of the layers this host has will do; only its presence is being satisfied.
+    """
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
-    for tool in ("git", "bash"):
+    watchdog = next((name for name in arm.WATCHDOGS if shutil.which(name)), None)
+    assert watchdog, f"one of {arm.WATCHDOGS} is required to run these tests"
+    for tool in ("git", "bash", watchdog):
         found = shutil.which(tool)
         assert found, f"{tool} is required to run these tests"
         target = bindir / tool
@@ -455,6 +463,58 @@ def probe_env(clean_env: dict[str, str], bindir: str | Path, **extra: str) -> di
     test (``test_arming_without_the_default_harnesss_binary_is_refused``).
     """
     return {**clean_env, "PATH": str(bindir), "ARL_HARNESS": "opencode", **extra}
+
+
+def _path_without_a_watchdog(tmp_path: Path) -> str:
+    """A PATH with git and bash but none of the watchdog layers."""
+    bindir = tmp_path / "nowatchdog"
+    bindir.mkdir(exist_ok=True)
+    for tool in ("git", "bash"):
+        found = shutil.which(tool)
+        assert found, f"{tool} is required to run these tests"
+        target = bindir / tool
+        if not target.exists():
+            target.symlink_to(found)
+    return str(bindir)
+
+
+def test_the_watchdog_list_matches_the_shims() -> None:
+    """The refusal names the layers ``scripts/arl.sh`` actually tries, in the same order.
+
+    Two lists in two languages, and nothing but this test stops them drifting: add a layer to
+    the shim alone and arming refuses on a host that would have worked, drop one there and
+    arming promises a watchdog the hook cannot find.
+    """
+    shim = (Path(__file__).resolve().parents[2] / "scripts" / "arl.sh").read_text()
+    line = next(ln for ln in shim.splitlines() if ln.strip().startswith("for candidate in "))
+    assert tuple(line.strip().removeprefix("for candidate in ").removesuffix("; do").split()) == arm.WATCHDOGS
+
+
+def test_arming_without_a_watchdog_is_refused(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Without one, every hook fails closed -- so say so now rather than one denial at a time.
+
+    This is the macOS case: no ``timeout(1)`` in the base system, so before the fallback layers
+    existed the gate armed happily and then denied every single tool call with an opaque 127.
+    """
+    env = {**clean_env, "PATH": _path_without_a_watchdog(tmp_path)}
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+
+    assert proc.returncode == 1
+    assert "no `timeout`, `gtimeout` or `perl` is on PATH" in proc.stdout
+    assert read_state(env, git_repo, "s1")["status"] == "ARM_FAILED"
+
+
+def test_the_watchdog_check_is_not_skipped_by_the_reviewer_seam(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``ARL_REVIEWER_CMD`` stands in for the reviewer, not for the watchdog.
+
+    The seam returns early from ``_check_reviewer``; if the watchdog check sat after it, the
+    whole suite -- which sets the seam everywhere -- would arm without one and never notice.
+    """
+    env = armed_env(clean_env, PATH=_path_without_a_watchdog(tmp_path))
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+
+    assert proc.returncode == 1
+    assert "cannot be bounded" in proc.stdout
 
 
 def test_arming_without_opencode_is_refused(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

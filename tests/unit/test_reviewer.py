@@ -30,6 +30,7 @@ import json
 import math
 import os
 import random
+import shutil
 import stat
 import subprocess
 import sys
@@ -752,14 +753,34 @@ def test_chunking_agrees_with_gnu_split_on_control_bytes(tmp_path: Path, seed: i
     assert_split_agrees(tmp_path, data, rng.choice([8, 16, 32]))
 
 
+def gnu_split() -> str | None:
+    """The GNU ``split`` binary, or ``None`` where the host has only a BSD one.
+
+    ``-C`` and ``--additional-suffix`` are GNU extensions that BSD ``split`` (macOS) does not
+    have, and the whole point of these tests is to check our cut points against the real tool,
+    so there is nothing to fall back to. Homebrew installs GNU coreutils as ``gsplit``.
+    """
+    for name in ("gsplit", "split"):
+        found = shutil.which(name)
+        if not found:
+            continue
+        probe = subprocess.run([found, "--version"], capture_output=True, text=True, check=False)
+        if probe.returncode == 0 and "GNU" in probe.stdout:
+            return found
+    return None
+
+
 def assert_split_agrees(tmp_path: Path, data: bytes, limit: int) -> None:
+    split = gnu_split()
+    if split is None:
+        pytest.skip("GNU split is not installed (macOS ships a BSD split without -C)")
     for stale in tmp_path.glob("changes.*.diff"):
         stale.unlink()
     (tmp_path / "in").write_bytes(data)
     # `-a 4` rather than the shell's `-a 2`: the suffix width does not move the split
     # points, and the small limits below would otherwise exhaust a two-digit suffix.
     subprocess.run(
-        ["split", "-C", str(limit), "-d", "-a", "4", "--additional-suffix=.diff", str(tmp_path / "in"), str(tmp_path / "changes.")],
+        [split, "-C", str(limit), "-d", "-a", "4", "--additional-suffix=.diff", str(tmp_path / "in"), str(tmp_path / "changes.")],
         check=True,
     )
     expected = [path.read_bytes() for path in sorted(tmp_path.glob("changes.*.diff"))]

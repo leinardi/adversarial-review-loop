@@ -33,7 +33,15 @@ from pathlib import Path
 
 import pytest
 from conftest import git, run_bootstrap, run_hook
-from test_commands_arm import _path_without_opencode, guide_file, plan_file, probe_env, read_state, state_dir
+from test_commands_arm import (
+    _path_without_a_watchdog,
+    _path_without_opencode,
+    guide_file,
+    plan_file,
+    probe_env,
+    read_state,
+    state_dir,
+)
 from test_commands_posttool import COMMIT, confirm
 from test_commands_pretool import armed, patch_state, payload, pretool
 from test_commands_stop import blocked, ended, stop
@@ -1169,6 +1177,25 @@ def test_resuming_onto_an_unimplemented_harness_is_refused(git_repo: Path, tmp_p
     assert code == 1
     assert "unknown harness 'not-a-harness'" in output
     assert (state_dir(env, git_repo, S1) / "state.json").read_bytes() == before
+
+
+def test_resuming_without_a_watchdog_is_refused_and_changes_nothing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``resume`` is the second arming path, and must refuse on the same terms as the first.
+
+    Otherwise it is a way around the check: resume binds a session and can create or mutate a
+    live activation, so a resume that succeeded without a watchdog would leave the user armed
+    to a gate whose every hook fails closed -- which is exactly the state this whole change
+    exists to prevent. Both paths share ``arm._check_reviewer``, so this pins that they still do.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    before = (state_dir(env, git_repo, S1) / "state.json").read_bytes()
+
+    code, output = resume_argv(git_repo, {**env, "PATH": _path_without_a_watchdog(tmp_path)}, S2, [])
+
+    assert code == 1
+    assert "no `timeout`, `gtimeout` or `perl` is on PATH" in output
+    assert (state_dir(env, git_repo, S1) / "state.json").read_bytes() == before, "the live activation is untouched"
 
 
 def test_a_resume_pins_the_probed_harness_not_an_environment_masked_flag(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

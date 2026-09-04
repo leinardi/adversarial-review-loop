@@ -27,6 +27,7 @@ ordinary case.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -36,9 +37,25 @@ from arl import paths
 from arl.errors import RepoResolutionError
 
 
+def sha256sum_argv() -> list[str] | None:
+    """The host's SHA-256 CLI, or ``None`` where it has neither.
+
+    macOS ships BSD ``shasum`` and no ``sha256sum``; both print the digest first, so the
+    caller's parse is unchanged. The point of this test is to check our hex against a tool we
+    did not write, and either tool serves.
+    """
+    for argv in (["sha256sum"], ["shasum", "-a", "256"]):
+        if shutil.which(argv[0]):
+            return argv
+    return None
+
+
 def sha256sum_of(text: str) -> str:
     """What `printf '%s' "$text" | sha256sum` produces, from the real tool."""
-    proc = subprocess.run(["sha256sum"], input=text, capture_output=True, text=True, check=True)
+    argv = sha256sum_argv()
+    if argv is None:
+        pytest.skip("neither sha256sum nor shasum is on PATH")
+    proc = subprocess.run(argv, input=text, capture_output=True, text=True, check=True)
     return proc.stdout.split(" ", 1)[0]
 
 
