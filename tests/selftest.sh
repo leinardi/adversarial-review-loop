@@ -1910,6 +1910,17 @@ hook_payload() {
                 '{session_id:$s,cwd:$c,hook_event_name:"Stop",stop_hook_active:false}'
             ;;
     esac
+    # Always 0, even when the write above died of EPIPE. Every fail-closed path this
+    # section exists to test -- a missing python3, no watchdog, an interpreter that exits
+    # without reading -- has the shim answer and exit *without draining stdin*, so this
+    # producer is racing a reader that may already be gone. Losing that race is not a
+    # finding about anything: it is jq reporting that nobody was listening. But the callers
+    # read `$?` of the whole pipeline under `set -o pipefail`, so jq's status would be
+    # handed to an `assert_eq` whose subject is the shim's -- which is exactly the two
+    # "the shim itself exits 0 / got: 2" failures CI run 34153953264 produced and no local
+    # run reproduced. A genuine jq failure is still caught, one assertion later: the payload
+    # is then empty, and the hook it feeds says so.
+    return 0
 }
 
 if start 'interpreter probe: a missing python3 fails closed, not open, on every hook'; then
