@@ -8,7 +8,11 @@ user-invocable: true
 
 # adversarial-review-loop configuration
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh config $ARGUMENTS`
+```!
+${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh config --args-stdin <<'ARL-ARGUMENTS-EOF'
+$ARGUMENTS
+ARL-ARGUMENTS-EOF
+```
 
 This command is unrelated to any armed activation — it never registers the review gate, and it does not require one to be running. It only ever touches the user's own config file (`~/.config/adversarial-review-loop/config.json` by default) or, with `--repo`, the repository's own `.adversarial-review-loop.json`.
 

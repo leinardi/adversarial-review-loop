@@ -50,6 +50,12 @@ USAGE = """usage: arl.sh <subcommand> [args]
   accept [--reason "…"] [--session <id>]
   config [<key> <value> [--repo] [--force] | <key> --unset [--repo]]
   dry-run | selftest
+
+The slash commands pass the user's argument string on stdin rather than on argv, as
+`--args-stdin` (arm, resume, pause, config) or `--reason-stdin` (accept): argv cannot
+carry it intact through Claude Code's unescaped `$ARGUMENTS` substitution. The argv
+spellings above are for a real command line, and for a skill body an older install still
+serves from its cache.
 """
 
 

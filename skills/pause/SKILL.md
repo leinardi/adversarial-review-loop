@@ -8,7 +8,11 @@ user-invocable: true
 
 # Pause at the end of a phase
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh pause --args "$ARGUMENTS"`
+```!
+${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh pause --args-stdin <<'ARL-ARGUMENTS-EOF'
+$ARGUMENTS
+ARL-ARGUMENTS-EOF
+```
 
 The block above moved the pause target, which is the only thing this command does. With no argument it is the phase currently in flight; `N` sets it to phase `N`; `0` or `all` clears it so the loop runs to the end of the plan.
 

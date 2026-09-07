@@ -8,7 +8,11 @@ user-invocable: true
 
 # Implement with an enforced review loop
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh arm --session "${CLAUDE_SESSION_ID}" --args "$ARGUMENTS"`
+```!
+${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh arm --session "${CLAUDE_SESSION_ID}" --args-stdin <<'ARL-ARGUMENTS-EOF'
+$ARGUMENTS
+ARL-ARGUMENTS-EOF
+```
 
 ## What just happened
 

@@ -51,7 +51,7 @@ from arl import config as config_module
 from arl.atomic import ensure_private_dir, locked, write_private_atomic
 from arl.config import Config
 from arl.state import State, pointer_read, pointer_write
-from arl.util import now
+from arl.util import now, stdin_argument
 
 __all__ = ["COMMIT_CONSTRAINTS", "flag_bool", "flag_str", "parse_flag_tokens", "resolve_until", "run", "split_args"]
 
@@ -248,11 +248,17 @@ def split_args(raw: str) -> tuple[str, list[str]]:
 def _parse(argv: list[str]) -> tuple[str, str, list[str]]:
     """``(session, plan, flag_tokens)`` from the dispatcher's arguments.
 
-    ``--session``, ``--plan`` and ``--args`` are the only tokens treated specially --
-    ``--args`` is ``split_args`` on the shim's single substituted string, and every other
-    token (whether it came from ``--args`` or directly on argv, in tests) is appended to the
-    same flat token list, in order. Parsing those tokens into named, validated flags happens
-    in ``_arm``, exactly where the equivalent single-flag check used to live.
+    ``--session``, ``--plan``, ``--args`` and ``--args-stdin`` are the only tokens treated
+    specially -- both argument forms are ``split_args`` on the slash command's single
+    substituted string, and every other token (whether it came from there or directly on
+    argv, in tests) is appended to the same flat token list, in order. Parsing those tokens
+    into named, validated flags happens in ``_arm``, exactly where the equivalent single-flag
+    check used to live.
+
+    ``--args-stdin`` is what the skill body spells, because argv cannot carry the string
+    safely through Claude Code's unescaped ``$ARGUMENTS`` substitution; see
+    :func:`arl.util.stdin_argument`. ``--args`` stays for callers on a real command line, and
+    for the skill body an older install still serves from its cache.
 
     An option whose value is missing consumes what is there and stops, rather than the
     shell's ``shift 2`` -- which fails on a one-element list, leaves the arguments untouched
@@ -264,6 +270,13 @@ def _parse(argv: list[str]) -> tuple[str, str, list[str]]:
     index = 0
     while index < len(argv):
         arg = argv[index]
+        if arg == "--args-stdin":
+            args_plan, args_flags = split_args(stdin_argument())
+            if args_plan:
+                plan = args_plan
+            flag_tokens.extend(args_flags)
+            index += 1
+            continue
         if arg in ("--session", "--args", "--plan"):
             value = argv[index + 1] if index + 1 < len(argv) else ""
             if arg == "--session":
