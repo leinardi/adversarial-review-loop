@@ -24,6 +24,7 @@ gate working as designed against a scenario worth understanding before you hit i
 | Commit lands ≠ reviewed tree, or is an amend | `RECONCILE` with a prescribed, non-automatic recovery |
 | `git reset --soft` before the activation commit | Denied (equal to it is allowed — that is the phase-1 recovery) |
 | The diverging commit is the repository's root commit | `RECONCILE` recovers with a bounded `git update-ref -d HEAD`; every other `git update-ref` is denied |
+| Every phase committed, but the activation was armed on an empty repository | No completion — the phase chain has no anchor — but no escalation either: it stays `ACTIVE` and names `finish` or `stop`. `arm` warns about this up front |
 | Activation older than `ttl_hours` | `STALE`: every mutation is denied and the turn ends with a message naming `resume`. **Never a silent disarm**, and never counted as a no-progress block |
 | No-progress `Stop` blocks past `max_stop_blocks` | `NEEDS_HUMAN`, loud system message. **Not** an approval |
 | Claude tries `arl finish` / `deactivate` / `resume` / `config` via Bash | Denied — user-only |
@@ -203,10 +204,26 @@ history, and nothing outside `state.json` can confirm the claim. Asking git abou
 phase 1 does not help: "a non-empty root commit" is exactly what any seeded repository's own
 first commit looks like. So the empty-repository case is refused rather than special-cased.
 
-All three escalate to `NEEDS_HUMAN` instead of completing, and escalation closes the `finish`
-remedy as well — `finish` refuses a `NEEDS_HUMAN` activation. For any of them, set
-`final_review true` or run `finish` **before** the last turn ends; both put a reviewer back in
-the loop, which is where this evidence cannot reach.
+None of the three completes, and the gate now names which one it was instead of reporting a
+generic "unexpected state" — but only two of them escalate.
+
+The **empty-repository** case does not. Its document describes work that was genuinely done,
+and the only thing missing is a field `arm` itself left empty; escalating on that wedged the
+activation outright, because `NEEDS_HUMAN` is neither finishable nor resumable and `accept`
+refuses too once `phase` is past the last phase — every remedy the escalation named was itself
+refused, leaving only `stop`. So the turn now ends `ACTIVE` with a message naming the two exits
+that do work: `/adversarial-review-loop:finish` (completes after a cumulative review) or
+`/adversarial-review-loop:stop` (leaves the mode without one). Nothing disarms, no tree is
+approved, and the answer is the same at every turn end until you pick one. `arm` says this when
+it arms on an unborn HEAD, so the choice is visible at phase 0 rather than after the last phase
+lands.
+
+A **blanked** `activation_commit` is told apart from a legitimately empty one by git, not by
+the document: the benign case's phase 1 is a root commit, and blanking the field in a
+repository that has history leaves a phase 1 with a parent. That one still escalates, as does
+every malformed chain. For any escalating shape, set `final_review true` or run `finish`
+**before** the last turn ends; both put a reviewer back in the loop, which is where this
+evidence cannot reach.
 
 Two further consequences worth knowing.
 

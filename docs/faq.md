@@ -250,9 +250,25 @@ escalation and leaves the mode armed, or `/adversarial-review-loop:stop`, which 
 mode entirely. `resume` deliberately refuses — an escalation that a resume could clear would
 not be an escalation.
 
+One caveat before reaching for `accept`: it approves a tree *for a phase*, so it refuses once
+`phase` is past the last one — an activation whose every phase is already committed has no
+phase left for an approval to name. There, `stop` is the exit.
+
 A `STALE` activation never lands here: the Stop gate ends those turns rather than counting
 them, precisely so the TTL cannot manufacture an escalation only `accept` could clear
 ([edge-cases.md](edge-cases.md#a-stale-activation)).
+
+### Every phase is committed, but the mode won't complete
+
+Check whether the repository had any commits when you armed it. An activation armed on an empty
+repository has no activation commit, and the no-review completion path will not disarm on a
+phase chain it cannot anchor to one
+([edge-cases.md](edge-cases.md#completing-without-a-final-cumulative-review)). The turn ends
+`ACTIVE` saying so — it does not escalate — and names the two exits that work:
+`/adversarial-review-loop:finish` completes the mode after a cumulative review, and
+`/adversarial-review-loop:stop` leaves it without one. Either way the per-phase reviews already
+happened and their commits stand. `arm` warns about this when it arms on an empty repository;
+setting `final_review true` avoids the question entirely.
 
 ### The review timed out, or hit a rate limit
 

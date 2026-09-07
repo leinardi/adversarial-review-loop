@@ -289,6 +289,30 @@ adversarial-review-loop: COMPLETE. Every one of the {total} phases landed throug
 This activation is now closed, so it cannot be reviewed cumulatively after the fact -- there is no remedy for this run. Set final_review=true (`config final_review true`, or ARL_FINAL_REVIEW=true for one run) before the next /adversarial-review-loop:implement to get one.
 """
 
+SKIP_PATH_UNPROVEN: Final = (
+    "adversarial-review-loop: escalated to NEEDS_HUMAN -- the no-review completion path was reached, but the phase "
+    "chain could not be proven against git history: {detail}. State is not a trust boundary, so this refuses to "
+    "complete on evidence that does not describe genuinely finished work, rather than risk disarming on it. "
+    "This is NOT an approval."
+)
+
+#: Addressed to Claude *and* through it to the user, and deliberately not an escalation. The
+#: activation stays ACTIVE with every phase committed; what it cannot do is prove that from the
+#: document alone, because it was armed before the repository had a first commit. Both exits it
+#: names really work from ACTIVE -- which is the whole point of not escalating here.
+UNANCHORED_COMPLETION: Final = """\
+adversarial-review-loop: all {total} phases are committed and every one of them passed the per-commit gate, but this activation cannot complete itself.
+
+It was armed on a repository with no commits, so it has no activation commit for the phase chain to be anchored to, and the no-review completion path will not disarm on a chain it cannot check against git history. Nothing is wrong with the work or with the state; this activation simply cannot use that path.
+
+Two ways to end it, both of which work right now:
+
+- /adversarial-review-loop:finish — runs the cumulative review across the whole activation and completes the mode if it approves. This is the one that ends with a review.
+- /adversarial-review-loop:stop — leaves the mode without that review. The per-phase reviews already happened and their commits stand.
+
+The mode stays armed until you pick one: commits here are still gated, and nothing was approved or disarmed by this message. Tell the user; do not pick for them.
+"""
+
 SKIP_PATH_STATE_INVALID: Final = (
     "adversarial-review-loop: escalated to NEEDS_HUMAN -- the no-review completion path was reached with unexpected "
     "state (status={status!r}, phase={phase}, total={total}). State is not a trust boundary, so this refuses to "
@@ -768,14 +792,25 @@ def _review(gate: _Gate) -> NoReturn:
         # the stored status is genuinely `ACTIVE`, the phase list is non-empty, and `phase` is
         # exactly one past the last phase -- the only shape "every phase was committed" can
         # take.
-        if (
-            state.get("status") == "ACTIVE"
-            and total > 0
-            and phase == total + 1
-            and state.phases_match_frozen()
-            and completion.phase_progress_proven(state, worktree)
-        ):
-            _complete_without_review(gate, pending, snap=snap, total=total)
+        if state.get("status") == "ACTIVE" and total > 0 and phase == total + 1 and state.phases_match_frozen():
+            gap = completion.phase_progress_gap(state, worktree)
+            if not gap.code:
+                _complete_without_review(gate, pending, snap=snap, total=total)
+            if gap.code == completion.UNANCHORED:
+                # **Refuse to complete, but do not escalate.** What this document describes was
+                # genuinely done -- every phase committed, every commit gate-verified -- and the
+                # one thing missing is an anchor `arm` itself left empty because the repository
+                # had no commits yet. Escalating on that wedges the activation rather than ending
+                # it: `NEEDS_HUMAN` is neither finishable nor resumable, and `accept` refuses too
+                # because `phase` is past the last phase, so all three remedies the escalation
+                # names are themselves refused and only `stop` is left. Measured on a real
+                # 12-phase activation. Staying `ACTIVE` keeps `finish` reachable -- a cumulative
+                # review is exactly where the evidence this cannot have does come from -- and
+                # costs nothing: the mode stays armed, nothing disarms, no tree is approved, and
+                # the turn ends rather than blocking, so no no-progress counter runs either.
+                gate.hook.stop_ok(_say(gate, UNANCHORED_COMPLETION.format(total=total).rstrip("\n")))
+            _escalate(gate, f"the no-review completion path could not be proven: {gap.message}")
+            gate.hook.stop_ok(_say(gate, SKIP_PATH_UNPROVEN.format(detail=gap.message).rstrip("\n")))
         _escalate(
             gate,
             f"the no-review completion path was reached with unexpected state (status={state.get('status')!r}, phase={phase}, total={total})",

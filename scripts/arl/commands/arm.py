@@ -599,6 +599,9 @@ def _armed_message(request: _Request, frozen: _Frozen) -> str:
         if frozen.guide_path
         else "none"
     )
+    # Said here, at phase 0, or not usefully at all: without it the consequence first surfaces
+    # after the last phase is committed, as a Stop gate that will not complete -- which is a
+    # long way to walk to find out the exit needed one flag or one command.
     return f"""\
 **adversarial-review-loop is ARMED for this worktree.**
 
@@ -612,7 +615,7 @@ def _armed_message(request: _Request, frozen: _Frozen) -> str:
 - pause target: {frozen.until if frozen.until else "none"} (checked again once phases are frozen)
 - block_severity: {config.as_str("block_severity")}
 - final cumulative review at the end: {"enabled" if config.as_bool("final_review") else "disabled (final_review)"}
-
+{_unanchored_note(frozen, config)}
 **Phases are not set yet, so every file mutation is currently denied.**
 
 Do this first, and nothing else:
@@ -630,6 +633,25 @@ commit only proceeds when the review passes. Findings come back as a denial with
 the full list; fix them and commit again.
 
 {COMMIT_CONSTRAINTS}"""
+
+
+def _unanchored_note(frozen: _Frozen, config: Config) -> str:
+    """The warning an activation armed on an unborn HEAD needs, at the moment it is armed.
+
+    An empty ``activation_commit`` is what ``completion.phase_progress_gap`` refuses to prove a
+    phase chain from, so this activation cannot take the no-review completion path however well
+    it goes. That is only worth saying when that path is the one it would otherwise take: with
+    ``final_review`` on, the cumulative review completes it and there is nothing to warn about.
+    """
+    if frozen.head_commit or config.as_bool("final_review"):
+        return ""
+    return (
+        "\n**This repository has no commits yet, so this activation cannot complete itself.**\n"
+        "The no-review completion path needs an activation commit to anchor its phase chain to, and there is none to\n"
+        "record. Every phase is still gated and reviewed exactly as usual; what changes is only how the mode ends --\n"
+        "with /adversarial-review-loop:finish (a cumulative review) or /adversarial-review-loop:stop (without one).\n"
+        "Turning final_review on now avoids the choice later: /adversarial-review-loop:config final_review true\n"
+    )
 
 
 def run(argv: list[str]) -> int:

@@ -358,6 +358,38 @@ def test_finish_completes_on_an_approving_review(git_repo: Path, tmp_path: Path,
     assert document["reason"] == "final cumulative review approved (user-invoked finish)"
 
 
+def test_finish_completes_an_activation_armed_on_an_unborn_head(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The exit the Stop gate now names for an activation that cannot prove its own phase chain.
+
+    An empty ``activation_commit`` means the no-review completion path will never disarm this
+    activation (``completion.phase_progress_gap``), so the Stop gate refuses -- and it refuses
+    *without escalating* precisely so this call still works. If ``finish`` stopped completing
+    here, the refusal would be the dead end this whole change exists to remove.
+    """
+    repo = tmp_path / "unborn"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "selftest@example.invalid")
+    git(repo, "config", "user.name", "arl selftest")
+    git(repo, "config", "commit.gpgsign", "false")
+    env = armed_env(clean_env, ARL_FAKE_MODE="approve")
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --allow-dirty"], cwd=repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, repo, "s1")["activation_commit"] == ""
+    set_phases(repo, env, "one")
+    (repo / "work.txt").write_text("done\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "phase one")
+
+    proc = run_bootstrap(["finish"], cwd=repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "adversarial-review-loop: COMPLETE." in proc.stdout
+    document = read_state(env, repo, "s1")
+    assert document["status"] == "COMPLETE"
+    assert document["final_done_tree"] == git(repo, "rev-parse", "HEAD^{tree}")
+
+
 @pytest.mark.parametrize("mode", ["changes", "approve-with-critical"])
 def test_finish_never_completes_on_a_review_that_did_not_approve(
     git_repo: Path,

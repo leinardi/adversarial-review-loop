@@ -948,7 +948,7 @@ def test_a_forged_phase_counter_refuses_the_no_review_completion(git_repo: Path,
 
     message = ended(stop(git_repo, env))
 
-    assert "unexpected state" in message
+    assert "not one canonical commit id per phase" in message
     after = read_state(env, git_repo, SESSION)
     assert after["status"] == "NEEDS_HUMAN"
     assert after["final_done_tree"] == ""
@@ -964,7 +964,7 @@ def test_a_phase_commit_no_longer_in_history_refuses_the_no_review_completion(gi
 
     message = ended(stop(git_repo, env))
 
-    assert "unexpected state" in message
+    assert "is not the last phase's commit" in message
     assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
 
 
@@ -1011,7 +1011,7 @@ def test_a_reused_phase_commit_refuses_the_no_review_completion(git_repo: Path, 
 
     message = ended(stop(git_repo, env))
 
-    assert "unexpected state" in message
+    assert "not all distinct commits" in message
     document = read_state(env, git_repo, SESSION)
     assert document["status"] == "NEEDS_HUMAN"
     assert document["final_done_tree"] == ""
@@ -1034,7 +1034,7 @@ def test_a_symbolic_phase_commit_refuses_the_no_review_completion(git_repo: Path
 
     message = ended(stop(git_repo, env))
 
-    assert "unexpected state" in message
+    assert "not one canonical commit id per phase" in message
     assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
 
 
@@ -1060,7 +1060,7 @@ def test_empty_commits_cannot_carry_an_unimplemented_plan_to_completion(git_repo
 
     message = ended(stop(git_repo, env))
 
-    assert "unexpected state" in message
+    assert "does not change the tree" in message
     document = read_state(env, git_repo, SESSION)
     assert document["status"] == "NEEDS_HUMAN"
     assert document["final_done_tree"] == ""
@@ -1094,19 +1094,22 @@ def unborn_active(repo: Path, tmp_path: Path, env: dict[str, str]) -> None:
     assert proc.returncode == 0, proc.stderr
 
 
-def test_an_activation_armed_on_an_unborn_head_still_completes(tmp_path: Path, clean_env: dict[str, str]) -> None:
-    """reports 025, 037 and 038 all landed here, and the third settles it: fail closed.
+def test_an_activation_armed_on_an_unborn_head_refuses_to_complete_without_wedging(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """reports 025, 037 and 038 all landed here; the third settles the refusal, this settles its cost.
 
     ``arm`` legitimately writes an empty ``activation_commit`` for a repository with no commits
     yet. But that field is what anchors the chain to *this* activation, and an empty one is a
     claim made by the document that nothing outside mutable state can confirm. Asking git about
     the shape of phase 1 does not confirm it either: "a non-empty root commit" is satisfied by
     any seeded repository's own first commit, so accepting the empty field would let real
-    history stand as phases nobody implemented (the next test is that shape).
+    history stand as phases nobody implemented (a later test is that shape). So: no completion.
 
-    The empty-repository case therefore pays with an escalation rather than a completion. The
-    remedy is `final_review` or `finish`, both of which put a reviewer back in the loop where
-    this evidence cannot go, and both are documented as the fix.
+    What that refusal must **not** do is escalate. Measured on a real 12-phase activation:
+    ``NEEDS_HUMAN`` is neither finishable nor resumable, and ``accept`` refuses as well because
+    ``phase`` is by then past the last phase -- so every remedy the escalation names is itself
+    refused, and the only exit left is abandoning the mode. Staying ``ACTIVE`` keeps ``finish``
+    reachable, which is where this evidence can actually come from, and the turn ends rather
+    than blocking, so nothing accumulates toward ``max_stop_blocks`` either.
     """
     repo = unborn_repo(tmp_path)
     env = armed_env(clean_env)
@@ -1116,9 +1119,30 @@ def test_an_activation_armed_on_an_unborn_head_still_completes(tmp_path: Path, c
 
     message = ended(stop(repo, env))
 
-    assert "unexpected state" in message
+    assert "cannot complete itself" in message
+    assert "no commits" in message
+    assert ":finish" in message, "the exit that ends with a review"
+    assert ":stop" in message, "and the exit that does not"
     document = read_state(env, repo, SESSION)
-    assert document["status"] == "NEEDS_HUMAN"
+    assert document["status"] == "ACTIVE", "refused, but still usable"
+    assert document["final_done_tree"] == "", "and nothing was signed off"
+    assert document["stop_blocks"] == 0, "the turn ended rather than blocking, so no counter ran"
+
+
+def test_an_unanchored_activation_stays_refused_turn_after_turn(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Not escalating must not decay into completing: the answer is the same every turn end."""
+    repo = unborn_repo(tmp_path)
+    env = armed_env(clean_env)
+    unborn_active(repo, tmp_path, env)
+    committed_phase(repo, env)
+
+    first = ended(stop(repo, env))
+    second = ended(stop(repo, env))
+
+    assert "cannot complete itself" in first
+    assert "cannot complete itself" in second
+    document = read_state(env, repo, SESSION)
+    assert document["status"] == "ACTIVE"
     assert document["final_done_tree"] == ""
 
 
@@ -1140,7 +1164,7 @@ def test_a_commit_after_the_last_phase_refuses_the_no_review_completion(git_repo
 
     message = ended(stop(git_repo, env))
 
-    assert "unexpected state" in message
+    assert "is not the last phase's commit" in message
     document = read_state(env, git_repo, SESSION)
     assert document["status"] == "NEEDS_HUMAN"
     assert document["final_done_tree"] == ""
@@ -1163,7 +1187,7 @@ def test_a_blanked_activation_commit_does_not_complete_a_seeded_repository(git_r
 
     message = ended(stop(git_repo, env))
 
-    assert "unexpected state" in message
+    assert "has a parent" in message, "git, not the document, is what says this repository had history"
     assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
 
 
@@ -1178,7 +1202,7 @@ def test_the_activation_commit_cannot_stand_in_for_a_phase(git_repo: Path, tmp_p
 
     message = ended(stop(git_repo, env))
 
-    assert "unexpected state" in message
+    assert "not all distinct commits" in message
     assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
 
 
