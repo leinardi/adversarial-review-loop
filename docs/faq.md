@@ -230,7 +230,9 @@ A commit landed that is not the one that was approved: `HEAD` moved more than on
 parent was not the pre-command `HEAD` (an amend), its tree is not the approved tree, or the
 worktree was left dirty. `RECONCILE` names the specific mismatch and gives one exact,
 non-automatic recovery — usually `git reset --soft <last known-good commit>`, the only
-mutation it permits. Nothing auto-corrects your worktree.
+mutation it permits, or `git update-ref -d HEAD` when the diverging commit is the
+repository's root commit and so has no parent to reset to. Nothing auto-corrects your
+worktree.
 
 The usual cause is a background writer: an editor saving a buffer, an MCP server dropping a
 state directory, a file watcher. Gitignore those paths before arming rather than fighting the

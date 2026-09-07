@@ -55,6 +55,7 @@ __all__ = [
     "escalate",
     "find_abandoned_marker_commit",
     "pending_intent",
+    "reconcile_recovery",
     "record_unstarted_arm",
     "resolve_abandoned_marker",
     "resolve_repo",
@@ -253,6 +254,23 @@ def find_abandoned_marker_commit(repo: str, *, activation_commit: str, marker_he
         if gitsnap.rev_parse_checked(repo, f"{commit}^") == marker_head and gitsnap.rev_parse_checked(repo, f"{commit}^{{tree}}") == marker_tree:
             return commit
     return ""
+
+
+def reconcile_recovery(state: State) -> str:
+    """The command that undoes this reconcile's diverging commit.
+
+    ``git reset --soft <parent>`` normally, but a **root** commit has no parent:
+    ``bad_commit_parent`` is empty, and interpolating it into the reset prints a command with
+    no target -- one ``cmdshape.reset_target`` refuses and ``pretool._gate_reset`` could never
+    match against an empty parent anyway. That is what left an activation armed in an empty
+    repository with no way out of ``RECONCILE`` short of abandoning it. Deleting the branch ref
+    drops that one commit and keeps the index and worktree, which is what ``--soft`` does
+    everywhere else; ``pretool._gate_root_undo`` re-verifies every part of that before
+    allowing it. ``posttool._recovery`` makes the same choice from the same two fields, with
+    the fuller wording the divergence message needs.
+    """
+    parent = state.get("bad_commit_parent")
+    return f"git reset --soft {parent}" if parent else "git update-ref -d HEAD"
 
 
 def resolve_abandoned_marker(state: State, *, repo: str) -> str:

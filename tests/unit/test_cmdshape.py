@@ -407,6 +407,61 @@ def test_a_malformed_reset_is_refused(command: str, fragment: str) -> None:
         cmdshape.reset_target(command)
 
 
+# -- the bounded root-commit reconcile recovery ----------------------------
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("git update-ref -d HEAD", True),
+        ("git update-ref refs/heads/main HEAD", True),
+        ("/usr/bin/git update-ref -d HEAD", True),
+        ("make && git update-ref -d HEAD", True),
+        pytest.param("git-update-ref -d HEAD", True, id="the-dashed-executable"),
+        pytest.param("/usr/lib/git-core/git-update-ref -d HEAD", True, id="the-dashed-executable-by-path"),
+        pytest.param("git update-reference -d HEAD", False, id="longer-word-does-not-match"),
+        pytest.param("git updateref -d HEAD", False, id="no-word-boundary-no-match"),
+        ("git reset --soft HEAD^", False),
+        ("", False),
+    ],
+)
+def test_update_ref_is_detected(command: str, expected: bool) -> None:
+    """Loose on purpose: every ``update-ref`` has to reach the gate, which denies all but one.
+
+    The dashed spellings are the ones that matter: git still ships ``git-update-ref`` in its
+    exec path (measured: git 2.55), and ``/usr/lib/git-core/git-update-ref -d HEAD`` deletes
+    the branch ref exactly as the subcommand does.
+    """
+    assert cmdshape.mentions_update_ref(command) is expected
+
+
+def test_the_root_commit_recovery_is_accepted() -> None:
+    """Acceptance is the absence of a raise -- there is nothing to return, only one shape."""
+    cmdshape.head_ref_deletion("git update-ref -d HEAD")
+
+
+@pytest.mark.parametrize(
+    ("command", "fragment"),
+    [
+        pytest.param("git update-ref -d refs/heads/main", "only .git update-ref -d HEAD", id="another-ref"),
+        pytest.param("git update-ref -d HEAD abc123", "only .git update-ref -d HEAD", id="old-value-argument"),
+        pytest.param("git update-ref HEAD abc123", "only .git update-ref -d HEAD", id="a-write-not-a-deletion"),
+        pytest.param("git update-ref --stdin", "only .git update-ref -d HEAD", id="stdin-form"),
+        pytest.param("git update-ref", "only .git update-ref -d HEAD", id="no-arguments"),
+        pytest.param("git update-ref -d HEAD && git commit -m x", "single command on its own", id="chained"),
+        pytest.param("git-update-ref -d HEAD", 'not a plain "git update-ref"', id="the-dashed-executable"),
+        pytest.param("/usr/lib/git-core/git-update-ref -d HEAD", 'not a plain "git update-ref"', id="dashed-by-path"),
+        pytest.param("/usr/bin/git update-ref -d HEAD", 'not a plain "git update-ref"', id="git-by-absolute-path"),
+        pytest.param("git reset --soft HEAD^", 'not a plain "git update-ref"', id="not-an-update-ref-at-all"),
+        pytest.param("", 'not a plain "git update-ref"', id="empty-string"),
+    ],
+)
+def test_every_other_update_ref_is_refused(command: str, fragment: str) -> None:
+    """The general form writes any ref to any value, which is a way onto or off any commit."""
+    with pytest.raises(CommandShapeError, match=fragment):
+        cmdshape.head_ref_deletion(command)
+
+
 # -- the properties behind the table ---------------------------------------
 
 

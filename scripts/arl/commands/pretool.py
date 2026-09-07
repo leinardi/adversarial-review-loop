@@ -339,6 +339,54 @@ RESET_ALLOWED: Final = (
     "adversarial-review-loop: bounded recovery reset to {resolved} permitted. Rebuild the intended complete tree, then commit again."
 )
 
+ROOT_UNDO_REJECTED: Final = """\
+The recovery ref deletion was rejected: {error}
+
+The diverging commit is this repository's root commit, so it has no parent to reset to. The
+one permitted command during this reconcile is:
+
+  git update-ref -d HEAD
+"""
+
+ROOT_UNDO_NOT_ROOT: Final = (
+    "This reconcile records the diverging commit's parent as {parent}, so the recovery is "
+    "`git reset --soft {parent}`, not a ref deletion. Deleting HEAD here would drop reviewed history.\n"
+)
+
+ROOT_UNDO_PREDATES_ACTIVATION: Final = (
+    "This activation started at commit {activation}, so the loop is not sitting on a repository whose first commit "
+    "is the diverging one. Deleting the branch ref would rewind history that predates the activation.\n"
+)
+
+ROOT_UNDO_MOVED: Final = (
+    "HEAD is {head}, not the diverging commit {bad} this reconcile recorded. Deleting the ref would drop "
+    "whatever HEAD is on now, which is not what this reconcile is about. Look at the history yourself.\n"
+)
+
+ROOT_UNDO_HAS_PARENT: Final = (
+    "HEAD ({head}) has a parent, so it is not the root commit this recovery is for. Nothing was allowed: "
+    "deleting the branch ref would drop that parent's history too.\n"
+)
+
+ROOT_UNDO_UNVERIFIABLE: Final = (
+    "Whether HEAD is a root commit could not be checked: {error}\nThe ref deletion is denied rather than allowed on an unresolved history question.\n"
+)
+
+ROOT_UNDO_ALLOWED: Final = (
+    "adversarial-review-loop: bounded recovery deletion of the branch ref at root commit {head} permitted. "
+    "The index and working tree are untouched. Rebuild the intended complete tree, then commit again."
+)
+
+UPDATE_REF_DENIED: Final = """\
+`git update-ref` writes a ref directly, which moves HEAD off a commit that was reviewed
+without any commit being made. It is denied while the loop is armed: every commit in this
+history is a tree that was actually reviewed, and rewinding or repointing one breaks that
+guarantee.
+
+The one exception is the recovery for a diverging *root* commit, which is offered by name
+when a reconcile records one.
+"""
+
 RESET_UNREADABLE: Final = """\
 This reset was not accepted: {error}
 
@@ -355,7 +403,7 @@ RECONCILE_FROM_ABANDONED: Final = """\
 The commit resume --abandon-pending gave up on ({bad}) landed after all, on top of the parent \
 it was expected to build on. Nothing here reviewed it.
 
-Recover explicitly: `git reset --soft {parent}`, rebuild the intended complete tree, and \
+Recover explicitly: `{recovery}`, rebuild the intended complete tree, and \
 commit again through the normal review gate.
 """
 
@@ -601,6 +649,13 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
     if expansion:
         hooks.deny(hook, EXPANSION_DENIED.format(expansion=expansion))
 
+    if cmdshape.mentions_update_ref(command):
+        # Only ever allowed as the root-commit reconcile recovery; everything else about
+        # `update-ref` is a ref write, which is a commit-free way off a reviewed commit.
+        if status == "RECONCILE":
+            _gate_root_undo(hook, state=state, repo=repo, command=command)
+        hooks.deny(hook, UPDATE_REF_DENIED)
+
     if status == "RECONCILE" and cmdshape.mentions_reset(command):
         _gate_reset(hook, state=state, repo=repo, command=command)
 
@@ -731,7 +786,7 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
     except gitsnap.GitUnavailable as exc:
         hooks.deny(hook, ABANDONED_MARKER_UNVERIFIABLE.format(error=exc))
     if bad:
-        hooks.deny(hook, RECONCILE_FROM_ABANDONED.format(bad=bad, parent=state.get("bad_commit_parent")))
+        hooks.deny(hook, RECONCILE_FROM_ABANDONED.format(bad=bad, recovery=hooks.reconcile_recovery(state)))
 
     snap = _prepare(hook, state=state, config=config, repo=repo, command=command)
     tree = snap.tree
@@ -942,6 +997,59 @@ def _gate_reset(hook: Hook, *, state: State, repo: str, command: str) -> NoRetur
         if predates:
             hooks.deny(hook, RESET_PREDATES_ACTIVATION.format(resolved=resolved, activation=activation))
     hook.allow(RESET_ALLOWED.format(resolved=resolved))
+
+
+def _gate_root_undo(hook: Hook, *, state: State, repo: str, command: str) -> NoReturn:
+    """The one bounded ``git update-ref -d HEAD`` permitted while a *root-commit* reconcile is unfinished.
+
+    Without it that reconcile has no exit at all. ``_gate_reset``'s recovery is
+    ``git reset --soft <the diverging commit's parent>``, and a root commit has no parent:
+    ``bad_commit_parent`` is empty, no target can ever equal it, and ``reset --soft`` refuses a
+    missing target anyway. The activation then sits in ``RECONCILE`` -- which the Stop gate
+    will not let the session complete through -- until the user stops the loop and re-arms,
+    which is not a recovery, it is giving up on the activation.
+
+    Four things are checked before this is allowed, and each one is a way the deletion would
+    drop something other than the single diverging commit:
+
+    - the reconcile really has no parent to reset to (otherwise the ordinary reset is the
+      recovery, and a ref deletion here would drop reviewed history);
+    - ``HEAD`` is still exactly the commit the reconcile recorded as diverging;
+    - that commit really is a root commit -- no parent -- so deleting the ref drops it alone;
+    - and the activation began in an empty repository (``activation_commit`` empty), which is
+      the only way the diverging commit's own root-ness means nothing older is being rewound.
+
+    An unreadable history denies, like everywhere else (Rule 1).
+    """
+    from arl import cmdshape, gitsnap  # noqa: PLC0415 - reached only during a reconcile
+
+    parent = state.get("bad_commit_parent")
+    try:
+        cmdshape.head_ref_deletion(command)
+    except cmdshape.CommandShapeError as exc:
+        hooks.deny(hook, ROOT_UNDO_REJECTED.format(error=exc))
+
+    if parent:
+        hooks.deny(hook, ROOT_UNDO_NOT_ROOT.format(parent=parent))
+    activation = state.get("activation_commit")
+    if activation:
+        hooks.deny(hook, ROOT_UNDO_PREDATES_ACTIVATION.format(activation=activation))
+
+    bad = state.get("bad_commit")
+    try:
+        head = gitsnap.rev_parse_checked(repo, "HEAD")
+        # `HEAD^` is empty for a root commit and raises when git cannot answer -- the same
+        # distinction `head_tree_checked` relies on. "git could not tell" must not read as
+        # "it has no parent", which is what would let this delete a ref with history under it.
+        head_parent = gitsnap.rev_parse_checked(repo, "HEAD^") if head else ""
+    except gitsnap.GitUnavailable as exc:
+        hooks.deny(hook, ROOT_UNDO_UNVERIFIABLE.format(error=exc))
+
+    if not head or head != bad:
+        hooks.deny(hook, ROOT_UNDO_MOVED.format(head=head or "<unborn>", bad=bad or "<none>"))
+    if head_parent:
+        hooks.deny(hook, ROOT_UNDO_HAS_PARENT.format(head=head))
+    hook.allow(ROOT_UNDO_ALLOWED.format(head=head))
 
 
 def _guard_reset(hook: Hook, *, repo: str, command: str) -> None:

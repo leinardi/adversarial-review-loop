@@ -217,6 +217,19 @@ def test_an_unfinished_reconcile_blocks_the_turn(git_repo: Path, tmp_path: Path,
     assert "git reset --soft abc123" in reason
 
 
+def test_a_root_commit_reconcile_blocks_with_a_recovery_that_exists(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """An empty ``bad_commit_parent`` used to print ``git reset --soft`` with no target here too."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status="RECONCILE", reason="a commit diverged", bad_commit_parent="")
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "the reconcile is unfinished" in reason
+    assert "git update-ref -d HEAD" in reason
+    assert "git reset --soft" not in reason
+
+
 def test_an_expired_activation_ends_the_turn_uncounted_and_never_escalates(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """STALE is the user's to clear, so blocking over it only wedges the session.
 

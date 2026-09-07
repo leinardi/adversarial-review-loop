@@ -64,6 +64,49 @@ is recorded as broken, and while it is, the Stop gate will not complete this
 activation at all.
 """
 
+#: The recovery for a diverging **root** commit. ``git reset --soft`` cannot be spelled here:
+#: the commit has no parent, so there is no target that exists, and the reconcile printed
+#: ``git reset --soft `` with an empty target -- advice the gate itself then refused, leaving
+#: the activation with no exit but abandoning it. Deleting the branch ref removes that one
+#: commit and leaves the index and worktree untouched, which is what ``--soft`` does everywhere
+#: else. ``pretool._gate_root_undo`` re-checks every claim in this message before allowing it.
+RECONCILE_CONTEXT_ROOT: Final = """\
+**adversarial-review-loop: the commit that landed is not the tree that was reviewed.**
+
+{detail}
+
+That commit is this repository's root commit, so there is no parent to reset to. The phase has
+NOT advanced. Recover explicitly, in this order:
+
+1. `git update-ref -d HEAD`   (permitted only during this reconcile, and only while HEAD is
+   still that root commit — it drops the commit and leaves the index and working tree exactly
+   as they are)
+2. rebuild the intended complete tree for this phase
+3. commit again with `git add -A && git commit -m "…"` — it goes through the
+   normal review gate
+
+Do not commit forward on top of the diverging commit: the per-commit invariant
+is recorded as broken, and while it is, the Stop gate will not complete this
+activation at all.
+"""
+
+#: The recovery when no commit landed at all and there is no earlier commit to reset to -- an
+#: activation armed in an empty repository whose ``git commit`` reported success without
+#: creating anything. There is nothing to undo, so the recovery is only to build the tree and
+#: commit it through the gate.
+RECONCILE_CONTEXT_NOTHING_LANDED: Final = """\
+**adversarial-review-loop: the approved tree was never committed.**
+
+{detail}
+
+Nothing landed and there is no earlier commit to reset to, so there is nothing to undo. The
+phase has NOT advanced. Rebuild the intended complete tree for this phase and commit again
+with `git add -A && git commit -m "…"` — it goes through the normal review gate.
+"""
+
+#: What ``_verify`` records as the diverging commit when no commit was created at all.
+NO_COMMIT: Final = "<none>"
+
 ACTIVATION_MOVED: Final = (
     "**adversarial-review-loop: {change} while this commit was being confirmed.**\n\n"
     "Nothing was written: whatever moved it owns the activation now, and it is {now}."
@@ -72,6 +115,18 @@ ACTIVATION_MOVED: Final = (
 UNREVIEWED_HEAD: Final = (
     "HEAD is now {head}, whose tree {head_tree} no review ever approved. The commit gate was never consulted: "
     "either the command that created it was not recognised as a commit, or HEAD was moved by something other than a commit."
+)
+
+#: An unborn HEAD is the *armed* state of a repository with no commits, and for one of those
+#: it is reported as nothing at all. It is only evidence of destroyed history when the
+#: activation was armed at a commit -- and it is the one HEAD move a tree comparison cannot
+#: notice, since there is no tree left to compare. The branch ref can be removed without a
+#: commit ever running (``git update-ref -d HEAD``, the dashed ``git-update-ref``, an unlink
+#: inside ``.git``), so the check that catches it has to be the *absence* of HEAD, not the
+#: shape of a command.
+UNBORN_HEAD: Final = (
+    "HEAD no longer exists, but this activation was armed at commit {activation}. The branch ref was deleted or the history "
+    "was rewound, which no commit does -- so every commit this activation made, reviewed or not, is unreachable."
 )
 
 HEAD_UNVERIFIABLE: Final = """\
@@ -307,16 +362,29 @@ def _guard_unreviewed_head(check: _Check) -> None:
         # unreadable -- suppressing the only report this hole has. "The gate cannot see the
         # history" is not "the history is fine" (Rule 1).
         check.hook.posttool_context(HEAD_UNVERIFIABLE.format(status=status, error=exc).rstrip("\n"))
-    # Empty means a repository with no commits yet, which is the state `arm` froze.
-    if not head_tree or check.state.tree_approved(head_tree):
+    activation = check.state.get("activation_commit")
+    if not head_tree and not activation:
+        # A repository with no commits yet, which is the state `arm` froze. Nothing to report.
+        return
+    if head_tree and check.state.tree_approved(head_tree):
         return
 
     repo = check.repo
+    if not head_tree:
+        # HEAD vanished from a repository that had commits when it was armed. Reported through
+        # the same path as an unapproved HEAD, with the activation commit as the recovery
+        # target -- `git reset --soft <activation>` is valid on an unborn branch and puts the
+        # history back where the loop started.
+        _unreviewed(check, status=status, detail=UNBORN_HEAD.format(activation=activation), bad=NO_COMMIT, parent=activation)
     head = gitsnap.head_commit(repo)
-    detail = UNREVIEWED_HEAD.format(head=head, head_tree=head_tree)
+    parent = gitsnap.rev_parse(repo, "HEAD^") or activation
+    _unreviewed(check, status=status, detail=UNREVIEWED_HEAD.format(head=head, head_tree=head_tree), bad=head, parent=parent)
+
+
+def _unreviewed(check: _Check, *, status: str, detail: str, bad: str, parent: str) -> NoReturn:
+    """Record or report a HEAD no review approved, according to what the status allows."""
     if status in _RECONCILABLE:
-        parent = gitsnap.rev_parse(repo, "HEAD^") or check.state.get("activation_commit")
-        _reconcile(check, detail=detail, bad=head, parent=parent)
+        _reconcile(check, detail=detail, bad=bad, parent=parent)
 
     # Nothing to transition to, so the answer is to say so. **Silence here is what makes the
     # wrapper escape work**: a Bash command that commits and then runs `arl.sh deactivate`
@@ -340,7 +408,7 @@ def _verify(check: _Check, *, pending: str) -> NoReturn:
         _reconcile(
             check,
             detail=HEAD_DID_NOT_MOVE.format(pending=pending),
-            bad=head or "<none>",
+            bad=head or NO_COMMIT,
             parent=pending_head or check.state.get("activation_commit"),
         )
     if parent != pending_head:
@@ -393,7 +461,23 @@ def _reconcile(check: _Check, *, detail: str, bad: str, parent: str) -> NoReturn
         # moved to is DISARMED -- writing RECONCILE over that would restart enforcement the
         # user had already ended (Rule 4). The divergence is still reported rather than lost.
         check.hook.posttool_context(f"{exc}\nThe commit that landed is not the tree that was reviewed:\n\n{detail}".rstrip("\n"))
-    check.hook.posttool_context(RECONCILE_CONTEXT.format(detail=detail, parent=parent).rstrip("\n"))
+    check.hook.posttool_context(_recovery(detail=detail, bad=bad, parent=parent).rstrip("\n"))
+
+
+def _recovery(*, detail: str, bad: str, parent: str) -> str:
+    """The recovery instructions that match what actually landed.
+
+    Three cases, and only the first has a commit to reset to. An empty ``parent`` used to be
+    interpolated into ``git reset --soft {parent}`` regardless, printing a command with no
+    target -- which ``cmdshape.reset_target`` refuses and ``_gate_reset`` could never match
+    against an empty ``bad_commit_parent`` anyway. The reconcile was therefore unrecoverable in
+    exactly the case an activation armed in an empty repository always hits.
+    """
+    if parent:
+        return RECONCILE_CONTEXT.format(detail=detail, parent=parent)
+    if bad and bad != NO_COMMIT:
+        return RECONCILE_CONTEXT_ROOT.format(detail=detail)
+    return RECONCILE_CONTEXT_NOTHING_LANDED.format(detail=detail)
 
 
 def _advance(check: _Check, *, pending: str, head: str) -> NoReturn:

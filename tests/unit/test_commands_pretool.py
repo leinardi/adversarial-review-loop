@@ -975,6 +975,176 @@ def test_a_bounded_reset_is_permitted_during_a_reconcile(git_repo: Path, tmp_pat
     assert "bounded recovery reset" in reason
 
 
+def unborn_repo(tmp_path: Path) -> Path:
+    """A repository with no commits at all -- what ``arm`` sees as an unborn HEAD.
+
+    ``git_repo`` is seeded, so the root-commit reconcile cannot be reached by patching a
+    field: that only produces a document making a claim git would refuse. This is the real
+    thing. Mirrors ``test_commands_stop.unborn_repo``.
+    """
+    repo = tmp_path / "unborn"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "selftest@example.invalid")
+    git(repo, "config", "user.name", "arl selftest")
+    git(repo, "config", "commit.gpgsign", "false")
+    return repo
+
+
+def unborn_active(repo: Path, tmp_path: Path, env: dict[str, str]) -> None:
+    """``active`` for an unborn repository, which arming treats as dirty.
+
+    There is nothing to fold in -- ``--allow-dirty`` is only how an activation gets past a
+    HEAD that does not exist yet.
+    """
+    proc = run_bootstrap(["arm", "--session", SESSION, "--args", f"{plan_file(tmp_path)} --allow-dirty"], cwd=repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    proc = run_bootstrap(["set-phases", "--phase", "phase one"], cwd=repo, env=env)
+    assert proc.returncode == 0, proc.stderr
+
+
+def unborn_reconcile(tmp_path: Path, env: dict[str, str]) -> Path:
+    """An activation armed in an empty repository whose root commit diverged.
+
+    This is the state that had no exit: the diverging commit is the root commit, so
+    ``bad_commit_parent`` is empty and no ``git reset --soft <target>`` can name it.
+    """
+    repo = unborn_repo(tmp_path)
+    unborn_active(repo, tmp_path, env)
+    (repo / "first.txt").write_text("first\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "root")
+    patch_state(env, repo, status="RECONCILE", bad_commit=git(repo, "rev-parse", "HEAD"), bad_commit_parent="")
+    return repo
+
+
+def test_the_root_commit_recovery_is_permitted_during_a_reconcile(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Without this the reconcile has no exit at all: there is no parent to reset to."""
+    env = armed_env(clean_env)
+    repo = unborn_reconcile(tmp_path, env)
+
+    verdict, reason = pretool(repo, env, command="git update-ref -d HEAD")
+
+    assert verdict == "allow"
+    assert "bounded recovery deletion" in reason
+
+
+def test_the_root_commit_recovery_leaves_the_index_and_worktree_alone(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """What makes it the root-commit spelling of ``--soft``: the content survives the undo."""
+    env = armed_env(clean_env)
+    repo = unborn_reconcile(tmp_path, env)
+
+    assert pretool(repo, env, command="git update-ref -d HEAD")[0] == "allow"
+    git(repo, "update-ref", "-d", "HEAD")
+
+    assert git(repo, "for-each-ref", "--format=%(refname)") == "", "the branch ref is gone, so the commit is undone"
+    assert (repo / "first.txt").read_text() == "first\n"
+    assert git(repo, "diff", "--cached", "--name-only") == "first.txt"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git-update-ref -d HEAD", id="the-dashed-executable"),
+        pytest.param("/usr/lib/git-core/git-update-ref -d HEAD", id="the-dashed-executable-by-path"),
+        pytest.param("/usr/bin/git update-ref -d HEAD", id="git-by-absolute-path"),
+    ],
+)
+def test_a_non_canonical_spelling_of_the_recovery_is_denied(tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
+    """git still ships ``git-update-ref`` in its exec path, and it deletes the ref just the same.
+
+    Detection catches every spelling; the validator accepts only ``git update-ref -d HEAD``,
+    so a non-canonical one is denied rather than passed through -- and the denial names the
+    spelling that works.
+    """
+    env = armed_env(clean_env)
+    repo = unborn_reconcile(tmp_path, env)
+
+    verdict, reason = pretool(repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "git update-ref -d HEAD" in reason
+    assert git(repo, "rev-parse", "HEAD") != ""
+
+
+def test_the_root_commit_recovery_is_denied_when_there_is_a_parent_to_reset_to(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """An ordinary reconcile: deleting the branch ref here would drop reviewed history."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    parent = git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "bad.txt").write_text("bad\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "bad")
+    patch_state(env, git_repo, status="RECONCILE", bad_commit=git(git_repo, "rev-parse", "HEAD"), bad_commit_parent=parent)
+
+    verdict, reason = pretool(git_repo, env, command="git update-ref -d HEAD")
+
+    assert verdict == "deny"
+    assert f"git reset --soft {parent}" in reason
+
+
+def test_the_root_commit_recovery_is_denied_when_the_activation_has_history_behind_it(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str]
+) -> None:
+    """An empty parent on a seeded repository is a claim state.json cannot make good on."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status="RECONCILE", bad_commit=git(git_repo, "rev-parse", "HEAD"), bad_commit_parent="")
+
+    verdict, reason = pretool(git_repo, env, command="git update-ref -d HEAD")
+
+    assert verdict == "deny"
+    assert "rewind history that predates the activation" in reason
+
+
+def test_the_root_commit_recovery_is_denied_once_head_has_moved_on(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The ref deletion drops whatever HEAD is on now, so it is only for the recorded commit."""
+    env = armed_env(clean_env)
+    repo = unborn_reconcile(tmp_path, env)
+    (repo / "second.txt").write_text("second\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "second")
+
+    verdict, reason = pretool(repo, env, command="git update-ref -d HEAD")
+
+    assert verdict == "deny"
+    assert "not the diverging commit" in reason
+
+
+def test_the_root_commit_recovery_is_denied_when_head_has_a_parent(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Belt and braces on the state document: git is asked whether HEAD really is a root commit."""
+    env = armed_env(clean_env)
+    repo = unborn_reconcile(tmp_path, env)
+    (repo / "second.txt").write_text("second\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "second")
+    patch_state(env, repo, bad_commit=git(repo, "rev-parse", "HEAD"))
+
+    verdict, reason = pretool(repo, env, command="git update-ref -d HEAD")
+
+    assert verdict == "deny"
+    assert "not the root commit" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git update-ref refs/heads/main HEAD~1", id="repointing-a-branch"),
+        pytest.param("git update-ref -d refs/heads/main", id="deleting-another-ref"),
+        pytest.param("git update-ref -d HEAD", id="even-the-recovery-spelling"),
+    ],
+)
+def test_update_ref_is_denied_outside_a_reconcile(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
+    """A ref write is a commit-free way off a reviewed commit, and no phase needs one."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "moves HEAD off a commit that was reviewed" in reason
+
+
 def test_a_reset_to_anything_but_the_diverging_parent_is_denied(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
