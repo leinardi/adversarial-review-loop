@@ -336,12 +336,26 @@ def test_a_quoted_ampersand_is_not_a_segment_separator() -> None:
         ("git reset --soft HEAD^", False, True),
         ("git reset", False, True),
         pytest.param("resetting git", False, False, id="reset-as-a-substring-does-not-match"),
+        pytest.param("git-commit -m x", True, False, id="the-dashed-commit-executable"),
+        pytest.param("/usr/lib/git-core/git-commit -m x", True, False, id="dashed-commit-by-path"),
+        pytest.param("git-reset --hard HEAD~1", False, True, id="the-dashed-reset-executable"),
+        pytest.param("/usr/lib/git-core/git-reset --hard HEAD~1", False, True, id="dashed-reset-by-path"),
+        pytest.param("git commit-graph write", False, False, id="commit-graph-is-not-a-commit"),
+        pytest.param("git-commit-graph write", False, False, id="dashed-commit-graph-is-not-a-commit"),
+        pytest.param("legit-commit -m x", False, False, id="a-word-merely-ending-in-git-does-not-match"),
         ("", False, False),
     ],
 )
 def test_the_loose_detectors(command: str, commit: bool, reset: bool) -> None:
     """Pins false positives and false negatives alike -- a detector too loose escalates every
-    ordinary command, and one too strict lets a real commit or reset through ungated."""
+    ordinary command, and one too strict lets a real commit or reset through ungated.
+
+    The dashed rows are the ones with teeth. git still installs ``git-commit``, ``git-reset``
+    and ``git-update-ref`` in ``$(git --exec-path)`` -- measured on git 2.55 -- and each does
+    exactly what its subcommand spelling does, so a detector that knows only the subcommand
+    lets ``/usr/lib/git-core/git-commit -m x`` reach the shell with no gate consulted at all.
+    ``commit-graph`` is the boundary those rows must not cross.
+    """
     assert cmdshape.mentions_commit(command) is commit
     assert cmdshape.mentions_reset(command) is reset
 

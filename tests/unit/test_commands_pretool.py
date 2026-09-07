@@ -1364,6 +1364,76 @@ def test_a_disguised_escape_is_still_denied(git_repo: Path, tmp_path: Path, clea
     assert "user-only commands" in reason
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git-commit -m x", id="dashed-commit"),
+        pytest.param("/usr/lib/git-core/git-commit -m x", id="dashed-commit-by-path"),
+        pytest.param("git add -A && git-commit -m x", id="dashed-commit-in-a-sequence"),
+    ],
+)
+def test_the_dashed_commit_executable_is_denied(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
+    """It is the same program as ``git commit``, and it used to reach the shell ungated.
+
+    git ships ``git-commit`` in ``$(git --exec-path)`` to this day (measured on git 2.55).
+    Detection now catches the spelling and the strict validator then refuses it, which is the
+    safe direction: the commit can be re-issued as ``git add -A && git commit -m "…"`` and go
+    through the ordinary review.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    before = git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "work.txt").write_text("work\n")
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "only git add, git status and git commit" in reason
+    assert git(git_repo, "rev-parse", "HEAD") == before, "and nothing landed"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git-reset --hard HEAD~1", id="dashed-reset"),
+        pytest.param("/usr/lib/git-core/git-reset --soft HEAD~1", id="dashed-reset-by-path"),
+    ],
+)
+def test_the_dashed_reset_executable_is_denied(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
+    """Same program as ``git reset``, and the same way off a reviewed commit without committing."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "more.txt").write_text("more\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "more")
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "This reset was not accepted" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git commit-graph write --reachable", id="subcommand"),
+        pytest.param("git-commit-graph write --reachable", id="dashed"),
+    ],
+)
+def test_a_commit_graph_command_is_not_read_as_a_commit(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
+    """The boundary the dashed alternative must not cross: ``commit-graph`` is not ``commit``.
+
+    Silence is the pass: a command the gate has no opinion about gets no response at all.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    proc = run_hook("pretool", payload(git_repo, command=command), cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+
+
 def test_a_disguised_reset_is_classified_as_a_reset(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     r"""``g\it reset`` reaches the reconcile gate, where the raw tokenizer reads it correctly."""
     env = armed_env(clean_env)
