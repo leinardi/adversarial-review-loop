@@ -177,6 +177,57 @@ def test_the_arm_summary_says_whether_a_final_review_will_run(
     assert f"- final cumulative review at the end: {expected}" in proc.stdout
 
 
+def unborn_repo(tmp_path: Path) -> Path:
+    """A repository with no commits at all -- what ``arm`` sees as an unborn HEAD."""
+    repo = tmp_path / "unborn"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "selftest@example.invalid")
+    git(repo, "config", "user.name", "arl selftest")
+    git(repo, "config", "commit.gpgsign", "false")
+    return repo
+
+
+def test_arming_an_empty_repository_says_it_cannot_complete_itself(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Said at phase 0, where it is still cheap to act on.
+
+    An empty ``activation_commit`` is what ``completion.phase_progress_gap`` refuses to prove a
+    phase chain from, so this activation can never take the no-review completion path. Without
+    this line the consequence first shows up after the *last* phase is committed, as a Stop gate
+    that will not complete -- a whole plan's work before learning the ending needs one flag or
+    one command. Measured on a 12-phase activation that found out at phase 13.
+    """
+    env = armed_env(clean_env)
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --allow-dirty"], cwd=unborn_repo(tmp_path), env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "cannot complete itself" in proc.stdout
+    assert "config final_review true" in proc.stdout, "the one thing that avoids the choice later"
+    assert ":finish" in proc.stdout
+
+
+def test_arming_an_empty_repository_says_nothing_when_a_final_review_will_run(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """With ``final_review`` on there is no missing ending to warn about: the cumulative review
+    completes the activation, and the anchor the no-review path needs never comes up."""
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --allow-dirty"], cwd=unborn_repo(tmp_path), env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "cannot complete itself" not in proc.stdout
+
+
+def test_arming_a_seeded_repository_says_nothing_about_completing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The warning is for the unborn-HEAD case only; every ordinary activation has an anchor."""
+    env = armed_env(clean_env)
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "cannot complete itself" not in proc.stdout
+
+
 def test_arm_writes_both_pointers(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """The session pointer is what the hooks read; the worktree pointer is what ``status`` reads."""
     env = armed_env(clean_env)

@@ -55,7 +55,7 @@ from __future__ import annotations
 import itertools
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 from arl import commands, gitsnap
 from arl import config as config_module
@@ -66,7 +66,7 @@ from arl.state import State
 if TYPE_CHECKING:  # pragma: no cover - the Stop gate must not import the reviewer to type-check
     from arl.reviewer import Review
 
-__all__ = ["Completion", "Fingerprint", "describe_change", "fingerprint", "start"]
+__all__ = ["UNANCHORED", "Completion", "Fingerprint", "Gap", "describe_change", "fingerprint", "phase_progress_gap", "start"]
 
 #: ``armed_at``, ``baseline_tree``, ``session_id``, stored status, effective status,
 #: ``activation_generation``.
@@ -180,7 +180,69 @@ def _moves_the_tree(repo: str, earlier: str, later: str) -> bool:
     return bool(before) and bool(after) and before != after
 
 
+#: ``Gap.code`` for the one shape that is not evidence of anything being wrong: an activation
+#: ``arm`` legitimately gave an empty ``activation_commit`` because it was armed on an unborn
+#: HEAD. Everything else a ``Gap`` reports is a document that does not describe finished work.
+#: The Stop gate treats this one differently -- see ``stop._by_status``'s skip path -- because
+#: escalating on it wedges an activation that has genuinely done all its phases.
+UNANCHORED: Final = "unanchored"
+
+
+class Gap(NamedTuple):
+    """Why the phase chain could not be proven, or an empty ``code`` when it was.
+
+    A reason rather than a bare ``False``, because the caller has to *say* what failed. The
+    Stop gate used to escalate with "unexpected state (status=…, phase=…, total=…)" for every
+    one of the failures below -- three values that are all *correct* in the commonest case,
+    which reads as "your state is corrupt" when nothing about it is.
+    """
+
+    code: str
+    message: str
+
+
+#: The chain is proven; nothing is missing.
+_PROVEN: Final = Gap("", "")
+
+
 def phase_progress_proven(state: State, repo: str) -> bool:
+    """Whether :func:`phase_progress_gap` found nothing missing."""
+    return not phase_progress_gap(state, repo).code
+
+
+def _unanchored_gap(repo: str, first: str) -> Gap:
+    """Which kind of missing ``activation_commit`` this is, asked of git rather than the document.
+
+    ``UNANCHORED`` -- the benign one the Stop gate refuses without escalating -- requires the
+    first phase commit to be a **root commit**, which is what an activation armed on an unborn
+    HEAD produces and what a blanked field in a repository with history cannot fake. Anything
+    git will not answer for is the escalating kind: a doubt here must not buy the softer
+    treatment (Rule 1).
+    """
+    try:
+        resolved = gitsnap.rev_parse_checked(repo, f"{first}^{{commit}}")
+        parent = gitsnap.rev_parse_checked(repo, f"{first}^") if resolved else ""
+    except gitsnap.GitUnavailable as exc:
+        return Gap("unanchored-unverifiable", f"there is no activation commit to anchor the phase chain to, and git could not check why ({exc})")
+    if not resolved:
+        return Gap(
+            "unanchored-unverifiable",
+            f"there is no activation commit to anchor the phase chain to, and phase 1's commit ({first}) is not in this repository",
+        )
+    if parent:
+        return Gap(
+            "unanchored-history",
+            f"there is no activation commit to anchor the phase chain to, but phase 1's commit ({first}) has a parent, "
+            "so this repository had history before the activation and the anchor cannot simply have been empty",
+        )
+    return Gap(
+        UNANCHORED,
+        "this activation was armed on a repository with no commits, so it has no activation commit for the phase chain "
+        "to start from, and nothing outside the state document can confirm that emptiness",
+    )
+
+
+def phase_progress_gap(state: State, repo: str) -> Gap:  # noqa: PLR0911 - one return per distinct thing that can be missing, which is the point
     """Every frozen phase has a recorded commit behind it that git still vouches for.
 
     The check that ends the regress. ``phase == phase_count() + 1`` says only that an integer
@@ -207,10 +269,15 @@ def phase_progress_proven(state: State, repo: str) -> bool:
     That is the fail-closed direction, and it applies only to an activation carried across this
     change mid-flight -- ``final_review``'s skip path is new, so no completed activation ever
     depended on it before.
+
+    Returns **which** of those it was, because the caller has to say. Every one of them used to
+    surface as the same "unexpected state (status=…, phase=…, total=…)" escalation, naming three
+    values that are correct in the commonest failure -- an activation armed on an empty
+    repository, whose ``UNANCHORED`` gap is the one shape here that means nothing is wrong.
     """
     total = len(state.get_array("phases"))
     if total <= 0:
-        return False
+        return Gap("no-phases", "the frozen phase list is empty, so there is nothing a phase chain could prove")
     chain = _recorded_phase_commits(state, total)
     # A *chain*, not a set of ancestors. "Each is an ancestor of HEAD" lets one real commit
     # stand in for every phase: record phase 1's ID again under phase 2, bump `phase`, and the
@@ -229,8 +296,19 @@ def phase_progress_proven(state: State, repo: str) -> bool:
     # `final_review` or `finish`, both documented, and both of which put a reviewer back in the
     # loop where this evidence cannot go.
     activation = state.get("activation_commit")
-    if chain is None or not activation or len(set(chain)) != total or activation in chain:
-        return False
+    if chain is None:
+        return Gap("no-chain", f"the recorded phase commits are not one canonical commit id per phase, numbered 1..{total}")
+    if not activation:
+        # Still refused either way -- an empty anchor is never *proof*. What git can settle is
+        # which kind of empty this is, and the two want different answers. A chain whose first
+        # commit is a root commit is consistent with the only legitimate cause, an `arm` on an
+        # unborn HEAD, and that activation has done real work it simply cannot document: the
+        # Stop gate says so and leaves it usable. A chain that starts on a commit *with* a
+        # parent is report 038's forgery -- blank the field in a seeded repository and record
+        # history it inherited -- and that is a tampered document, which escalates.
+        return _unanchored_gap(repo, chain[0])
+    if len(set(chain)) != total or activation in chain:
+        return Gap("chain-not-distinct", "the recorded phase commits are not all distinct commits after the activation commit")
     # A *chain*, not a set of ancestors, and it starts strictly after the activation commit.
     # The last phase commit must *be* HEAD, not merely an ancestor of it (report 039). An
     # ancestor test leaves room for a commit after the final phase, and one shape of that is
@@ -240,20 +318,22 @@ def phase_progress_proven(state: State, repo: str) -> bool:
     # activation would then complete with the work undone and nothing having reviewed the undo.
     try:
         head = gitsnap.rev_parse_checked(repo, "HEAD")
-    except gitsnap.GitUnavailable:
-        return False
+    except gitsnap.GitUnavailable as exc:
+        return Gap("head-unreadable", f"git could not resolve HEAD, so the phase chain could not be checked against history ({exc})")
     if chain[-1] != head:
-        return False
+        return Gap("head-past-chain", f"HEAD ({head or '<unborn>'}) is not the last phase's commit ({chain[-1]})")
     links = [(activation, chain[0]), *itertools.pairwise(chain)]
     if not all(gitsnap.is_ancestor(repo, earlier, later) for earlier, later in links):
-        return False
+        return Gap("chain-broken", "the recorded phase commits do not form an ancestry chain from the activation commit")
     # Distinct commit IDs prove only that `git commit` ran N times. `git commit --allow-empty`
     # runs it without changing anything, and `pretool` approves an unchanged tree straight from
     # `last_approved_tree` without calling the reviewer at all -- so N empty commits would
     # otherwise carry an entirely unimplemented plan to COMPLETE with no model in the loop.
     # Requiring each phase commit to *move* the tree is what makes the chain evidence of work:
     # a moved tree is one the gate had to put in front of a reviewer before it could land.
-    return all(_moves_the_tree(repo, earlier, later) for earlier, later in links)
+    if not all(_moves_the_tree(repo, earlier, later) for earlier, later in links):
+        return Gap("empty-phase", "a recorded phase commit does not change the tree, so it is not evidence that phase was implemented")
+    return _PROVEN
 
 
 @dataclass(frozen=True)
