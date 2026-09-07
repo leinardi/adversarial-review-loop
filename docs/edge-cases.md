@@ -23,6 +23,7 @@ gate working as designed against a scenario worth understanding before you hit i
 | Diff above `hard_diff_ceiling` | `NEEDS_HUMAN` |
 | Commit lands ≠ reviewed tree, or is an amend | `RECONCILE` with a prescribed, non-automatic recovery |
 | `git reset --soft` before the activation commit | Denied (equal to it is allowed — that is the phase-1 recovery) |
+| The diverging commit is the repository's root commit | `RECONCILE` recovers with a bounded `git update-ref -d HEAD`; every other `git update-ref` is denied |
 | Activation older than `ttl_hours` | `STALE`: every mutation is denied and the turn ends with a message naming `resume`. **Never a silent disarm**, and never counted as a no-progress block |
 | No-progress `Stop` blocks past `max_stop_blocks` | `NEEDS_HUMAN`, loud system message. **Not** an approval |
 | Claude tries `arl finish` / `deactivate` / `resume` / `config` via Bash | Denied — user-only |
@@ -75,6 +76,15 @@ non-automatic recovery (typically `git reset --soft <the last known-good commit>
 the only mutation `RECONCILE` permits, and only to that exact target). Nothing here
 auto-corrects the worktree; a bad commit sitting there is safer than a "helpful" reset
 running unattended and possibly discarding something.
+
+**When the diverging commit is a root commit**, there is no parent to reset to, so the
+recovery is `git update-ref -d HEAD` instead: it drops that one commit and leaves the index
+and working tree exactly as they are, which is what `--soft` does everywhere else. It is
+permitted only while the reconcile records no parent, `HEAD` is still the commit that
+diverged, that commit really has no parent, and the activation began in an empty repository —
+and `git update-ref` is denied outright in every other situation, being a commit-free way to
+move `HEAD` off a reviewed commit. This is the case an activation armed in an empty
+repository hits on its very first phase.
 
 **A background writer will put you here.** An editor auto-saving a buffer, an MCP server
 dropping a state directory, a file watcher — anything that touches the worktree between the

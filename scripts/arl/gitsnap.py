@@ -2,8 +2,17 @@
 
 Ports ``scripts/lib/gitsnap.sh``. A snapshot is committed + staged + unstaged + non-ignored
 untracked content, captured through a **throwaway index**: ``GIT_INDEX_FILE`` points at a
-temporary file, so ``read-tree``/``add -A``/``write-tree`` never touch the repository's real
-index (Rule 3 -- nothing the gate does is visible inside the repository under review).
+temporary *copy* of the repository's index, so ``add -A``/``write-tree`` never touch the real
+one (Rule 3 -- nothing the gate does is visible inside the repository under review).
+
+A copy, rather than a fresh index seeded from ``HEAD``, because the tree this produces is the
+tree ``git add -A && git commit`` is about to produce, and those two are not the same thing
+whenever the real index holds an entry ``add -A`` would not create: a ``git add -f`` of a
+gitignored path is the ordinary way to get one. Seeding from ``HEAD`` left that entry out of
+the reviewed tree while the commit still carried it, so the commit's tree could not match the
+approved tree and every such phase ended in ``RECONCILE`` -- the gate accusing the model of
+committing something other than what it reviewed, when what it reviewed was simply short a
+file. See :func:`_seed`.
 
 Only the index is redirected. ``git add -A`` still writes the blobs it hashes into
 ``.git/objects``, exactly as the shell did; that is unavoidable for ``write-tree`` and is
@@ -37,6 +46,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -392,6 +402,66 @@ def _temp_index() -> Iterator[str]:
                 os.unlink(leftover)
 
 
+def _index_path(repo: str) -> str:
+    """Absolute path of the repository's real index file.
+
+    ``rev-parse --git-path`` rather than ``<git-dir>/index`` spelled by hand: ``GIT_INDEX_FILE``
+    may already point elsewhere in the environment the hook runs in, and git is the only thing
+    that knows where the index for *this* worktree actually is (a linked worktree keeps its own,
+    under ``.git/worktrees/<name>/index``).
+    """
+    proc = git_run(repo, ["rev-parse", "--git-path", "index"])
+    path = _first_line_output(proc) if proc.returncode == 0 else ""
+    if not path:
+        raise SnapshotError("git could not say where this worktree's index is")
+    return path if os.path.isabs(path) else os.path.join(repo, path)
+
+
+def _seed(repo: str, index: str, env: Mapping[str, str]) -> None:
+    """Fill the throwaway index with the state ``git add -A`` will be applied to.
+
+    A byte copy of the real index, which is what the commit will build from. Copied rather
+    than reconstructed: an index carries entries no tree-level reconstruction reproduces --
+    a force-added gitignored path, an unmerged entry mid-merge -- and the ones it misses are
+    exactly the ones that would make the reviewed tree differ from the committed tree.
+
+    A split index (``core.splitIndex``) copies safely: the shared half is named inside the
+    file and resolved against ``$GIT_DIR``, not against the index's own path. The subsequent
+    ``add -A`` is run with ``core.splitIndex=false`` so that writing the *copy* back cannot
+    deposit a new ``sharedindex.*`` file in the repository.
+
+    Falls back to ``HEAD`` (or an empty index) only when there is no index file at all -- a
+    freshly ``git init``-ed repository nothing has ever staged in. A failure to *read* an
+    index that exists raises instead: silently reviewing a tree seeded from ``HEAD`` is how
+    the entries described above go missing, and a snapshot that is not the working state is
+    never the safe fallback (Rule 1).
+    """
+    real = _index_path(repo)
+    if os.path.exists(real):
+        try:
+            # Content and timestamps, but **not** the mode: `shutil.copy2` would copy that
+            # too, and a repository index is commonly group-readable (0664 under a shared
+            # umask), which would widen the 0600 `mkstemp` gave this file -- publishing every
+            # path in the repository, and letting anyone in the group rewrite the very index
+            # the review is about to be taken from, in a world-writable `$TMPDIR`.
+            shutil.copyfile(real, index)
+            # The mtime is the load-bearing half. git calls an entry "racily clean" when its
+            # recorded mtime is not older than the index file's own, and re-reads such an
+            # entry's content instead of trusting its stat data -- which is the only thing
+            # that catches a same-size rewrite made in the same second as the last `git add`.
+            # A copy stamped with *now* looks newer than every entry in it, so that protection
+            # switches off and the snapshot silently keeps the previous content: a tree the
+            # reviewer would approve and the commit would then not match.
+            stamp = os.stat(real)
+            os.utime(index, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        except OSError as exc:
+            raise SnapshotError(f"could not copy this worktree's index: {exc}") from exc
+        return
+    seed = ["read-tree", "HEAD"] if head_commit(repo) else ["read-tree", "--empty"]
+    if git_run(repo, seed, env=env).returncode != 0:
+        raise SnapshotError("could not seed the temporary index from HEAD")
+
+
 def snapshot(repo: str) -> Snapshot:
     """Turn the current working state into a tree id.
 
@@ -401,10 +471,8 @@ def snapshot(repo: str) -> Snapshot:
     """
     with _temp_index() as index:
         env = {**os.environ, "GIT_INDEX_FILE": index}
-        seed = ["read-tree", "HEAD"] if head_commit(repo) else ["read-tree", "--empty"]
-        if git_run(repo, seed, env=env).returncode != 0:
-            raise SnapshotError("could not seed the temporary index from HEAD")
-        if git_run(repo, ["add", "-A"], env=env).returncode != 0:
+        _seed(repo, index, env)
+        if git_run(repo, ["-c", "core.splitIndex=false", "add", "-A"], env=env).returncode != 0:
             raise SnapshotError("git add -A failed against the temporary index")
         write = git_run(repo, ["write-tree"], env=env)
         tree = _first_line_output(write) if write.returncode == 0 else ""

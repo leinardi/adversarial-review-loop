@@ -33,7 +33,7 @@ from pathlib import Path
 import pytest
 from conftest import git, hook_json, run_bootstrap, run_hook
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
-from test_commands_pretool import SESSION, active, active_until, patch_state, payload, pretool
+from test_commands_pretool import SESSION, active, active_until, patch_state, payload, pretool, unborn_active, unborn_repo
 
 COMMIT = 'git add -A && git commit -m "phase"'
 
@@ -298,6 +298,137 @@ def test_committing_a_different_tree_than_the_approved_one_enters_reconcile(
 
     assert "but the approved tree was" in context(stdout)
     assert read_state(env, git_repo, SESSION)["status"] == "RECONCILE"
+
+
+def test_a_deleted_branch_ref_is_caught_even_though_no_tree_is_left_to_compare(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """The one HEAD move the tree comparison cannot see: there is no HEAD tree any more.
+
+    ``git update-ref -d HEAD`` (or the dashed executable, or an unlink inside ``.git``) drops
+    the branch ref without any commit running. An unborn HEAD is also the armed state of a
+    repository with no commits, which is why this is reported only when the activation was
+    armed at one -- and reading the two as the same thing made a destroyed history silent.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    activation = read_state(env, git_repo, SESSION)["activation_commit"]
+    assert activation
+    git(git_repo, "update-ref", "-d", "HEAD")
+
+    _, stdout = confirm(git_repo, env, command="echo unrelated")
+
+    message = context(stdout)
+    assert "HEAD no longer exists" in message
+    assert f"git reset --soft {activation}" in message
+    document = read_state(env, git_repo, SESSION)
+    assert document["status"] == "RECONCILE"
+    assert document["bad_commit_parent"] == activation
+
+
+def test_an_empty_repository_with_no_commits_is_still_not_reported(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The other half of the distinction: an unborn HEAD an activation was *armed* on."""
+    env = armed_env(clean_env)
+    repo = unborn_repo(tmp_path)
+    unborn_active(repo, tmp_path, env)
+
+    _, stdout = confirm(repo, env, command="echo unrelated")
+
+    assert stdout == ""
+    assert read_state(env, repo, SESSION)["status"] == "ACTIVE"
+
+
+def test_a_force_added_ignored_file_commits_and_advances_the_phase(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """End to end for the divergence that had nothing to do with the model.
+
+    ``git add -f`` of a path inside an ignored directory is how ``.idea/.gitignore`` gets
+    tracked under ``.idea/*``. Its index entry survives the ``git add -A`` in the approved
+    command, so the commit carried it while a snapshot seeded from ``HEAD`` did not -- one
+    file's difference, per-commit invariant broken, phase not advanced.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env, "phase one", "phase two")
+    (git_repo / ".gitignore").write_text(".idea/*\n")
+    (git_repo / ".idea").mkdir()
+    (git_repo / ".idea" / ".gitignore").write_text("shared\n")
+    git(git_repo, "add", "-f", ".idea/.gitignore")
+    assert pretool(git_repo, env, command=COMMIT)[0] == "allow"
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "phase")
+
+    _, stdout = confirm(git_repo, env, command=COMMIT)
+
+    assert "phase 1 of 2 committed and verified" in context(stdout)
+    document = read_state(env, git_repo, SESSION)
+    assert document["status"] == "ACTIVE"
+    assert document["phase"] == 2
+    assert ".idea/.gitignore" in git(git_repo, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+
+
+def test_an_ordinary_reconcile_names_the_reset_to_the_diverging_parent(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    parent = git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "new.txt").write_text("work\n")
+    (git_repo / "other.txt").write_text("also work\n")
+    assert pretool(git_repo, env, command=COMMIT)[0] == "allow"
+    git(git_repo, "add", "new.txt")
+    git(git_repo, "commit", "-qm", "only half of it")
+
+    _, stdout = confirm(git_repo, env, command=COMMIT)
+
+    assert f"git reset --soft {parent}" in context(stdout)
+    assert read_state(env, git_repo, SESSION)["bad_commit_parent"] == parent
+
+
+def test_a_diverging_root_commit_names_a_recovery_that_exists(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A root commit has no parent, so the reset the message used to print had no target.
+
+    It printed ``git reset --soft `` -- which ``cmdshape.reset_target`` refuses, and which
+    ``pretool._gate_reset`` could never match against an empty ``bad_commit_parent`` anyway.
+    The reconcile was unrecoverable in exactly the case an activation armed in an empty
+    repository always hits: its first commit is a root commit.
+    """
+    env = armed_env(clean_env)
+    repo = unborn_repo(tmp_path)
+    unborn_active(repo, tmp_path, env)
+    (repo / "new.txt").write_text("work\n")
+    (repo / "other.txt").write_text("also work\n")
+    assert pretool(repo, env, command=COMMIT)[0] == "allow"
+    git(repo, "add", "new.txt")
+    git(repo, "commit", "-qm", "only half of it")
+
+    _, stdout = confirm(repo, env, command=COMMIT)
+
+    message = context(stdout)
+    assert "git update-ref -d HEAD" in message
+    assert "git reset --soft" not in message
+    assert read_state(env, repo, SESSION)["bad_commit_parent"] == ""
+
+
+def test_a_commit_that_never_happened_in_an_empty_repository_has_nothing_to_undo(
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """No commit landed and no earlier commit exists: neither recovery command applies."""
+    env = armed_env(clean_env)
+    repo = unborn_repo(tmp_path)
+    unborn_active(repo, tmp_path, env)
+    (repo / "new.txt").write_text("work\n")
+    assert pretool(repo, env, command=COMMIT)[0] == "allow"
+
+    _, stdout = confirm(repo, env, command=COMMIT)
+
+    message = context(stdout)
+    assert "was never committed" in message
+    assert "git reset --soft" not in message
+    assert "git update-ref" not in message
 
 
 # --------------------------------------------------------------------------

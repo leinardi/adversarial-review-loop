@@ -97,6 +97,126 @@ def test_staged_content_counts_as_dirty(git_repo: Path) -> None:
     assert gitsnap.worktree_clean(str(git_repo)) is False
 
 
+# -- the snapshot is the tree the commit will have -------------------------
+
+
+def commit_tree_of(repo: Path) -> str:
+    """The tree ``git add -A && git commit`` actually produces here.
+
+    The gate's whole per-commit invariant is that this equals the snapshot it reviewed, so
+    the tests below compare against the real thing rather than against a hand-built expectation.
+    """
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "compare")
+    return git(repo, "rev-parse", "HEAD^{tree}")
+
+
+def test_a_force_added_ignored_file_is_in_the_snapshot(git_repo: Path) -> None:
+    """The tree that will be committed, not the tree ``add -A`` would build from ``HEAD``.
+
+    ``git add -f`` is the ordinary way to track one file inside an ignored directory
+    (``.idea/.gitignore`` under ``.idea/*``). Its index entry survives the ``git add -A`` in
+    the approved command, so it is in the commit -- and a snapshot seeded from ``HEAD``
+    left it out, making the approved tree short exactly one file and sending every such
+    phase to RECONCILE.
+    """
+    (git_repo / ".gitignore").write_text(".idea/*\n")
+    (git_repo / ".idea").mkdir()
+    (git_repo / ".idea" / ".gitignore").write_text("shared\n")
+    git(git_repo, "add", "-f", ".idea/.gitignore")
+
+    snapshot = gitsnap.snapshot(str(git_repo)).tree
+
+    assert ".idea/.gitignore" in git(git_repo, "ls-tree", "-r", "--name-only", snapshot).splitlines()
+    assert snapshot == commit_tree_of(git_repo)
+
+
+def test_a_force_added_ignored_file_makes_the_worktree_dirty(git_repo: Path) -> None:
+    """It is content to be committed, so a phase that "committed all of its work" includes it."""
+    (git_repo / ".gitignore").write_text(".idea/*\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ignore")
+    (git_repo / ".idea").mkdir()
+    (git_repo / ".idea" / ".gitignore").write_text("shared\n")
+    git(git_repo, "add", "-f", ".idea/.gitignore")
+
+    assert gitsnap.worktree_clean(str(git_repo)) is False
+
+
+def test_a_force_added_ignored_file_is_in_the_first_commit_of_an_empty_repository(tmp_path: Path) -> None:
+    """The activation-in-an-empty-repository case, where the divergence had no recovery."""
+    repo = tmp_path / "fresh"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "selftest@example.invalid")
+    git(repo, "config", "user.name", "arl selftest")
+    git(repo, "config", "commit.gpgsign", "false")
+    (repo / ".gitignore").write_text(".idea/*\n")
+    (repo / ".idea").mkdir()
+    (repo / ".idea" / ".gitignore").write_text("shared\n")
+    (repo / "a.txt").write_text("a\n")
+    git(repo, "add", "-f", ".idea/.gitignore")
+
+    assert gitsnap.snapshot(str(repo)).tree == commit_tree_of(repo)
+
+
+def test_the_copied_index_keeps_mkstemps_private_mode(git_repo: Path, temp_index_dir: Path) -> None:
+    """The copy takes the real index's *timestamps*, never its mode.
+
+    A repository index is commonly group-readable (0664 under a shared umask). Copying that
+    mode onto a file in a world-writable ``$TMPDIR`` would publish every path in the
+    repository and let anyone in the group rewrite the index the review is taken from.
+    """
+    index_file = git_repo / ".git" / "index"
+    index_file.chmod(0o664)
+    stamp = index_file.stat()
+    copy = temp_index_dir / "copy"
+    copy.touch(mode=0o600)
+
+    gitsnap._seed(str(git_repo), str(copy), {})
+
+    assert copy.stat().st_mode & 0o777 == 0o600
+    assert copy.stat().st_mtime_ns == stamp.st_mtime_ns
+
+
+def test_a_same_size_rewrite_right_after_a_stage_is_still_seen(git_repo: Path) -> None:
+    """The copied index keeps the original's mtime, so git's racy-clean re-read still fires.
+
+    An entry whose recorded mtime is not older than the index file's own is "racily clean":
+    git re-reads its content rather than trusting the stat data, which is what catches a
+    same-size rewrite in the same second as the last ``git add``. A copy stamped with *now*
+    looks newer than every entry in it, turning that protection off -- and the snapshot would
+    then carry the previous content of a file the commit carries the new content of.
+    """
+    (git_repo / "new.txt").write_text("phase one work\n")
+    git(git_repo, "add", "-A")
+    (git_repo / "new.txt").write_text("phase two work\n")  # same length, same second
+
+    snapshot = gitsnap.snapshot(str(git_repo)).tree
+
+    assert git(git_repo, "show", f"{snapshot}:new.txt") == "phase two work"
+    assert snapshot == commit_tree_of(git_repo)
+
+
+def test_a_split_index_snapshots_to_the_tree_that_will_be_committed(git_repo: Path) -> None:
+    """A copied split index resolves its shared half against ``$GIT_DIR``, so the copy is usable.
+
+    And the copy is written back with ``core.splitIndex=false``, so no new ``sharedindex.*``
+    is deposited in the repository under review (Rule 3).
+    """
+    git(git_repo, "update-index", "--split-index")
+    (git_repo / "new.txt").write_text("new\n")
+    git(git_repo, "add", "-A")
+    # Captured after the repository's own writes, so what this asserts is that the *snapshot*
+    # adds nothing -- git's own split-index bookkeeping is the repository's business.
+    shared_before = sorted(path.name for path in (git_repo / ".git").glob("sharedindex.*"))
+
+    snapshot = gitsnap.snapshot(str(git_repo)).tree
+
+    assert sorted(path.name for path in (git_repo / ".git").glob("sharedindex.*")) == shared_before
+    assert snapshot == commit_tree_of(git_repo)
+
+
 def test_nothing_is_oversized_in_a_small_repo(git_repo: Path) -> None:
     assert gitsnap.oversized(str(git_repo), 1_000_000) == []
 
@@ -186,7 +306,9 @@ def test_the_throwaway_index_is_removed_even_when_the_snapshot_fails(tmp_path: P
 def test_a_directory_that_is_not_a_repository_raises(tmp_path: Path) -> None:
     not_a_repo = tmp_path / "plain"
     not_a_repo.mkdir()
-    with pytest.raises(SnapshotError, match="could not seed the temporary index"):
+    # The first thing the snapshot asks git is where this worktree's index is, so that is
+    # the question a directory git refuses to answer for fails on.
+    with pytest.raises(SnapshotError, match="could not say where this worktree's index is"):
         gitsnap.snapshot(str(not_a_repo))
 
 

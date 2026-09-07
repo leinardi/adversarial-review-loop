@@ -70,10 +70,12 @@ __all__ = [
     "CommandShapeTimeout",
     "ShellMetacharacterError",
     "detection_form",
+    "head_ref_deletion",
     "is_escape",
     "is_set_phases",
     "mentions_commit",
     "mentions_reset",
+    "mentions_update_ref",
     "reset_target",
     "tokenize",
     "validate_commit",
@@ -454,6 +456,14 @@ _GIT: Final = r"(?:[^ \t\v\f\r\n;&|()]*/)?git"
 
 _COMMIT_RE: Final = re.compile(rf"{_BEFORE}{_GIT}({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+commit({_SPACE}|$)", re.MULTILINE)
 _RESET_RE: Final = re.compile(rf"{_BEFORE}{_GIT}({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+reset({_SPACE}|$)", re.MULTILINE)
+#: ``git update-ref``, **including the dashed executable** ``git-update-ref``. git still ships
+#: the dashed builtins in ``$(git --exec-path)`` (measured: git 2.55 has
+#: ``/usr/lib/git-core/git-update-ref``), and ``/usr/lib/git-core/git-update-ref -d HEAD``
+#: deletes the branch ref just as the subcommand spelling does -- with no whitespace before
+#: ``update-ref``, so the subcommand pattern cannot see it. Detection is deliberately looser
+#: than the validator: a dashed spelling reaches the gate here and is then refused by
+#: :func:`head_ref_deletion`, which accepts only the canonical ``git update-ref -d HEAD``.
+_UPDATE_REF_RE: Final = re.compile(rf"{_BEFORE}{_GIT}(({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+|-)update-ref({_SPACE}|$)", re.MULTILINE)
 _ESCAPE_RE: Final = re.compile(rf"arl(\.sh)?{_SPACE}+(finish|deactivate|resume|config|accept|pause)({_SPACE}|$)", re.MULTILINE)
 
 
@@ -519,6 +529,16 @@ def mentions_commit(command: str) -> bool:
 
 def mentions_reset(command: str) -> bool:
     return _RESET_RE.search(detection_form(command)) is not None
+
+
+def mentions_update_ref(command: str) -> bool:
+    """Does this command run ``git update-ref``?
+
+    Detected for the same reason ``git reset`` is: it moves or removes a ref, which is a way
+    of moving ``HEAD`` off a reviewed commit without ever running ``git commit``. The gate
+    denies it outright except as the one bounded root-commit recovery (:func:`head_ref_deletion`).
+    """
+    return _UPDATE_REF_RE.search(detection_form(command)) is not None
 
 
 def is_escape(command: str) -> bool:
@@ -1321,3 +1341,31 @@ def reset_target(command: str) -> str:
     if not target:
         raise CommandShapeError("git reset --soft needs an explicit target during reconcile")
     return target
+
+
+def head_ref_deletion(command: str) -> None:
+    """Accept **exactly** ``git update-ref -d HEAD``, the root-commit reconcile recovery.
+
+    A commit that diverged from the reviewed tree is undone with ``git reset --soft <parent>``
+    -- except when it is the repository's root commit, which has no parent and therefore no
+    reset target that exists. ``update-ref -d HEAD`` deletes the branch ref ``HEAD`` points at,
+    which removes that one commit and leaves the index and the working tree exactly as they
+    are: the same "keep the content, drop the commit" effect ``--soft`` has everywhere else.
+
+    Nothing else about ``update-ref`` is permitted, and the strictness is the point -- the
+    general form writes any ref to any value, which is a way to move ``HEAD`` onto or off any
+    commit at all. No ``&&``, no other ref, no old-value argument (the caller has already
+    verified which commit ``HEAD`` is on, against the recorded divergence, and an old-value
+    argument would only give this parser a second thing to be wrong about).
+    """
+    tokens = tokenize(command)
+    if "&&" in tokens:
+        raise CommandShapeError("the recovery ref deletion must be a single command on its own")
+    # `tokens[0] != "git"` refuses every non-canonical spelling the *detector* deliberately
+    # still catches -- `/usr/bin/git`, and the dashed `git-update-ref` executable. Denying
+    # those is the safe direction and costs nothing: the recovery can be re-issued as
+    # `git update-ref -d HEAD`. `reset_target` is strict in exactly the same way.
+    if len(tokens) < 2 or tokens[0] != "git" or tokens[1] != "update-ref":
+        raise CommandShapeError('not a plain "git update-ref" command')
+    if tokens[2:] != ["-d", "HEAD"]:
+        raise CommandShapeError('only "git update-ref -d HEAD" is permitted during a root-commit reconcile')

@@ -181,7 +181,7 @@ adversarial-review-loop: a commit diverged from the reviewed tree and the reconc
 
 {reason}
 
-Recover with `git reset --soft {parent}`, rebuild the phase, and commit again.
+Recover with `{recovery}`, rebuild the phase, and commit again.
 """
 
 UNVERIFIABLE_AT_EXIT: Final = """\
@@ -657,7 +657,7 @@ def _by_status(gate: _Gate) -> None:
         plan_file = _named_plan_file(gate)
         _block_counted(gate, NOT_FROZEN.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file).rstrip("\n"))
     if status == "RECONCILE":
-        _block_counted(gate, RECONCILE.format(reason=state.get("reason"), parent=state.get("bad_commit_parent")).rstrip("\n"))
+        _block_counted(gate, RECONCILE.format(reason=state.get("reason"), recovery=hooks.reconcile_recovery(state)).rstrip("\n"))
 
     # A deliberate pause to ask the user something: allowed once, and logged.
     if state.get("defer_pending") == "true":
@@ -713,7 +713,7 @@ def _review(gate: _Gate) -> NoReturn:
         _block_counted(gate, ABANDONED_MARKER_UNVERIFIABLE.format(error=exc))
     if bad:
         reason = f"a commit abandoned by resume ({bad}) landed after all"
-        _block_counted(gate, RECONCILE.format(reason=reason, parent=state.get("bad_commit_parent")).rstrip("\n"))
+        _block_counted(gate, RECONCILE.format(reason=reason, recovery=hooks.reconcile_recovery(state)).rstrip("\n"))
 
     try:
         snap = gitsnap.snapshot(worktree)

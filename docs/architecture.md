@@ -64,10 +64,24 @@ SHA, which buys idempotence, skip-when-unchanged, and duplicate-review suppressi
 content go into a throwaway index, and the resulting tree id is what gets reviewed:
 
 ```bash
-GIT_INDEX_FILE=$tmp git read-tree HEAD
+index=$(git rev-parse --git-path index)
+cp "$index" "$tmp"                 # contents only — $tmp keeps its own private 0600 mode
+touch -r "$index" "$tmp"           # …but the real index's mtime, see below
 GIT_INDEX_FILE=$tmp git add -A     # respects .gitignore; the real index is untouched
 tree=$(GIT_INDEX_FILE=$tmp git write-tree)
 ```
+
+The throwaway index starts as a *copy of the real one*, not as a fresh index read from `HEAD`,
+because the tree this produces has to be the tree `git add -A && git commit` will produce.
+The two differ whenever the index holds an entry `add -A` would not create on its own — a
+`git add -f` of a gitignored path is the ordinary way to get one — and a snapshot short one
+file sends an otherwise correct commit to `RECONCILE`.
+
+The mtime is copied and the mode is not, and both halves matter. git re-reads the content of
+an entry whose mtime is not older than the index file's own ("racily clean"), which is what
+catches a same-size rewrite made in the same second as the last `git add`; a copy stamped with
+the current time silently loses that. The mode stays `mkstemp`'s `0600`, because the file lives
+in `$TMPDIR` and a repository index is commonly group-readable.
 
 **Approval and commit are separate events.** `PreToolUse` permits the Bash call;
 `PostToolUse` then verifies that a new commit exists, that its parent is the pre-command
