@@ -319,6 +319,53 @@ def test_a_quoted_ampersand_is_not_a_segment_separator() -> None:
     assert cmdshape.tokenize('git commit -m "a && b"') == ["git", "commit", "-m", "a && b"]
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('git commit -m "handle \\"quoted\\" input"', id="a-quoted-word-in-a-message"),
+        pytest.param('git commit -m "a \\" b"', id="one-escaped-quote"),
+        pytest.param('git commit -m "escaped \\\\ backslash"', id="an-escaped-backslash"),
+        pytest.param('git commit -m "trailing pair \\\\"', id="an-escaped-backslash-before-the-close"),
+        pytest.param('git commit -m "\\" ; rm -rf / \\""', id="a-metacharacter-inside-the-escaped-quotes"),
+    ],
+)
+def test_a_backslash_escaped_quote_does_not_end_the_quote(command: str) -> None:
+    """Inside double quotes a backslash escapes the next character, and bash is the arbiter.
+
+    Every command here is one bash accepts as a single quoted word. The deny scan had no
+    escape arm inside a quote, so the ``\\"`` *closed* it: the rest of the word was scanned
+    bare, and the command was refused either for an "unterminated quote" or for a
+    metacharacter that had been quoted all along. That refused ordinary commit messages, and
+    -- because ``is_set_phases`` swallows the reason -- deadlocked a fresh activation whose
+    phase descriptions quoted anything.
+
+    The last row is the security direction: the ``;`` and the ``rm`` are inside the word in
+    bash too, so allowing them is agreement with the shell, not a relaxation of it.
+    """
+    cmdshape.tokenize(command)
+
+
+@pytest.mark.parametrize(
+    ("command", "match"),
+    [
+        pytest.param('git commit -m "\\\\" ; rm -rf /', "metacharacter", id="an-escaped-backslash-really-does-close"),
+        pytest.param("git commit -m 'a \\' ; rm -rf /", "metacharacter", id="single-quotes-have-no-escape"),
+        pytest.param('git commit -m "unterminated \\"', "unterminated quote", id="the-escape-consumes-the-closing-quote"),
+    ],
+)
+def test_the_escape_arm_does_not_swallow_a_real_close(command: str, match: str) -> None:
+    """The dangerous mistake is reading a quote as open where the shell has closed it.
+
+    In ``"\\\\"`` the backslash escapes a backslash, so the quote *is* closed and the ``;``
+    after it separates two commands -- exactly as bash reads it, and still refused. Single
+    quotes get no escape at all, again matching the shell. And a backslash that consumes what
+    would have been the closing quote leaves the quote genuinely open, which is the one case
+    where "unterminated quote" is the right answer.
+    """
+    with pytest.raises(CommandShapeError, match=match):
+        cmdshape.tokenize(command)
+
+
 # -- the loose detectors ---------------------------------------------------
 
 
@@ -621,6 +668,45 @@ def test_only_the_trusted_set_phases_command_is_the_armed_exception(command: str
     including one the repository under review ships, satisfied it.
     """
     assert cmdshape.is_set_phases(command, ENTRYPOINT) is accepted
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param(f'{ENTRYPOINT} set-phases --phase "add `greet`"', "backtick", id="backtick-is-named"),
+        pytest.param(f'{ENTRYPOINT} set-phases --phase "costs $5"', '"$"', id="dollar-is-named"),
+        pytest.param(f"{ENTRYPOINT} set-phases --phase x && git commit -m x", "on its own", id="a-chain-is-named"),
+        pytest.param(f'{ENTRYPOINT} set-phases --phase "plain words"', "", id="an-accepted-command-has-no-refusal"),
+        pytest.param(f'{ENTRYPOINT} set-phases --phase "say \\"hi\\""', "", id="escaped-quotes-are-accepted"),
+        pytest.param("git status --short", "", id="an-unrelated-command-is-not-coached"),
+        pytest.param("./arl set-phases --phase x", "", id="an-impostor-is-not-coached"),
+        pytest.param(f"git add -A && {ENTRYPOINT} set-phases --phase x", "", id="a-commit-in-front-is-not-coached"),
+        pytest.param(f'{ENTRYPOINT}\tset-phases --phase "add `greet`"', "backtick", id="a-tab-before-the-subcommand"),
+        pytest.param(f'{ENTRYPOINT} set-phases\t--phase "add `greet`"', "backtick", id="a-tab-after-the-subcommand"),
+        pytest.param(f'{ENTRYPOINT}set-phases --phase "add `greet`"', "", id="no-separator-names-another-program"),
+        pytest.param(f'{ENTRYPOINT} set-phases-extra --phase "add `greet`"', "", id="a-longer-subcommand-is-another-command"),
+    ],
+)
+def test_a_refused_set_phases_attempt_says_why(command: str, expected: str) -> None:
+    """The generic "phases are not frozen" denial is a dead end for a genuine attempt.
+
+    Measured on a real activation: the model ran the exact command the gate printed, was
+    refused for a backtick in a phase description, got a message naming no cause, tried a
+    different quoting, got the identical message, and escalated to ``NEEDS_HUMAN`` after four
+    rounds on a plan that only needed rephrasing.
+
+    The rows that expect ``""`` are the other half of the contract: coaching a command that was
+    never a ``set-phases`` attempt would send the model after a fault it did not commit, and
+    telling an impostor or a chained commit *why* it was rejected is help this gate does not
+    owe them. ``<entrypoint>set-phases`` with no separator is in that half -- it names a
+    different program -- while a tab on either side of the subcommand is a genuine attempt and
+    has to be recognised as one.
+    """
+    refusal = cmdshape.set_phases_refusal(command, ENTRYPOINT)
+    if not expected:
+        assert refusal == ""
+    else:
+        assert expected in refusal
 
 
 # --------------------------------------------------------------------------

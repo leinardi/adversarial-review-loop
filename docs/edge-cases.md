@@ -16,6 +16,7 @@ gate working as designed against a scenario worth understanding before you hit i
 | Git cannot be run from the hook, or the working directory is gone | Denied: the gate cannot tell whether an armed worktree guards the call, and does not guess |
 | A session that never ran `implement`/`resume` opens an armed worktree (a fresh `claude`, a resumed session under a new id) | Every mutation and commit is denied until `/adversarial-review-loop:resume` binds the session; the other session's activation is left untouched |
 | Mutation before `set-phases` | Denied, with the exact command to run |
+| `set-phases` whose phase text contains a backtick or `$` | Denied **naming that character**, so the freeze can be retried with plain prose instead of stalling |
 | Turn ends while `ARM_FAILED` or phases unset | `Stop` blocks with instructions; the reviewer is never called |
 | Timeout, malformed output, missing verdict, non-zero exit | `OP_FAILURE` → deny; never an approval |
 | `OP_FAILURE` past `max_failures` | `NEEDS_HUMAN`; the reviewer is no longer invoked |
@@ -143,6 +144,27 @@ would land an in-flight final review as `SUPERSEDED` and discard a real verdict 
 And the Stop gate reads `stop_after_phase` once, near the top of its run, so a pause that
 races a turn end takes effect at the *next* turn end rather than the one already in
 progress. Both are benign; neither can turn into an approval.
+
+## What a phase description may contain
+
+The `set-phases` command is the one thing allowed to run while the phase list is unfrozen,
+so the gate reads it with the same tokenizer it applies to a commit — and that tokenizer
+refuses a backtick or a `$` anywhere in the command, quoted or not, because both are command
+substitution to the shell and this is the one moment when nothing else may run at all.
+
+A phase description is prose, and prose about code reaches for exactly those characters:
+``add `greet.py` `` or `return f"hello {name}"` are the natural way to write a phase. The
+refusal is deliberate and stays, but it now **names the character**, so the freeze can be
+retried with the formatting dropped:
+
+```text
+...arl.sh set-phases --phase "add greet.py" --phase "cover greet with a test"
+```
+
+Quotes inside a description are fine — `--phase "make it return \"hello\""` is one shell
+word and always was one to bash. The deny scan used to read the `\"` as closing the quote
+and refuse the command for an unterminated quote, which, paired with a denial that named no
+cause, could stall a fresh activation at phase 0 until a human intervened.
 
 ## Revising the plan mid-run
 

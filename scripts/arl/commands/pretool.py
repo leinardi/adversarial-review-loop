@@ -143,8 +143,8 @@ Read the frozen plan ({act_dir}/{plan_file}), then run exactly:
 
     {plugin_root}/scripts/arl.sh set-phases --phase "…" --phase "…"
 
-one --phase per phase, in order. Reading the repository is allowed; changing it
-is not, until that command has run.
+one --phase per phase, in order. Reading the repository with Read, Grep and Glob
+is allowed; that one command is the only Bash this gate accepts until it has run.
 """
 
 REPLAN_PENDING: Final = """\
@@ -156,8 +156,22 @@ Read the current frozen plan ({act_dir}/{plan_file}), then run exactly:
     {plugin_root}/scripts/arl.sh set-phases --phase "…" --phase "…"
 
 replacing only the phases from the current one onward -- phases already committed are
-immutable and are kept automatically. Reading the repository is allowed; changing it is not,
-until that command has run.
+immutable and are kept automatically. Reading the repository with Read, Grep and Glob is
+allowed; that one command is the only Bash this gate accepts until it has run.
+"""
+
+SET_PHASES_REFUSED: Final = """\
+That is the right command, but this spelling of it was refused: {error}
+
+The phase descriptions are ordinary text and the tokenizer reads them as shell words, so a
+description cannot contain a backtick or a "$" -- both are command substitution to the shell,
+and neither is worth risking at the one moment nothing else may run. Rewrite them as plain
+prose, drop any code formatting, and run it again:
+
+    {plugin_root}/scripts/arl.sh set-phases --phase "…" --phase "…"
+
+The wording of a phase is yours to choose; only the characters are constrained. Nothing else
+about the activation has changed, and no attempt has been counted against you.
 """
 
 SET_PHASES_ALLOWED: Final = "adversarial-review-loop: set-phases is the one command allowed before the phase list is frozen."
@@ -562,6 +576,26 @@ def _gate_terminal_status(hook: Hook, *, state: State, config: Config, status: s
         hooks.deny(hook, RESUMED.format(successor=successor))
 
 
+def _deny_set_phases_shape(hook: Hook, *, tool: str, command: str) -> None:
+    """Deny a refused ``set-phases`` attempt *naming the reason*, or return and let the
+    ordinary "phases are not frozen" denial stand.
+
+    Reached only after :func:`cmdshape.is_set_phases` has already declined to allow the
+    command, so this cannot turn a denial into an approval -- it chooses between two
+    denials, and the one it adds is strictly more specific. The generic message is right for
+    a command that was never a ``set-phases`` attempt; it is a dead end for one that was,
+    because it repeats the instruction the model just followed without saying what about the
+    spelling was rejected.
+    """
+    if tool != "Bash":
+        return
+    from arl import cmdshape  # noqa: PLC0415 - not on the read-only hot path, same as `_gate`'s own import
+
+    refusal = cmdshape.set_phases_refusal(command, commands.entrypoint())
+    if refusal:
+        hooks.deny(hook, SET_PHASES_REFUSED.format(error=refusal, plugin_root=commands.plugin_root()))
+
+
 def _verified_plan_file(hook: Hook, *, state: State, config: Config) -> str:
     """The active plan revision's file name, fully verified, or escalate and deny.
 
@@ -624,6 +658,7 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
         # `arl` that the repository under review happens to ship. See `cmdshape.is_set_phases`.
         if tool == "Bash" and cmdshape.is_set_phases(command, commands.entrypoint()):
             hook.allow(SET_PHASES_ALLOWED)
+        _deny_set_phases_shape(hook, tool=tool, command=command)
         hooks.deny(hook, PHASES_NOT_FROZEN.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file))
 
     if status == "ACTIVE" and state.get("replan_pending") == "true":
@@ -634,6 +669,7 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
         plan_file = _verified_plan_file(hook, state=state, config=config)
         if tool == "Bash" and cmdshape.is_set_phases(command, commands.entrypoint()):
             hook.allow(SET_PHASES_ALLOWED_REPLAN)
+        _deny_set_phases_shape(hook, tool=tool, command=command)
         hooks.deny(hook, REPLAN_PENDING.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file))
 
     if tool != "Bash":

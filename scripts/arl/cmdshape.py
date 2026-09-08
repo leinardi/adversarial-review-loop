@@ -77,6 +77,7 @@ __all__ = [
     "mentions_reset",
     "mentions_update_ref",
     "reset_target",
+    "set_phases_refusal",
     "tokenize",
     "validate_commit",
 ]
@@ -177,6 +178,13 @@ def _deny_shell_grammar(command: str) -> None:  # noqa: PLR0912 - one branch per
     token accumulation removed and ``started`` kept, since a ``#`` is a comment only where a
     word is not already open.
 
+    "Exactly as the shell does" is load-bearing in **both** directions. Reading a quote as
+    still open where the shell has closed it would let a metacharacter through, which is the
+    dangerous mistake; reading it as closed where the shell has not is the safe one, and it
+    is what the missing backslash arm below used to do -- refusing ``-m "handle \\"this\\""``,
+    a command bash accepts, with a message about an unterminated quote that named nothing the
+    model could act on.
+
     **One message differs from the shell's deliberately, and no verdict does.** ``&>`` and
     ``&>>`` are bash's "redirect stdout and stderr" operators; the shell's ``&`` arm caught
     them first and called them backgrounding. Both were refused then and are refused now --
@@ -198,6 +206,17 @@ def _deny_shell_grammar(command: str) -> None:  # noqa: PLR0912 - one branch per
     while index < length:
         char = command[index]
         if quote:
+            if quote == '"' and char == "\\":
+                # Inside double quotes a backslash escapes the next character, so
+                # `git commit -m "handle \"quoted\" input"` is one word and not two quotes
+                # with a bare `quoted` between them. Without this arm the `\"` *closed* the
+                # quote, everything after it was scanned as unquoted, and an ordinary commit
+                # message or phase description was refused for an "unterminated quote" -- or
+                # for a metacharacter that was quoted all along. Single quotes are untouched:
+                # the shell has no escape inside them, and neither does this.
+                index += 2
+                started = True
+                continue
             if char == quote:
                 quote = ""
             started = True
@@ -579,6 +598,9 @@ def is_set_phases(command: str, entrypoint: str) -> bool:
     The arguments after ``set-phases`` are deliberately not constrained. They are read by
     :mod:`arl.commands.phases`, which can freeze a phase list and nothing else -- there is
     no argument to that command that touches the repository under review.
+
+    A ``False`` here says nothing about *why*; :func:`set_phases_refusal` is what turns a
+    refused attempt into a message, and the two must stay in step.
     """
     try:
         tokens = tokenize(command)
@@ -587,6 +609,60 @@ def is_set_phases(command: str, entrypoint: str) -> bool:
     if len(tokens) < 2 or "&&" in tokens:
         return False
     return tokens[0] == entrypoint and tokens[1] == "set-phases"
+
+
+def set_phases_refusal(command: str, entrypoint: str) -> str:
+    """Why this ``set-phases`` attempt was refused, or ``""`` if it was not one.
+
+    :func:`is_set_phases` answers a verdict and throws the reason away. That was survivable
+    while the reason was always "you wrote something else", and became a dead end once it
+    could be "your phase description contains a backtick": the caller fell through to the
+    generic *"the phase list has not been frozen"* denial, which names no cause, so a model
+    that had just run the exact command the gate asked for was told only to run it again.
+    Measured on a real activation: four attempts, four identical messages, then a
+    ``NEEDS_HUMAN`` escalation on a plan that only needed its descriptions rephrased.
+
+    **This changes no verdict.** It runs only after :func:`is_set_phases` has already said
+    no, and it returns a string for the denial to quote. The textual pre-check is what keeps
+    it from claiming an unrelated command was a set-phases attempt -- an ordinary
+    ``git status`` in the unfrozen state must still get the ordinary message, since telling
+    the model its *quoting* was wrong there would send it after a fault it did not commit.
+    """
+    if not _looks_like_set_phases(command, entrypoint):
+        return ""
+    try:
+        tokenize(command)
+    except CommandShapeError as exc:
+        return str(exc)
+    if is_set_phases(command, entrypoint):
+        return ""
+    return "it must be that command on its own, with nothing chained onto it"
+
+
+#: ``set-phases`` as its own shell word: at least one separator in front of it, and the word
+#: ending at a separator or at the end of the command. Both halves matter, and for opposite
+#: reasons -- without the leading one ``<entrypoint>set-phases …`` names a *different program*
+#: and would be coached as though it were this one, and without the trailing one a tab before
+#: the first ``--phase`` hid a genuine attempt behind the generic denial.
+_SET_PHASES_WORD: Final = re.compile(r"[ \t]+set-phases([ \t]|\Z)")
+
+
+def _looks_like_set_phases(command: str, entrypoint: str) -> bool:
+    """Does ``command`` begin with ``<entrypoint> set-phases``, read as plain text?
+
+    Textual on purpose: the tokenizer is exactly what is unavailable here, because the reason
+    this is being asked at all is that tokenizing raised. That rules out asking the shell
+    where the word boundaries are, so they are spelled out -- separators are a space or a tab,
+    the two the deny scan itself treats as separators, and a newline is not one of them
+    because a command containing one is refused before any of this is asked.
+
+    The entrypoint is matched with ``startswith`` rather than a pattern: it is a path from the
+    caller, and a path is full of characters a regex would read as syntax.
+    """
+    stripped = command.strip(" \t")
+    if not stripped.startswith(entrypoint):
+        return False
+    return _SET_PHASES_WORD.match(stripped, len(entrypoint)) is not None
 
 
 # --------------------------------------------------------------------------
