@@ -24,7 +24,7 @@ import sys
 import time
 import traceback
 
-__all__ = ["TRUNCATION_MARKER", "log", "log_exception", "now", "truncate"]
+__all__ = ["TRUNCATION_MARKER", "log", "log_exception", "now", "stdin_argument", "truncate"]
 
 TRUNCATION_MARKER = "[... truncated at {limit} bytes; the full report is on disk, print it with /adversarial-review-loop:report ...]"
 
@@ -53,6 +53,36 @@ def log_exception() -> None:
 def now() -> int:
     """Seconds since the epoch, matching the shell's ``printf '%(%s)T' -1``."""
     return int(time.time())
+
+
+def stdin_argument() -> str:
+    """The slash command's argument string, read whole from stdin.
+
+    The ``--*-stdin`` flags exist because Claude Code substitutes ``$ARGUMENTS`` into a skill
+    body *textually*, with no shell escaping -- the only transform applied to the substituted
+    value is one that neutralises ``!`` shell-exec markers. Whatever the user typed after the
+    slash command is therefore parsed as shell source, so a quote in it ends the argument
+    early and a ``$(...)`` or a ``;`` in it runs. A quoted here-document is the one shell
+    construct whose body is never parsed, which is how the skills now hand the string over;
+    this is the receiving end. See AGENTS.md, "The argument channel".
+
+    A trailing newline is stripped because the here-document adds one that the user did not
+    type. Nothing else is touched: leading whitespace, embedded newlines, quotes and dollar
+    signs all arrive exactly as typed.
+
+    Reading is skipped when stdin is a terminal, so an operator who types the flag by hand
+    gets an empty argument instead of a process that hangs waiting for a here-document that
+    is never coming. Every read error is likewise an empty argument -- these commands refuse
+    on their own terms when the argument is missing, and none of them is a gate whose silence
+    could be read as approval.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return ""
+        return sys.stdin.read().removesuffix("\n")
+    except (OSError, ValueError, UnicodeDecodeError):
+        log("could not read the argument from stdin; treating it as empty")
+        return ""
 
 
 def truncate(text: str, limit: int) -> str:

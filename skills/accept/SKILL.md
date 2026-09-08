@@ -8,7 +8,11 @@ user-invocable: true
 
 # Manually accept the current tree
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh accept --reason "$ARGUMENTS"`
+```!
+${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh accept --reason-stdin <<'ARL-ARGUMENTS-EOF'
+$ARGUMENTS
+ARL-ARGUMENTS-EOF
+```
 
 ## What just happened
 

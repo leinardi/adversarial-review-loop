@@ -52,7 +52,7 @@ from arl.commands import hooks
 from arl.config import Config
 from arl.gitsnap import SnapshotError
 from arl.state import State
-from arl.util import log, now
+from arl.util import log, now, stdin_argument
 
 __all__ = ["run"]
 
@@ -114,11 +114,21 @@ def _refusal(state: State, config: Config) -> str | None:  # noqa: PLR0911 - one
 
 
 def _parse_args(argv: list[str]) -> tuple[str, str]:
-    """``(reason, session)``. Unrecognised tokens are ignored, matching ``session.defer``."""
+    """``(reason, session)``. Unrecognised tokens are ignored, matching ``session.defer``.
+
+    ``--reason-stdin`` is how the skill spells it: the reason arrives on stdin instead of on
+    argv, because argv cannot carry it safely through Claude Code's unescaped ``$ARGUMENTS``
+    substitution (see :func:`arl.util.stdin_argument`). ``--reason`` stays for callers on a
+    real command line, and for the skill body an older install still serves from its cache.
+    """
     reason = ""
     session = ""
     index = 0
     while index < len(argv):
+        if argv[index] == "--reason-stdin":
+            reason = stdin_argument()
+            index += 1
+            continue
         if argv[index] == "--reason":
             reason = argv[index + 1] if index + 1 < len(argv) else ""
             index += 2

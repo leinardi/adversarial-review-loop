@@ -61,6 +61,7 @@ from arl import commands
 from arl.commands import arm
 from arl.config import Config
 from arl.state import State
+from arl.util import stdin_argument
 
 __all__ = ["run"]
 
@@ -130,17 +131,24 @@ def _refusal(state: State, config: Config) -> str | None:  # noqa: PLR0911 - one
 def _parse_args(argv: list[str]) -> tuple[list[str], str]:
     """``(positionals, session)``.
 
-    ``--args`` is the slash command's single substituted string, whitespace-split; a bare
-    token on argv (how the tests and a shell caller spell it) is a positional too. Unlike
-    ``arm.split_args`` nothing here is a path, so the split is plain and every token is kept
-    -- including the extra ones, so :func:`run` can refuse rather than silently read the
-    first and drop the rest.
+    ``--args`` and ``--args-stdin`` are the slash command's single substituted string,
+    whitespace-split; a bare token on argv (how the tests and a shell caller spell it) is a
+    positional too. Unlike ``arm.split_args`` nothing here is a path, so the split is plain
+    and every token is kept -- including the extra ones, so :func:`run` can refuse rather than
+    silently read the first and drop the rest.
+
+    ``--args-stdin`` is what the skill body spells, and the one form that survives Claude
+    Code's unescaped ``$ARGUMENTS`` substitution intact; see :func:`arl.util.stdin_argument`.
     """
     positionals: list[str] = []
     session = ""
     index = 0
     while index < len(argv):
         token = argv[index]
+        if token == "--args-stdin":
+            positionals.extend(stdin_argument().split())
+            index += 1
+            continue
         if token in ("--args", "--session"):
             value = argv[index + 1] if index + 1 < len(argv) else ""
             if token == "--session":

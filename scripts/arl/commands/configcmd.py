@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Final
@@ -41,6 +42,7 @@ from typing import Any, Final
 from arl import atomic, commands, harness, paths, reviewer_probe
 from arl import config as config_module
 from arl.config import Config
+from arl.util import stdin_argument
 
 __all__ = ["run"]
 
@@ -397,7 +399,39 @@ def _parse(argv: list[str]) -> tuple[str, list[str], bool, bool, bool]:
     return key, positionals, repo_flag, force, unset
 
 
+def _stdin_argv(argv: list[str]) -> list[str]:
+    """Replace a leading ``--args-stdin`` with the whitespace-split argument string.
+
+    This command's arguments are words, not one free-text string, so the split happens here
+    rather than in the caller. It is :mod:`shlex` rather than a plain whitespace split because
+    this is the one slash command whose old body interpolated ``$ARGUMENTS`` *unquoted*: the
+    shell split it, which meant ``config verify_cmd "make test"`` worked and had to keep
+    working once the string stopped reaching a shell at all. ``shlex`` reproduces exactly the
+    part of that the user was relying on -- quoting to hold a value together -- and none of
+    the part that broke it, since it expands nothing and runs nothing.
+
+    An unbalanced quote is not an error here: ``shlex`` raises, and the fallback hands the
+    whitespace split to the ordinary validation, which names the key or value it could not
+    accept. That is a better answer than a parser complaint about a quote the user may not
+    have meant as one.
+
+    ``--args-stdin`` is what the skill body spells, and the one form that survives Claude
+    Code's unescaped ``$ARGUMENTS`` substitution intact; see :func:`arl.util.stdin_argument`.
+    A bare argv (a real command line, and every test that does not exercise this path) is
+    returned untouched.
+    """
+    if not argv or argv[0] != "--args-stdin":
+        return argv
+    raw = stdin_argument()
+    try:
+        words = shlex.split(raw)
+    except ValueError:
+        words = raw.split()
+    return words + argv[1:]
+
+
 def _run(argv: list[str]) -> int:
+    argv = _stdin_argv(argv)
     if not argv:
         return _show()
 
@@ -411,8 +445,8 @@ def _run(argv: list[str]) -> int:
     if not positionals:
         raise _ConfigFailure(f'"config {key}" needs a value, or --unset to remove it\n\n{USAGE}')
     # Everything that is not a recognised flag is the value, rejoined with a single space --
-    # the shim receives `$ARGUMENTS` unquoted (AGENTS.md, "The argument channel is not
-    # escaped"), so a multi-word value like a `verify_cmd` arrives as several tokens rather
+    # the slash command hands over one whitespace-split string (AGENTS.md, "The argument
+    # channel"), so a multi-word value like a `verify_cmd` arrives as several tokens rather
     # than one quoted string.
     return _set(key, " ".join(positionals), repo_flag=repo_flag, force=force)
 

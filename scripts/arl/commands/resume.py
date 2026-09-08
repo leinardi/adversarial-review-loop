@@ -66,7 +66,7 @@ from arl.atomic import DIR_MODE, FILE_MODE, ensure_private_dir, write_private_at
 from arl.commands import arm
 from arl.errors import StateLoadError
 from arl.state import State, pointer_read, pointer_write
-from arl.util import now
+from arl.util import now, stdin_argument
 
 __all__ = ["run"]
 
@@ -243,30 +243,41 @@ class _Decision:
     replan: bool
 
 
+def _extend_flag_tokens(flag_tokens: list[str], raw: str) -> None:
+    """Append ``raw``'s whitespace-separated tokens, dropping an empty or all-space string."""
+    stripped = raw.strip(arm._SPACE)
+    if stripped:
+        flag_tokens.extend(re.split(rf"[{re.escape(arm._SPACE)}]+", stripped))
+
+
 def _parse(argv: list[str]) -> tuple[str, list[str]]:
     """``(session, flag_tokens)`` from the dispatcher's arguments.
 
     Unlike ``arm``, there is no positional plan: a revised plan is always named by the
     ``--plan`` flag, so there is no plan/flag boundary to find, and every non-option token is
-    itself a flag token. ``--args`` is the shim's single substituted ``$ARGUMENTS`` string,
-    split on whitespace exactly as ``arm.split_args`` splits the flag half of its own input --
-    which carries the same limitation ``arm`` already has for ``--model``/``--variant``: a
-    value containing whitespace cannot survive this channel. See AGENTS.md, "The argument
-    channel is not escaped".
+    itself a flag token. ``--args`` and ``--args-stdin`` are the slash command's single
+    substituted ``$ARGUMENTS`` string, split on whitespace exactly as ``arm.split_args``
+    splits the flag half of its own input -- which carries the same limitation ``arm`` already
+    has for ``--model``/``--variant``: a value containing whitespace cannot survive this
+    channel. ``--args-stdin`` is what the skill body spells, and the one form that survives
+    Claude Code's unescaped ``$ARGUMENTS`` substitution intact; see AGENTS.md, "The argument
+    channel".
     """
     session = ""
     flag_tokens: list[str] = []
     index = 0
     while index < len(argv):
         token = argv[index]
+        if token == "--args-stdin":
+            _extend_flag_tokens(flag_tokens, stdin_argument())
+            index += 1
+            continue
         if token in ("--session", "--args"):
             value = argv[index + 1] if index + 1 < len(argv) else ""
             if token == "--session":
                 session = value
             else:
-                stripped = value.strip(arm._SPACE)
-                if stripped:
-                    flag_tokens.extend(re.split(rf"[{re.escape(arm._SPACE)}]+", stripped))
+                _extend_flag_tokens(flag_tokens, value)
             index += 2
             continue
         if token:

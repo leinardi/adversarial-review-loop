@@ -8,7 +8,11 @@ user-invocable: true
 
 # Resume the review loop
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh resume --session "${CLAUDE_SESSION_ID}" --args "$ARGUMENTS"`
+```!
+${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh resume --session "${CLAUDE_SESSION_ID}" --args-stdin <<'ARL-ARGUMENTS-EOF'
+$ARGUMENTS
+ARL-ARGUMENTS-EOF
+```
 
 ## What just happened
 
