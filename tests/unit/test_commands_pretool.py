@@ -433,6 +433,55 @@ def test_set_phases_is_the_one_command_allowed_while_armed(git_repo: Path, tmp_p
     assert "set-phases is the one command allowed" in reason
 
 
+def test_a_phase_description_may_quote_something(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A description containing an escaped quote is ordinary text, and bash accepts the word.
+
+    This is what deadlocked a real activation: the deny scan read the ``\\"`` as closing the
+    quote, refused the command, and the generic denial named no cause.
+    """
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=f'{ENTRYPOINT} set-phases --phase "make greet(name) return \\"hello\\""')
+
+    assert verdict == "allow"
+    assert "set-phases is the one command allowed" in reason
+
+
+def test_a_refused_set_phases_attempt_is_told_what_about_it_was_refused(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A backtick in a description is refused -- correctly -- but the reason has to reach the model.
+
+    Without it the gate answers a correctly-typed ``set-phases`` with the same message that
+    asked for it, and the only way out of the loop is a human. Measured: four rounds, then
+    ``NEEDS_HUMAN``.
+    """
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=f"{ENTRYPOINT} set-phases --phase 'add `greet.py`'")
+
+    assert verdict == "deny"
+    assert "this spelling of it was refused" in reason
+    assert "backtick" in reason
+    assert "phase list has not been frozen yet" not in reason
+
+
+def test_a_command_that_was_never_set_phases_still_gets_the_ordinary_denial(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The other half: coaching here would send the model after a fault it did not commit.
+
+    An impostor ``arl`` and a commit chained in front of the real one are refused with the
+    ordinary message too -- telling either of those *why* is help this gate does not owe them.
+    """
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    for command in ("git status --short", "./arl set-phases --phase 'one'", f"git add -A && {ENTRYPOINT} set-phases --phase 'one'"):
+        verdict, reason = pretool(git_repo, env, command=command)
+        assert verdict == "deny", command
+        assert "phase list has not been frozen yet" in reason, command
+        assert "this spelling of it was refused" not in reason, command
+
+
 # --------------------------------------------------------------------------
 # A corrupted plan_revisions entry escalates rather than substituting evidence
 # --------------------------------------------------------------------------
