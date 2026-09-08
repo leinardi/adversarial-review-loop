@@ -454,8 +454,16 @@ _BEFORE: Final = r"(^|[ \t\v\f\r;&|(])"
 #: strict validator then refuses the non-canonical spelling, which is the safe direction.
 _GIT: Final = r"(?:[^ \t\v\f\r\n;&|()]*/)?git"
 
-_COMMIT_RE: Final = re.compile(rf"{_BEFORE}{_GIT}({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+commit({_SPACE}|$)", re.MULTILINE)
-_RESET_RE: Final = re.compile(rf"{_BEFORE}{_GIT}({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+reset({_SPACE}|$)", re.MULTILINE)
+#: The subcommand spelling ``git commit``, **or** the dashed executable ``git-commit``. git
+#: still installs the dashed builtins in ``$(git --exec-path)`` -- measured on git 2.55,
+#: ``/usr/lib/git-core/git-commit``, ``git-reset`` and ``git-update-ref`` are all there, and
+#: each does exactly what its subcommand does. With no whitespace before ``commit`` the
+#: subcommand pattern cannot see them, so ``/usr/lib/git-core/git-commit -m x`` reached the
+#: shell with no gate consulted at all. Both alternatives keep the same right-hand boundary,
+#: which is what stops ``git commit-graph write`` -- and ``git-commit-graph write`` -- from
+#: being read as a commit.
+_COMMIT_RE: Final = re.compile(rf"{_BEFORE}{_GIT}(({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+|-)commit({_SPACE}|$)", re.MULTILINE)
+_RESET_RE: Final = re.compile(rf"{_BEFORE}{_GIT}(({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+|-)reset({_SPACE}|$)", re.MULTILINE)
 #: ``git update-ref``, **including the dashed executable** ``git-update-ref``. git still ships
 #: the dashed builtins in ``$(git --exec-path)`` (measured: git 2.55 has
 #: ``/usr/lib/git-core/git-update-ref``), and ``/usr/lib/git-core/git-update-ref -d HEAD``

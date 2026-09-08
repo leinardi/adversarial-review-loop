@@ -96,6 +96,16 @@ over whatever's left. The deny-list runs first and is the actual security bounda
 parser only turns the small surviving language into words correctly — it doesn't widen what
 the gate accepts.
 
+Detection knows the ways git can be *spelled*, not only the canonical one. A path-qualified
+`/usr/bin/git commit`, an escaped `g\it commit` (undone by `detection_form` before matching),
+and the dashed executables git still installs in `git --exec-path` — `git-commit`,
+`git-reset` and `git-update-ref`, measured present on git 2.55, each doing exactly what its
+subcommand does — all reach the gate. Detection is deliberately looser than what the gate then
+accepts: a non-canonical spelling is refused by the strict validator rather than classified,
+which is the safe direction, and the command can be re-issued as `git commit -m "…"` to go
+through the ordinary review. The word boundary is kept on both sides, so `git commit-graph
+write` is not a commit under either spelling.
+
 A third check, `unresolved_expansion`, runs on **every** `Bash` call rather than only on the
 commit path, and it is *not* the boundary. It exists so textual detection cannot go blind on
 a command **name**: `$(printf git) commit` runs `git commit` and contains no `git` for the
