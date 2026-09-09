@@ -158,6 +158,27 @@ def test_arm_freezes_the_plan_and_records_the_activation(git_repo: Path, tmp_pat
     assert revisions[0]["sha256"] == hashlib.sha256(frozen.read_bytes()).hexdigest()
 
 
+def test_the_frozen_plan_is_byte_identical(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The frozen copy is what every review is shown; a re-encoded one is a different plan.
+
+    ``_freeze_plan`` must copy bytes, not text. A plan that is not valid UTF-8 -- a stray
+    latin-1 paste, a file with a BOM-less UTF-16 fragment -- has to survive unchanged, so a
+    later rewrite to text mode (which would re-encode or reject it) fails here rather than
+    silently narrowing the review scope.
+    """
+    env = armed_env(clean_env)
+    plan = tmp_path / "plan.md"
+    raw = b"# plan\n\n\xff\xfe raw bytes \xc3\xa9\n"
+    plan.write_bytes(raw)
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan)], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    frozen = state_dir(env, git_repo, "s1") / "plan.frozen.md"
+    assert frozen.read_bytes() == raw
+    assert read_state(env, git_repo, "s1")["plan_revisions"][0]["sha256"] == hashlib.sha256(raw).hexdigest()  # type: ignore[index]
+
+
 @pytest.mark.parametrize(("setting", "expected"), [("false", "disabled (final_review)"), ("true", "enabled")])
 def test_the_arm_summary_says_whether_a_final_review_will_run(
     git_repo: Path, tmp_path: Path, clean_env: dict[str, str], setting: str, expected: str
