@@ -718,7 +718,7 @@ def test_escalation_persists_immediately(state_env: dict[str, str]) -> None:
 
 def test_new_state_document_carries_the_resume_fields(state_env: dict[str, str]) -> None:
     doc = state.new_state_document()
-    assert doc["version"] == state.STATE_VERSION == 4
+    assert doc["version"] == state.STATE_VERSION == 5
     assert doc["stop_after_phase"] == 0
     assert doc["resumed_from"] == ""
     assert doc["resumed_into"] == ""
@@ -746,7 +746,7 @@ def test_a_fresh_document_needs_no_migration(state_env: dict[str, str]) -> None:
         st.update(status="ARMED")
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 4
+    assert reread.data["version"] == 5
     assert reread.data["plan_revisions"] == []
     assert reread.data["round_history"] == []
 
@@ -773,7 +773,7 @@ def test_a_legacy_document_migrates_on_the_first_transaction(state_env: dict[str
 
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 4
+    assert reread.data["version"] == 5
     assert reread.data["plan_revisions"] == [
         {
             "at": before["armed_at"],
@@ -933,7 +933,7 @@ def test_a_v2_document_migrates_forward_with_no_evidence_recovery(state_env: dic
 
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 4
+    assert reread.data["version"] == 5
     assert reread.data["round_history"] == []
     assert reread.data["transient_failures"] == 0
     assert reread.data["retry_not_before"] == 0
@@ -953,7 +953,7 @@ def test_the_2_to_3_arm_preserves_an_existing_round_history(state_env: dict[str,
 
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 4
+    assert reread.data["version"] == 5
     assert reread.data["round_history"] == existing
 
 
@@ -986,7 +986,7 @@ def test_a_v3_document_migrates_to_v4_with_no_guide(state_env: dict[str, str]) -
 
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 4
+    assert reread.data["version"] == 5
     assert reread.data["guide_path"] == ""
     assert reread.data["guide_revisions"] == []
     assert reread.data["report_seq"] == 4
@@ -1003,7 +1003,7 @@ def test_the_3_to_4_arm_preserves_existing_guide_revisions(state_env: dict[str, 
 
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 4
+    assert reread.data["version"] == 5
     assert reread.data["guide_path"] == "/repo/.arl/g.md"
     assert reread.data["guide_revisions"] == existing
 
@@ -1033,18 +1033,83 @@ def test_a_fresh_document_carries_the_end_state_fields_empty(state_env: dict[str
     assert doc["ended_at"] == 0
 
 
-def test_migration_never_backfills_ended_capture(state_env: dict[str, str]) -> None:
-    """``ended_capture``'s **absence** is the legacy signal, so no arm may ``setdefault`` it.
-
-    A document written before the end-state record existed must come out of the migration
-    still missing the key: that is what both reporting channels read as "this activation
-    predates the check, say nothing", and a backfilled ``""`` would be indistinguishable only
-    by luck while a backfilled anything-else would invent evidence.
-    """
-    st = _install_v3_state(WORKTREE, SESSION)
-    doc = json.loads(st.state_file.read_text())
+def _install_v4_state(worktree: str, session: str, **overrides: object) -> state.State:
+    """A version-4 document: the current schema minus everything the 4 -> 5 arm decides about."""
+    st = state.State(worktree, session)
+    doc = state.new_state_document()
     for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
-        doc.pop(key, None)
+        del doc[key]
+    doc["version"] = 4
+    doc.update({"status": "ACTIVE", "phases": ["one"], "phase": 1, "report_seq": 4, **overrides})
+    write_private_atomic(st.state_file, json.dumps(doc), root=paths.state_root())
+    return st
+
+
+@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "RESUMED"])
+def test_the_4_to_5_arm_leaves_an_already_ended_document_absent(state_env: dict[str, str], status: str) -> None:
+    """An activation that ended before the record existed keeps the legacy signal.
+
+    Nothing about that history is recoverable, and inventing evidence is worse than refusing --
+    the same reasoning the 3 -> 4 arm uses to decline synthesizing a guide revision 0. Both
+    reporting channels read the absence as silence, which is the correct answer here and the
+    one direction this arm must not take away.
+    """
+    st = _install_v4_state(WORKTREE, SESSION, status=status)
+
+    with state.State(WORKTREE, SESSION).transaction() as live:
+        live.update(reason="touched after the upgrade")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["version"] == 5
+    for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
+        assert key not in reread.data, f"{key} was backfilled into a document that had already ended"
+    assert st.state_file.exists()
+
+
+@pytest.mark.parametrize("status", ["ARMED", "ACTIVE", "RECONCILE", "ARM_FAILED", "NEEDS_HUMAN"])
+def test_the_4_to_5_arm_gives_a_still_live_document_the_current_schema(state_env: dict[str, str], status: str) -> None:
+    """A legacy activation that has *not* ended will reach its terminal transition under this
+    build, which records properly -- so it gets the current schema's empty record now.
+
+    Without this, absence would go on meaning silence for it forever, and the documented Rule 4
+    bypass (writing ``status`` straight into ``state.json``, which leaves no evidence by
+    construction) would inherit that silence. With it, a hand-edited status is a document that
+    has the field and never filled it, which ``hooks.end_state`` reports as tampering.
+    """
+    st = _install_v4_state(WORKTREE, SESSION, status=status)
+
+    with state.State(WORKTREE, SESSION).transaction() as live:
+        live.update(reason="touched after the upgrade")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["version"] == 5
+    assert reread.data["ended_capture"] == ""
+    assert reread.data["ended_head"] == ""
+    assert reread.data["ended_tree"] == ""
+    assert reread.data["ended_at"] == 0
+    assert st.state_file.exists()
+
+
+def test_the_4_to_5_arm_never_invents_a_value(state_env: dict[str, str]) -> None:
+    """Only the empty defaults are ever written -- an arm that guessed would fabricate evidence."""
+    st = _install_v4_state(WORKTREE, SESSION, status="ACTIVE")
+
+    with state.State(WORKTREE, SESSION).transaction() as live:
+        live.update(reason="migrated")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["ended_capture"] not in ("recorded", "unborn", "unreadable")
+    assert st.state_file.exists()
+
+
+def test_the_4_to_5_arm_preserves_an_existing_record(state_env: dict[str, str]) -> None:
+    """``setdefault``, not assignment: a document that already carries one keeps it."""
+    st = _install_v4_state(WORKTREE, SESSION, status="ACTIVE")
+    doc = json.loads(st.state_file.read_text())
+    doc.update(ended_capture="recorded", ended_head="a" * 40, ended_tree="b" * 40, ended_at=1_757_000_000)
     write_private_atomic(st.state_file, json.dumps(doc), root=paths.state_root())
 
     with state.State(WORKTREE, SESSION).transaction() as live:
@@ -1052,5 +1117,5 @@ def test_migration_never_backfills_ended_capture(state_env: dict[str, str]) -> N
 
     reread = state.State(WORKTREE, SESSION)
     assert reread.load()
-    assert reread.data["version"] == 4
-    assert "ended_capture" not in reread.data
+    assert reread.data["ended_capture"] == "recorded"
+    assert reread.data["ended_head"] == "a" * 40

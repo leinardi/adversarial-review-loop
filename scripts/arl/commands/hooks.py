@@ -38,7 +38,7 @@ from arl import config as config_module
 from arl.config import Config
 from arl.errors import RepoResolutionError, UnsafePathError
 from arl.hookio import Hook
-from arl.state import State, intent_read, pointer_ack, pointer_read, pointer_write
+from arl.state import ENDED_EVIDENCE_STATUSES, State, intent_read, pointer_ack, pointer_read, pointer_write
 from arl.util import log, now
 
 __all__ = [
@@ -214,6 +214,10 @@ _END_CAPTURES: Final = frozenset({"recorded", "unborn", "unreadable"})
 #: A value outside it did not come from ``util.now``.
 _MAX_ENDED_AT: Final = 10_000_000_000
 
+#: Distinguishes "the key is not in the document" from "the key holds an empty string".
+#: Load-bearing -- see :func:`end_state`.
+_ABSENT: Final = object()
+
 
 def _end_capture(capture: str, *, head: str = "", tree: str = "") -> dict[str, object]:
     return {"ended_capture": capture, "ended_head": head, "ended_tree": tree, "ended_at": now()}
@@ -276,6 +280,15 @@ def end_state(state: State) -> EndState:
     maps every malformed value to ``0`` and ``int(True) == 1`` slips straight through it,
     either of which would make corruption indistinguishable from a legacy absence.
 
+    **An absent ``ended_capture`` and a present, empty one are not the same thing**, and
+    collapsing them is a suppression, not a tidy-up. Absent means the document predates the
+    record and there is nothing to report. Present-and-empty means the schema has the field
+    and no terminal transition filled it -- ordinary on a live activation, and impossible on
+    one whose stored status a terminal transition writes, since all three of those writes fold
+    :func:`ended_evidence` into the same ``state.update``. The documented Rule 4 bypass is
+    editing ``status`` straight into ``state.json`` (AGENTS.md, "What Rule 4 does and does not
+    guarantee"), which produces precisely that second shape, so it is reported as tampering.
+
     ``looks_like_object_id`` and **not** ``gitsnap.checked_tree``: ``checked_tree`` resolves
     against the repository as it is *now*, and a genuinely recorded tree legitimately stops
     resolving after a rewrite, reset or gc -- that would turn a true report into silence, the
@@ -284,11 +297,9 @@ def end_state(state: State) -> EndState:
     interpolated into a message.
     """
 
-    raw_capture = state.data.get("ended_capture")
-    if raw_capture is None or raw_capture == "":
-        # A document written before this check existed. Its absence is the legacy signal, so
-        # no migration arm may ever backfill it.
-        return EndState(capture="", head="", tree="", at=0, recorded=False, malformed=False)
+    raw_capture = state.data.get("ended_capture", _ABSENT)
+    if raw_capture is _ABSENT or raw_capture is None or raw_capture == "":
+        return _no_record_end_state(state, present=raw_capture is not _ABSENT)
     # `isinstance` first: `x in frozenset` hashes `x`, and an edited document may hold a list
     # or a dict there. A `TypeError` raised here would unwind through the hook's fail-closed
     # guard, which reports a crash rather than the tampering this function exists to name.
@@ -327,6 +338,26 @@ def _recorded_end_state(raw_head: object, raw_tree: object, at: int) -> EndState
     if len(head) != len(tree):
         return _malformed_end_state()
     return EndState(capture="recorded", head=head, tree=tree, at=at, recorded=True, malformed=False)
+
+
+def _no_record_end_state(state: State, *, present: bool) -> EndState:
+    """The ``ended_capture``-carries-nothing arm of :func:`end_state`, which is two cases.
+
+    ``present=False`` -- the key is absent -- is a document written before this check existed.
+    That is the legacy signal, the only shape that reads as silence: there is genuinely no
+    evidence, and current HEAD answers a different question.
+
+    ``present=True`` means this document *has* the field and no terminal transition filled it.
+    On a live activation that is the ordinary armed value. On one whose stored status a
+    terminal transition writes it is a contradiction this build cannot produce, since all
+    three of those writes fold :func:`ended_evidence` into the same ``state.update`` -- and it
+    is precisely what the documented Rule 4 bypass leaves behind, `status` written straight
+    into ``state.json`` with no command to inspect. Reading that as legacy silence would hand
+    the bypass its own suppression.
+    """
+    if present and state.get("status") in ENDED_EVIDENCE_STATUSES:
+        return _malformed_end_state()
+    return EndState(capture="", head="", tree="", at=0, recorded=False, malformed=False)
 
 
 def _malformed_end_state() -> EndState:

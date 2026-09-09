@@ -79,9 +79,46 @@ def test_an_absent_capture_is_legacy_silence_not_corruption() -> None:
     assert read.capture == ""
 
 
-def test_an_empty_capture_on_a_live_document_is_legacy_silence_too() -> None:
-    """A freshly armed document carries ``ended_capture: ""``; nothing has ended there."""
-    read = end_state_of()
+@pytest.mark.parametrize("status", ["ARMED", "ACTIVE", "RECONCILE", "ARM_FAILED", "NEEDS_HUMAN", "STALE"])
+def test_an_empty_capture_on_a_live_document_says_nothing_has_ended(status: str) -> None:
+    """A freshly armed document carries ``ended_capture: ""``, and so does every live one.
+
+    ``ARM_FAILED`` and ``NEEDS_HUMAN`` are in here deliberately: they are terminal in their own
+    way, but no writer records evidence for them, so an empty record there is correct rather
+    than suspicious.
+    """
+    read = end_state_of(status=status)
+    assert read.recorded is False
+    assert read.malformed is False
+
+
+@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "RESUMED"])
+def test_a_terminal_document_with_no_record_was_edited(status: str) -> None:
+    """The documented Rule 4 state-edit bypass, and it must not read as legacy silence.
+
+    All three production writes of a terminal status fold ``ended_evidence`` into the same
+    ``state.update``, so this build cannot produce a terminal document carrying the field
+    empty. Writing ``status: DISARMED`` straight into ``state.json`` ends the mode with no
+    command to inspect (AGENTS.md, "What Rule 4 does and does not guarantee") and leaves
+    exactly this shape -- so collapsing it into the legacy case would hand that bypass its own
+    suppression.
+    """
+    read = end_state_of(status=status)
+    assert read.malformed is True
+    assert read.recorded is False
+
+
+@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "RESUMED"])
+def test_a_legacy_terminal_document_still_says_nothing(status: str) -> None:
+    """The other half of the distinction: **absent** is the legacy signal, and stays silent."""
+    st = state.State("/wt", "sess")
+    st.data = state.new_state_document()
+    st.data["status"] = status
+    for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
+        del st.data[key]
+
+    read = hooks.end_state(st)
+
     assert read.recorded is False
     assert read.malformed is False
 
