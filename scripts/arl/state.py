@@ -75,7 +75,19 @@ ENDED_EVIDENCE_STATUSES: Final = frozenset({"DISARMED", "COMPLETE", "RESUMED"})
 #: marks a retired activation -- it already denies everything on its own, and letting the
 #: TTL turn it into ``STALE`` instead would replace a message naming the successor session
 #: with a generic re-arm prompt.
-_TTL_EXEMPT: Final = frozenset({"COMPLETE", "ARM_FAILED", "NEEDS_HUMAN", "RESUMED"})
+#:
+#: **``DISARMED`` belongs here for a stronger reason than tidiness.** The TTL exists to catch
+#: an activation nobody ever ended; one the user *did* end is the case it was never about, and
+#: expiring it does three separate kinds of damage. ``pretool._gate_terminal_status`` passes
+#: ``DISARMED`` and **denies** ``STALE``, so a worktree the user deliberately stopped starts
+#: refusing every mutation ``ttl_hours`` after it was armed. The Stop gate then tells them to
+#: ``resume`` a mode they chose to leave. And ``STALE`` is not in ``commands.posttool._ENDED``,
+#: so the document routes back onto the live current-HEAD branch and the ungated-commit report
+#: this change exists to scope comes back -- one day late.
+#:
+#: ``resume`` is unaffected: it reads the *stored* status against ``_RESUMABLE``, so a stale
+#: ``DISARMED`` activation was always resumable and still is.
+_TTL_EXEMPT: Final = frozenset({"COMPLETE", "DISARMED", "ARM_FAILED", "NEEDS_HUMAN", "RESUMED"})
 
 #: Version 2 adds resume, pause, plan revision and the config overlay's fields. Version 3
 #: adds ``round_history`` and the convergence counters. Version 4 adds the repo-supplied

@@ -237,6 +237,31 @@ def test_a_root_commit_reconcile_blocks_with_a_recovery_that_exists(git_repo: Pa
     assert "git reset --soft" not in reason
 
 
+def test_a_stopped_activation_is_not_asked_to_resume_after_the_ttl(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The Stop-gate half of the ``DISARMED`` TTL exemption. Fails hard on the old code.
+
+    An activation the user deliberately ended was turned into ``STALE`` once ``armed_at``
+    passed ``ttl_hours``, and the turn end then told them to ``resume`` a mode they chose to
+    leave. It also routed the document back onto the live current-HEAD branch, which brings the
+    ungated-commit noise back a day after it was scoped away.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    committed_phase(git_repo, env)
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    patch_state(env, git_repo, armed_at=1)
+
+    assert stop(git_repo, env) == {}
+
+    # And an ordinary commit made afterwards stays silent too, rather than the expiry putting
+    # the document back on the branch that asks about current HEAD.
+    (git_repo / "ordinary.txt").write_text("ungated by design\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ordinary work after the mode ended")
+    assert stop(git_repo, env) == {}
+
+
 def test_an_expired_activation_ends_the_turn_uncounted_and_never_escalates(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """STALE is the user's to clear, so blocking over it only wedges the session.
 
