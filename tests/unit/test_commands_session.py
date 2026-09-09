@@ -24,7 +24,9 @@ pointer in place, and ``finish`` must reach ``COMPLETE`` only through an approvi
 
 from __future__ import annotations
 
+import ast
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -32,7 +34,9 @@ import pytest
 from conftest import FAKE_REVIEWER, git, run_bootstrap
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
 
+from arl import commands as commands_module
 from arl import harness, paths
+from arl.commands import session as session_module
 
 
 def arm(repo: Path, tmp_path: Path, env: dict[str, str], session: str = "s1") -> None:
@@ -525,6 +529,266 @@ def test_deactivate_without_an_activation(git_repo: Path, clean_env: dict[str, s
     proc = run_bootstrap(["deactivate"], cwd=git_repo, env=armed_env(clean_env))
     assert proc.returncode == 0
     assert proc.stdout == "adversarial-review-loop: not armed in this worktree, so there is nothing to stop.\n"
+
+
+def latest_pointer(env: dict[str, str], repo: Path) -> Path:
+    return state_dir(env, repo, "s1").parent / "latest"
+
+
+def in_the_publication_window(git_repo: Path, tmp_path: Path, env: dict[str, str]) -> Path:
+    """Arm ``s1``, retire it into ``s2`` for real, then rewind ``latest`` to the predecessor.
+
+    Reproduces the one shape that reaches ``deactivate``'s ``RESUMED`` branch: a cross-session
+    resume that retired the predecessor and published the successor, then died before
+    repointing the worktree. The rewind is the crash, not a fixture convenience -- resolution
+    reads ``latest``, so a resume that got as far as repointing can never land there at all.
+    """
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one", "two")
+    proc = run_bootstrap(["resume", "--session", "s2", "--args", ""], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    pointer = latest_pointer(env, git_repo)
+    assert pointer.read_text() == "s2\n"
+    pointer.write_text("s1\n")
+    return pointer
+
+
+def test_deactivate_stops_the_successor_a_dead_resume_never_pointed_at(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``/stop`` has to honour its own name here, and only the successor can carry it.
+
+    The predecessor is retired and must never be rewritten, so stopping *it* is not available;
+    before this, ``deactivate`` therefore changed nothing and told the user to run it again
+    once the pointer named the successor -- which no longer happens, because the resume that
+    would have repointed it is dead. The worktree stayed gated through unlimited ``/stop``s.
+    """
+    env = armed_env(clean_env)
+    pointer = in_the_publication_window(git_repo, tmp_path, env)
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "STOPPED for this worktree -- through s2" in proc.stdout
+    assert read_state(env, git_repo, "s2")["status"] == "DISARMED"
+    assert pointer.read_text() == "s2\n"
+    # The retired document is the one thing that must come through untouched (AGENTS.md).
+    retired = read_state(env, git_repo, "s1")
+    assert retired["status"] == "RESUMED"
+    assert retired["resumed_into"] == "s2"
+
+
+def test_deactivate_records_the_end_state_on_the_successor_it_stops(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The stop is a real terminal transition, so it owes the same evidence as any other."""
+    env = armed_env(clean_env)
+    in_the_publication_window(git_repo, tmp_path, env)
+
+    run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    successor = read_state(env, git_repo, "s2")
+    assert successor["ended_capture"] == "recorded"
+    assert successor["ended_head"]
+    assert successor["ended_tree"]
+    assert successor["ended_at"]
+
+
+def test_deactivate_finishes_the_pointer_even_when_the_successor_already_ended(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Nothing to stop, but leaving ``latest`` on the retired document wedges a finished worktree.
+
+    Every later command would resolve the predecessor again and deny under ``RESUMED``, so the
+    pointer is the whole remedy -- and the successor's own end-state record, not the
+    predecessor's, is what the reporting channels must then read.
+    """
+    env = armed_env(clean_env)
+    pointer = in_the_publication_window(git_repo, tmp_path, env)
+    pointer.write_text("s2\n")
+    run_bootstrap(["deactivate"], cwd=git_repo, env=env)  # stops s2 the ordinary way
+    before = read_state(env, git_repo, "s2")
+    pointer.write_text("s1\n")
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "s2 was no longer live (DISARMED)" in proc.stdout
+    assert pointer.read_text() == "s2\n"
+    # First terminal transition wins: the second run must not restamp the evidence.
+    assert read_state(env, git_repo, "s2") == before
+
+
+def test_deactivate_says_plainly_that_it_cannot_free_an_unpublished_retirement(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Both sides deny by design here, and pretending otherwise is the only real failure.
+
+    The successor has no document, so there is nothing to stop and nothing to point at. The
+    honest answer names ``implement`` and says ``/stop`` will keep printing this -- rather than
+    offering a remedy that cannot fire.
+    """
+    env = armed_env(clean_env)
+    pointer = in_the_publication_window(git_repo, tmp_path, env)
+    shutil.rmtree(state_dir(env, git_repo, "s2"))
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "retired by a resume that never finished" in proc.stdout
+    assert "cannot free this worktree" in proc.stdout
+    # Rule 0: a session with no document denies; it does not "gate nothing".
+    assert "can prove nothing about" in proc.stdout
+    assert pointer.read_text() == "s1\n"
+    assert read_state(env, git_repo, "s1")["status"] == "RESUMED"
+
+
+def test_deactivate_refuses_a_successor_that_does_not_name_its_predecessor_back(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``resumed_into`` is untrusted input, and what it authorises here is a write.
+
+    Retirement writes both halves of the link at once, so a half-present chain was written by
+    something else. Following it would let one edited field in a retired document aim ``/stop``
+    at an unrelated live activation -- disarming it and publishing it as ``latest`` -- which is
+    a wider escape than the state edit it rides in on.
+    """
+    env = armed_env(clean_env)
+    pointer = in_the_publication_window(git_repo, tmp_path, env)
+    successor_path = state_dir(env, git_repo, "s2") / "state.json"
+    document = json.loads(successor_path.read_text())
+    document["resumed_from"] = "somebody-else"
+    successor_path.write_text(json.dumps(document))
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "does not name it back" in proc.stdout
+    assert read_state(env, git_repo, "s2")["status"] == "ACTIVE", "an unlinked activation must not be disarmed"
+    assert pointer.read_text() == "s1\n", "nor published as this worktree's activation"
+
+
+def test_deactivate_publishes_the_pointer_under_the_lock_that_a_retirement_takes(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The pointer write must sit inside the successor's own transaction.
+
+    ``resume``'s retirement runs inside the predecessor's ``transaction()``, so that lock is
+    what serialises the two. Published after the lock released, a concurrent resume could retire
+    this successor and repoint ``latest`` at *its* successor, and this call would then overwrite
+    that pointer with a session now ``RESUMED`` -- wedging the worktree while reporting it
+    freed. This pins the ordering rather than the race, which is not reproducible in-process.
+    """
+    source = (Path(__file__).parents[2] / "scripts" / "arl" / "commands" / "session.py").read_text()
+    function = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.FunctionDef) and node.name == "_stop_the_successor")
+    statements = [node for node in ast.walk(function) if isinstance(node, ast.With)]
+    assert len(statements) == 1, "one lock, or this check is reading the wrong one"
+    # The `except` handler is a sibling of the `with`, not a descendant, so a pointer write
+    # moved out to it lands outside this set -- which is exactly the regression to catch.
+    under_the_lock = set(ast.walk(statements[0]))
+    published = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "write_latest"
+    ]
+    assert len(published) == 2, "the terminal-successor path and the stopped path both publish"
+    assert all(call in under_the_lock for call in published), "a pointer write escaped the successor's lock"
+
+
+def test_deactivate_never_publishes_a_pointer_to_a_retired_successor(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A successor found ``RESUMED`` under the lock is a chain that grew; re-walk, never publish.
+
+    Publishing it would name a document that denies every mutation, so ``latest`` would point at
+    a wedge -- and would clobber the pointer the concurrent resume had already moved on.
+    """
+    env = armed_env(clean_env)
+    pointer = in_the_publication_window(git_repo, tmp_path, env)
+    # s2 retired into s3, and s3 was published: the walk must follow through to s3.
+    pointer.write_text("s2\n")
+    proc = run_bootstrap(["resume", "--session", "s3", "--args", ""], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    pointer.write_text("s1\n")
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "through s3" in proc.stdout
+    assert pointer.read_text() == "s3\n"
+    assert read_state(env, git_repo, "s3")["status"] == "DISARMED"
+    assert read_state(env, git_repo, "s2")["status"] == "RESUMED"
+
+
+def test_deactivate_refuses_to_publish_over_a_pointer_something_else_moved(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``latest`` has five publishers and none of them serialise, so the repair must not barge.
+
+    A concurrent ``implement`` can arm and publish a wholly unrelated activation while this
+    command is mid-repair. Overwriting that pointer would leave ``latest`` on a stopped session
+    while a live one gates every unbound session resolving through it -- a fail-open. The repair
+    is only valid while the pointer still names what it was resolved from, so it refuses, and
+    refusing leaves the successor untouched as well.
+    """
+    env = armed_env(clean_env)
+    pointer = in_the_publication_window(git_repo, tmp_path, env)
+    # The pointer has to move *during* the command: moved beforehand, resolution would pick up
+    # the other activation and never reach the retirement branch at all. So this one runs
+    # in-process, with the competing publisher standing in for a concurrent `implement`.
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.chdir(git_repo)
+    activation = commands_module.resolve_local_activation()
+    assert activation is not None
+    assert activation.session == "s1"
+    monkeypatch.setattr(commands_module, "latest_session", lambda _worktree: "somebody-else")
+
+    message = session_module._finish_the_retirement(activation)
+
+    assert "pointer moved while /stop was working" in message
+    assert pointer.read_text() == "s1\n", "the other publisher's pointer must survive"
+    assert read_state(env, git_repo, "s2")["status"] == "ACTIVE", "and a refused repair changes nothing"
+
+
+def test_deactivate_names_every_retired_activation_whose_sessions_still_deny(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """An A-into-B-into-C history leaves sessions bound to A *and* B denying.
+
+    The gate resolves a bound session's own document before it looks at the worktree pointer,
+    so naming only the activation this command happened to resolve would describe the other
+    retired session as free.
+    """
+    env = armed_env(clean_env)
+    pointer = in_the_publication_window(git_repo, tmp_path, env)
+    pointer.write_text("s2\n")
+    assert run_bootstrap(["resume", "--session", "s3", "--args", ""], cwd=git_repo, env=env).returncode == 0
+    pointer.write_text("s1\n")
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "(s1, s2)" in proc.stdout, "both retired activations, not just the resolved one"
+    assert "keep reading that retired document" in proc.stdout
+
+
+def test_deactivate_does_not_claim_the_reports_follow_the_pointer(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A bound session's Stop and PostToolUse reports read *its* document, not ``latest``.
+
+    The terminal-successor message used to say the reporting channels now read the successor's
+    end-state record, which is false for exactly the session most likely to be reading it.
+    """
+    env = armed_env(clean_env)
+    pointer = in_the_publication_window(git_repo, tmp_path, env)
+    pointer.write_text("s2\n")
+    run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+    pointer.write_text("s1\n")
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert "s2 was no longer live (DISARMED)" in proc.stdout
+    assert "keep reading that retired document" in proc.stdout
+    assert "the reporting channels read s2's own end-state record" not in proc.stdout
+
+
+def test_deactivate_survives_a_resumed_into_chain_that_points_at_itself(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``state.json`` is not a trust boundary: a self-naming chain must terminate, not spin."""
+    env = armed_env(clean_env)
+    in_the_publication_window(git_repo, tmp_path, env)
+    successor_path = state_dir(env, git_repo, "s2") / "state.json"
+    document = json.loads(successor_path.read_text())
+    document.update(status="RESUMED", resumed_into="s2")
+    successor_path.write_text(json.dumps(document))
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert "retired by a resume that never finished" in proc.stdout
 
 
 # --------------------------------------------------------------------------

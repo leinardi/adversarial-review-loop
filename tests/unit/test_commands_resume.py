@@ -1621,13 +1621,16 @@ def test_stopping_a_retired_activation_does_not_call_the_worktree_ungated(
     tmp_path: Path,
     clean_env: dict[str, str],
 ) -> None:
-    """``RESUMED`` is terminal for the document and *not* for the worktree.
+    """``RESUMED`` is terminal for the document and *not* for the session still bound to it.
 
     A cross-session resume retires the predecessor **before** it publishes the successor or
     repoints ``latest`` -- the fail-closed order, which has no automatic rollback -- so a
     ``/stop`` inside that window, or after a crash in it, resolves the retired predecessor.
-    ``pretool`` denies every mutation under ``RESUMED``, so reporting "commits are not gated"
-    there would describe a wedged worktree as a free one.
+    ``deactivate`` now finishes what that resume started: it stops the successor and publishes
+    the pointer, so the *worktree* really is free afterwards. What stays denied is narrower and
+    must not be glossed over -- ``pretool`` reads the calling session's own document, so a
+    session bound to the retired predecessor keeps being denied whatever the pointer says.
+    Claiming a blanket "commits are not gated" would describe that session as a free one.
     """
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
@@ -1642,12 +1645,14 @@ def test_stopping_a_retired_activation_does_not_call_the_worktree_ungated(
     proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
 
     assert proc.returncode == 0, proc.stdout
-    assert "retired by a resume" in proc.stdout
     assert S2 in proc.stdout
-    assert "not gated" not in proc.stdout
-    assert "every mutation is still denied" in proc.stdout
+    assert "A Claude session still *bound* to any retired activation" in proc.stdout
+    assert f"({S1})" in proc.stdout, "and the chain it names has to include this one"
     # And the one document AGENTS.md forbids mutating at all is untouched.
     assert (state_dir(env, git_repo, S1) / "state.json").read_bytes() == before
     verdict, reason = pretool(git_repo, env, command=COMMIT, session=S1)
     assert verdict == "deny"
     assert "retired by a resume" in reason
+    # The worktree itself is free, which is the whole point of having stopped the successor.
+    # A passing `pretool` writes nothing at all, so this cannot go through the JSON helper.
+    assert run_hook("pretool", payload(git_repo, command=COMMIT, session=S2), cwd=git_repo, env=env).stdout == ""
