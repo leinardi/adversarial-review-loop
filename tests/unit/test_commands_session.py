@@ -966,3 +966,97 @@ def test_a_reconciled_finish_marks_the_tree_it_reviewed_as_approved(
     assert document["final_done_tree"] == tree
     assert tree in approved
     assert document["ended_tree"] == tree
+
+
+def test_status_reports_how_a_stopped_activation_ended(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The user-invoked view of the record the two silent channels read."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    (git_repo / "sneaked.txt").write_text("never gated\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ungated")
+    head = git(git_repo, "rev-parse", "HEAD")
+    assert run_bootstrap(["deactivate"], cwd=git_repo, env=env).returncode == 0
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "ended:" in proc.stdout
+    assert head in proc.stdout
+    # Worded as membership in `approved_trees`, never as "reviewed": the set also holds the
+    # baseline tree and anything the gate passed without a reviewer call.
+    ended_line = proc.stdout.split("ended:")[1].split("\n")[0]
+    assert "NOT in approved_trees" in ended_line
+    assert "reviewed" not in ended_line
+
+
+def test_status_calls_the_baseline_tree_gate_approved_not_reviewed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The caveat made concrete: a mode stopped with no work done ends on the baseline tree,
+    which is in ``approved_trees`` without any reviewer having run. "gate-approved" is
+    therefore the honest word and "reviewed" would be a false one."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    assert run_bootstrap(["deactivate"], cwd=git_repo, env=env).returncode == 0
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    ended_line = proc.stdout.split("ended:")[1].split("\n")[0]
+    assert "gate-approved" in ended_line
+    assert "reviewed" not in ended_line
+
+
+def test_status_says_nothing_about_an_activation_that_is_still_live(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Nothing has ended, so there is no line to print."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "ended:" not in proc.stdout
+
+
+def test_status_offers_the_other_question_for_a_legacy_activation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The compensating control for the legacy rule.
+
+    Both reporting channels are silent for an activation that ended before the record existed,
+    which is right for a message nobody asked for -- but it leaves the user no way to ask. Here
+    they can, and the current-HEAD comparison is offered explicitly as the different question
+    it is rather than answered as though it were the same one.
+    """
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    assert run_bootstrap(["deactivate"], cwd=git_repo, env=env).returncode == 0
+    path = state_dir(env, git_repo, "s1") / "state.json"
+    document = json.loads(path.read_text())
+    document["version"] = 4
+    for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
+        document.pop(key, None)
+    path.write_text(json.dumps(document))
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "not recorded (this activation predates the check)" in proc.stdout
+    assert "a different question" in proc.stdout
+
+
+def test_status_reports_a_tampered_end_record_without_running_it(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``status`` is the one command a human runs to find out what went wrong, so it must
+    survive a document that was edited -- and the recorded tree never reaches argv."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    assert run_bootstrap(["deactivate"], cwd=git_repo, env=env).returncode == 0
+    pwned = tmp_path / "pwned"
+    patch_state(env, git_repo, ended_tree=f"--output={pwned}")
+
+    proc = run_bootstrap(["status"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "not one this gate could have written" in proc.stdout
+    assert not pwned.exists()

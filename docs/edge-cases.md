@@ -27,6 +27,11 @@ gate working as designed against a scenario worth understanding before you hit i
 | The diverging commit is the repository's root commit | `RECONCILE` recovers with a bounded `git update-ref -d HEAD`; every other `git update-ref` is denied |
 | Every phase committed, but the activation was armed on an empty repository | No completion — the phase chain has no anchor — but no escalation either: it stays `ACTIVE` and names `finish` or `stop`. `arm` warns about this up front |
 | Activation older than `ttl_hours` | `STALE`: every mutation is denied and the turn ends with a message naming `resume`. **Never a silent disarm**, and never counted as a no-progress block |
+| An activation the user *stopped* passes `ttl_hours` | Nothing: `DISARMED` is TTL-exempt. Expiring a mode the user ended would deny every mutation in that worktree a day later — see [below](#after-the-mode-ends) |
+| An ordinary commit made after the mode ended | Silent. Both reports are scoped to what the gate could see when enforcement stopped — see [below](#after-the-mode-ends) |
+| A wrapper that commits and then disarms in one Bash call | Reported by both channels, from evidence recorded at the moment it disarmed — and it stays reported even if `.git` is destroyed afterwards |
+| `status: DISARMED` written straight into `state.json` | Reported as an edited record: no terminal transition ran, so the document carries no end-state evidence it should have |
+| `/adversarial-review-loop:stop` run twice | The second is a no-op naming the status that already ended it; the first transition's record is kept byte for byte |
 | No-progress `Stop` blocks past `max_stop_blocks` | `NEEDS_HUMAN`, loud system message. **Not** an approval |
 | Claude tries `arl finish` / `deactivate` / `resume` / `config` via Bash | Denied — user-only |
 | Any mutation against a `RESUMED` activation | Denied, naming the session that took over; re-arm with `implement` is the only way out |
@@ -262,6 +267,72 @@ reviewer call between attempts; without it, a worktree something else is rewriti
 through `max_stop_blocks` in seconds and escalate to `NEEDS_HUMAN`. That escalation is the
 fail-closed direction and is working as intended — but it arrives sooner than it would with
 the cumulative review enabled.
+
+## After the mode ends
+
+Ending the mode does not end the *reporting*, and for a while it did not end it in the worst
+possible way: both channels asked "is HEAD's tree approved?", which nothing about a stopped
+activation can ever make true again. An ordinary commit made after the mode ended fired the
+same alarm as a deliberate bypass — on every turn end and every Bash call, for the rest of
+the worktree's life. An alarm that always fires carries no information.
+
+Every terminal transition — `stop`, a completion, and a cross-session `resume`'s retirement —
+now records what the gate could see at that moment, in the same write as the status:
+
+| Recorded | Meaning | What the reports do |
+| --- | --- | --- |
+| `recorded` | HEAD and its tree were read | Report if that tree is not in `approved_trees` |
+| `unborn` | git answered, HEAD did not exist | Report if the activation was armed at a commit — the history it was gating is gone. Silent for an activation armed on an empty repository |
+| `unreadable` | git could not answer | Always report: the gate could not see the history when the mode ended |
+| present but empty | No transition wrote it, yet the status says one did | Report as an edited `state.json` — this is the shape the state-edit escape leaves |
+| absent | Ended before this record existed | Silent; `/adversarial-review-loop:status` answers on request |
+
+**Three things this does not claim**, all of which were true before the change as well:
+
+- **Detection is exactly "the recorded tree is absent from `approved_trees`".** That is not
+  proof of review and not proof of commit identity. The set also holds the baseline tree and
+  every tree the gate passed without calling a reviewer — already approved, or
+  `ignore_globs`-matched. A wrapper that lands an **empty** commit, or rewrites history onto
+  a tree already in the set, is silent. See
+  [security.md](security.md#why-a-bypass-is-not-catastrophic).
+- **The capture is not atomic with git.** The activation lock does not lock the repository, so
+  a commit landing between the capture and the transaction's save is not covered. The window
+  is the tail of one transaction, but it is real. The recorded head and tree are at least
+  self-coherent, because the tree is derived from the captured commit rather than read from
+  `HEAD` a second time.
+- **An escape ordered `deactivate && commit` records an approved tree and goes silent.** The
+  previous code "caught" that ordering only by also firing on every legitimate post-stop
+  commit, which is why it caught nothing anyone could act on.
+
+**A legacy activation is silent, and that is a decision rather than an oversight.** A document
+written before the record existed has no evidence to report from, and current HEAD answers a
+different question — so reporting it would restore exactly the permanent noise this fixes,
+with no action the user could take to clear it. The gap is bounded on both sides: the
+migration that introduces the field decides, from the stored status, whether an absent record
+means "already ended" (left absent, silent) or "still live, so it will record properly when it
+ends" (given the current schema, so a later hand-edited status is reported), and `pretool`
+runs that migration on the first tool call it gates. What stays open is an activation whose
+status is edited by something that never passes a hook at all — the user's own shell, which is
+not the threat model.
+
+Ask about a legacy one directly with `/adversarial-review-loop:status`, which prints the
+recorded end state for any ended activation, or offers the current-HEAD comparison explicitly
+as the different question it is. It is user-invoked, writes nothing, and cannot become noise.
+
+**A stopped activation does not expire.** `DISARMED` is exempt from `ttl_hours` — the TTL is
+for an activation nobody ever ended. Without the exemption a worktree the user deliberately
+stopped began denying every mutation a day later, the Stop gate asked them to `resume` a mode
+they chose to leave, and the document routed back onto the live current-HEAD branch, bringing
+the noise above back one day after it was scoped away. `resume` reads the *stored* status, so
+a stale `DISARMED` activation is still resumable.
+
+**`/adversarial-review-loop:stop` is a no-op on an activation that already ended.** The first
+terminal transition wins. Re-running it is the obvious remedy for a report the user disagrees
+with, and without the guard it would rewrite a `COMPLETE` document as `DISARMED` and stamp
+today's unapproved HEAD in as the end-of-mode evidence — making the alarm permanent and
+"evidenced". A retired (`RESUMED`) activation gets its own message: it is terminal for that
+document but **not** a worktree where commits are ungated, since every mutation is still
+denied under that status.
 
 ## The phase cap
 

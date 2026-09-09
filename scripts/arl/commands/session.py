@@ -43,8 +43,8 @@ from arl.commands import completion, hooks
 from arl.commands.completion import Completion
 from arl.config import Config
 from arl.gitsnap import SnapshotError
-from arl.state import State, pointer_read
-from arl.util import log, now
+from arl.state import ENDED_EVIDENCE_STATUSES, State, pointer_read
+from arl.util import format_at, log, now
 
 __all__ = ["deactivate", "defer", "finish", "reorient", "report_cmd", "status"]
 
@@ -189,6 +189,44 @@ def _revision_list(state: State, key: str) -> list[dict[str, Any]] | None:
     return value
 
 
+def _ended_display(state: State, effective: str) -> str:
+    """How this activation ended, for :func:`status`. Reads only; makes no git call.
+
+    **This is the compensating control for the legacy rule.** Both reporting channels stay
+    silent for an activation that ended before the end-state record existed, because there is
+    no evidence to report from and current HEAD answers a different question. That is the right
+    default for a message nobody asked for and which would otherwise repeat on every turn end
+    forever -- but it leaves a user with no way to ask. Here they can: user-invoked, writes
+    nothing, and structurally incapable of becoming noise.
+
+    The comparison is worded as **gate-approved / not in approved_trees**, never as
+    "reviewed". Membership in ``approved_trees`` is not evidence a model read anything: the
+    baseline tree is in it, and so is any tree the gate passed without a reviewer call --
+    already approved, or ``ignore_globs``-matched. The same caveat the detection rule carries.
+    """
+    end = hooks.end_state(state)
+    if end.malformed:
+        return "record present but not one this gate could have written -- state.json was edited; look at the history yourself"
+    if not end.recorded:
+        # Offered explicitly as the different question it is, rather than answered here: the
+        # gate cannot scope it to the mode's lifetime, so an answer would be misleading in
+        # exactly the way the silent channels are avoiding.
+        return (
+            f"not recorded (this activation predates the check). What HEAD is *now* is a different question -- "
+            f"compare `git rev-parse HEAD^{{tree}}` against approved_trees in {state.state_file} yourself."
+        )
+    at = format_at(end.at)
+    if end.capture == "unreadable":
+        return f"{at} -- the repository could not be read when enforcement stopped, so the gate never saw the history it was gating"
+    if end.capture == "unborn":
+        activation_commit = state.get("activation_commit")
+        if activation_commit:
+            return f"{at} -- HEAD did not exist when enforcement stopped, though this activation was armed at {activation_commit}"
+        return f"{at} -- HEAD did not exist when enforcement stopped, and this activation was armed on an empty repository"
+    verdict = "gate-approved" if state.tree_approved(end.tree) else "NOT in approved_trees"
+    return f"{at} at {end.head}, tree {end.tree} ({verdict}); status {effective}"
+
+
 def status(argv: list[str]) -> int:
     """Print everything the gate is currently deciding on. Never changes anything."""
     del argv
@@ -274,6 +312,8 @@ def status(argv: list[str]) -> int:
     remaining = retry_not_before - now()
     backoff_line = f"retry backoff:       {remaining}s remaining\n" if remaining > 0 else ""
 
+    ended_line = f"ended:               {_ended_display(state, effective)}\n" if effective in ENDED_EVIDENCE_STATUSES else ""
+
     sys.stdout.write(
         f"""\
 adversarial-review-loop status
@@ -302,7 +342,7 @@ model:               {harness.display_model(config)} {config.as_str("variant")}
 block_severity:      {config.as_str("block_severity")}
 rounds this phase:   {len(phase_history)}
 reviewer session:    {reviewer.continuity_summary(state, config)}
-{cost_line}{persisting_line}state directory:     {activation.act_dir}
+{cost_line}{persisting_line}{ended_line}state directory:     {activation.act_dir}
 
 phases:
 {phases}
