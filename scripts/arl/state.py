@@ -121,6 +121,21 @@ def new_state_document() -> dict[str, Any]:
         "activation_commit": "",
         "armed_at": 0,
         "allow_dirty": False,
+        #: ``gitsnap.exclude_digest`` as it stood when this activation was armed. The gate's
+        #: snapshot stages with ``git add -A``, which obeys ``.git/info/exclude`` -- a file
+        #: that lives outside the worktree, so nothing reviews it and no commit carries it.
+        #: One line written there makes a real file read as a clean worktree, which defeats
+        #: the dirty check and the turn-end unreviewed-work sweep at once. Comparing against
+        #: this baseline is what turns that from silent into reported.
+        #:
+        #: **Absence is not a change.** A document armed before this field existed has no
+        #: baseline to compare against, and treating that as "the file moved" would fire on
+        #: every activation already on disk -- the same permanent-alarm failure the end-state
+        #: record was added to fix. It degrades exactly as ``active_review`` does, so it needs
+        #: no migration arm. ``resume`` deliberately does *not* reset it: the successor keeps
+        #: the predecessor's baseline, or a resume would launder an edit made under the
+        #: predecessor into the successor's starting state.
+        "exclude_digest": "",
         "phases": [],
         "phase": 1,
         "last_approved_tree": "",

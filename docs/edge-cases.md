@@ -15,6 +15,7 @@ gate working as designed against a scenario worth understanding before you hit i
 | Arming never executes (refused sandbox, unreadable script) | The `UserPromptSubmit` hook recorded that arming was asked for; the next hook call records `ARM_FAILED` itself and denies |
 | Git cannot be run from the hook, or the working directory is gone | Denied: the gate cannot tell whether an armed worktree guards the call, and does not guess |
 | A session that never ran `implement`/`resume` opens an armed worktree (a fresh `claude`, a resumed session under a new id) | Every mutation and commit is denied until `/adversarial-review-loop:resume` binds the session; the other session's activation is left untouched |
+| `.git/info/exclude` changed while the activation is live | `Stop` blocks: every reviewed tree obeys that file, it is outside the repository so no review has seen the change, and "clean" can no longer be proven — see [below](#gitinfoexclude-changing-mid-activation) |
 | Mutation before `set-phases` | Denied, with the exact command to run |
 | `set-phases` whose phase text contains a backtick or `$` | Denied **naming that character**, so the freeze can be retried with plain prose instead of stalling |
 | Turn ends while `ARM_FAILED` or phases unset | `Stop` blocks with instructions; the reviewer is never called |
@@ -485,6 +486,50 @@ it are excluded from triggering a review at all, so a commit touching *only* ign
 (a changelog, generated docs) is a cache hit with no reviewer call — but any change that
 touches even one non-ignored file still gets a full review of everything in the diff,
 ignored paths included.
+
+## `.git/info/exclude` changing mid-activation
+
+`ignore_globs` and `.gitignore` are configuration the gate reads on purpose. `.git/info/exclude`
+is different in one way that matters: it lives **outside** the worktree, so no commit carries
+it, no review ever sees it, and nothing about it is under version control — while every tree
+this gate builds comes out of `git add -A`, which obeys it. One line written there turns a file
+that is really sitting in the worktree into a clean worktree. Measured: a `backdoor.py` went
+from `?? backdoor.py` to `worktree_clean = True`, with the snapshot tree falling back to the
+baseline and the file still on disk holding its contents.
+
+That defeats the dirty check and the turn-end unreviewed-work sweep at once, which is the exact
+guarantee `confirm-commit` states out loud (*"the turn-end sweep still covers anything left
+uncommitted"*). It cannot get unreviewed code into history — an excluded path is not staged, so
+it never enters a commit's tree — but it can leave work in the repository that the gate called
+clean.
+
+The answer is not to look *through* the file: legitimately ignored paths are what it exists for,
+and sweeping `node_modules` into a review would make every turn end unusable. `arm` records
+`gitsnap.exclude_digest` instead, and the Stop gate blocks when it no longer matches, naming the
+file and the recovery (restore it, or re-arm to take the new contents as the baseline). `/status`
+prints which of the three states it is in.
+
+`arm` refuses outright when it cannot establish the baseline, rather than storing an empty one:
+an empty baseline is indistinguishable from a document that predates the field, so recording one
+would leave the check off for the life of the activation. The digest is taken *before* the
+cleanliness check and re-verified just before the document is written, so both describe the same
+ignore rules; and the Stop gate re-checks after every reviewer call, because a review is a
+minutes-long window in which an exclude edit can hide a file created beside it.
+
+The comparison is tri-state, not a boolean, because "it changed", "the baseline is not one an
+arm wrote" and "the current state could not be read" are three different claims and only the
+first is evidence about the worktree — each gets its own message, and none of the three passes.
+A reading git will not give blocks as *unverifiable*: `git_run` reports a timeout as status 124,
+which every other caller treats as a denial, and passing on it would let one transient failure
+complete an activation under ignore rules nothing compared. (There is no sandbox exemption to
+make here: `Stop` blocks on a failed snapshot before the exclude guard is ever reached, so git
+has already answered by then.)
+
+Exactly one state is silent: an activation armed before the field existed has no baseline, and
+calling that a change would block every document already on disk — the permanent-alarm failure
+the end-state record exists to avoid. And `resume` does not reset the field: the successor keeps
+the predecessor's baseline, or one resume would launder an edit made under the predecessor into
+the successor's starting truth.
 
 ## Empty diffs are cache hits, not free passes
 

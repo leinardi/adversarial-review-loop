@@ -35,9 +35,10 @@ from pathlib import Path
 import pytest
 from conftest import FAKE_REVIEWER, git, run_bootstrap
 
-from arl import harness, paths
+from arl import gitsnap, harness, paths
 from arl.atomic import locked as _real_locked
 from arl.commands import arm
+from arl.commands import arm as arm_module
 
 
 def armed_env(clean_env: dict[str, str], **extra: str) -> dict[str, str]:
@@ -1340,3 +1341,61 @@ def test_status_reports_a_mangled_revisions_field_instead_of_crashing(
         assert proc.returncode == 0, proc.stderr
         assert "Traceback" not in proc.stderr
         assert f"<corrupted: {key} is not a list of objects>" in proc.stdout
+
+
+# --------------------------------------------------------------------------
+# info/exclude baseline
+# --------------------------------------------------------------------------
+
+
+def exclude_file(repo: Path) -> Path:
+    path = gitsnap.exclude_path(str(repo))
+    assert path is not None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def test_arm_refuses_when_the_exclude_baseline_cannot_be_established(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A baseline that could not be read must not be stored as "".
+
+    ``arm`` already refuses when it cannot establish whether the worktree is clean; this is the
+    same question one file over. An empty baseline is indistinguishable from a document that
+    predates the field, which every reader treats as "say nothing" -- so storing one would turn
+    a single unreadable moment into protection that is off for the whole activation.
+    """
+    exclude_file(git_repo).unlink(missing_ok=True)
+    exclude_file(git_repo).mkdir()  # a directory where the file belongs: read_bytes raises
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan_file(tmp_path))], cwd=git_repo, env=armed_env(clean_env))
+
+    assert proc.returncode == 1
+    assert "baseline could not be established" in proc.stdout
+    assert read_state(armed_env(clean_env), git_repo, "s1")["status"] == "ARM_FAILED"
+
+
+def test_arm_refuses_when_the_exclude_file_moves_while_it_is_arming(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The cleanliness verdict and the recorded baseline must describe one set of ignore rules.
+
+    The digest is captured before the worktree is checked and compared again before the
+    document is written. A writer that adds an exclusion and the file it hides in between --
+    the plan freeze, the reviewer probe and the guide freeze all sit in that window -- would
+    otherwise have the arm record the *new* rules as its baseline and activate over work
+    already hidden from every later check.
+
+    In-process because the window is inside one command: no environment variable opens it, and
+    the subprocess path has nothing to interleave with.
+    """
+    for key, value in armed_env(clean_env).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.chdir(git_repo)
+    real = gitsnap.exclude_digest
+    readings = iter([real(str(git_repo)), "a" * 64])
+    monkeypatch.setattr(gitsnap, "exclude_digest", lambda _repo: next(readings, "a" * 64))
+
+    code = arm_module.run(["--session", "s1", "--plan", str(plan_file(tmp_path))])
+
+    assert code == 1
+    assert "changed while this activation was being armed" in capsys.readouterr().out
+    assert read_state(armed_env(clean_env), git_repo, "s1")["status"] == "ARM_FAILED"

@@ -1656,3 +1656,32 @@ def test_stopping_a_retired_activation_does_not_call_the_worktree_ungated(
     # The worktree itself is free, which is the whole point of having stopped the successor.
     # A passing `pretool` writes nothing at all, so this cannot go through the JSON helper.
     assert run_hook("pretool", payload(git_repo, command=COMMIT, session=S2), cwd=git_repo, env=env).stdout == ""
+
+
+def test_a_resume_does_not_launder_an_exclude_edit_into_the_successor(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """``exclude_digest`` is deliberately absent from both reset tables.
+
+    A successor copies the predecessor's document and resets a *named* set of fields. Naming
+    this one would re-baseline the exclude file at every resume -- so an edit made under the
+    predecessor would become the successor's starting truth, and one ``/adversarial-review-loop:resume``
+    would clear the report permanently. The inverted carry-forward rule is doing real work here.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    armed_digest = read_state(env, git_repo, S1)["exclude_digest"]
+    assert armed_digest
+
+    exclude = gitsnap.exclude_path(str(git_repo))
+    assert exclude is not None
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a") as handle:
+        handle.write("backdoor.py\n")
+    code, banner = resume(git_repo, env)
+    assert code == 0, banner
+
+    assert read_state(env, git_repo, S2)["exclude_digest"] == armed_digest
+    assert gitsnap.exclude_digest(str(git_repo)) != armed_digest, "the file really did change"

@@ -678,3 +678,72 @@ def test_changed_paths_strict_refuses_a_truncated_or_unknown_record(git_repo: Pa
     monkeypatch.setattr(gitsnap, "git_run", fake_run)
     with pytest.raises(gitsnap.ChangedPathsUnavailable):
         gitsnap.changed_paths_strict(str(git_repo), "a", "b")
+
+
+# --------------------------------------------------------------------------
+# info/exclude
+# --------------------------------------------------------------------------
+
+
+def test_exclude_digest_distinguishes_absent_from_unreadable(git_repo: Path) -> None:
+    """``""`` means "could not tell" and must never be confused with "there is no file".
+
+    A caller that reads them as the same thing either blocks every turn in a sandbox that
+    hides ``.git``, or stops noticing an exclude file appearing where there was none.
+    """
+    exclude = gitsnap.exclude_path(str(git_repo))
+    assert exclude is not None
+    exclude.unlink(missing_ok=True)
+    assert gitsnap.exclude_digest(str(git_repo)) == gitsnap.EXCLUDE_ABSENT
+
+    exclude.write_text("build/\n")
+    first = gitsnap.exclude_digest(str(git_repo))
+    assert len(first) == 64
+    assert first != gitsnap.EXCLUDE_ABSENT
+
+    exclude.write_text("build/\nsecret.py\n")
+    assert gitsnap.exclude_digest(str(git_repo)) != first
+
+    assert gitsnap.exclude_digest(str(git_repo / "not-a-repo")) == ""
+
+
+def test_exclude_digest_follows_git_rather_than_guessing_the_path(git_repo: Path, tmp_path: Path) -> None:
+    """A linked worktree's ``.git`` is a file, so ``<repo>/.git/info/exclude`` does not exist.
+
+    Hand-building that path would answer ``EXCLUDE_ABSENT`` for every linked worktree -- which
+    is a digest that never changes, and therefore a check that never fires.
+    """
+    linked = tmp_path / "linked"
+    git(git_repo, "worktree", "add", "-q", "--detach", str(linked))
+    assert (linked / ".git").is_file(), "a linked worktree's .git is a file, not a directory"
+
+    resolved = gitsnap.exclude_path(str(linked))
+
+    assert resolved is not None
+    assert resolved.parent.name == "info"
+    assert not str(resolved).startswith(str(linked / ".git" / "info"))
+    (resolved.parent).mkdir(parents=True, exist_ok=True)
+    resolved.write_text("hidden.py\n")
+    assert len(gitsnap.exclude_digest(str(linked))) == 64
+
+
+def test_an_excluded_file_is_invisible_to_every_tree_this_module_builds(git_repo: Path) -> None:
+    """The vector itself, pinned: this is *why* the digest is recorded.
+
+    ``snapshot`` stages with ``git add -A``, which obeys ``info/exclude``, so one line written
+    into a file that lives outside the worktree turns a real file into a clean worktree.
+    """
+    baseline = gitsnap.snapshot(str(git_repo)).tree
+    (git_repo / "backdoor.py").write_text("payload\n")
+    assert not gitsnap.worktree_clean(str(git_repo))
+    assert gitsnap.snapshot(str(git_repo)).tree != baseline
+
+    exclude = gitsnap.exclude_path(str(git_repo))
+    assert exclude is not None
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a") as handle:
+        handle.write("backdoor.py\n")
+
+    assert gitsnap.worktree_clean(str(git_repo)), "the evasion: git reports the worktree clean"
+    assert gitsnap.snapshot(str(git_repo)).tree == baseline, "and the tree falls back to the baseline"
+    assert (git_repo / "backdoor.py").read_text() == "payload\n", "while the file is still there"

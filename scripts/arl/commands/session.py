@@ -190,6 +190,37 @@ def _revision_list(state: State, key: str) -> list[dict[str, Any]] | None:
     return value
 
 
+#: Distinguishes "no ``exclude_digest`` in the document" from "an empty one". Mirrors
+#: ``hooks._ABSENT`` and ``stop._ABSENT``: ``.get(key, "")`` collapses two states that mean
+#: opposite things -- a document that predates the field, and one whose baseline was removed.
+_ABSENT: Final = object()
+
+
+def _exclude_display(state: State, repo: str) -> str:
+    """The ``info/exclude`` line: unchanged, changed, or a stated reason for neither.
+
+    ``status`` is the compensating control for a check that otherwise only speaks at turn end,
+    so it says which of the three it is rather than printing a digest nobody can compare by
+    eye. It changes nothing and escalates nothing -- an activation armed before the field
+    existed says so, instead of being reported as though the file had moved.
+    """
+    baseline = state.data.get("exclude_digest", _ABSENT)
+    if baseline is _ABSENT:
+        return "not recorded (this activation predates the check)"
+    if not isinstance(baseline, str) or not baseline:
+        # No current `arm` can store this -- it refuses rather than record a baseline it could
+        # not establish -- so an empty one is an edited document, and saying "predates the
+        # check" here would launder a tampered field into a reassuring sentence.
+        return "recorded as empty, which no arm writes -- state.json was edited; the check cannot run"
+    current = gitsnap.exclude_digest(repo)
+    if not current:
+        return f"recorded, but unreadable now -- compare {gitsnap.exclude_path(repo)} yourself"
+    if current == baseline:
+        where = "no such file, then or now" if current == gitsnap.EXCLUDE_ABSENT else "unchanged since arming"
+        return where
+    return f"CHANGED since arming -- {gitsnap.exclude_path(repo)} now hides paths no review has seen"
+
+
 def _ended_display(state: State, effective: str) -> str:
     """How this activation ended, for :func:`status`. Reads only; makes no git call.
 
@@ -328,6 +359,7 @@ frozen plan:         {activation.act_dir}/{active_plan_file}
 plan revision:       {revision_count - 1} ({revision_count} recorded)
 review guide:        {guide_line}
 baseline tree:       {state.get("baseline_tree")}
+info/exclude:        {_exclude_display(state, activation.repo)}
 activation commit:   {state.get("activation_commit")}
 last approved tree:  {state.get("last_approved_tree")}
 pending approval:    {state.get("pending_approved_tree")}

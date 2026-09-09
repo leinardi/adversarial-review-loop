@@ -280,6 +280,60 @@ adversarial-review-loop: the worktree is not clean, so the last of the work is n
 {summary}
 """
 
+#: The one ignore file the gate cannot see past and cannot review. Every tree this gate builds
+#: comes out of ``git add -A``, which obeys ``info/exclude`` -- and that file lives outside the
+#: worktree, so no commit carries it and no review ever sees it. One line written there makes a
+#: file that is really sitting in the worktree read as a clean worktree, which defeats the dirty
+#: check and this sweep at once. ``.gitignore`` needs no equivalent: it is inside the
+#: repository, so a change to it is itself reviewed.
+EXCLUDE_MOVED: Final = """\
+adversarial-review-loop: {path} changed while this activation was live, so the worktree cannot be shown to be clean.
+
+That file decides what `git add -A` ignores, and every tree this gate reviews is built with \
+`git add -A`. It is outside the repository, so no commit carries it and no review has seen \
+this change -- which means anything newly listed in it is in the worktree but invisible to the \
+unreviewed-work sweep, and "clean" can no longer be proven.
+
+Restore it to what it was when the activation was armed and end the turn again. If the change \
+was deliberate and should stand, the user can end the mode with /adversarial-review-loop:stop, \
+or re-arm with /adversarial-review-loop:implement <plan.md> to take the new contents as the \
+baseline. This is not a finding about the code.
+"""
+
+#: The baseline is present but empty, which no ``arm`` writes -- it refuses rather than record
+#: one it could not establish. So this is an edited document, and the honest claim is that the
+#: comparison cannot be made, **not** that the file changed: nothing here observed a change.
+EXCLUDE_TAMPERED: Final = """\
+adversarial-review-loop: this activation's {path} baseline is empty, which no arming writes, so the check that file guards cannot run.
+
+`arm` refuses rather than record a baseline it could not establish, so an empty one means \
+state.json was edited or written by another tool. Nothing here observed a change to the file \
+itself -- what is missing is anything to compare it against, and that file decides what \
+`git add -A` ignores, so "the worktree is clean" cannot be proven without it.
+
+Tell the user. Re-arm with /adversarial-review-loop:implement <plan.md> to take a fresh \
+baseline, or leave the mode with /adversarial-review-loop:stop. This is not a finding about \
+the code.
+"""
+
+#: git answered for the snapshot moments earlier and will not answer for this, so "could not
+#: tell" here is an anomaly rather than an environment -- a ``rev-parse`` that timed out
+#: (``git_run`` reports an expiry as status 124, a denial everywhere else) or a file that
+#: cannot be read. Passing on it would let one transient failure complete an activation under
+#: ignore rules nothing compared.
+EXCLUDE_UNREADABLE: Final = """\
+adversarial-review-loop: {path} could not be read, so the worktree cannot be shown to be clean.
+
+That file decides what `git add -A` ignores, and every tree this gate reviews is built with \
+`git add -A`, so without reading it there is no way to tell whether anything is being hidden \
+from the unreviewed-work sweep. git answered for the snapshot a moment ago, so this is not a \
+repository the gate cannot see -- something about this one file or this one call failed.
+
+This is not a finding about the code, and it is not a claim that anything was hidden. Retry \
+the turn; if it persists, tell the user -- they can leave the mode with \
+/adversarial-review-loop:stop.
+"""
+
 PAUSED: Final = """\
 adversarial-review-loop: paused -- the pause target (phase {target} of {total}) has been reached.
 
@@ -805,11 +859,23 @@ def _review(gate: _Gate) -> NoReturn:
     # `arl.commands.completion`.
     pending = completion.start(state, config=gate.config, repo=worktree)
 
+    # Before the sweep, because the sweep is what this protects: every tree below it comes out
+    # of `git add -A`, which obeys `.git/info/exclude`, so a changed exclude file means the
+    # snapshot may be hiding work and "clean" can no longer be proven. Rule 0's direction --
+    # a gate that cannot prove it is running denies -- applies to a gate that cannot prove
+    # what it is looking at.
+    _guard_exclude(gate, worktree)
+
     # Unreviewed work sweep: anything not yet approved gets reviewed now. An approving sweep
     # returns the deferred-findings paragraph (or ""), which every response below carries as
     # its first paragraph -- the sweep has no response of its own to put it in.
     if tree != state.get("last_approved_tree") and not state.tree_approved(tree):
         gate = dataclasses.replace(gate, deferred=_sweep(gate, snap=snap, phase=phase))
+
+    # Again, because the sweep above is a reviewer call and the worktree kept moving through
+    # it. An exclude edit landing mid-sweep hides whatever was created beside it, and the
+    # cleanliness check a few lines down would then read the worktree as clean.
+    _guard_exclude(gate, worktree)
 
     finish_requested = _finish_requested_after_sweep(gate)
 
@@ -864,6 +930,89 @@ def _review(gate: _Gate) -> NoReturn:
         )
         gate.hook.stop_ok(_say(gate, SKIP_PATH_STATE_INVALID.format(status=state.get("status"), phase=phase, total=total).rstrip("\n")))
     _final(gate, pending, snap=snap, total=total)
+
+
+#: Distinguishes "the document has no ``exclude_digest``" from "it has an empty one". Mirrors
+#: ``hooks._ABSENT``, for the identical reason: ``.get(key, "")`` collapses the two, and the
+#: two mean opposite things -- legacy silence versus a baseline that should exist and does not.
+_ABSENT: Final = object()
+
+
+def _guard_exclude(gate: _Gate, worktree: str) -> None:
+    """Block the turn end when ``info/exclude`` has moved since arming, else return.
+
+    **Called before the sweep and again after every reviewer call**, because a review is a
+    minutes-long window in which the worktree keeps moving. Checked only up front, an exclude
+    file edited *during* the sweep would hide a file created alongside it, and the cleanliness
+    check that follows -- built on ``git add -A``, which obeys the new rules -- would then
+    report the worktree clean and let the activation complete. The check is cheap (one
+    ``rev-parse`` and one file read) and the thing it guards is the gate's central claim, so it
+    runs at each point where a decision is about to be taken on a snapshot's word.
+
+    Kept off ``_review``'s own body so the decision and its reason live together, and so the
+    lazy ``gitsnap`` import stays out of a path that may never need git at all.
+    """
+    verdict = _exclude_verdict(gate.state, worktree)
+    if verdict == _EXCLUDE_OK:
+        return
+    from arl import gitsnap  # noqa: PLC0415 - module-scope git is off this module's hot path
+
+    path = gitsnap.exclude_path(worktree) or ".git/info/exclude"
+    template = {
+        _EXCLUDE_CHANGED: EXCLUDE_MOVED,
+        _EXCLUDE_TAMPERED: EXCLUDE_TAMPERED,
+        _EXCLUDE_UNREADABLE: EXCLUDE_UNREADABLE,
+    }[verdict]
+    _block_counted(gate, template.format(path=path).rstrip("\n"))
+
+
+#: :func:`_exclude_verdict`'s answers. Deliberately three failures rather than one boolean:
+#: "it changed", "the baseline is not one an arm wrote" and "the current state could not be
+#: read" are three different claims, and only the first is evidence about the worktree.
+_EXCLUDE_OK: Final = ""
+_EXCLUDE_CHANGED: Final = "changed"
+_EXCLUDE_TAMPERED: Final = "tampered"
+_EXCLUDE_UNREADABLE: Final = "unreadable"
+
+
+def _exclude_verdict(state: State, worktree: str) -> str:
+    """Has ``info/exclude`` changed since this activation was armed, and can that be told?
+
+    **An absent field and a present-empty one are not the same thing, and conflating them is
+    how this check turns itself off.** Absent means a document written before the field
+    existed: there is nothing to compare against, and calling that a change would fire on every
+    activation already on disk -- the permanent-alarm failure the end-state record exists to
+    avoid. That is the *only* case here that passes silently. Present-and-empty cannot be
+    produced by any current ``arm``, which refuses rather than store a baseline it could not
+    establish, so it means an edited document -- reported as such, not as a change nobody
+    observed.
+
+    **An unreadable current reading blocks too, and calling it "unchanged" was a real hole.**
+    ``gitsnap.exclude_digest`` answers ``""`` for a ``rev-parse`` that failed or timed out
+    (``git_run`` reports an expiry as status 124, which every other caller treats as a denial)
+    and for a file it cannot read. Passing on that lets a transient failure in this one call
+    complete an activation under ignore rules nothing compared -- while the snapshot calls
+    around it succeed. The sandbox argument that once justified passing does not survive
+    contact with the order things run in: ``_review`` blocks on ``SnapshotError`` before this
+    is ever reached, so git has already answered by the time it runs, and a repository that
+    genuinely cannot be read never gets this far.
+
+    Directional in neither sense: a file appearing where there was none and one being emptied
+    are both changes. What matters is that the set of paths ``git add -A`` skips is no longer
+    the set the baseline was taken under. ``EXCLUDE_ABSENT`` on both sides is the ordinary
+    answer for a worktree that never had the file and still does not.
+    """
+    baseline = state.data.get("exclude_digest", _ABSENT)
+    if baseline is _ABSENT:
+        return _EXCLUDE_OK
+    if not isinstance(baseline, str) or not baseline:
+        return _EXCLUDE_TAMPERED
+    from arl import gitsnap  # noqa: PLC0415 - module-scope git is off this module's hot path
+
+    current = gitsnap.exclude_digest(worktree)
+    if not current:
+        return _EXCLUDE_UNREADABLE
+    return _EXCLUDE_OK if current == baseline else _EXCLUDE_CHANGED
 
 
 def _sweep(gate: _Gate, *, snap: Snapshot, phase: int) -> str:
@@ -996,6 +1145,10 @@ def _final(gate: _Gate, pending: completion.Completion, *, snap: Snapshot, total
     review = reviewer.execute(target, state=state, config=config, warnings=snap.warnings)
 
     if review.verdict == "APPROVED":
+        # The final review is the longest window of all, and what follows it is the one
+        # transition that disarms. An approval decided under one set of ignore rules must not
+        # complete an activation under another.
+        _guard_exclude(gate, gate.worktree)
         _commit_or_yield_to_terminal(gate, pending, reviewed=snap.tree, reason="final cumulative review approved", review=review)
         gate.hook.stop_ok(_say(gate, COMPLETE.format(base=base, head=snap.tree, total=total, report=review.report).rstrip("\n")))
     if review.verdict == "CHANGES_REQUIRED":

@@ -35,7 +35,7 @@ from conftest import FAKE_REVIEWER, git, run_bootstrap
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
 
 from arl import commands as commands_module
-from arl import harness, paths
+from arl import gitsnap, harness, paths
 from arl.commands import session as session_module
 
 
@@ -1324,3 +1324,35 @@ def test_status_reports_a_tampered_end_record_without_running_it(git_repo: Path,
     assert proc.returncode == 0, proc.stdout
     assert "not one this gate could have written" in proc.stdout
     assert not pwned.exists()
+
+
+def test_status_says_which_of_the_three_the_exclude_file_is(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``status`` is the compensating control for a check that otherwise speaks only at turn end."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    assert "info/exclude:        unchanged since arming" in run_bootstrap(["status"], cwd=git_repo, env=env).stdout
+
+    exclude = gitsnap.exclude_path(str(git_repo))
+    assert exclude is not None
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a") as handle:
+        handle.write("backdoor.py\n")
+
+    line = run_bootstrap(["status"], cwd=git_repo, env=env).stdout
+    assert "CHANGED since arming" in line
+    assert "hides paths no review has seen" in line
+
+
+def test_status_does_not_accuse_an_activation_that_predates_the_check(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    state_path = state_dir(env, git_repo, "s1") / "state.json"
+    document = json.loads(state_path.read_text())
+    del document["exclude_digest"]
+    state_path.write_text(json.dumps(document))
+
+    stdout = run_bootstrap(["status"], cwd=git_repo, env=env).stdout
+
+    assert "info/exclude:        not recorded (this activation predates the check)" in stdout
+    assert "CHANGED" not in stdout
