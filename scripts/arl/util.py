@@ -20,11 +20,12 @@
 from __future__ import annotations
 
 import contextlib
+import datetime
 import sys
 import time
 import traceback
 
-__all__ = ["TRUNCATION_MARKER", "log", "log_exception", "now", "stdin_argument", "truncate"]
+__all__ = ["TRUNCATION_MARKER", "format_at", "log", "log_exception", "now", "stdin_argument", "truncate"]
 
 TRUNCATION_MARKER = "[... truncated at {limit} bytes; the full report is on disk, print it with /adversarial-review-loop:report ...]"
 
@@ -53,6 +54,26 @@ def log_exception() -> None:
 def now() -> int:
     """Seconds since the epoch, matching the shell's ``printf '%(%s)T' -1``."""
     return int(time.time())
+
+
+def format_at(at: object) -> str:
+    """Epoch seconds read out of ``state.json`` rendered as UTC, for a human to read.
+
+    Every caller passes a value that came out of a state document, which is not a trust
+    boundary, so this must answer for *any* object rather than raise. ``fromtimestamp``
+    raises ``OverflowError`` or ``OSError`` -- not only ``TypeError``/``ValueError`` -- for a
+    value the platform's C library cannot represent, and a huge or negative integer is
+    exactly what an edited document supplies, so all four are caught: a report that names an
+    unreadable time is still a report, while an exception raised inside a hook is a
+    fail-closed denial that says nothing useful.
+    """
+    if isinstance(at, bool) or not isinstance(at, (int, float, str)):
+        return "(unknown time)"
+    try:
+        seconds = int(at)
+        return datetime.datetime.fromtimestamp(seconds, tz=datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "(unknown time)"
 
 
 def stdin_argument() -> str:

@@ -27,11 +27,13 @@ approval looks like afterwards.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import time
 from pathlib import Path
 
 import pytest
-from conftest import git, hook_json, run_bootstrap, run_hook
+from conftest import BOOTSTRAP, git, hook_json, run_bootstrap, run_hook
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
 from test_commands_pretool import SESSION, active, active_until, patch_state, payload, pretool, unborn_active, unborn_repo
 
@@ -713,37 +715,90 @@ def test_an_ordinary_bash_call_is_not_mistaken_for_an_ungated_commit(
         assert proc.stdout == "", stage
 
 
+def end_the_mode(repo: Path, env: dict[str, str], status: str) -> None:
+    """Reach ``status`` through a **real** terminal transition, not a ``patch_state``.
+
+    ``patch_state`` writes the status word with no transition behind it, which leaves the
+    ``ended_*`` fields present and empty -- the shape the documented Rule 4 state-edit bypass
+    produces, now reported as an edited record. Every one of these statuses has to be arrived
+    at the way production arrives at it, or the test pins something else entirely.
+    """
+    if status == "DISARMED":
+        proc = run_bootstrap(["deactivate"], cwd=repo, env=env)
+    elif status == "COMPLETE":
+        proc = run_bootstrap(["finish"], cwd=repo, env={**env, "ARL_FAKE_MODE": "approve"})
+    elif status == "RESUMED":
+        proc = run_bootstrap(["resume", "--session", "s2", "--args", ""], cwd=repo, env=env)
+    else:  # pragma: no cover - a typo in a parametrize list, not a branch
+        raise AssertionError(f"no real transition reaches {status}")
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, repo, SESSION)["status"] == status
+
+
 def test_a_wrapper_that_commits_and_disarms_does_not_go_unreported(
     git_repo: Path,
     tmp_path: Path,
     clean_env: dict[str, str],
 ) -> None:
-    """The Rule 4 escape, end to end, and the most it can currently be reduced to.
+    """The Rule 4 escape, end to end, run for real rather than mocked with ``patch_state``.
 
     ``bash escape.sh`` is neither a commit nor an escape to a string-matching gate, so the
-    script inside it commits and then disarms the mode. Nothing can undo that from here --
-    the user may legitimately have stopped with work outstanding, and reverting would take an
-    exit away from them, which is the same rule in the other direction. What must not happen
-    is what happened before: silence, leaving an unreviewed commit behind a mode that looks
-    deliberately stopped.
+    script inside it commits and then runs the actual ``deactivate`` -- both halves inside the
+    one Bash call this hook is being asked about, which is the whole shape of the escape and
+    the reason the evidence is captured during the very call being reported on. Nothing can
+    undo that from here: the user may legitimately have stopped with work outstanding, and
+    reverting would take an exit away from them, which is the same rule in the other
+    direction. What must not happen is what happened before -- silence, leaving an unreviewed
+    commit behind a mode that looks deliberately stopped.
     """
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
-    (git_repo / "escape.sh").write_text("git add -A && git commit -qm bypass\n")
-    __import__("subprocess").run(["bash", "escape.sh"], cwd=git_repo, check=True)
-    patch_state(env, git_repo, status="DISARMED", reason="stopped by the user")
+    (git_repo / "escape.sh").write_text(f"git add -A && git commit -qm bypass && python3 -I {str(BOOTSTRAP)!r} deactivate >/dev/null\n")
+    subprocess.run(["bash", "escape.sh"], cwd=git_repo, check=True, env={**os.environ, **env})
+    head = git(git_repo, "rev-parse", "HEAD")
+    assert read_state(env, git_repo, SESSION)["status"] == "DISARMED"
 
     _, stdout = confirm(git_repo, env, command="bash escape.sh")
 
     message = context(stdout)
     assert "no review approved" in message
     assert "The mode is DISARMED" in message
+    assert head in message, "the report names the recorded commit, not whatever HEAD is now"
+    # It must not claim the Bash call it is reporting on is the ungated one -- the document
+    # carries no command identity, and saying so is what had the model relay a false claim.
+    assert "cannot tell which command" in message
     # Reported, not acted on: the user's exit stands.
     assert read_state(env, git_repo, SESSION)["status"] == "DISARMED"
 
 
-@pytest.mark.parametrize("status", ["NEEDS_HUMAN", "STALE", "COMPLETE", "RESUMED"])
-def test_an_unapproved_head_is_reported_in_every_state_that_cannot_act_on_it(
+def test_a_wrapper_that_breaks_git_before_disarming_is_still_reported(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """The fuller escape: commit, destroy ``.git``, then disarm.
+
+    Recording the outcome at the transition is what makes this *stronger* than the check it
+    replaced -- the evidence is on disk before any report is asked for, so breaking the
+    repository can no longer suppress one, and it does not decay if git becomes readable
+    again.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    escape = f"git add -A && git commit -qm bypass && rm .git/HEAD && python3 -I {str(BOOTSTRAP)!r} deactivate >/dev/null\n"
+    (git_repo / "escape.sh").write_text(escape)
+    subprocess.run(["bash", "escape.sh"], cwd=git_repo, check=True, env={**os.environ, **env})
+    assert read_state(env, git_repo, SESSION)["ended_capture"] == "unreadable"
+
+    _, stdout = confirm(git_repo, env, command="bash escape.sh")
+
+    message = context(stdout)
+    assert "could not be read" in message
+    assert "not a clean result" in message
+
+
+@pytest.mark.parametrize("status", ["NEEDS_HUMAN", "STALE"])
+def test_an_unapproved_head_is_reported_in_every_live_state_that_cannot_act_on_it(
     git_repo: Path,
     tmp_path: Path,
     clean_env: dict[str, str],
@@ -751,22 +806,77 @@ def test_an_unapproved_head_is_reported_in_every_state_that_cannot_act_on_it(
 ) -> None:
     """Entering RECONCILE would downgrade an escalation, so these report instead.
 
-    ``RESUMED`` belongs in this group for the same reason: writing ``RECONCILE`` over a
-    retirement would give a dead session something that looks recoverable, when what
-    actually happened is that ``resume`` replaced it.
+    Both are deliberately still on the **current-HEAD** path: the loop is live in each, every
+    mutation is still denied, and current HEAD is exactly the right question there. The
+    terminal statuses moved to the recorded-evidence path -- see
+    :func:`test_a_commit_after_the_mode_ended_is_not_reported`.
     """
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     (git_repo / "sneaked.txt").write_text("never gated\n")
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "ungated")
-    extra = {"resumed_into": "s2"} if status == "RESUMED" else {}
-    patch_state(env, git_repo, status=status, reason="whatever", armed_at=1 if status == "STALE" else 2**31, **extra)
+    patch_state(env, git_repo, status=status, reason="whatever", armed_at=1 if status == "STALE" else 2**31)
 
     _, stdout = confirm(git_repo, env, command="make test")
 
     assert "no review approved" in context(stdout)
     assert read_state(env, git_repo, SESSION)["status"] == status
+
+
+@pytest.mark.parametrize("status", ["DISARMED", "RESUMED"])
+def test_work_held_when_a_terminal_transition_landed_is_reported(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    status: str,
+) -> None:
+    """The terminal statuses, reached for real, still report what the gate was holding.
+
+    ``COMPLETE`` is not a missing case here: both routes to it run the final cumulative
+    review, which marks the tree it approved, so a finished activation has nothing unapproved
+    left to report -- pinned by :func:`test_a_commit_after_the_mode_ended_is_not_reported`.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "sneaked.txt").write_text("never gated\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ungated")
+    end_the_mode(git_repo, env, status)
+
+    _, stdout = confirm(git_repo, env, command="make test")
+
+    assert "no review approved" in context(stdout)
+    assert read_state(env, git_repo, SESSION)["status"] == status
+
+
+@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "RESUMED"])
+def test_a_commit_after_the_mode_ended_is_not_reported(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    status: str,
+) -> None:
+    """The whole point, and it fails on the old code, which asked about *current* HEAD.
+
+    Commits made after enforcement stopped are ungated by design. Reporting them injected
+    "the commit gate was never consulted" into the model's context after every Bash call in
+    that worktree, forever, which the model then duly relayed.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    gated_commit(git_repo, env)
+    confirm(git_repo, env, command=COMMIT)
+    end_the_mode(git_repo, env, status)
+
+    (git_repo / "ordinary.txt").write_text("ungated by design\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ordinary work after the mode ended")
+
+    for _ in range(2):  # and it stays silent -- the repetition was the failure
+        code, stdout = confirm(git_repo, env, command="make test")
+        assert code == 0
+        assert stdout == "", stdout
 
 
 def test_an_unreadable_repository_is_reported_rather_than_read_as_clean(
@@ -777,15 +887,16 @@ def test_an_unreadable_repository_is_reported_rather_than_read_as_clean(
     """Breaking ``.git`` used to suppress the only report the wrapper escape has.
 
     ``head_tree`` answers ``""`` for a repository with no commits *and* for one git cannot
-    read, and this guard treated empty as "nothing to check here". So the full escape was:
-    commit, disarm, then make ``.git`` unreadable -- and every signal went quiet.
+    read, and this guard treated empty as "nothing to check here". Asked here of a **live**
+    status, which is the path that still questions current HEAD; the terminal twin is
+    :func:`test_a_wrapper_that_breaks_git_before_disarming_is_still_reported`.
     """
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     (git_repo / "sneaked.txt").write_text("never gated\n")
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "ungated")
-    patch_state(env, git_repo, status="DISARMED")
+    patch_state(env, git_repo, status="NEEDS_HUMAN", reason="a reviewer failure")
     (git_repo / ".git" / "HEAD").unlink()
 
     _, stdout = confirm(git_repo, env, command="make test")
@@ -793,6 +904,96 @@ def test_an_unreadable_repository_is_reported_rather_than_read_as_clean(
     message = context(stdout)
     assert "could not be read" in message
     assert "not a clean result" in message
+
+
+def test_a_legacy_live_activation_cannot_suppress_the_report_by_never_being_written(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """The wrapper's own Bash call is what migrates the document out of reach of this bypass.
+
+    ``_migrate`` only runs inside a transaction and both hooks read without one, so a legacy
+    activation that nothing writes to keeps its absent ``ended_*`` record -- and a hand-edited
+    ``status`` then reads as "ended before the record existed", which is silence.
+    ``pretool._upgrade_stale_document`` runs the migration on the first tool call it gates,
+    and the escape has to make at least one.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    state_path = state_dir(env, git_repo, SESSION) / "state.json"
+    # Exactly what the previous build left on disk: version 4, no record, still live.
+    document = json.loads(state_path.read_text())
+    document["version"] = 4
+    for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
+        document.pop(key, None)
+    state_path.write_text(json.dumps(document))
+
+    # The wrapper, verbatim -- and nothing has written to the document since the upgrade. The
+    # gate passes it (it is not a commit shape), which is the whole premise of the escape; what
+    # matters here is that being *asked* is what brings the document up to date.
+    (git_repo / "escape.sh").write_text("git add -A && git commit -qm bypass\n")
+    proc = run_hook("pretool", payload(git_repo, command="bash escape.sh"), cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(state_path.read_text())["version"] == 5, "the gated call must have migrated it"
+    subprocess.run(["bash", "escape.sh"], cwd=git_repo, check=True, env={**os.environ, **env})
+    patch_state(env, git_repo, status="DISARMED", reason="stopped by the user")
+
+    _, stdout = confirm(git_repo, env, command="bash escape.sh")
+
+    assert "not one this gate could have written" in context(stdout)
+
+
+def test_an_uncertain_outcome_does_not_claim_unreviewed_work_was_found(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """Only a recorded tree absent from ``approved_trees`` establishes unreviewed work.
+
+    "Could not be read" is the gate saying it cannot tell. Reporting it under the categorical
+    headline is the same class of false claim as telling the model its own just-run command was
+    the ungated one, pointed the other way -- and here it would be said about a repository that
+    may have exited perfectly cleanly.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    gated_commit(git_repo, env)
+    confirm(git_repo, env, command=COMMIT)
+    (git_repo / ".git" / "HEAD").unlink()
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, SESSION)["ended_capture"] == "unreadable"
+
+    _, stdout = confirm(git_repo, env, command="make test")
+
+    message = context(stdout)
+    assert "could not verify how it stopped" in message
+    assert "not a finding of unreviewed work" in message
+    assert "holding work no review approved" not in message
+
+
+def test_a_status_edited_into_the_document_is_reported_as_an_edited_record(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """The other documented Rule 4 bypass, which leaves no command to inspect at all.
+
+    No terminal transition ran, so the document carries the ``ended_*`` fields present and
+    empty. Reading that as a document that predates the record would hand the bypass its own
+    suppression.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "sneaked.txt").write_text("never gated\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ungated")
+    patch_state(env, git_repo, status="DISARMED", reason="stopped by the user")
+
+    _, stdout = confirm(git_repo, env, command="make test")
+
+    assert "not one this gate could have written" in context(stdout)
 
 
 def test_a_repository_with_no_commits_is_not_reported(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

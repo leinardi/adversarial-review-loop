@@ -3746,13 +3746,15 @@ def _lock_is_held(lock_file: Path) -> bool:
         [
             sys.executable,
             "-c",
-            "import fcntl,os,sys\n"
-            "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
-            "try:\n"
-            "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-            "except BlockingIOError:\n"
-            "    sys.exit(1)\n"
-            "sys.exit(0)\n",
+            (
+                "import fcntl,os,sys\n"
+                "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+                "try:\n"
+                "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                "except BlockingIOError:\n"
+                "    sys.exit(1)\n"
+                "sys.exit(0)\n"
+            ),
             str(lock_file),
         ],
         check=False,

@@ -49,20 +49,60 @@ from arl.config import Config
 from arl.errors import StateLoadError
 from arl.util import log, now
 
-__all__ = ["STATE_VERSION", "State", "new_state_document", "pointer_clear", "pointer_read", "pointer_write"]
+__all__ = [
+    "ENDED_EVIDENCE_STATUSES",
+    "STATE_VERSION",
+    "State",
+    "new_state_document",
+    "pointer_clear",
+    "pointer_read",
+    "pointer_write",
+]
+
+#: The stored statuses a terminal transition writes -- ``session.deactivate``,
+#: ``completion.Completion.commit`` and ``resume``'s retirement, the only three production
+#: writes of a terminal status, all of which fold ``commands.hooks.ended_evidence`` into the
+#: same ``state.update``. A document carrying one of these therefore **must** carry an
+#: ``ended_*`` record unless it ended before the record existed. Lives here rather than beside
+#: its reader in ``commands.hooks`` because ``_migrate``'s 4 -> 5 arm needs it too, and
+#: ``hooks`` imports ``state``, not the other way round.
+#:
+#: ``ARM_FAILED`` and ``NEEDS_HUMAN`` are deliberately absent: no writer records evidence for
+#: them, so an empty record there is correct rather than suspicious.
+ENDED_EVIDENCE_STATUSES: Final = frozenset({"DISARMED", "COMPLETE", "RESUMED"})
 
 #: Statuses that are terminal enough that the TTL no longer applies to them. ``RESUMED``
 #: marks a retired activation -- it already denies everything on its own, and letting the
 #: TTL turn it into ``STALE`` instead would replace a message naming the successor session
 #: with a generic re-arm prompt.
-_TTL_EXEMPT: Final = frozenset({"COMPLETE", "ARM_FAILED", "NEEDS_HUMAN", "RESUMED"})
+#:
+#: **``DISARMED`` belongs here for a stronger reason than tidiness.** The TTL exists to catch
+#: an activation nobody ever ended; one the user *did* end is the case it was never about, and
+#: expiring it does three separate kinds of damage. ``pretool._gate_terminal_status`` passes
+#: ``DISARMED`` and **denies** ``STALE``, so a worktree the user deliberately stopped starts
+#: refusing every mutation ``ttl_hours`` after it was armed. The Stop gate then tells them to
+#: ``resume`` a mode they chose to leave. And ``STALE`` is not in ``commands.posttool._ENDED``,
+#: so the document routes back onto the live current-HEAD branch and the ungated-commit report
+#: this change exists to scope comes back -- one day late.
+#:
+#: ``resume`` is unaffected: it reads the *stored* status against ``_RESUMABLE``, so a stale
+#: ``DISARMED`` activation was always resumable and still is.
+_TTL_EXEMPT: Final = frozenset({"COMPLETE", "DISARMED", "ARM_FAILED", "NEEDS_HUMAN", "RESUMED"})
 
 #: Version 2 adds resume, pause, plan revision and the config overlay's fields. Version 3
 #: adds ``round_history`` and the convergence counters. Version 4 adds the repo-supplied
-#: review guide's fields (``guide_path``, ``guide_revisions``). See ``State._migrate`` for
-#: the upgrade from any earlier (or unversioned) document -- a version-1 document reaches
-#: the current version in one pass.
-STATE_VERSION: Final = 4
+#: review guide's fields (``guide_path``, ``guide_revisions``). Version 5 adds the end-state
+#: record (``ended_capture`` and friends). See ``State._migrate`` for the upgrade from any
+#: earlier (or unversioned) document -- a version-1 document reaches the current version in
+#: one pass.
+#:
+#: **The 5 bump is not bookkeeping**, unlike the fields ``manual_accepts`` / ``reviewer_session``
+#: were allowed to add without one. Those degraded safely because a missing value simply read
+#: as an empty default. ``ended_capture``'s *absence* is a load-bearing signal instead -- it is
+#: what tells a document that ended before the record existed apart from one whose ``status``
+#: was edited straight into ``state.json``, the documented Rule 4 bypass. Without the bump
+#: those two shapes are the same bytes, and the second is silent.
+STATE_VERSION: Final = 5
 
 #: The name ``arm`` freezes the plan under, and the name revision 0 always carries.
 _PLAN_FROZEN_NAME: Final = "plan.frozen.md"
@@ -81,6 +121,21 @@ def new_state_document() -> dict[str, Any]:
         "activation_commit": "",
         "armed_at": 0,
         "allow_dirty": False,
+        #: ``gitsnap.exclude_digest`` as it stood when this activation was armed. The gate's
+        #: snapshot stages with ``git add -A``, which obeys ``.git/info/exclude`` -- a file
+        #: that lives outside the worktree, so nothing reviews it and no commit carries it.
+        #: One line written there makes a real file read as a clean worktree, which defeats
+        #: the dirty check and the turn-end unreviewed-work sweep at once. Comparing against
+        #: this baseline is what turns that from silent into reported.
+        #:
+        #: **Absence is not a change.** A document armed before this field existed has no
+        #: baseline to compare against, and treating that as "the file moved" would fire on
+        #: every activation already on disk -- the same permanent-alarm failure the end-state
+        #: record was added to fix. It degrades exactly as ``active_review`` does, so it needs
+        #: no migration arm. ``resume`` deliberately does *not* reset it: the successor keeps
+        #: the predecessor's baseline, or a resume would launder an edit made under the
+        #: predecessor into the successor's starting state.
+        "exclude_digest": "",
         "phases": [],
         "phase": 1,
         "last_approved_tree": "",
@@ -100,6 +155,31 @@ def new_state_document() -> dict[str, Any]:
         "defers": 0,
         "defer_pending": False,
         "final_done_tree": "",
+        #: What the gate could see about the repository at the moment enforcement stopped,
+        #: written **only** inside the transaction that performs a terminal transition, and
+        #: **write-once** -- the first terminal transition wins. The two reporting channels
+        #: (``stop._ended``, ``posttool._guard_ended_head``) read these instead of current
+        #: HEAD, so a commit made *after* the mode ended is silent while the documented
+        #: ``git commit && arl.sh deactivate`` escape is still reported, from evidence
+        #: recorded at that moment. See ``commands.hooks.ended_evidence`` / ``end_state``.
+        #:
+        #: ``ended_capture`` is the discriminator, not ``ended_at``: a freshly armed document
+        #: already carries ``ended_at: 0``. It is one of ``"recorded"`` (HEAD and its tree
+        #: were read), ``"unborn"`` (git answered, HEAD does not exist) or ``"unreadable"``
+        #: (git could not answer), so a capture that *failed* stays reportable instead of
+        #: degrading into "nothing to see".
+        #:
+        #: **Its absence is load-bearing**: it marks a document that ended *before* this check
+        #: existed, which both readers treat as silence, and it is the only shape that does.
+        #: Present-and-empty on a document whose status a terminal transition writes is
+        #: reported as tampering instead -- see ``commands.hooks.end_state``. Only the 4 -> 5
+        #: migration arm may write these, only for a document that has **not** already ended,
+        #: and only the empty defaults; backfilling an ended one would hand that silence to the
+        #: Rule 4 state-edit bypass, and backfilling any *value* would invent evidence.
+        "ended_capture": "",
+        "ended_head": "",
+        "ended_tree": "",
+        "ended_at": 0,
         "report_seq": 0,
         "stop_after_phase": 0,
         "resumed_from": "",
@@ -446,6 +526,10 @@ class State:
           correctly through the typed accessors (``get_int`` answers ``0``,
           ``get_array_of_dicts`` answers ``[]``), so a plain ``setdefault`` from
           :func:`new_state_document` is the whole arm.
+        * **4 -> 5** adds the end-state record, and is the one arm that is *not* an
+          unconditional ``setdefault``: ``ended_capture``'s absence is a load-bearing signal,
+          not a default, so the arm resolves what it means from the stored status while that
+          question still has an answer. See :meth:`_migrate_4_to_5`.
         * **3 -> 4** adds ``guide_path`` and ``guide_revisions``, and is a plain ``setdefault``
           for the same reason -- with one property that matters more than it degrading safely:
           an empty ``guide_revisions`` is the *correct* answer for every document written
@@ -488,6 +572,8 @@ class State:
             for key in ("guide_path", "guide_revisions"):
                 self.data.setdefault(key, defaults[key])
             self.data["version"] = 4
+        if version < 5:
+            self._migrate_4_to_5(defaults)
 
     def _migrate_1_to_2(self, defaults: dict[str, Any]) -> None:
         """The 1 -> 2 arm of :meth:`_migrate`: synthesize revision 0, default the resume fields."""
@@ -546,6 +632,43 @@ class State:
             }
         ]
         self.data["version"] = 2
+
+    def _migrate_4_to_5(self, defaults: dict[str, Any]) -> None:
+        """The 4 -> 5 arm: resolve what an absent ``ended_capture`` means, while it still can be.
+
+        The other arms default a field because its absence carries no information. This one is
+        the opposite: ``ended_capture``'s absence is what the two reporting channels read as
+        "this activation ended before the record existed, so there is nothing to report". That
+        answer is only correct for a document that *had already ended* when this build first
+        touched it. For one still live, absence would go on meaning silence forever -- and the
+        documented Rule 4 bypass, writing ``status`` straight into ``state.json``, would inherit
+        that silence, because a hand-edited status leaves no evidence behind by construction.
+
+        So the arm backfills **only when the stored status is not one a terminal transition
+        writes**:
+
+        * already terminal -- it genuinely ended before the record existed. Nothing is
+          recoverable and inventing evidence is worse than refusing, exactly as the 3 -> 4 arm
+          declines to synthesize a guide revision 0. The fields stay **absent**, and both
+          channels stay silent.
+        * still live (or ``ARM_FAILED`` / ``NEEDS_HUMAN``, which no writer records evidence
+          for) -- it will reach its terminal transition under *this* build, which records
+          properly. Giving it the current schema's empty record now means a later hand-edited
+          status is a document that has the field and never filled it, which
+          ``commands.hooks.end_state`` reports as tampering rather than passing over.
+
+        **What this does not close**, and the honest bound on it: a legacy activation that is
+        live when the build is upgraded and whose status is edited *before* any write path takes
+        a transaction is still absent-and-terminal, hence silent. Migration runs under the lock
+        in :meth:`transaction`, so it needs a writer to have run at all -- in a loop that is
+        actually being worked in that is the next confirmed commit, blocked turn end or defer,
+        but it is not a guarantee. Reading the stored status is the earliest moment the question
+        has an answer at all; there is no earlier one to move it to.
+        """
+        if self.data.get("status") not in ENDED_EVIDENCE_STATUSES:
+            for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
+                self.data.setdefault(key, defaults[key])
+        self.data["version"] = 5
 
     @contextmanager
     def transaction(self, *, create: bool = False) -> Iterator[State]:

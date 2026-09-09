@@ -378,7 +378,7 @@ class Hook:
             return 0
         except OutputFailure:
             return EXIT_OUTPUT_ERROR
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - the fail-closed guard: nothing may escape without a fallback
             log_exception()
             return self._fallback(type(exc).__name__)
         # Falling out of the body without deciding is itself a defect; the shell's EXIT

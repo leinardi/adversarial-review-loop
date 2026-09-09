@@ -48,6 +48,22 @@ at the human, not the model. Whether that message reliably reaches a human rathe
 the model transcript is one of the open items in `tests/STEP0.md` — see
 [edge-cases.md](edge-cases.md#what-isnt-settled-without-a-live-session).
 
+**Both reports are bounded to what the gate could observe while it was enforcing**, and the
+bound is what makes them worth reading. Every terminal transition records HEAD and its tree
+in the activation's own document, inside the same write as the status, and the two channels
+report from that record rather than from current HEAD. A commit made after the mode ended is
+therefore silent — it is ungated by design, and reporting it made the alarm fire on every
+turn end and every Bash call for the rest of the worktree's life, which is the same as it
+carrying no information. The wrapper escape above still reports, from evidence written at
+the moment it disarmed. See [edge-cases.md](edge-cases.md#after-the-mode-ends) for the exact
+detection rule, what it does not prove, and the capture/save race.
+
+The state-edit escape is reported too, one step removed: a terminal document that carries no
+record cannot have reached that status through any of the three transitions that write one.
+The exception is an activation that ended *before* this record existed, whose absent record
+is genuine and which both channels pass over in silence —
+`/adversarial-review-loop:status` answers for those on request instead.
+
 ## The five rules
 
 Everything else in the codebase is detail against these. Paraphrased from `AGENTS.md`:
@@ -162,7 +178,15 @@ only the first of them is unconditional:
   no parent check, no cleanliness check — and an approved commit that failed still leaves
   its tree in the set, so a rewrite onto it passes unremarked. And membership in that set
   is not proof a model reviewed anything: the baseline tree is in it, and so is any tree
-  where `ignore_globs` matched everything.
+  where `ignore_globs` matched everything. A cumulative review that completes the activation
+  now adds the tree it approved to the set, so the end-state check does not report a
+  legitimate `finish` — that is one more tree in the set whose presence means "the gate
+  passed it", not "every line was read".
+
+  **The same two gaps bound the end-state report**, which asks the identical question of the
+  tree recorded when enforcement stopped: an empty commit reuses its parent's tree, so a
+  wrapper that lands one on an approved tree is invisible to it, before this check as much as
+  after. See [edge-cases.md](edge-cases.md#after-the-mode-ends).
 
   Whether it is also *recoverable* depends on the activation's status: an active one enters
   `RECONCILE`, while one that is already finished, escalated, resumed or expired is reported

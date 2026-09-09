@@ -38,7 +38,7 @@ from arl import config as config_module
 from arl.config import Config
 from arl.errors import RepoResolutionError, UnsafePathError
 from arl.hookio import Hook
-from arl.state import State, intent_read, pointer_ack, pointer_read, pointer_write
+from arl.state import ENDED_EVIDENCE_STATUSES, State, intent_read, pointer_ack, pointer_read, pointer_write
 from arl.util import log, now
 
 __all__ = [
@@ -47,11 +47,14 @@ __all__ = [
     "UNBOUND_PASS_STATUSES",
     "UNSTARTED_ARM_REASON",
     "Activation",
+    "EndState",
     "IntentCheck",
     "Unbound",
     "activation",
     "deny",
     "describe_move",
+    "end_state",
+    "ended_evidence",
     "escalate",
     "find_abandoned_marker_commit",
     "pending_intent",
@@ -201,6 +204,164 @@ def describe_move(before: Activation, now: Activation) -> str:
     if before.activation_generation != now.activation_generation:
         return "a resume or an accept changed the activation while this was in progress"
     return "the pending approval changed"
+
+
+#: The three values ``ended_capture`` may hold. Anything else in a document is corruption,
+#: not a fourth outcome -- see :func:`end_state`.
+_END_CAPTURES: Final = frozenset({"recorded", "unborn", "unreadable"})
+
+#: The widest epoch ``ended_at`` may plausibly carry: 1970-01-01 exclusive to 2286-11-20.
+#: A value outside it did not come from ``util.now``.
+_MAX_ENDED_AT: Final = 10_000_000_000
+
+#: Distinguishes "the key is not in the document" from "the key holds an empty string".
+#: Load-bearing -- see :func:`end_state`.
+_ABSENT: Final = object()
+
+
+def _end_capture(capture: str, *, head: str = "", tree: str = "") -> dict[str, object]:
+    return {"ended_capture": capture, "ended_head": head, "ended_tree": tree, "ended_at": now()}
+
+
+def ended_evidence(repo: str) -> dict[str, object]:
+    """What the gate can see about ``repo`` right now, as fields to fold into a terminal write.
+
+    Returns a mapping rather than writing anything, so each caller folds it into the **same**
+    ``state.update`` as its own terminal status write: one code path, and the evidence can
+    never be recorded without the transition or the transition without the evidence. Callers
+    must not substitute a tree they already hold -- deriving the tree from the captured commit
+    (``<head>^{tree}``) instead of reading ``HEAD`` twice is what keeps the pair self-coherent.
+
+    **Nothing here may fail the transition.** Every :class:`gitsnap.GitUnavailable` is caught
+    and recorded as an *outcome*; a raise inside the caller's ``state.transaction()`` would
+    abandon a completion over a reporting field. ``rev_parse_checked`` is the right reader
+    precisely because it distinguishes "resolves to nothing" from "git could not answer",
+    which is the distinction ``ended_capture`` exists to keep.
+
+    **The capture is not atomic with git.** The activation lock does not lock the repository,
+    so a commit landing between this call and the transaction's save is not covered. The
+    window is the tail of one transaction; it is real, and ``docs/security.md`` says so.
+    """
+    from arl import gitsnap  # noqa: PLC0415 - not on the read-only hot path
+
+    try:
+        head = gitsnap.rev_parse_checked(repo, "HEAD")
+    except gitsnap.GitUnavailable:
+        return _end_capture("unreadable")
+    if not head:
+        return _end_capture("unborn")
+    try:
+        tree = gitsnap.rev_parse_checked(repo, f"{head}^{{tree}}")
+    except gitsnap.GitUnavailable:
+        return _end_capture("unreadable")
+    return _end_capture("recorded", head=head, tree=tree) if tree else _end_capture("unreadable")
+
+
+@dataclass(frozen=True)
+class EndState:
+    """The ``ended_*`` record as the two reporting channels read it. Makes no git call."""
+
+    capture: str
+    head: str
+    tree: str
+    at: int
+    #: A terminal transition recorded evidence. False for a legacy document, and false when
+    #: the record is malformed -- ``malformed`` is what tells those two apart.
+    recorded: bool
+    #: The document carries an ``ended_*`` record this gate could not have written. Reported
+    #: as tampering, never read as benign silence.
+    malformed: bool
+
+
+def end_state(state: State) -> EndState:
+    """Read and validate the ``ended_*`` record. Never raises, never touches git.
+
+    Validation reads the **raw** document rather than the coercing accessors: ``get_int``
+    maps every malformed value to ``0`` and ``int(True) == 1`` slips straight through it,
+    either of which would make corruption indistinguishable from a legacy absence.
+
+    **An absent ``ended_capture`` and a present, empty one are not the same thing**, and
+    collapsing them is a suppression, not a tidy-up. Absent means the document predates the
+    record and there is nothing to report. Present-and-empty means the schema has the field
+    and no terminal transition filled it -- ordinary on a live activation, and impossible on
+    one whose stored status a terminal transition writes, since all three of those writes fold
+    :func:`ended_evidence` into the same ``state.update``. The documented Rule 4 bypass is
+    editing ``status`` straight into ``state.json`` (AGENTS.md, "What Rule 4 does and does not
+    guarantee"), which produces precisely that second shape, so it is reported as tampering.
+
+    ``looks_like_object_id`` and **not** ``gitsnap.checked_tree``: ``checked_tree`` resolves
+    against the repository as it is *now*, and a genuinely recorded tree legitimately stops
+    resolving after a rewrite, reset or gc -- that would turn a true report into silence, the
+    one direction Rule 1 forbids. The shape check suffices because the value never reaches
+    argv: it is compared with ``State.tree_approved`` (set membership on strings) and
+    interpolated into a message.
+    """
+
+    raw_capture = state.data.get("ended_capture", _ABSENT)
+    if raw_capture is _ABSENT or raw_capture is None or raw_capture == "":
+        return _no_record_end_state(state, present=raw_capture is not _ABSENT)
+    # `isinstance` first: `x in frozenset` hashes `x`, and an edited document may hold a list
+    # or a dict there. A `TypeError` raised here would unwind through the hook's fail-closed
+    # guard, which reports a crash rather than the tampering this function exists to name.
+    if not isinstance(raw_capture, str) or raw_capture not in _END_CAPTURES:
+        return _malformed_end_state()
+
+    raw_at = state.data.get("ended_at")
+    if isinstance(raw_at, bool) or not isinstance(raw_at, int) or not (0 < raw_at < _MAX_ENDED_AT):
+        return _malformed_end_state()
+
+    raw_head = state.data.get("ended_head")
+    raw_tree = state.data.get("ended_tree")
+    if raw_capture == "recorded":
+        return _recorded_end_state(raw_head, raw_tree, raw_at)
+
+    # `ended_evidence` cannot emit "unborn"/"unreadable" alongside an id, so finding one means
+    # the document was edited -- and reading it as benign unborn evidence would let an editor
+    # silence a real report.
+    if raw_head != "" or raw_tree != "":
+        return _malformed_end_state()
+    return EndState(capture=str(raw_capture), head="", tree="", at=raw_at, recorded=True, malformed=False)
+
+
+def _recorded_end_state(raw_head: object, raw_tree: object, at: int) -> EndState:
+    """The ``capture == "recorded"`` arm of :func:`end_state`.
+
+    A *partial* record is malformed, not silence. Both ids must be shaped like object ids and
+    be the same width: ``looks_like_object_id`` accepts 40 (sha1) and 64 (sha256), and one of
+    each cannot have come from one repository.
+    """
+    from arl import gitsnap  # noqa: PLC0415 - not on the read-only hot path
+
+    if not gitsnap.looks_like_object_id(raw_head) or not gitsnap.looks_like_object_id(raw_tree):
+        return _malformed_end_state()
+    head, tree = str(raw_head), str(raw_tree)
+    if len(head) != len(tree):
+        return _malformed_end_state()
+    return EndState(capture="recorded", head=head, tree=tree, at=at, recorded=True, malformed=False)
+
+
+def _no_record_end_state(state: State, *, present: bool) -> EndState:
+    """The ``ended_capture``-carries-nothing arm of :func:`end_state`, which is two cases.
+
+    ``present=False`` -- the key is absent -- is a document written before this check existed.
+    That is the legacy signal, the only shape that reads as silence: there is genuinely no
+    evidence, and current HEAD answers a different question.
+
+    ``present=True`` means this document *has* the field and no terminal transition filled it.
+    On a live activation that is the ordinary armed value. On one whose stored status a
+    terminal transition writes it is a contradiction this build cannot produce, since all
+    three of those writes fold :func:`ended_evidence` into the same ``state.update`` -- and it
+    is precisely what the documented Rule 4 bypass leaves behind, `status` written straight
+    into ``state.json`` with no command to inspect. Reading that as legacy silence would hand
+    the bypass its own suppression.
+    """
+    if present and state.get("status") in ENDED_EVIDENCE_STATUSES:
+        return _malformed_end_state()
+    return EndState(capture="", head="", tree="", at=0, recorded=False, malformed=False)
+
+
+def _malformed_end_state() -> EndState:
+    return EndState(capture="", head="", tree="", at=0, recorded=False, malformed=True)
 
 
 def find_abandoned_marker_commit(repo: str, *, activation_commit: str, marker_head: str, marker_tree: str) -> str:

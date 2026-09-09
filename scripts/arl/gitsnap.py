@@ -44,6 +44,7 @@ that one.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import shutil
@@ -51,6 +52,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final, NamedTuple
 
 from arl import globmatch
@@ -59,6 +61,7 @@ from arl.errors import OcrlError
 from arl.util import log
 
 __all__ = [
+    "EXCLUDE_ABSENT",
     "GIT_TIMEOUT_SEC",
     "ChangedPathsUnavailable",
     "GitUnavailable",
@@ -69,6 +72,8 @@ __all__ = [
     "changed_paths_strict",
     "checked_tree",
     "dirty_summary",
+    "exclude_digest",
+    "exclude_path",
     "format_oversized",
     "git_run",
     "head_commit",
@@ -215,6 +220,60 @@ def head_tree(repo: str) -> str:
     :func:`head_tree_checked` wherever that difference decides whether anything is reported.
     """
     return rev_parse(repo, "HEAD^{tree}")
+
+
+#: What :func:`exclude_digest` answers when the worktree has no ``info/exclude`` at all. A
+#: distinct value rather than ``""``, which means "could not tell": a file that does not exist
+#: excludes nothing, and an activation armed without one must still notice one appearing.
+EXCLUDE_ABSENT: Final = "absent"
+
+
+def exclude_digest(repo: str) -> str:
+    """Digest of this worktree's ``info/exclude``, :data:`EXCLUDE_ABSENT`, or ``""``.
+
+    ``.git/info/exclude`` is an ignore file that lives **outside** the worktree, so nothing
+    ever reviews it and no commit ever carries it -- and every snapshot this module takes
+    obeys it, because :func:`snapshot` stages with ``git add -A``. Anything listed there is
+    therefore invisible to the dirty check, to the turn-end unreviewed-work sweep and to every
+    review tree: writing one line into it makes a file that is really sitting in the worktree
+    read as a clean worktree. Measured -- a staged ``backdoor.py`` went from ``?? backdoor.py``
+    to ``clean = True`` with the snapshot tree falling back to the baseline.
+
+    The answer is *not* to look through the file. Legitimately ignored paths (``node_modules``,
+    build output) are exactly what it and ``.gitignore`` exist for, and sweeping them into a
+    review would make every turn end unusable. What is worth knowing is narrower: whether the
+    file **changed while an activation was live**. ``.gitignore`` needs no such treatment --
+    it is inside the repository, so a change to it is itself reviewed.
+
+    ``""`` on any failure, and callers must treat it as "no comparison possible" rather than
+    as a change: git being unrunnable is already denied by Rule 0 elsewhere, and turning an
+    unreadable file into a reported edit would fire on every sandbox that hides ``.git``.
+    """
+    path = exclude_path(repo)
+    if path is None:
+        return ""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return EXCLUDE_ABSENT
+    except OSError:
+        return ""
+
+
+def exclude_path(repo: str) -> Path | None:
+    """Where this worktree's ``info/exclude`` lives, or ``None`` when git will not say.
+
+    ``--git-path`` rather than a hand-built ``.git/info/exclude``: a linked worktree's ``.git``
+    is a *file* pointing into the main repository's ``worktrees/<name>/``, and a submodule's is
+    elsewhere again. git knows where its own metadata lives; this must not guess.
+    """
+    proc = git_run(repo, ["rev-parse", "--git-path", "info/exclude"])
+    if proc.returncode != 0:
+        return None
+    resolved = _decode(proc.stdout).strip()
+    if not resolved:
+        return None
+    return Path(resolved) if os.path.isabs(resolved) else Path(repo) / resolved
 
 
 def is_ancestor(repo: str, ancestor: str, descendant: str) -> bool:

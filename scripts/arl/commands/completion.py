@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 from arl import commands, gitsnap
 from arl import config as config_module
+from arl.commands import hooks
 from arl.config import Config
 from arl.gitsnap import SnapshotError
 from arl.state import State
@@ -543,7 +544,22 @@ class Completion:
                         "turn again to run one.\n"
                     )
 
-            state.update(final_done_tree=reviewed, status="COMPLETE", reason=reason)
+            if review is not None:
+                # A tree a cumulative review approved must be marked approved -- and only that
+                # tree. `finish` accepts `RECONCILE` and completes through this method, which
+                # wrote only `final_done_tree`; since `tree_approved` is pure membership in
+                # `approved_trees`, the end-state record below would then name a tree the gate
+                # reads as unapproved and report a legitimate completion as an escape forever.
+                #
+                # Guarded on `review`, never unconditional: `_complete_without_review` passes
+                # none, and its whole point is that no review ran. Marking there would let a
+                # completion with no reviewer involved repair the approval set, and this
+                # method's own docstring is explicit that `final_done_tree` "does not
+                # distinguish which".
+                state.mark_tree_approved(reviewed)
+            # Folded into the same write as the terminal status, so the evidence can never be
+            # recorded without the transition or the transition without the evidence.
+            state.update(final_done_tree=reviewed, status="COMPLETE", reason=reason, **hooks.ended_evidence(repo))
 
 
 def start(state: State, *, config: Config, repo: str) -> Completion:

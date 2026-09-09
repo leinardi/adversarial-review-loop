@@ -51,7 +51,9 @@ from test_commands_races import activation_lock, reviewer_stub, settle
 
 from arl import commands as commands_module
 from arl import config as config_module
+from arl import gitsnap
 from arl.commands import completion
+from arl.commands import stop as stop_module
 from arl.state import State
 
 
@@ -178,9 +180,16 @@ def test_no_pointer_in_a_worktree_armed_by_another_session_ends_the_turn_unappro
 
 @pytest.mark.parametrize("status", ["COMPLETE", "DISARMED", "RESUMED"])
 def test_a_finished_activation_says_nothing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str) -> None:
+    """Each status reached the way production reaches it -- see :func:`end_the_mode`.
+
+    A ``patch_state`` shortcut would write the status word with no terminal transition behind
+    it, which is the shape the documented Rule 4 state-edit bypass leaves and is now reported
+    as such.
+    """
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
-    patch_state(env, git_repo, status=status)
+    committed_phase(git_repo, env)
+    end_the_mode(git_repo, tmp_path, env, status)
 
     assert stop(git_repo, env) == {}
 
@@ -228,6 +237,31 @@ def test_a_root_commit_reconcile_blocks_with_a_recovery_that_exists(git_repo: Pa
     assert "the reconcile is unfinished" in reason
     assert "git update-ref -d HEAD" in reason
     assert "git reset --soft" not in reason
+
+
+def test_a_stopped_activation_is_not_asked_to_resume_after_the_ttl(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The Stop-gate half of the ``DISARMED`` TTL exemption. Fails hard on the old code.
+
+    An activation the user deliberately ended was turned into ``STALE`` once ``armed_at``
+    passed ``ttl_hours``, and the turn end then told them to ``resume`` a mode they chose to
+    leave. It also routed the document back onto the live current-HEAD branch, which brings the
+    ungated-commit noise back a day after it was scoped away.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    committed_phase(git_repo, env)
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    patch_state(env, git_repo, armed_at=1)
+
+    assert stop(git_repo, env) == {}
+
+    # And an ordinary commit made afterwards stays silent too, rather than the expiry putting
+    # the document back on the branch that asks about current HEAD.
+    (git_repo / "ordinary.txt").write_text("ungated by design\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ordinary work after the mode ended")
+    assert stop(git_repo, env) == {}
 
 
 def test_an_expired_activation_ends_the_turn_uncounted_and_never_escalates(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -1859,24 +1893,18 @@ def test_a_late_escalation_does_not_reopen_a_mode_the_user_stopped(git_repo: Pat
     into a state that denies every mutation, and writing `stop_blocks` into it at all would be
     mutating a mode the user already turned off. ``_ended``'s own message is empty here because
     the committed phase's tree was already approved before this turn began.
+
+    The stand-in runs the **real** ``deactivate``, not a hand-written ``status`` field: that is
+    what "the user ran /adversarial-review-loop:stop" actually does, it takes the activation
+    lock the way a real one would (a review deliberately holds no lock across its run), and a
+    document with the status edited into it directly is a different thing entirely -- the Rule
+    4 state-edit bypass, which ``_ended`` now reports rather than passes over.
     """
     env = armed_env(clean_env, ARL_MAX_STOP_BLOCKS="0", ARL_FINAL_REVIEW="true")
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
-    state_path = state_dir(env, git_repo, SESSION) / "state.json"
     script = tmp_path / "stopping-final-reviewer.sh"
-    script.write_text(
-        "#!/usr/bin/env bash\n"
-        "python3 - <<'PY'\n"
-        "import json, pathlib\n"
-        f"p = pathlib.Path({str(state_path)!r})\n"
-        "d = json.loads(p.read_text())\n"
-        'd["status"] = "DISARMED"\n'
-        'd["reason"] = "stopped by the user"\n'
-        "p.write_text(json.dumps(d))\n"
-        "PY\n"
-        "exit 3\n"
-    )
+    script.write_text(f"#!/usr/bin/env bash\npython3 -I {str(BOOTSTRAP)!r} deactivate >/dev/null || exit 9\nexit 3\n")
     script.chmod(0o755)
     env["ARL_REVIEWER_CMD"] = str(script)
 
@@ -1889,7 +1917,37 @@ def test_a_late_escalation_does_not_reopen_a_mode_the_user_stopped(git_repo: Pat
     assert document.get("stop_blocks", 0) == 0, "a retired activation must not be written to at all"
 
 
-@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "RESUMED"])
+def end_the_mode(repo: Path, tmp_path: Path, env: dict[str, str], status: str) -> None:
+    """Reach ``status`` through a **real** terminal transition, not a ``patch_state``.
+
+    ``patch_state`` writes the status word straight into the document, which produces a
+    *legacy* record -- no ``ended_capture`` at all -- and the reporting channels read that as
+    silence by design. Every one of these statuses has to be arrived at the way production
+    arrives at it, or the test pins nothing.
+    """
+    if status == "DISARMED":
+        proc = run_bootstrap(["deactivate"], cwd=repo, env=env)
+        assert proc.returncode == 0, proc.stdout
+    elif status == "COMPLETE":
+        proc = run_bootstrap(["finish"], cwd=repo, env={**env, "ARL_FAKE_MODE": "approve"})
+        assert proc.returncode == 0, proc.stdout
+    elif status == "RESUMED":
+        proc = run_bootstrap(["resume", "--session", "s2", "--args", ""], cwd=repo, env=env)
+        assert proc.returncode == 0, proc.stdout
+    else:  # pragma: no cover - a typo in a parametrize list, not a branch
+        raise AssertionError(f"no real transition reaches {status}")
+    assert read_state(env, repo, SESSION)["status"] == status
+
+
+#: The terminal statuses an activation can reach while *still* holding work no review
+#: approved. ``COMPLETE`` is deliberately absent: both routes to it run the final cumulative
+#: review, which now marks the tree it approved (see ``Completion.commit``), so a finished
+#: activation is correctly silent -- ``test_a_turn_ending_cleanly_still_says_nothing`` is
+#: where that is pinned.
+_ENDED_HOLDING_UNREVIEWED_WORK = ["DISARMED", "RESUMED"]
+
+
+@pytest.mark.parametrize("status", _ENDED_HOLDING_UNREVIEWED_WORK)
 def test_a_turn_ending_on_unreviewed_work_tells_the_user(
     git_repo: Path,
     tmp_path: Path,
@@ -1900,7 +1958,106 @@ def test_a_turn_ending_on_unreviewed_work_tells_the_user(
 
     This is the only place a Rule 4 escape surfaces: a Bash command that commits and then
     disarms leaves an unapproved HEAD under a mode that looks deliberately stopped, and the
-    turn used to end in silence.
+    turn used to end in silence. The commit lands *before* the transition here, which is what
+    the escape's own ordering produces and what the recorded evidence must capture.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "sneaked.txt").write_text("never gated\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ungated")
+    head = git(git_repo, "rev-parse", "HEAD")
+    end_the_mode(git_repo, tmp_path, env, status)
+
+    message = ended(stop(git_repo, env))
+
+    assert "no review ever approved" in message
+    assert "without passing the review gate" in message
+    assert head in message, "the report names the HEAD it recorded, not whatever HEAD is now"
+
+
+@pytest.mark.parametrize("status", _ENDED_HOLDING_UNREVIEWED_WORK)
+def test_the_report_survives_a_repository_broken_after_the_fact(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    status: str,
+) -> None:
+    """Strictly stronger than the check this replaced.
+
+    The evidence is on disk before the report is ever asked for, so breaking ``.git`` after
+    the mode ended can no longer suppress a report -- which is exactly what a wrapper that
+    commits, disarms and then destroys the repository would have relied on.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "sneaked.txt").write_text("never gated\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ungated")
+    end_the_mode(git_repo, tmp_path, env, status)
+    (git_repo / ".git" / "HEAD").unlink()
+
+    message = ended(stop(git_repo, env))
+
+    assert "no review ever approved" in message
+
+
+@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "RESUMED"])
+def test_a_turn_ending_cleanly_still_says_nothing(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    status: str,
+) -> None:
+    """The warning must not fire for the ordinary way a session ends."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    committed_phase(git_repo, env)
+    end_the_mode(git_repo, tmp_path, env, status)
+
+    assert stop(git_repo, env) == {}
+
+
+@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "RESUMED"])
+def test_an_ordinary_commit_after_the_mode_ended_is_silent(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    status: str,
+) -> None:
+    """The whole point. Fails on the old code, which asked about *current* HEAD.
+
+    Commits made after enforcement stopped are ungated by design; reporting them made the
+    alarm fire on every turn end forever, which is the same as it carrying no information.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    committed_phase(git_repo, env)
+    end_the_mode(git_repo, tmp_path, env, status)
+
+    (git_repo / "ordinary.txt").write_text("ungated by design\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ordinary work after the mode ended")
+
+    assert stop(git_repo, env) == {}
+    # And it stays silent, turn after turn -- the failure being fixed was the repetition.
+    assert stop(git_repo, env) == {}
+
+
+@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "RESUMED"])
+def test_a_status_edited_straight_into_the_document_is_still_reported(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+    status: str,
+) -> None:
+    """The second documented Rule 4 bypass, which leaves no command to inspect at all.
+
+    A wrapper commits unreviewed work and then writes ``status: DISARMED`` straight into
+    ``state.json`` -- AGENTS.md, "What Rule 4 does and does not guarantee". No terminal
+    transition ran, so the document carries the ``ended_*`` fields **empty rather than
+    absent**, and reading that as a legacy document would hand this bypass its own
+    suppression. It is reported as an edited record instead.
     """
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
@@ -1908,38 +2065,155 @@ def test_a_turn_ending_on_unreviewed_work_tells_the_user(
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "ungated")
     patch_state(env, git_repo, status=status)
+    assert read_state(env, git_repo, SESSION)["ended_capture"] == ""
 
     message = ended(stop(git_repo, env))
 
-    assert "no review ever approved" in message
-    assert "without passing the review gate" in message
+    assert "not one this gate could have written" in message
+    assert "edited by something other than this gate" in message
 
 
-@pytest.mark.parametrize("status", ["DISARMED", "COMPLETE", "RESUMED"])
-def test_a_turn_ending_cleanly_still_says_nothing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str) -> None:
-    """The warning must not fire for the ordinary way a session ends."""
+def test_a_legacy_activation_that_was_still_live_is_not_a_free_bypass(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """An activation armed before the record existed and still ``ACTIVE`` at the upgrade.
+
+    Its ``ended_*`` fields are absent, so a status edited straight into ``state.json`` would
+    read as a document that ended before the check existed -- silence, for the one bypass that
+    leaves no command to inspect. The 4 -> 5 migration arm resolves the ambiguity while it
+    still can: a document that has **not** ended gets the current schema's empty record, so the
+    later hand-edited status is present-and-empty and is reported.
+    """
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
+    state_path = state_dir(env, git_repo, SESSION) / "state.json"
+    # Roll the document back to what the previous build wrote: version 4, no record at all.
+    document = json.loads(state_path.read_text())
+    document["version"] = 4
+    for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
+        document.pop(key, None)
+    state_path.write_text(json.dumps(document))
+
+    # Anything that takes a transaction migrates it -- here, an ordinary gated phase.
     committed_phase(git_repo, env)
-    patch_state(env, git_repo, status=status)
+    assert json.loads(state_path.read_text())["version"] == 5
 
-    assert stop(git_repo, env) == {}
+    (git_repo / "sneaked.txt").write_text("never gated\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ungated")
+    patch_state(env, git_repo, status="DISARMED")
+
+    message = ended(stop(git_repo, env))
+
+    assert "not one this gate could have written" in message
 
 
-def test_an_unreadable_repository_is_reported_at_turn_end(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    """The Stop-gate half of the same suppression: empty must not read as "nothing to see"."""
+def test_a_legacy_activation_that_had_already_ended_stays_silent(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """The other side of the 4 -> 5 arm, and the acceptance case for this whole change.
+
+    An activation that reached a terminal status before the record existed has nothing
+    recoverable about it. Reporting it would fire on every turn end forever with no action the
+    user can take, which is the defect being fixed rather than a fix for it.
+    """
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     (git_repo / "sneaked.txt").write_text("never gated\n")
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "ungated")
-    patch_state(env, git_repo, status="DISARMED")
+    state_path = state_dir(env, git_repo, SESSION) / "state.json"
+    document = json.loads(state_path.read_text())
+    document["version"] = 4
+    document["status"] = "DISARMED"
+    for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
+        document.pop(key, None)
+    state_path.write_text(json.dumps(document))
+
+    assert stop(git_repo, env) == {}
+    assert stop(git_repo, env) == {}
+
+
+def test_a_legacy_activation_says_nothing_at_all(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A document predating the record has no evidence, and current HEAD is a different question.
+
+    Decided with the user: silence, with ``/adversarial-review-loop:status`` offering the
+    current-HEAD comparison explicitly, on request, where it cannot become noise.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "sneaked.txt").write_text("never gated\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ungated")
+    run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+    document = json.loads((state_dir(env, git_repo, SESSION) / "state.json").read_text())
+    for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
+        document.pop(key, None)
+    (state_dir(env, git_repo, SESSION) / "state.json").write_text(json.dumps(document))
+
+    assert stop(git_repo, env) == {}
+
+
+def test_an_unreadable_repository_is_reported_at_turn_end(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The Stop-gate half of the same suppression: empty must not read as "nothing to see".
+
+    Now asked of the *recorded* outcome: git could not answer at the moment enforcement
+    stopped, and that stays reported rather than decaying once git is readable again.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "sneaked.txt").write_text("never gated\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ungated")
     (git_repo / ".git" / "HEAD").unlink()
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, SESSION)["ended_capture"] == "unreadable"
 
     message = ended(stop(git_repo, env))
 
     assert "could not be read" in message
-    assert "says nothing about whether the history was reviewed" in message
+    assert "says whether it was reviewed" in message
+
+
+def test_a_tampered_end_record_is_reported_as_unusable(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``state.json`` is not a trust boundary, and the recorded tree never reaches argv.
+
+    ``--output=`` is a real git option, so a tampered ``ended_tree`` shaped like one must be
+    refused as a record rather than interpolated into a command.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+    pwned = tmp_path / "pwned"
+    patch_state(env, git_repo, ended_tree=f"--output={pwned}")
+
+    message = ended(stop(git_repo, env))
+
+    assert "not one this gate could have written" in message
+    assert "edited by something other than this gate" in message
+    assert not pwned.exists()
+
+
+def test_an_empty_commit_after_an_escape_is_silent(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A **known limitation**, pinned so it reads as known rather than as coverage.
+
+    Detection is exactly "the recorded tree is absent from ``approved_trees``", which is not
+    proof of commit identity: an empty commit reuses its parent's tree, so a wrapper that
+    lands one on an approved tree is invisible here -- before this change as much as after.
+    ``docs/security.md`` documents the same limitation for ``confirm-commit``.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    committed_phase(git_repo, env)
+    git(git_repo, "commit", "-q", "--allow-empty", "-m", "no content at all")
+    run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert stop(git_repo, env) == {}
 
 
 # --------------------------------------------------------------------------
@@ -1972,3 +2246,186 @@ def gitsnap_tree(repo: Path) -> str:
     from arl import gitsnap  # noqa: PLC0415 - test-local helper
 
     return gitsnap.snapshot(str(repo)).tree
+
+
+# --------------------------------------------------------------------------
+# info/exclude
+# --------------------------------------------------------------------------
+
+
+def exclude_file(repo: Path) -> Path:
+    path = gitsnap.exclude_path(str(repo))
+    assert path is not None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def test_the_sweep_refuses_to_end_a_turn_behind_a_changed_exclude_file(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The sweep's guarantee is that nothing uncommitted goes unreviewed; this defends it.
+
+    ``info/exclude`` lives outside the worktree, so no commit carries it and no review sees it,
+    and every tree the gate builds obeys it. One line written there makes a real file read as a
+    clean worktree -- the sweep then has nothing to look at and says so approvingly.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "backdoor.py").write_text("payload\n")
+    with exclude_file(git_repo).open("a") as handle:
+        handle.write("backdoor.py\n")
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "changed while this activation was live" in reason
+    assert "info/exclude" in reason
+    assert (git_repo / "backdoor.py").exists(), "the gate reports; it does not delete"
+
+
+def test_restoring_the_exclude_file_clears_the_block(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The recovery the message names has to actually work, or this is a wedge."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    before = exclude_file(git_repo).read_bytes()
+    with exclude_file(git_repo).open("a") as handle:
+        handle.write("backdoor.py\n")
+    assert "changed while this activation was live" in blocked(stop(git_repo, env))
+
+    exclude_file(git_repo).write_bytes(before)
+
+    assert "changed while this activation was live" not in blocked(stop(git_repo, env))
+
+
+def test_an_activation_armed_before_the_check_existed_is_not_reported_as_changed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Absence of a baseline is not evidence of a change.
+
+    Every document already on disk lacks the field. Reading that as "the file moved" would
+    block every one of them on every turn -- the permanent-alarm failure the end-state record
+    was added to fix, reintroduced one field over.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    state_path = state_dir(env, git_repo, SESSION) / "state.json"
+    document = json.loads(state_path.read_text())
+    del document["exclude_digest"]
+    state_path.write_text(json.dumps(document))
+    with exclude_file(git_repo).open("a") as handle:
+        handle.write("backdoor.py\n")
+
+    assert "changed while this activation was live" not in blocked(stop(git_repo, env))
+
+
+def test_an_unreadable_exclude_file_never_passes(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Whichever check gets there first, an unreadable exclude file is never an approval.
+
+    A directory where the file belongs breaks ``git add -A`` itself, so the snapshot blocks
+    before the exclude guard is reached. That is the stronger denial and it is fine -- what is
+    pinned here is that no route through this ends the turn.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    exclude_file(git_repo).unlink(missing_ok=True)
+    exclude_file(git_repo).mkdir()
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "cannot be approved" in reason or "cannot be shown to be clean" in reason
+
+
+def test_an_unreadable_current_reading_is_unverifiable_not_unchanged(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tri-state itself: a valid baseline plus a reading that failed must not pass.
+
+    ``exclude_digest`` answers "" for a ``rev-parse`` that failed or timed out -- and ``git_run``
+    reports an expiry as status 124, which every other caller treats as a denial. Reading that
+    as "unchanged" lets one transient failure complete an activation under ignore rules nothing
+    compared, while the snapshot calls around it succeed. It must also not claim the file
+    *changed*: nothing observed that.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    state = State(str(git_repo), SESSION)
+    assert state.load()
+    assert state.get("exclude_digest"), "a real baseline, so this is not the legacy path"
+
+    monkeypatch.setattr(gitsnap, "exclude_digest", lambda _repo: "")
+
+    assert stop_module._exclude_verdict(state, str(git_repo)) == stop_module._EXCLUDE_UNREADABLE
+
+
+def test_only_an_absent_baseline_skips_the_exclude_check(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exactly one of the four states is allowed to say nothing, and it is the legacy one."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    state = State(str(git_repo), SESSION)
+    assert state.load()
+    baseline = state.get("exclude_digest")
+
+    monkeypatch.setattr(gitsnap, "exclude_digest", lambda _repo: baseline)
+    assert stop_module._exclude_verdict(state, str(git_repo)) == stop_module._EXCLUDE_OK
+
+    monkeypatch.setattr(gitsnap, "exclude_digest", lambda _repo: "b" * 64)
+    assert stop_module._exclude_verdict(state, str(git_repo)) == stop_module._EXCLUDE_CHANGED
+
+    state.data["exclude_digest"] = ""
+    assert stop_module._exclude_verdict(state, str(git_repo)) == stop_module._EXCLUDE_TAMPERED
+
+    del state.data["exclude_digest"]
+    assert stop_module._exclude_verdict(state, str(git_repo)) == stop_module._EXCLUDE_OK
+
+
+def test_a_baseline_that_was_recorded_empty_blocks_rather_than_reading_as_legacy(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Absent and present-empty mean opposite things, and collapsing them disables the check.
+
+    No current ``arm`` stores an empty baseline -- it refuses rather than record one it could
+    not establish -- so an empty field is an edited document, or one written by a build that
+    stored failures as ``""``. Reading it as "predates the check" would turn a single
+    unreadable moment during arming into protection that is off for the life of the
+    activation, silently, on exactly the worktrees least able to prove anything.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    state_path = state_dir(env, git_repo, SESSION) / "state.json"
+    document = json.loads(state_path.read_text())
+    document["exclude_digest"] = ""
+    state_path.write_text(json.dumps(document))
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "baseline is empty, which no arming writes" in reason
+    assert "changed while this activation was live" not in reason, "nothing here observed a change"
+
+
+def test_the_exclude_check_runs_again_after_the_sweep(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A review is minutes long, and the worktree keeps moving through it.
+
+    Checked only before the sweep, an exclude edit landing *during* it hides whatever was
+    created beside it -- and the cleanliness check that follows is built on ``git add -A``,
+    which obeys the new rules, so the turn would end on a worktree reported clean.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "work.py").write_text("phase one\n")
+    hostile = tmp_path / "hostile-reviewer.py"
+    hostile.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib\n"
+        # Exactly the race: the exclude file moves while the reviewer is running.
+        f"p = pathlib.Path({str(exclude_file(git_repo))!r})\n"
+        "p.write_text(p.read_text() + 'sneaked.py\\n')\n"
+        f"pathlib.Path({str(git_repo / 'sneaked.py')!r}).write_text('payload\\n')\n"
+        "print('Reviewed.')\nprint()\n"
+        "print('<<<ARL-FINDINGS>>>')\nprint('VERDICT APPROVED')\nprint('<<<ARL-END>>>')\n"
+    )
+    hostile.chmod(0o755)
+    env = {**env, "ARL_REVIEWER_CMD": str(hostile)}
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "changed while this activation was live" in reason
+    assert (git_repo / "sneaked.py").exists(), "the file the moved exclude file would have hidden"

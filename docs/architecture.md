@@ -127,12 +127,27 @@ values that exist:
 | `RESUMED` | retired by a `resume` into a successor session | **yes** |
 | `COMPLETE` | the activation is closed and the mode disarmed. Reached three ways: the Stop gate with every phase committed, either directly or after an approving cumulative review when `final_review` is on; the Stop gate following through on a standing `finish_requested`, which skips the outstanding-phase check and so can complete with phases left; or a user-invoked `finish`, which always reviews and likewise need not have every phase committed. The `reason` field records which | **yes** |
 | `ARM_FAILED` | arming (or resuming) failed; nothing was frozen | no — re-arm fixes it |
-| `DISARMED` | the user ran `stop` | no — re-arming starts fresh |
+| `DISARMED` | the user ran `stop` | **yes, for enforcement** — the gate passes everything and `stop` is a no-op on it; `resume` can still reactivate it, and re-arming starts fresh |
+
+"Terminal" in that column means **terminal for enforcement**, which is the distinction the
+code actually makes and the one the table used to blur. `DISARMED` was listed as non-terminal
+because a `resume` can reactivate it — true, and so can it for `COMPLETE`'s neighbours in
+spirit — but every gate treats it as ended: `pretool` passes, `posttool` and the Stop gate
+report from the recorded end state rather than from current HEAD, `stop` refuses to rewrite
+it, and it is exempt from the TTL. `ARM_FAILED` and `NEEDS_HUMAN` are the genuinely
+non-terminal denying states: they still block, and there is a way back that is not a re-arm.
 
 `STALE` is not a stored value — it's *derived* from `armed_at` plus `ttl_hours` at read
 time (`state.effective_status`). An activation can be stored as `ACTIVE` and answer `STALE`
-today, then answer `ACTIVE` again tomorrow if `resume` refreshes `armed_at`. See
+today, then answer `ACTIVE` again tomorrow if `resume` refreshes `armed_at`. The statuses that
+have already stopped enforcing are exempt, `DISARMED` included: expiring a mode the user ended
+would deny every mutation in that worktree a day later. See
 [edge-cases.md](edge-cases.md#a-stale-activation) for what that means in practice.
+
+**Three git calls left the hot paths with the end-state record.** `stop._ended` and
+`posttool._guard_ended_head` read the recorded evidence, so an ended session pays no
+`git rev-parse` per turn end and no `git rev-parse` per Bash call in that worktree — the
+saving the live statuses cannot have, since they genuinely must ask about HEAD now.
 
 ### `round_history`
 

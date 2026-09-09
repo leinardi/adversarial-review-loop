@@ -44,7 +44,7 @@ from test_commands_arm import armed_env, plan_file, state_dir
 ARL_SH = PLUGIN_ROOT / "scripts" / "arl.sh"
 
 #: Fields whose value is a clock reading; equality would be a flake, presence is the claim.
-_VOLATILE = ("armed_at",)
+_VOLATILE = ("armed_at", "ended_at")
 
 
 def shell(argv: list[str], *, cwd: Path, env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:

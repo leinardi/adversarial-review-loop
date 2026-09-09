@@ -40,7 +40,7 @@ from arl import config as config_module
 from arl.commands import hooks
 from arl.errors import RepoResolutionError
 from arl.hookio import Hook, read_hook_input
-from arl.state import State, pointer_read
+from arl.state import STATE_VERSION, State, pointer_read
 from arl.util import now
 
 if TYPE_CHECKING:  # pragma: no cover - the hot path must not import these to type-check
@@ -633,9 +633,48 @@ def _verified_plan_file(hook: Hook, *, state: State, config: Config) -> str:
     return str(entry.get("file"))
 
 
+def _upgrade_stale_document(state: State) -> None:
+    """Run any pending migration once, here, on the first tool call this gate decides about.
+
+    ``State._migrate`` runs inside :meth:`State.transaction`, and both hooks read without one,
+    so a document written by an older build stays un-migrated for as long as nothing happens to
+    write to it. That is a correctness gap rather than untidiness, because of what the 4 -> 5
+    arm decides: it reads the stored status to work out whether an absent ``ended_*`` record
+    means "this ended before the record existed" (silence) or "this is live and will record
+    properly when it ends" (so a later hand-edited status is reported). Left un-migrated, a
+    legacy activation that is still live keeps the absent record, and writing ``status:
+    DISARMED`` straight into ``state.json`` -- the Rule 4 bypass that leaves no command to
+    inspect -- reads as the first case and goes unreported.
+
+    This is the earliest point that closes it, and it closes it for the shape that matters: the
+    wrapper has to run at least one tool call to do anything, and every one of them arrives
+    here first. What it cannot cover is a status edited by something that never passes a hook
+    at all -- the user's own shell -- which is not the threat model.
+
+    **Costs one write per activation, ever**, not one per call: after the first upgrade the
+    version check matches and this returns on a dict lookup. The lock is taken only on that
+    same first call. It is deliberately *not* hoisted above ``hooks.tool_is_readonly``, so a
+    read-only tool still answers before state is loaded at all (see AGENTS.md, "Hot-path
+    rules").
+
+    A migration that cannot complete raises ``StateLoadError`` exactly as it does on every
+    other path, and the fail-closed guard in ``hookio.Hook.run`` turns that into a denial --
+    the right answer for a document the gate cannot bring up to date. That does mean a legacy
+    activation whose ``plan.frozen.md`` is gone reaches its ``ARM_FAILED`` escalation on the
+    next tool call rather than on the next write; earlier, and in the denying direction.
+    """
+    if state.data.get("version") == STATE_VERSION:
+        return
+    with state.transaction():
+        # Nothing to mutate: entering the transaction is what migrates, and the exit saves.
+        pass
+
+
 def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo: str) -> None:
     """Everything from the effective status down. Ends in an emitter on every path."""
     from arl import cmdshape  # noqa: PLC0415 - not on the read-only hot path
+
+    _upgrade_stale_document(state)
 
     tool, command = payload.tool_name, payload.command
     status = state.effective_status(config)

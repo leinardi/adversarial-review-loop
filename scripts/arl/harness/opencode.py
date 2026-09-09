@@ -265,7 +265,7 @@ def _list_sessions(*, repo: str, config: Config, act_dir: Path, seq: str) -> lis
         if not isinstance(data, list):
             log("session list output was not a JSON list")
             return None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - continuity is a hint: any failure costs one fresh review, never an approval
         log(f"session list failed: {exc}")
         return None
     finally:

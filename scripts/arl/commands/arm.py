@@ -731,6 +731,24 @@ def _arm(state: State, request: _Request) -> _Frozen:
             f"the working directory ({os.getcwd()}) is not inside a git repository; the commit is the phase boundary, so a repository is required"
         )
 
+    # Captured *before* the cleanliness check below, and re-read just before the document is
+    # written, so the baseline and the "this worktree is clean" verdict describe one and the
+    # same set of ignore rules. Taken after the check, a writer that added an exclusion and the
+    # file it hides in between would have this arm record the *new* rules as its baseline and
+    # activate over work already hidden from every later check -- a gate that starts blind.
+    #
+    # An unestablishable digest is a refusal, not a stored "". `arm` already refuses when it
+    # cannot establish whether the worktree is clean, and this is the same question one file
+    # over. Storing "" would look exactly like a document that predates the field, which every
+    # reader treats as "no baseline, say nothing" -- so the protection would be off for the
+    # life of the activation, silently, on the very worktrees least able to prove anything.
+    exclude_digest = gitsnap.exclude_digest(repo)
+    if not exclude_digest:
+        raise _ArmFailure(
+            "the .git/info/exclude baseline could not be established, so a later change to it -- which would "
+            f"hide files from every review and from the turn-end sweep -- could not be detected. {SANDBOX_HINT}"
+        )
+
     allow_dirty = parsed.allow_dirty or config.as_bool("allow_dirty")
     if not allow_dirty:
         status = gitsnap.worktree_status(repo)
@@ -832,6 +850,17 @@ def _arm(state: State, request: _Request) -> _Frozen:
             except guide.GuideRejected as exc:
                 raise _ArmFailure(str(exc)) from exc
 
+        # The compare half of the capture above. Everything between the two -- the cleanliness
+        # check, the reviewer probe, the plan freeze -- ran under the rules `exclude_digest`
+        # names, so publishing a document whose baseline no longer matches them would bless
+        # whatever changed underneath. Refusing costs a re-run; the alternative is an
+        # activation that was already blind when it started.
+        if gitsnap.exclude_digest(repo) != exclude_digest:
+            raise _ArmFailure(
+                "the .git/info/exclude file changed while this activation was being armed, so the worktree that was "
+                "checked and the ignore rules being recorded are not the same one. Re-run /adversarial-review-loop:implement."
+            )
+
         # A fresh document: re-arming the same session starts a new activation, and carrying
         # the old one's approved trees forward would approve a tree nobody reviewed for it.
         state.new()
@@ -846,6 +875,10 @@ def _arm(state: State, request: _Request) -> _Frozen:
             last_approved_tree=frozen.baseline,
             armed_at=now(),
             allow_dirty=allow_dirty,
+            # Established before the cleanliness check and re-verified just above, so this is
+            # never the empty string: an arm that could not read it refused rather than storing
+            # a baseline indistinguishable from a document that predates the field.
+            exclude_digest=exclude_digest,
             stop_after_phase=until,
             overrides=overrides,
             # Revision 0, so the list is never empty and "revised" is exactly "more than one

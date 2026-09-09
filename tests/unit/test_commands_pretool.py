@@ -401,6 +401,40 @@ def test_a_resumed_activation_ignores_the_ttl(git_repo: Path, tmp_path: Path, cl
     assert "older than ttl_hours" not in reason
 
 
+def test_a_stopped_activation_does_not_expire_back_into_denying(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The TTL is for an activation nobody ever ended, which is not this one.
+
+    Fails hard on the old code: ``DISARMED`` was missing from ``_TTL_EXEMPT``, so a worktree
+    the user deliberately stopped started refusing **every** mutation ``ttl_hours`` after it
+    was armed -- and the Stop gate told them to resume a mode they had chosen to leave.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+    patch_state(env, git_repo, armed_at=1)
+
+    # `DISARMED` is a pure pass-through: zero bytes, no decision to parse.
+    proc = run_hook("pretool", payload(git_repo, tool="Write"), cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", proc.stdout
+
+
+def test_a_stopped_activation_can_still_be_resumed_after_the_ttl(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``resume`` reads the *stored* status against ``_RESUMABLE``, so the exemption changes
+    nothing for it -- a stale ``DISARMED`` activation was always resumable and still is."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    assert run_bootstrap(["deactivate"], cwd=git_repo, env=env).returncode == 0
+    patch_state(env, git_repo, armed_at=1)
+
+    proc = run_bootstrap(["resume", "--session", SESSION, "--args", ""], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
+
+
 def test_an_expired_activation_blocks_rather_than_disarming(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """STALE is a denial, not a timer that quietly turns enforcement off (Rule 1)."""
     env = armed_env(clean_env)

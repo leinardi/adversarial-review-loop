@@ -44,6 +44,7 @@ from arl.config import Config
 from arl.errors import RepoResolutionError
 from arl.hookio import Hook, HookInput, read_hook_input
 from arl.state import State, pointer_read
+from arl.util import format_at
 
 __all__ = ["confirm_commit", "posttool_failure"]
 
@@ -145,6 +146,64 @@ UNREVIEWED_HEAD_REPORT: Final = """\
 
 The mode is {status}, so the gate has nothing left to enforce and has changed nothing. Tell
 the user: this commit is in their history and was never reviewed.
+"""
+
+#: The terminal path's own detail lines. ``UNREVIEWED_HEAD`` is deliberately **not** reworded
+#: for them: it also supplies ``{detail}`` on the ``_RECONCILABLE`` path, where "HEAD is now
+#: ..." is correct and the divergence is acted on.
+ENDED_UNREVIEWED_HEAD: Final = (
+    "When enforcement stopped ({at}), HEAD was {head}, whose tree {head_tree} no review ever approved. "
+    "Either the command that created it was not recognised as a commit, or HEAD was moved by something other than a commit."
+)
+
+ENDED_UNBORN_HEAD: Final = (
+    "When enforcement stopped ({at}), HEAD no longer existed, though this activation was armed at commit {activation}. "
+    "The branch ref was deleted or the history was rewound, which no commit does -- so every commit this activation made, "
+    "reviewed or not, is unreachable."
+)
+
+ENDED_HEAD_UNVERIFIABLE: Final = (
+    "When enforcement stopped ({at}), this repository could not be read, so the gate never saw the history it was gating. That is not a clean result."
+)
+
+ENDED_EVIDENCE_MALFORMED: Final = (
+    "This activation's record of how it ended is not one this gate could have written, so state.json was edited by "
+    "something other than this gate. What the gate could see when enforcement stopped cannot be recovered."
+)
+
+#: The terminal path's own report, for the **one** branch that has actually established
+#: unreviewed work: a recorded tree absent from ``approved_trees``.
+#:
+#: The old wording's last line -- "this commit is in their history" -- is what made the model
+#: believe its *own* just-run command was the ungated one, and relay that. The replacement must
+#: not overcorrect into the opposite false claim either: in the ``git commit && arl.sh
+#: deactivate`` escape the evidence really is captured during the very Bash call being reported
+#: on, and the document carries no command identity. So it says what is true and no more.
+ENDED_HEAD_REPORT: Final = """\
+**adversarial-review-loop: when this worktree's review gate stopped, it was holding work no review approved.**
+
+{detail}
+
+The mode is {status}, so the gate has nothing left to enforce and has changed nothing. This
+describes the state recorded at the moment enforcement stopped; it cannot tell which command
+produced that state, and commits made after that moment are ungated by design. Tell the user
+about the recorded commit, not about whatever this Bash call just did.
+"""
+
+#: The other three branches. **None of them establishes that unreviewed work exists** --
+#: unreadable and malformed say the gate could not see, and unborn says the history is gone --
+#: so they must not borrow the categorical headline above. Reporting "it was holding work no
+#: review approved" for a repository that merely could not be read is the same class of false
+#: claim as the line this change removed, pointed the other way.
+ENDED_UNCERTAIN_REPORT: Final = """\
+**adversarial-review-loop: this worktree's review gate could not verify how it stopped.**
+
+{detail}
+
+The mode is {status}, so the gate has nothing left to enforce and has changed nothing. This is
+not a clean result and it is not a finding of unreviewed work either -- it is the gate saying
+it cannot tell. Commits made after the mode ended are ungated by design and are not what this
+is about. Tell the user, and have them look at the history themselves.
 """
 
 HEAD_DID_NOT_MOVE: Final = "The command reported success but HEAD did not move, so no commit was created for the approved tree {pending}."
@@ -312,6 +371,16 @@ _RECONCILABLE: Final = frozenset({"ACTIVE", "ARMED"})
 #: still has something to recover, so an unapproved HEAD under it is reported, not acted on.
 _REPORT_ONLY: Final = frozenset({"DISARMED", "COMPLETE", "NEEDS_HUMAN", "STALE", "RESUMED"})
 
+#: The subset of :data:`_REPORT_ONLY` in which enforcement has **stopped**, so the question to
+#: ask is what the gate could see at that moment rather than what HEAD is now. Routed to
+#: :func:`_guard_ended_head`.
+#:
+#: ``NEEDS_HUMAN`` and ``STALE`` deliberately stay on the current-HEAD path: the loop is still
+#: live in both, every mutation is still denied, and current HEAD is exactly the right
+#: question there. Disjoint from :data:`_RECONCILABLE`, so the reconcile branch is unreachable
+#: from here.
+_ENDED: Final = frozenset({"DISARMED", "COMPLETE", "RESUMED"})
+
 
 def _confirm_commit(hook: Hook) -> None:
     payload = read_hook_input()
@@ -354,6 +423,12 @@ def _guard_unreviewed_head(check: _Check) -> None:
     status = check.expected.effective_status
     if status not in _RECONCILABLE and status not in _REPORT_ONLY:
         return
+    if status in _ENDED:
+        # Enforcement has stopped, so "is current HEAD approved?" is not a question about this
+        # gate: it fires on every ordinary commit made afterwards, forever. Everything below
+        # still serves the live statuses.
+        _guard_ended_head(check, status=status)
+        return
     try:
         head_tree = gitsnap.head_tree_checked(check.repo)
     except gitsnap.GitUnavailable as exc:
@@ -379,6 +454,48 @@ def _guard_unreviewed_head(check: _Check) -> None:
     head = gitsnap.head_commit(repo)
     parent = gitsnap.rev_parse(repo, "HEAD^") or activation
     _unreviewed(check, status=status, detail=UNREVIEWED_HEAD.format(head=head, head_tree=head_tree), bad=head, parent=parent)
+
+
+def _guard_ended_head(check: _Check, *, status: str) -> None:
+    """The :data:`_ENDED` half of :func:`_guard_unreviewed_head`: report from the record.
+
+    Same branch table as ``stop._ended``, ending in ``posttool_context`` rather than a
+    ``systemMessage``. It never routes through :func:`_unreviewed`: :data:`_ENDED` is disjoint
+    from :data:`_RECONCILABLE`, so the reconcile branch is unreachable from here and a
+    retired activation can never be written back into one that still has something to recover.
+
+    **Makes no git call**, so a Bash call in an ended worktree stops paying one ``git
+    rev-parse`` -- the saving the live path cannot have, since it genuinely must ask about
+    HEAD now.
+
+    Detection is exactly "the recorded tree is absent from ``approved_trees``", which is
+    neither proof of review nor proof of commit identity; see ``docs/security.md``.
+    """
+    end = hooks.end_state(check.state)
+    if end.malformed:
+        check.hook.posttool_context(ENDED_UNCERTAIN_REPORT.format(status=status, detail=ENDED_EVIDENCE_MALFORMED).rstrip("\n"))
+    if not end.recorded:
+        # Ended before the record existed. Current HEAD answers a different question, and
+        # asking it here is what made every post-stop commit look like an escape. `pretool`
+        # upgrades a stale document on the first tool call it gates, so this is only reached
+        # for an activation that had *already* ended before the record existed.
+        return
+    at = format_at(end.at)
+    if end.capture == "unreadable":
+        check.hook.posttool_context(ENDED_UNCERTAIN_REPORT.format(status=status, detail=ENDED_HEAD_UNVERIFIABLE.format(at=at)).rstrip("\n"))
+    if end.capture == "unborn":
+        activation = check.state.get("activation_commit")
+        if activation:
+            # An unborn HEAD is also the armed state of a repository with no commits, so only
+            # a non-empty anchor makes this destroyed history rather than nothing to report.
+            detail = ENDED_UNBORN_HEAD.format(at=at, activation=activation)
+            check.hook.posttool_context(ENDED_UNCERTAIN_REPORT.format(status=status, detail=detail).rstrip("\n"))
+        return
+    if not check.state.tree_approved(end.tree):
+        # The only branch that has established unreviewed work, and the only one that may say
+        # so categorically.
+        detail = ENDED_UNREVIEWED_HEAD.format(at=at, head=end.head, head_tree=end.tree)
+        check.hook.posttool_context(ENDED_HEAD_REPORT.format(status=status, detail=detail).rstrip("\n"))
 
 
 def _unreviewed(check: _Check, *, status: str, detail: str, bad: str, parent: str) -> NoReturn:

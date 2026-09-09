@@ -1484,3 +1484,204 @@ def test_a_malformed_guide_revisions_field_escalates_instead_of_normalising_it_a
     assert read_state(env, git_repo, S2)["status"] == "ARM_FAILED"
     root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
     assert (root / "worktrees" / paths.sha256_hex(str(git_repo)) / "latest").read_text() == S1 + "\n"
+
+
+# --------------------------------------------------------------------------
+# The end-state record across a resume
+# --------------------------------------------------------------------------
+
+
+def test_retiring_a_live_activation_records_the_head_it_stopped_at(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """Retirement is a terminal transition, so it captures like the other two."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    head = git(git_repo, "rev-parse", "HEAD")
+    tree = git(git_repo, "rev-parse", "HEAD^{tree}")
+
+    code, banner = resume(git_repo, env)
+
+    assert code == 0, banner
+    retired = read_state(env, git_repo, S1)
+    assert retired["status"] == "RESUMED"
+    assert retired["ended_capture"] == "recorded"
+    assert retired["ended_head"] == head
+    assert retired["ended_tree"] == tree
+
+
+def test_a_successor_never_inherits_the_predecessors_end_state(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """The inverted carry-forward rule: the successor is live, so it has not ended."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+
+    code, banner = resume(git_repo, env)
+
+    assert code == 0, banner
+    successor = read_state(env, git_repo, S2)
+    assert successor["ended_capture"] == ""
+    assert successor["ended_head"] == ""
+    assert successor["ended_tree"] == ""
+    assert successor["ended_at"] == 0
+
+
+def test_a_same_session_resume_clears_the_end_state_it_reactivates_from(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """Both resume paths reset the same fields, and the two tables must agree."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    assert run_bootstrap(["deactivate"], cwd=git_repo, env=env).returncode == 0
+    assert read_state(env, git_repo, S1)["ended_capture"] == "recorded"
+
+    code, banner = resume_argv(git_repo, env, S1, [])
+
+    assert code == 0, banner
+    document = read_state(env, git_repo, S1)
+    assert document["status"] == "ACTIVE"
+    assert document["ended_capture"] == ""
+    assert document["ended_head"] == ""
+    assert document["ended_tree"] == ""
+    assert document["ended_at"] == 0
+
+
+def test_retiring_a_stopped_activation_keeps_the_record_the_stop_wrote(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """Enforcement ended at the ``deactivate``, not at the retirement.
+
+    Re-capturing here would record today's ungated HEAD and have the retired session accuse
+    work the user was entitled to do after stopping.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    assert run_bootstrap(["deactivate"], cwd=git_repo, env=env).returncode == 0
+    stopped_at = read_state(env, git_repo, S1)
+    assert stopped_at["ended_capture"] == "recorded"
+
+    (git_repo / "after.txt").write_text("ungated by design\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ordinary work after the mode ended")
+    assert git(git_repo, "rev-parse", "HEAD") != stopped_at["ended_head"]
+
+    code, banner = resume(git_repo, env)
+
+    assert code == 0, banner
+    retired = read_state(env, git_repo, S1)
+    assert retired["status"] == "RESUMED"
+    assert retired["ended_head"] == stopped_at["ended_head"]
+    assert retired["ended_tree"] == stopped_at["ended_tree"]
+    assert retired["ended_at"] == stopped_at["ended_at"]
+
+
+def test_retiring_a_legacy_stopped_activation_records_nothing(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """The rule is decided from the **status**, never from whether a record is already there.
+
+    A ``DISARMED`` document written before this check exists carries no ``ended_capture`` at
+    all, so any "capture if the record is empty" test would reintroduce the bug for exactly the
+    documents the change was reported against.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    assert run_bootstrap(["deactivate"], cwd=git_repo, env=env).returncode == 0
+    path = state_dir(env, git_repo, S1) / "state.json"
+    document = json.loads(path.read_text())
+    for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
+        document.pop(key, None)
+    path.write_text(json.dumps(document))
+
+    (git_repo / "after.txt").write_text("ungated by design\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ordinary work after the mode ended")
+
+    code, banner = resume(git_repo, env)
+
+    assert code == 0, banner
+    retired = read_state(env, git_repo, S1)
+    assert retired["status"] == "RESUMED"
+    assert "ended_capture" not in retired, "a legacy DISARMED document must stay legacy"
+
+
+def test_stopping_a_retired_activation_does_not_call_the_worktree_ungated(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """``RESUMED`` is terminal for the document and *not* for the session still bound to it.
+
+    A cross-session resume retires the predecessor **before** it publishes the successor or
+    repoints ``latest`` -- the fail-closed order, which has no automatic rollback -- so a
+    ``/stop`` inside that window, or after a crash in it, resolves the retired predecessor.
+    ``deactivate`` now finishes what that resume started: it stops the successor and publishes
+    the pointer, so the *worktree* really is free afterwards. What stays denied is narrower and
+    must not be glossed over -- ``pretool`` reads the calling session's own document, so a
+    session bound to the retired predecessor keeps being denied whatever the pointer says.
+    Claiming a blanket "commits are not gated" would describe that session as a free one.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    code, banner = resume(git_repo, env)
+    assert code == 0, banner
+    assert read_state(env, git_repo, S1)["status"] == "RESUMED"
+    # The crash window reproduced exactly: retirement landed, `latest` never moved on.
+    root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
+    (root / "worktrees" / paths.sha256_hex(str(git_repo)) / "latest").write_text(S1 + "\n")
+    before = (state_dir(env, git_repo, S1) / "state.json").read_bytes()
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert S2 in proc.stdout
+    assert "A Claude session still *bound* to any retired activation" in proc.stdout
+    assert f"({S1})" in proc.stdout, "and the chain it names has to include this one"
+    # And the one document AGENTS.md forbids mutating at all is untouched.
+    assert (state_dir(env, git_repo, S1) / "state.json").read_bytes() == before
+    verdict, reason = pretool(git_repo, env, command=COMMIT, session=S1)
+    assert verdict == "deny"
+    assert "retired by a resume" in reason
+    # The worktree itself is free, which is the whole point of having stopped the successor.
+    # A passing `pretool` writes nothing at all, so this cannot go through the JSON helper.
+    assert run_hook("pretool", payload(git_repo, command=COMMIT, session=S2), cwd=git_repo, env=env).stdout == ""
+
+
+def test_a_resume_does_not_launder_an_exclude_edit_into_the_successor(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """``exclude_digest`` is deliberately absent from both reset tables.
+
+    A successor copies the predecessor's document and resets a *named* set of fields. Naming
+    this one would re-baseline the exclude file at every resume -- so an edit made under the
+    predecessor would become the successor's starting truth, and one ``/adversarial-review-loop:resume``
+    would clear the report permanently. The inverted carry-forward rule is doing real work here.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    armed_digest = read_state(env, git_repo, S1)["exclude_digest"]
+    assert armed_digest
+
+    exclude = gitsnap.exclude_path(str(git_repo))
+    assert exclude is not None
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a") as handle:
+        handle.write("backdoor.py\n")
+    code, banner = resume(git_repo, env)
+    assert code == 0, banner
+
+    assert read_state(env, git_repo, S2)["exclude_digest"] == armed_digest
+    assert gitsnap.exclude_digest(str(git_repo)) != armed_digest, "the file really did change"
