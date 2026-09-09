@@ -839,7 +839,7 @@ def _normalized_file(file: str) -> str:
     alone silently stops a value matching itself -- which in this direction means a deferred
     finding never becoming a known one.
     """
-    return file[2:] if file.startswith("./") else file
+    return file.removeprefix("./")
 
 
 def _validated_prior_files(state: State, target: Target) -> frozenset[str] | None:
@@ -2420,7 +2420,7 @@ def run_bounded(  # noqa: PLR0913 - each arg is an independent knob of the run; 
     return status
 
 
-def _capture_to_file(  # noqa: PLR0913 - one more knob of the same run; see `run_bounded`'s own note
+def _capture_to_file(  # noqa: PLR0913, PLR0917 - one more knob of the same run; see `run_bounded`'s own note
     command: list[str], env: dict[str, str], out_path: Path, timeout_sec: int, stdin: bytes | None = None, cwd: str | None = None
 ) -> int:
     """Run the reviewer with both streams to ``out_path``, answering ``timeout``'s status."""
@@ -4440,9 +4440,11 @@ def _stall_summary(  # noqa: PLR0913 - one independently meaningful piece of evi
         reasons.append(f"{len(oscillating_points)} anchor(s) reappeared or were reversed more than once")
 
     out = [
-        f"{target.label} looks stalled after {round_count} round(s), so no new review was run: "
-        f"{' and '.join(reasons)}. Genuinely new findings every round would keep iterating -- "
-        "this phase did not raise one.\n"
+        (
+            f"{target.label} looks stalled after {round_count} round(s), so no new review was run: "
+            f"{' and '.join(reasons)}. Genuinely new findings every round would keep iterating -- "
+            "this phase did not raise one.\n"
+        )
     ]
     if persisting_points:
         out.append("\nPersisting findings (verbatim, one line per round):\n\n")

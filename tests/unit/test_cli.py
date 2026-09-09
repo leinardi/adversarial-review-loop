@@ -126,5 +126,9 @@ def test_dispatch_stamps_the_clock_for_a_hook_and_clears_it_otherwise(monkeypatc
 
     before = cli.HOOK_STARTED
     cli._start_clock("pretool")
-    assert cli.HOOK_DEADLINE_SEC == PRETOOL_CEILING
+    # Read into an annotated local: the assert above narrows the module attribute to `None`
+    # for the rest of the function, and mypy then reads the comparison below as always-false
+    # and everything after it as unreachable. `_start_clock` is what re-widens it in reality.
+    deadline: float | None = cli.HOOK_DEADLINE_SEC
+    assert deadline == PRETOOL_CEILING
     assert before <= cli.HOOK_STARTED

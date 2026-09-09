@@ -661,7 +661,7 @@ def reorient(argv: list[str]) -> int:
         if activation is None or activation.repo != worktree:
             return 0
         text = _reorient_text(activation)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - reorient is advisory: any failure is silence, never a denial
         log(f"reorient: {exc}")
         return 0
     if text:

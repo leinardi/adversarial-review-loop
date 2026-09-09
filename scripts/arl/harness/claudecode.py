@@ -429,7 +429,7 @@ def transcript(raw: bytes) -> bytes:
     return answer.encode("utf-8", "surrogateescape")
 
 
-def _number(value: object, kind: type[int] | type[float]) -> Any:
+def _number(value: object, kind: type[int | float]) -> Any:
     """``value`` when it is a real number of ``kind``, else ``None``.
 
     ``bool`` is excluded explicitly: it is a subclass of ``int`` in Python, so a
