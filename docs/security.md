@@ -552,7 +552,7 @@ rewrite once mutations are permitted. Every key it sets is a lever, not only `ve
 - **`{"ignore_globs": ["**"]}` is a full, silent review bypass**, not merely a relaxation.
   A commit whose every changed path matches `ignore_globs` skips the reviewer entirely and
   is approved with no model ever consulted — `gitsnap.all_paths_ignored`, exercised with
-  exactly this input in `tests/selftest.sh`. This is the single most direct self-serving
+  exactly this input in `tests/unit/test_commands_pretool.py`. This is the single most direct self-serving
   edit available: write that one line, and every subsequent commit passes unreviewed.
 - **`block_severity` raised to `critical`** lets every medium and high finding through
   uncommented-on — the reviewer still runs and still writes the finding into the report,

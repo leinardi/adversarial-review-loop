@@ -498,9 +498,12 @@ milliseconds.
 
 ## Testing
 
-`tests/selftest.sh` drives the hook entrypoints with synthetic payloads against scratch
-git repos, with the reviewer replaced by `tests/fixtures/fake-reviewer.sh` — no model is
-ever called. `tests/unit/` is the pytest suite for the Python modules directly.
+`tests/unit/` is the whole behaviour suite: it drives the hook entrypoints with synthetic
+payloads against scratch git repos, through the same `scripts/arl-bootstrap.py` production
+uses, with the reviewer replaced by `tests/fixtures/fake-reviewer.sh` — no model is ever
+called. `tests/selftest.sh` covers only the layer that suite structurally cannot reach,
+because pytest runs *inside* the Python it launches: the interpreter probe, the shim
+contract, the watchdog layers, socket stdin, and the hot path's process budget.
 `tests/STEP0.md` is a separate runbook for the handful of things only a live Claude Code
 session can settle (skill-hook registration, prompt-expansion, argument handling) — see
 [edge-cases.md](edge-cases.md) for what's still open there.

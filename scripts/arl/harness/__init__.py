@@ -15,8 +15,8 @@ keeps "add a third harness" a new module rather than another pass over the gate.
 
 **The test seam sits above this layer, deliberately.** ``ARL_REVIEWER_CMD`` (and
 ``ARL_SESSION_LIST_CMD``) short-circuit in :mod:`arl.reviewer` *before* a harness is
-consulted, so ``tests/selftest.sh`` exercises the loop without any harness being
-involved and a new harness cannot quietly change what the selftest measures.
+consulted, so ``tests/unit/`` exercises the loop without any harness being
+involved and a new harness cannot quietly change what those tests measure.
 """
 
 #  This file is part of adversarial-review-loop.

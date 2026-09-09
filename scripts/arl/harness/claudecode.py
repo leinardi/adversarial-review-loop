@@ -544,7 +544,7 @@ class AssignedSessions:
         """
         if os.environ.get("ARL_REVIEWER_CMD", ""):
             # Under the test seam no `claude` ran, so there is no transcript to find and the
-            # lookup below would report a missing session on every round of `tests/selftest.sh`.
+            # lookup below would report a missing session on every round driven under the seam.
             # Skipped rather than merely un-logged, and skipped here rather than in
             # `_session_file`, for the same reason `opencode._list_sessions` short-circuits: a
             # reviewer-adjacent call has no business running when the reviewer itself did not.

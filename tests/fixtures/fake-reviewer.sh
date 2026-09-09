@@ -18,7 +18,7 @@
 # along with adversarial-review-loop.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-# Stand-in reviewer used by the selftest, so the loop logic can be exercised
+# Stand-in reviewer used by tests/unit/ and the shim selftest, so the loop logic can be exercised
 # without spending a model call. Behaviour is chosen with ARL_FAKE_MODE.
 #
 # Invoked as: fake-reviewer.sh <bundle_dir> <prompt_file>
@@ -304,7 +304,7 @@ case "$mode" in
         printf '<<<ARL-END>>>\n'
         ;;
     echo-prompt)
-        # Dumps the prompt file the gate handed over, so the selftest can assert what the
+        # Dumps the prompt file the gate handed over, so a test can assert what the
         # reviewer was actually instructed to do -- including a repo-supplied review guide
         # spliced in by `arl.guide.compose`. Blocking, so the denial carries the dump back.
         printf 'Prompt seen by this reviewer:\n'
@@ -328,7 +328,7 @@ case "$mode" in
         printf '\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>\n'
         ;;
     echo-context)
-        # Dumps the context/ attachments the real path would pass with -f, so the selftest
+        # Dumps the context/ attachments the real path would pass with -f, so a test
         # can assert round 2 is actually shown round 1's findings. Still a blocking verdict
         # so the denial reason carries the dump back.
         printf 'Prior rounds seen by this reviewer:\n'
@@ -423,7 +423,7 @@ case "$mode" in
         ;;
     clarify)
         # A clarify run: prose only, no findings block. Echoes the bundle it was pointed at
-        # and the question it was handed, so the selftest and unit tests can assert both.
+        # and the question it was handed, so the tests can assert both.
         printf 'Clarification.\n\n'
         printf 'bundle: %s\n' "$bundle"
         if [ -f "$bundle/range.txt" ]; then grep -E '^(base_tree|head_tree|round):' "$bundle/range.txt" || true; fi

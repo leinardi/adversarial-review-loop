@@ -477,7 +477,7 @@ def deny(hook: Hook, body: str) -> NoReturn:
 
     The trailing newlines go because the shell built every one of these reasons inside
     ``$( … )``, which strips them, and the messages are asserted on character for character
-    by ``tests/selftest.sh``.
+    by ``tests/unit/``.
     """
     hook.deny(f"{DENY_PREAMBLE}{body}".rstrip("\n"))
 

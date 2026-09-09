@@ -228,7 +228,8 @@ off from a self-serving edit:
 - **`ignore_globs` is a full bypass, not a relaxation.** `{"ignore_globs": ["**"]}` makes
   every changed path match, and a commit whose every path is ignored skips the reviewer
   entirely — approved outright, with no model ever consulted
-  (`gitsnap.all_paths_ignored`, exercised with exactly this shape in `tests/selftest.sh`).
+  (`gitsnap.all_paths_ignored`, exercised with exactly this shape in
+  `tests/unit/test_commands_pretool.py`).
 - **`block_severity` raised to `critical`** means only a critical finding blocks; every
   medium or high finding still shows up in the report, but nothing stops the commit.
 - **`late_block_severity` raised to `critical`** widens what a later round may defer: from

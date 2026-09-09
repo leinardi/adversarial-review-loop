@@ -2475,7 +2475,7 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
     """Run the reviewer, leaving its output at ``out_path``, and report what it cost.
 
     Raises :class:`ReviewerFailed` on a timeout or a non-zero exit. ``ARL_REVIEWER_CMD`` is
-    the test seam the selftest drives: a stand-in that reads the bundle and writes the same
+    the test seam the suites drive: a stand-in that reads the bundle and writes the same
     contract to stdout, so the loop can be exercised without spending a model call.
 
     The return value is :class:`arl.harness.Usage` for a harness that reports its accounting,
@@ -2507,7 +2507,7 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
             env["ARL_SESSION_ID"] = run.session_id
         if run.context_files:
             # The stub reviewer never builds an argv, so the `-f context/…` channel the real
-            # path uses is surfaced as an env var for the selftest to read. Read off the
+            # path uses is surfaced as an env var for the tests to read. Read off the
             # invocation, not re-listed from disk -- same reason `review_argv` takes it.
             env["ARL_CONTEXT_FILES"] = "\n".join(str(path) for path in run.context_files)
         command = [reviewer_cmd, str(run.bundle_dir), str(run.prompt_file)]
@@ -2590,7 +2590,7 @@ def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invoc
     it. Raises :class:`ReviewerFailed` on a timeout or a non-zero exit, exactly as
     :func:`invoke` does, so a failed clarify is reported, not silently empty.
 
-    ``ARL_REVIEWER_CMD`` is honoured for the selftest: the stub is handed
+    ``ARL_REVIEWER_CMD`` is honoured for the tests: the stub is handed
     ``ARL_QUESTION_FILE`` so it can read the question the real path would inline with ``-f``.
     """
     env = dict(os.environ if environ is None else environ)

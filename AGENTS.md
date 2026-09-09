@@ -229,7 +229,7 @@ The `PreToolUse` dispatcher runs on **every** tool call, so cost there is multip
 | `scripts/arl/guide.py` | the repo-supplied review guide: resolution, the arm-time refusals, freezing, re-verification, and composing it into a prompt |
 | `prompts/*.md` | the reviewer prompts — Claude writes none of this. The phase and final ones carry one `<!-- ARL:PROJECT-GUIDANCE -->` line, which `guide.compose` replaces with the repository's frozen guide (or strips) on every review; nothing else is composed |
 | `skills/*/SKILL.md` | the nine slash commands; none registers a hook — `hooks/hooks.json` does, at plugin load |
-| `tests/selftest.sh` | the whole black-box acceptance suite; scratch repos, no model calls, language-agnostic on purpose |
+| `tests/selftest.sh` | the **shim** suite, and only that: interpreter probe, shim contract, watchdog layers, socket stdin, the hot path's process budget, one bootstrap smoke walk. Everything the gate *decides* is `tests/unit/`, driven through the same bootstrap. Written in bash because it has to run outside the Python it is testing the launch of |
 | `tests/unit/` | pytest unit tests for the Python modules |
 | `tests/STEP0.md` | runbook for the assumptions only a live session can settle |
 | `tests/step0-fixture.sh` | builds the throwaway repo that runbook needs |
@@ -240,8 +240,8 @@ The `PreToolUse` dispatcher runs on **every** tool call, so cost there is multip
 make dev-deps                # install the pinned dev dependencies (once per checkout)
 make test                    # full suite; no model is called
 make test-unit               # the pytest half only
-make test-accept             # tests/selftest.sh only
-make test-filter FILTER=stop # one selftest section
+make test-accept             # tests/selftest.sh only (the shim)
+make test-filter FILTER=watchdog # one selftest section
 make check                   # pre-commit: shellcheck, markdownlint, yamllint, actionlint, ruff, mypy
 make sync-pins               # propagate requirements-dev.txt into .pre-commit-config.yaml
 make dry-run                 # print the exact reviewer command and prompt without invoking it
@@ -294,7 +294,7 @@ New keys go in `config.DEFAULTS`, in `config.from_env`'s key list with the right
 
 **`final_review` is a key whose entire purpose is to switch a layer off, so it needs the objection answered rather than dodged.** It is admissible because of what it cannot reach: it disables a *backstop* that runs only after every phase has passed the per-commit gate, it can never approve anything (the skip path completes an activation, it does not review one), it does not touch `confirm-commit`, the deny-list or `pretool`, and `finish` ignores it outright. Note "passed the gate", not "was reviewed" — an already-approved or `ignore_globs`-matched tree passes without a model call, so the backstop was never standing behind a guarantee that every line had been read. What it does cost is real and is recorded in the plan and in `docs/security.md`: the cross-phase view, and the second of the two layers above.
 
-Repository config may set it, like every other key, and that is deliberate rather than an oversight. A repository config can already set `ignore_globs: ["**"]` — a strictly worse and complete bypass of *every* per-commit review (`gitsnap.all_paths_ignored`, documented in `docs/security.md`, exercised in `selftest.sh`). Special-casing `final_review` while that stays open would be theatre. If you want to close this class, close it at `ignore_globs` first; a new key is not where the exposure lives.
+Repository config may set it, like every other key, and that is deliberate rather than an oversight. A repository config can already set `ignore_globs: ["**"]` — a strictly worse and complete bypass of *every* per-commit review (`gitsnap.all_paths_ignored`, documented in `docs/security.md`, exercised end to end in `tests/unit/test_commands_pretool.py`). Special-casing `final_review` while that stays open would be theatre. If you want to close this class, close it at `ignore_globs` first; a new key is not where the exposure lives.
 
 **`review_guide` (default unset) is the first key whose *value* becomes instruction to the reviewer**, and that difference is what has to be argued rather than waved through. Every other repository-authored input reaches the reviewer as evidence *about* the change, and the prompt says so; a guide is spliced into the prompt itself. It is admissible on the same footing `final_review` is: this layer can already set `ignore_globs: ["**"]`, a complete and strictly worse bypass of every per-commit review, and `verify_cmd` already runs repository-authored code through `bash -lc` inside the gate. Guidance text is the weaker primitive of the three. It is bounded rather than trusted, and the bounds are structural, not stylistic: gate-authored framing that says the guide may not change the contract, the rubric, what blocks or the verdict — and that an attempt to must be reported as a `high` finding against the guide file; splicing *above* the output contract so the contract keeps the last position; a per-composition nonce on the fence so guide text cannot close it; an allowlist (not an escape set) on the one piece of repository text that lands outside the fence, the guide's own path; arm-time refusal of a guide carrying either contract marker, on top of `parse`'s existing exactly-one-block rule; and a verdict recomputed from the `FINDING` lines, so a coerced `VERDICT APPROVED` beside a blocking finding still blocks. What is pinned is the *content*, not the name: `arm` freezes it as `guide.frozen.md` and hashes it, every bundle build re-verifies it, and a copy that no longer matches escalates to `NEEDS_HUMAN` rather than composing a review without it (Rule 1). `resume --guide` records a new revision beside the old one and never overwrites, so `range.txt` can tell a final review that earlier phases ran under different guidance. What none of that prevents is a guide steering *attention* — a bad guide makes reviews worse. That one is disclosed rather than fixed, on every surface a human reads a review from, and it is why the guide and its sha256 are named in the banners, `/status`, stored reports, `range.txt` and `dry-run`.
 
@@ -341,7 +341,7 @@ What a new module has to settle, in the order the existing two settled it:
 Then: `tests/unit/test_harness.py` is parametrised over the registry and will pick the new
 module up for free (protocol, binary-first argv, no session on a cold or clarify call,
 `is_session_id` strictness, the lease ceiling); add a `test_harness_<name>.py` for its own argv
-and output shapes, and a `--harness <name>` dry-run block in `tests/selftest.sh`. `make
+and output shapes, and a `--harness <name>` case in `tests/unit/test_commands_dryrun.py`. `make
 dry-run` prints whatever `review_command` composed, generically, so there is no rendering to
 add — if the new harness's argv looks right there and its stdin carries every attachment
 between its fences, the seam is wired.

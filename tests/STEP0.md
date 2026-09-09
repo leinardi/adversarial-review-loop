@@ -1,6 +1,6 @@
 # Step 0 — the live-session runbook
 
-`tests/selftest.sh` covers everything reachable from a shell. It cannot cover how **Claude Code itself** loads the skill, expands its body, and dispatches its hooks. This document is the procedure for settling that, once, before the mode is trusted on real work.
+`tests/unit/` and `tests/selftest.sh` between them cover everything reachable from a shell. Neither can cover how **Claude Code itself** loads the skill, expands its body, and dispatches its hooks. This document is the procedure for settling that, once, before the mode is trusted on real work.
 
 Budget about an hour, plus a handful of real model calls in session A.
 
@@ -262,7 +262,7 @@ Run the OpenCode side at least once too (`ARL_HARNESS=opencode`), since a defaul
 
 With the fixture armed, a separate session in an unrelated repository edited a file with no gate activity at all — no denial, no status message, no added latency.
 
-*(Superseded 2026-08-30 — see "Plugin-level hooks" below. The property held; it was also the hole.)* Note precisely what that establishes. A second session has no `arl` hooks registered, because skill hooks register on invocation rather than at plugin load, so the dispatcher never runs there. That is the property that matters day to day: **installing the plugin does not tax or gate sessions that never armed it.** The narrower branch — same session, different worktree, where the dispatcher *does* run and compares the pointer against the repo root — is covered by the `scoping` cases in `selftest.sh` rather than here.
+*(Superseded 2026-08-30 — see "Plugin-level hooks" below. The property held; it was also the hole.)* Note precisely what that establishes. A second session has no `arl` hooks registered, because skill hooks register on invocation rather than at plugin load, so the dispatcher never runs there. That is the property that matters day to day: **installing the plugin does not tax or gate sessions that never armed it.** The narrower branch — same session, different worktree, where the dispatcher *does* run and compares the pointer against the repo root — is covered by the scoping cases in `tests/unit/test_commands_pretool.py` rather than here.
 
 ### Plugin-level hooks, 2026-08-30
 

@@ -110,7 +110,12 @@ def _start_clock(sub: str) -> None:
 
 
 def _selftest(argv: list[str]) -> int:
-    """Hand over to the acceptance suite, which stays Bash and language-agnostic."""
+    """Hand over to the shim suite, which stays Bash because it tests the launch of Python.
+
+    Not the whole test suite: everything the gate *decides* is ``tests/unit/``, run with
+    pytest. This is the interpreter probe, the shim contract and the watchdog layers, which a
+    process already running under the interpreter cannot answer for.
+    """
     import arl  # noqa: PLC0415
 
     script = str(arl.PLUGIN_ROOT / "tests" / "selftest.sh")
