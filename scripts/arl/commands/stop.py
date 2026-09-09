@@ -48,6 +48,7 @@ from arl.commands import completion, hooks
 from arl.errors import RepoResolutionError
 from arl.hookio import Hook, read_hook_input
 from arl.state import State, pointer_read
+from arl.util import format_at
 
 if TYPE_CHECKING:  # pragma: no cover
     from arl import reviewer
@@ -184,20 +185,36 @@ adversarial-review-loop: a commit diverged from the reviewed tree and the reconc
 Recover with `{recovery}`, rebuild the phase, and commit again.
 """
 
-UNVERIFIABLE_AT_EXIT: Final = """\
-adversarial-review-loop: the mode is {status}, and this repository could not be read.
+ENDED_UNVERIFIABLE: Final = """\
+adversarial-review-loop: the mode is {status}, and when it ended ({at}) this repository could not be read.
 
-{error}
+The check that reports work committed without passing the review gate could not see the history at that moment, so nothing here says whether it was reviewed. Look at it yourself.
 
-The check that reports work committed without passing the review gate could not run, so this turn ending says nothing about whether the history was reviewed. Look at it yourself.
+Commits made after the mode ended are ungated by design and are not what this reports.
+"""
+
+ENDED_UNBORN: Final = """\
+adversarial-review-loop: the mode is {status}, and when it ended ({at}) this repository had no HEAD at all, though it was armed against commit {activation_commit}.
+
+The history this activation was gating is gone. Nothing here says what was in it.
+
+Commits made after the mode ended are ungated by design and are not what this reports.
+"""
+
+ENDED_EVIDENCE_MALFORMED: Final = """\
+adversarial-review-loop: the mode is {status}, and its record of how it ended is not one this gate could have written.
+
+state.json was edited by something other than this gate, so what the gate could see when enforcement stopped cannot be recovered. Look at the history yourself.
 """
 
 UNREVIEWED_AT_EXIT: Final = """\
-adversarial-review-loop: the mode is {status}, but HEAD is {head}, whose tree {head_tree} no review ever approved.
+adversarial-review-loop: the mode is {status}, and when it ended ({at}) HEAD was {head}, whose tree {head_tree} no review ever approved.
 
 Work was committed in this worktree without passing the review gate. If you did not stop the mode yourself, it was ended from inside a Bash command — the gate cannot tell those apart, so it reports rather than acts.
 
-Review that commit yourself, or re-arm with /adversarial-review-loop:implement <plan.md>.
+This describes the state recorded at the moment enforcement stopped, and nothing after it: commits made since then are ungated by design and are not what this reports.
+
+Review commit {head} yourself, or re-arm with /adversarial-review-loop:implement <plan.md>.
 """
 
 ACTIVATION_MOVED: Final = (
@@ -574,7 +591,7 @@ def _block_counted(gate: _Gate, reason: str, *, after_completion_refusal: bool =
 
 
 def _ended(gate: _Gate, status: str) -> NoReturn:
-    """The mode is off. Let the turn end -- but not silently if work went unreviewed.
+    """The mode is off. Let the turn end -- but not silently if work went unreviewed *then*.
 
     ``systemMessage`` rather than a block, and that choice is the point: it reaches the
     **user** instead of the model, and the model does not get to decide whether to relay it.
@@ -584,19 +601,49 @@ def _ended(gate: _Gate, status: str) -> NoReturn:
     under a mode that looks deliberately stopped -- and the gate cannot tell it apart from a
     user who stopped the mode with work outstanding. So it reports rather than acts: reverting
     would take an exit away from the user, which is the same rule in the other direction.
-    """
-    from arl import gitsnap  # noqa: PLC0415 - a disarmed session pays one git process here
 
-    try:
-        head_tree = gitsnap.head_tree_checked(gate.worktree)
-    except gitsnap.GitUnavailable as exc:
-        # The same hole the post-hook guards: `head_tree` cannot tell an unreadable `.git`
-        # from a repository with no commits, and reading the empty string as "nothing to see"
-        # is what lets breaking `.git` suppress this warning entirely.
-        gate.hook.stop_ok(UNVERIFIABLE_AT_EXIT.format(status=status, error=exc).rstrip("\n"))
-    if head_tree and not gate.state.tree_approved(head_tree):
-        head = gitsnap.head_commit(gate.worktree)
-        gate.hook.stop_ok(UNREVIEWED_AT_EXIT.format(status=status, head=head, head_tree=head_tree).rstrip("\n"))
+    **What changed is the question, not the choice.** This used to ask "is current HEAD
+    approved?", which is not a question about the gate at all: nothing recorded HEAD at the
+    moment enforcement stopped, so an ordinary commit made hours after a terminal transition
+    was indistinguishable from the escape above and fired the same alarm -- on every turn end,
+    forever. It now reads the record ``hooks.end_state`` validates, so it reports what the gate
+    could observe when enforcement stopped and nothing after it.
+
+    **Detection is exactly "the recorded tree is absent from ``approved_trees``".** That is not
+    proof of review and not proof of commit identity: the set also holds the baseline tree and
+    any tree the gate passed without a reviewer call. A wrapper that lands an *empty* commit,
+    or rewrites history onto a tree already in the set, is silent -- before this change as much
+    as after; see ``docs/security.md``. And an escape ordered ``deactivate && commit`` records
+    an approved tree and goes silent, which the previous code "caught" only by also firing on
+    every legitimate post-stop commit.
+
+    Makes **no git call on any path**, so every ended session stops paying one ``git
+    rev-parse`` per turn end.
+    """
+    end = hooks.end_state(gate.state)
+    if end.malformed:
+        gate.hook.stop_ok(ENDED_EVIDENCE_MALFORMED.format(status=status).rstrip("\n"))
+    if not end.recorded:
+        # A document written before the end-state record existed. There is no evidence to
+        # report from, and current HEAD answers a different question -- so this says nothing.
+        # `/adversarial-review-loop:status` offers that other comparison explicitly, on
+        # request, where it cannot become noise.
+        gate.hook.stop_ok()
+    at = format_at(end.at)
+    if end.capture == "unreadable":
+        # Recorded, so it no longer decays if git becomes readable again -- and breaking
+        # `.git` after the stop can no longer suppress a report already on disk.
+        gate.hook.stop_ok(ENDED_UNVERIFIABLE.format(status=status, at=at).rstrip("\n"))
+    if end.capture == "unborn":
+        activation_commit = gate.state.get("activation_commit")
+        if activation_commit:
+            # An unborn HEAD is also the armed state of a repository with no commits, so only
+            # a non-empty anchor makes this "the history was destroyed" rather than "nothing
+            # was ever committed here".
+            gate.hook.stop_ok(ENDED_UNBORN.format(status=status, at=at, activation_commit=activation_commit).rstrip("\n"))
+        gate.hook.stop_ok()
+    if not gate.state.tree_approved(end.tree):
+        gate.hook.stop_ok(UNREVIEWED_AT_EXIT.format(status=status, at=at, head=end.head, head_tree=end.tree).rstrip("\n"))
     gate.hook.stop_ok()
 
 
