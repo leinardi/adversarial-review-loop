@@ -458,39 +458,200 @@ def _reject_unreadable_word(node: Any, word: str) -> None:
 # --------------------------------------------------------------------------
 # Cheap detection: does this command try to create a commit at all?
 #
-# Deliberately loose -- anything flagged here still has to pass full validation. The
-# character classes spell out POSIX [[:space:]] minus the newline, because the shell ran
-# these as `grep -E` over a line at a time.
+# Deliberately loose -- anything flagged here still has to pass full validation. This runs on
+# every Bash call, ahead of any parse, so it has to answer even for input the parser would
+# reject outright.
 # --------------------------------------------------------------------------
 
 _SPACE: Final = r"[ \t\v\f\r]"
-_NON_SPACE: Final = r"[^ \t\v\f\r\n]"
-_BEFORE: Final = r"(^|[ \t\v\f\r;&|(])"
 
-#: ``git``, however it is spelled as a path. The shell matched the bare word, so
-#: ``/usr/bin/git commit -m x`` -- the same program, and what a ``PATH``-wary caller writes --
-#: matched nothing and was passed through ungated. Any word ending in ``/git`` counts; the
-#: strict validator then refuses the non-canonical spelling, which is the safe direction.
-_GIT: Final = r"(?:[^ \t\v\f\r\n;&|()]*/)?git"
+#: Segment separators: bash runs what is on either side as its own command, so each is the
+#: start of a fresh "is word 0 git?" question. Newline included -- the shell read a line at a
+#: time and this reads the whole string.
+_SEPARATORS: Final = frozenset(";&|()\n")
 
-#: The subcommand spelling ``git commit``, **or** the dashed executable ``git-commit``. git
-#: still installs the dashed builtins in ``$(git --exec-path)`` -- measured on git 2.55,
-#: ``/usr/lib/git-core/git-commit``, ``git-reset`` and ``git-update-ref`` are all there, and
-#: each does exactly what its subcommand does. With no whitespace before ``commit`` the
-#: subcommand pattern cannot see them, so ``/usr/lib/git-core/git-commit -m x`` reached the
-#: shell with no gate consulted at all. Both alternatives keep the same right-hand boundary,
-#: which is what stops ``git commit-graph write`` -- and ``git-commit-graph write`` -- from
-#: being read as a commit.
-_COMMIT_RE: Final = re.compile(rf"{_BEFORE}{_GIT}(({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+|-)commit({_SPACE}|$)", re.MULTILINE)
-_RESET_RE: Final = re.compile(rf"{_BEFORE}{_GIT}(({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+|-)reset({_SPACE}|$)", re.MULTILINE)
-#: ``git update-ref``, **including the dashed executable** ``git-update-ref``. git still ships
-#: the dashed builtins in ``$(git --exec-path)`` (measured: git 2.55 has
-#: ``/usr/lib/git-core/git-update-ref``), and ``/usr/lib/git-core/git-update-ref -d HEAD``
-#: deletes the branch ref just as the subcommand spelling does -- with no whitespace before
-#: ``update-ref``, so the subcommand pattern cannot see it. Detection is deliberately looser
-#: than the validator: a dashed spelling reaches the gate here and is then refused by
-#: :func:`head_ref_deletion`, which accepts only the canonical ``git update-ref -d HEAD``.
-_UPDATE_REF_RE: Final = re.compile(rf"{_BEFORE}{_GIT}(({_SPACE}+-{_NON_SPACE}+)*{_SPACE}+|-)update-ref({_SPACE}|$)", re.MULTILINE)
+#: git global options that consume the **next word** as their value, so the subcommand is the
+#: word after that. Measured against real git 2.55 by asking which word git reports as "not a
+#: git command": ``git -C ZZ nosuchsubcmd`` complains about ``nosuchsubcmd`` (``-C`` ate
+#: ``ZZ``), while ``git --no-pager ZZ nosuchsubcmd`` complains about ``ZZ``.
+#:
+#: ``--super-prefix`` is not in git 2.55 any more and ``--exec-path`` with a separate value
+#: prints the path instead of running a subcommand; both are listed anyway, because listing an
+#: option that takes no value can only ever cost a false denial, while omitting one that does
+#: is a hole. The attached spellings (``--git-dir=<path>``) consume no extra word and are
+#: recognised by the ``=`` instead.
+_VALUE_OPTIONS: Final = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source", "--super-prefix", "--exec-path"}
+)
+
+#: git global options that are switches: they consume no value, so the **next** word is the
+#: subcommand. Anything not in either set is an option this build has never heard of, and
+#: :func:`_subcommand_is` then tries it both ways rather than guessing -- see there.
+_SWITCH_OPTIONS: Final = frozenset(
+    {
+        "-v",
+        "--version",
+        "-h",
+        "--help",
+        "-p",
+        "--paginate",
+        "-P",
+        "--no-pager",
+        "--bare",
+        "--no-replace-objects",
+        "--no-lazy-fetch",
+        "--no-optional-locks",
+        "--no-advice",
+        "--literal-pathspecs",
+        "--no-literal-pathspecs",
+        "--glob-pathspecs",
+        "--noglob-pathspecs",
+        "--icase-pathspecs",
+        "--html-path",
+        "--man-path",
+        "--info-path",
+    }
+)
+
+
+def detection_words(command: str) -> list[list[str]]:
+    r"""The command as bash would word-split it, one list of words per segment.
+
+    **Why words and not a regex over the flattened text.** :func:`detection_form` removes the
+    quotes, which also removes the word boundary they were carrying: ``git -C "dir with space"
+    commit`` flattens to ``git -C dir with space commit``, where no pattern can tell the path
+    from the subcommand. The old detectors matched nothing there and the command reached the
+    shell ungated -- measured, it lands an unreviewed commit, and the same quoting hid a
+    ``reset`` and an ``update-ref`` from their guards. Splitting on the *unquoted* whitespace
+    keeps the boundary the quotes were there to state.
+
+    Quote and backslash removal is :func:`detection_form`'s, applied here per character so the
+    boundaries survive it. A ``\`` before a newline is a line continuation -- both characters
+    vanish and the word continues -- which is what makes ``git com\<newline>mit`` one word.
+
+    Segments split on the separators bash itself uses (:data:`_SEPARATORS`), so ``make && git
+    commit`` offers ``git`` as a word 0 rather than burying it. Deliberately cruder than the
+    real tokenizer: this runs on every Bash call, ahead of any parse, and it must have an
+    answer for input the parser would reject outright.
+    """
+    segments: list[list[str]] = [[]]
+    word: list[str] = []
+    quoted = False
+    quote = ""
+    index = 0
+
+    def end_word() -> None:
+        nonlocal quoted
+        if word or quoted:
+            segments[-1].append("".join(word))
+            word.clear()
+        quoted = False
+
+    while index < len(command):
+        char = command[index]
+        if quote:
+            if char == quote:
+                quote = ""
+            elif char == "\\" and quote == '"':
+                index += 1
+                if command[index : index + 1] != "\n":
+                    word.append(command[index : index + 1])
+            else:
+                word.append(char)
+        elif char in ("'", '"'):
+            quote = char
+            quoted = True
+        elif char == "\\":
+            index += 1
+            if command[index : index + 1] != "\n":
+                word.append(command[index : index + 1])
+        elif char in _SEPARATORS:
+            end_word()
+            segments.append([])
+        elif char.isspace():
+            end_word()
+        else:
+            word.append(char)
+        index += 1
+    end_word()
+    return [segment for segment in segments if segment]
+
+
+def _is_git(word: str) -> bool:
+    """``git``, however it is spelled as a path.
+
+    The shell matched the bare word, so ``/usr/bin/git commit -m x`` -- the same program, and
+    what a ``PATH``-wary caller writes -- matched nothing and was passed through ungated.
+    """
+    return word.rsplit("/", 1)[-1] == "git"
+
+
+def _subcommand_is(words: list[str], index: int, sub: str) -> bool:
+    """Does the git invocation starting at ``words[index]`` run ``git <sub>``?
+
+    Walks the global options between ``git`` and its subcommand, skipping each one's value
+    when it takes a separate word (:data:`_VALUE_OPTIONS`) and not when it does not
+    (:data:`_SWITCH_OPTIONS`). Reading arity is what keeps this from being either a hole or a
+    nuisance: ``git -C . commit -m x`` really is a commit, and ``git --no-pager grep commit``
+    really is a read-only grep whose argument happens to be the word ``commit``.
+
+    **An option in neither set is tried both ways**, because it is an option this build has
+    never heard of -- a newer git's, or a typo. Under-detecting there would be a hole that
+    reopens itself the next time git grows an option; over-detecting costs a denial on a
+    command that pairs an unknown global option with the literal word ``commit``, which is a
+    trade in the direction Rule 1 points.
+    """
+    cursor = index + 1
+    while cursor < len(words):
+        word = words[cursor]
+        if not word.startswith("-") or word == "-":
+            return word == sub
+        if "=" in word or word in _SWITCH_OPTIONS:
+            cursor += 1
+        elif word in _VALUE_OPTIONS:
+            cursor += 2
+        else:
+            # Unknown arity: this option either took the next word or it did not.
+            return words[cursor + 1 : cursor + 2] == [sub] or words[cursor + 2 : cursor + 3] == [sub]
+    return False
+
+
+def _mentions(command: str, sub: str) -> bool:
+    """Does any segment of ``command`` run ``git <sub>``, however it is spelled?
+
+    Every position is tried, not only word 0, because the old regex matched ``git`` anywhere
+    after a separator and that looseness is deliberate: over-detection routes a command into
+    the gate, which then proves it is one of the accepted shapes or denies it.
+
+    The dashed executable is the other spelling. git still installs ``git-commit``,
+    ``git-reset`` and ``git-update-ref`` in ``$(git --exec-path)`` -- measured on git 2.55 --
+    and each does exactly what its subcommand does, so a detector that knows only the
+    subcommand form lets ``/usr/lib/git-core/git-commit -m x`` reach the shell with no gate
+    consulted. Compared as a whole basename, which is what keeps ``git-commit-graph write``
+    and ``legit-commit -m x`` out.
+
+    **Each segment is read two ways, and the union is the answer.** Respecting the quotes is
+    what finds ``git -C "dir with space" commit``; ignoring them -- splitting every word again
+    on the whitespace inside it -- is what keeps ``sh -c "git commit -m x"`` and a ``git
+    commit`` written inside a heredoc body. Those are not the same question. The first asks
+    what bash will run *here*; the second asks whether the text names a commit at all, which
+    is the older and deliberately looser reading, and dropping it would hand back exactly the
+    exec-wrapper bypass the quote removal was added to close. Neither view alone is safe, so
+    both run: a hit in either routes the command to the gate, which then proves it is one of
+    the accepted shapes or denies it.
+    """
+    dashed = f"git-{sub}"
+    for segment in detection_words(command):
+        flattened = [part for word in segment for part in word.split()]
+        for words in (segment, flattened):
+            for index, word in enumerate(words):
+                if word.rsplit("/", 1)[-1] == dashed:
+                    return True
+                if _is_git(word) and _subcommand_is(words, index, sub):
+                    return True
+    return False
+
+
 _ESCAPE_RE: Final = re.compile(rf"arl(\.sh)?{_SPACE}+(finish|deactivate|resume|config|accept|pause)({_SPACE}|$)", re.MULTILINE)
 
 
@@ -507,6 +668,20 @@ def detection_form(command: str) -> str:
     So the word-removal half of bash's expansion is applied first: a backslash outside single
     quotes escapes the next character, quote delimiters vanish, and everything else survives
     in place.
+
+    **A backslash before a newline is a line continuation: both characters disappear**, and
+    that is a bypass too, not a nicety. Bash splices the line, so::
+
+        git com\
+        mit -m x
+
+    runs ``git commit``. Emitting the newline -- escaping it, the way every other character is
+    escaped -- left ``com\nmit`` in the detection form, which no detector matches, and the
+    command reached the shell with no gate consulted: measured, it lands an unreviewed commit.
+    The same splice hid ``git re\<newline>set --hard`` from the reset guard and
+    ``arl.sh fin\<newline>ish`` from the Rule 4 denial. It applies inside double quotes for
+    the same reason bash applies it there, and **not** inside single quotes, where bash keeps
+    both characters literally.
 
     **Used for detection only, never for validation.** ``tokenize`` still reads the raw
     string, because that is where the deny-list lives. Over-detecting is the safe direction:
@@ -536,14 +711,16 @@ def detection_form(command: str) -> str:
                 quote = ""
             elif char == "\\" and quote == '"':
                 index += 1
-                out.append(command[index : index + 1])
+                if command[index : index + 1] != "\n":
+                    out.append(command[index : index + 1])
             else:
                 out.append(char)
         elif char in ("'", '"'):
             quote = char
         elif char == "\\":
             index += 1
-            out.append(command[index : index + 1])
+            if command[index : index + 1] != "\n":
+                out.append(command[index : index + 1])
         else:
             out.append(char)
         index += 1
@@ -551,11 +728,13 @@ def detection_form(command: str) -> str:
 
 
 def mentions_commit(command: str) -> bool:
-    return _COMMIT_RE.search(detection_form(command)) is not None
+    """Does this command try to create a commit? See :func:`_mentions`."""
+    return _mentions(command, "commit")
 
 
 def mentions_reset(command: str) -> bool:
-    return _RESET_RE.search(detection_form(command)) is not None
+    """Does this command run ``git reset``? It moves ``HEAD`` off a reviewed commit."""
+    return _mentions(command, "reset")
 
 
 def mentions_update_ref(command: str) -> bool:
@@ -564,8 +743,12 @@ def mentions_update_ref(command: str) -> bool:
     Detected for the same reason ``git reset`` is: it moves or removes a ref, which is a way
     of moving ``HEAD`` off a reviewed commit without ever running ``git commit``. The gate
     denies it outright except as the one bounded root-commit recovery (:func:`head_ref_deletion`).
+
+    Detection is deliberately looser than the validator: the dashed spelling
+    ``/usr/lib/git-core/git-update-ref -d HEAD`` reaches the gate here and is then refused by
+    :func:`head_ref_deletion`, which accepts only the canonical ``git update-ref -d HEAD``.
     """
-    return _UPDATE_REF_RE.search(detection_form(command)) is not None
+    return _mentions(command, "update-ref")
 
 
 def is_escape(command: str) -> bool:

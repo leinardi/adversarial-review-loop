@@ -375,7 +375,42 @@ def test_the_escape_arm_does_not_swallow_a_real_close(command: str, match: str) 
         ("git commit -m x", True, False),
         ("git commit", True, False),
         ("cd /tmp && git commit -m x", True, False),
-        pytest.param("git -c user.name=x commit -m y", False, False, id="global-option-disguise-not-detected"),
+        # Regression: an option and its *separate* value used to break the pattern before the
+        # subcommand, so none of these five was detected at all -- `git -C . commit -m x`
+        # reached the shell ungated and committed the worktree under review. Each spelling was
+        # measured against real git first; all five create a commit, and `-C`/`-c` hide a reset
+        # and a ref deletion the same way.
+        pytest.param("git -c user.name=x commit -m y", True, False, id="dash-c-with-a-separate-value"),
+        pytest.param("git -C . commit -m x", True, False, id="dash-C-with-a-separate-value"),
+        pytest.param("git --git-dir .git commit -m z", True, False, id="git-dir-with-a-separate-value"),
+        pytest.param("git --work-tree . commit -m w", True, False, id="work-tree-with-a-separate-value"),
+        pytest.param("git --namespace ns commit -m n", True, False, id="namespace-with-a-separate-value"),
+        pytest.param("git -C . reset --hard HEAD~1", False, True, id="dash-C-does-not-hide-a-reset"),
+        # Quoting an option's value used to destroy the word boundary detection needed: the
+        # flattened text reads `git -C dir with space commit`, where nothing can tell the path
+        # from the subcommand. Measured: bash runs the commit.
+        pytest.param('git -C "dir with space" commit -m x', True, False, id="a-quoted-option-value-keeps-its-word"),
+        pytest.param("git -C 'dir with space' commit -m x", True, False, id="a-single-quoted-option-value"),
+        pytest.param('git -C "d d" reset --hard', False, True, id="a-quoted-option-value-before-a-reset"),
+        # A backslash-newline is a line continuation: bash splices the word back together and
+        # runs `git commit`. Escaping the newline instead left `com\nmit`, which matched
+        # nothing. Measured: bash runs the commit.
+        pytest.param("git com\\\nmit -m x", True, False, id="a-continuation-inside-the-subcommand"),
+        pytest.param("git re\\\nset --hard", False, True, id="a-continuation-inside-reset"),
+        pytest.param('git "com"mit -m x', True, False, id="quotes-inside-the-subcommand"),
+        # An option this build has never heard of is tried both ways, so a newer git's option
+        # cannot reopen the hole by taking a value nobody here knows about.
+        pytest.param("git --unknown-future-opt commit -m x", True, False, id="unknown-option-taking-no-value"),
+        pytest.param("git --unknown-future-opt val commit -m x", True, False, id="unknown-option-taking-a-value"),
+        # The looser reading, kept: what bash runs *here* is `sh`, but the text names a commit
+        # and the exec wrapper really would run one. Dropping this is the bypass the quote
+        # removal was added to close in the first place.
+        pytest.param('sh -c "git commit -m x"', True, False, id="a-commit-inside-an-exec-wrapper"),
+        # The other direction: a bare word is only ever consumed as a *flag's* value, so a
+        # read-only command whose argument happens to be "commit" is still passed through.
+        pytest.param("git grep commit", False, False, id="an-argument-that-is-not-a-flags-value"),
+        pytest.param("git grep reset", False, False, id="an-argument-that-is-not-a-flags-value-reset"),
+        pytest.param("git --literal-pathspecs commit -m l", True, False, id="a-value-less-flag-does-not-swallow-the-subcommand"),
         ("make && git commit", True, False),
         pytest.param("gitcommit", False, False, id="no-word-boundary-no-match"),
         pytest.param("git committer", False, False, id="longer-word-does-not-match"),
@@ -405,6 +440,26 @@ def test_the_loose_detectors(command: str, commit: bool, reset: bool) -> None:
     """
     assert cmdshape.mentions_commit(command) is commit
     assert cmdshape.mentions_reset(command) is reset
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param("git update-ref -d HEAD", True, id="the-subcommand"),
+        pytest.param("git-update-ref -d HEAD", True, id="the-dashed-executable"),
+        pytest.param("git -C . update-ref -d HEAD", True, id="behind-a-separate-value-option"),
+        pytest.param("git -c x=y update-ref -d HEAD", True, id="behind-dash-c"),
+        pytest.param("git update-refs", False, id="a-longer-word-does-not-match"),
+        pytest.param("git grep update-ref", False, id="an-argument-that-is-not-a-flags-value"),
+    ],
+)
+def test_the_update_ref_detector(command: str, expected: bool) -> None:
+    """``update-ref`` shares the detector's shape, so it shared the separate-value hole too.
+
+    It matters for the same reason ``reset`` does: a ref deletion the gate never sees moves
+    ``HEAD`` off a reviewed commit with nothing recorded.
+    """
+    assert cmdshape.mentions_update_ref(command) is expected
 
 
 @pytest.mark.parametrize(
