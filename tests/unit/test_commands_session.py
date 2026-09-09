@@ -786,3 +786,183 @@ def test_reorient_survives_a_malformed_payload_and_a_malformed_history(git_repo:
     out = reorient(git_repo, env)
     assert out, "a broken history entry must not silence the re-orientation"
     assert "cannot be read back" in out
+
+
+# --------------------------------------------------------------------------
+# The end-state record
+# --------------------------------------------------------------------------
+
+
+def patch_state(env: dict[str, str], repo: Path, session: str = "s1", **values: object) -> None:
+    path = state_dir(env, repo, session) / "state.json"
+    document = json.loads(path.read_text())
+    document.update(values)
+    path.write_text(json.dumps(document))
+
+
+def test_deactivate_records_the_head_it_stopped_at(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The evidence the reporting channels read instead of current HEAD."""
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    head = git(git_repo, "rev-parse", "HEAD")
+    tree = git(git_repo, "rev-parse", "HEAD^{tree}")
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    document = read_state(env, git_repo, "s1")
+    assert document["ended_capture"] == "recorded"
+    assert document["ended_head"] == head
+    assert document["ended_tree"] == tree
+    assert isinstance(document["ended_at"], int)
+    assert document["ended_at"] > 0
+
+
+def test_finish_records_the_head_it_completed_at(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed_env(clean_env, ARL_FAKE_MODE="approve")
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    (git_repo / "work.txt").write_text("done\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "phase one")
+    head = git(git_repo, "rev-parse", "HEAD")
+    tree = git(git_repo, "rev-parse", "HEAD^{tree}")
+
+    proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    document = read_state(env, git_repo, "s1")
+    assert document["status"] == "COMPLETE"
+    assert document["ended_capture"] == "recorded"
+    assert document["ended_head"] == head
+    assert document["ended_tree"] == tree
+
+
+def test_an_activation_armed_on_an_empty_repository_records_unborn(tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """git answered and HEAD does not exist -- distinct from git being unable to answer."""
+    repo = tmp_path / "unborn"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "selftest@example.invalid")
+    git(repo, "config", "user.name", "arl selftest")
+    git(repo, "config", "commit.gpgsign", "false")
+    env = armed_env(clean_env)
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan_file(tmp_path)} --allow-dirty"], cwd=repo, env=env)
+    assert proc.returncode == 0, proc.stdout
+
+    proc = run_bootstrap(["deactivate"], cwd=repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    document = read_state(env, repo, "s1")
+    assert document["ended_capture"] == "unborn"
+    assert document["ended_head"] == ""
+    assert document["ended_tree"] == ""
+
+
+def test_deactivate_records_unreadable_rather_than_failing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Nothing about the record may fail the transition, and the outcome stays reportable.
+
+    Stronger than the check it replaces: breaking ``.git`` after the stop can no longer
+    suppress a report that is already on disk.
+    """
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    (git_repo / ".git" / "HEAD").unlink()
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "adversarial-review-loop: STOPPED for this worktree." in proc.stdout
+    document = read_state(env, git_repo, "s1")
+    assert document["status"] == "DISARMED"
+    assert document["ended_capture"] == "unreadable"
+    assert document["ended_head"] == ""
+
+
+def test_a_second_deactivate_changes_nothing_at_all(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """First terminal transition wins.
+
+    Re-running ``/adversarial-review-loop:stop`` is the obvious remedy for a report the user
+    disagrees with; left ungated it would stamp today's unapproved HEAD in as the end-of-mode
+    evidence and make the alarm permanent and "evidenced".
+    """
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+    path = state_dir(env, git_repo, "s1") / "state.json"
+    before = path.read_bytes()
+
+    (git_repo / "later.txt").write_text("ungated by design\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "ordinary work after the mode ended")
+    time.sleep(1.1)
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "already ended (DISARMED)" in proc.stdout
+    assert path.read_bytes() == before
+
+
+def test_a_deactivate_over_a_finished_activation_keeps_what_ended_it(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """Fails on the old code, which overwrote ``COMPLETE`` with ``DISARMED`` unconditionally.
+
+    ``commands.resolve_local_activation()`` filters on loadability, never on status, so the
+    record of which of the two actually ended the mode was discarded.
+    """
+    env = armed_env(clean_env, ARL_FAKE_MODE="approve")
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    (git_repo / "work.txt").write_text("done\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "phase one")
+    assert run_bootstrap(["finish"], cwd=git_repo, env=env).returncode == 0
+    completed = read_state(env, git_repo, "s1")
+
+    proc = run_bootstrap(["deactivate"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "already ended (COMPLETE)" in proc.stdout
+    document = read_state(env, git_repo, "s1")
+    assert document["status"] == "COMPLETE"
+    assert document["reason"] == completed["reason"]
+    assert document["final_done_tree"] == completed["final_done_tree"]
+    assert document["ended_head"] == completed["ended_head"]
+
+
+def test_a_reconciled_finish_marks_the_tree_it_reviewed_as_approved(
+    git_repo: Path,
+    tmp_path: Path,
+    clean_env: dict[str, str],
+) -> None:
+    """Fails on the old code, which wrote only ``final_done_tree``.
+
+    ``tree_approved`` is pure membership in ``approved_trees``, so a legitimate
+    ``RECONCILE`` -> ``finish`` -> ``COMPLETE`` left the recorded end tree unapproved and would
+    be reported as an escape forever.
+    """
+    env = armed_env(clean_env, ARL_FAKE_MODE="approve")
+    arm(git_repo, tmp_path, env)
+    set_phases(git_repo, env, "one")
+    (git_repo / "work.txt").write_text("done\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "a commit that diverged")
+    patch_state(env, git_repo, status="RECONCILE", reason="a commit diverged", bad_commit_parent="abc123")
+
+    proc = run_bootstrap(["finish"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    document = read_state(env, git_repo, "s1")
+    assert document["status"] == "COMPLETE"
+    tree = git(git_repo, "rev-parse", "HEAD^{tree}")
+    approved = document["approved_trees"]
+    assert isinstance(approved, list)
+    assert document["final_done_tree"] == tree
+    assert tree in approved
+    assert document["ended_tree"] == tree

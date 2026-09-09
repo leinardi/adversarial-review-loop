@@ -501,6 +501,68 @@ def _discard_intent(session: str) -> str:
     return "adversarial-review-loop: discarded this session's pending enforcement request (an arm that never completed).\n"
 
 
+#: The statuses at which this activation has stopped enforcing and must not be rewritten.
+#: ``RESUMED`` is **not** here: it is terminal for this document but it still denies every
+#: mutation, so it gets its own message rather than this one's claim. See
+#: :data:`_ALREADY_ENDED_STATUSES` for the full guard set.
+_ENFORCEMENT_OVER_STATUSES: Final = frozenset({"COMPLETE", "DISARMED"})
+
+#: Every status ``deactivate`` refuses to rewrite. A retired (``RESUMED``) activation is the
+#: one document AGENTS.md forbids mutating at all.
+_ALREADY_ENDED_STATUSES: Final = _ENFORCEMENT_OVER_STATUSES | {"RESUMED"}
+
+ALREADY_ENDED = """\
+adversarial-review-loop: this worktree's activation already ended ({status}), so nothing was changed.
+
+Commits and file changes are not gated. The record of how the mode ended -- which the
+reporting channels read instead of current HEAD -- is kept exactly as it was written.
+
+State and reports are at:
+  {act_dir}
+
+Re-arm at any time with /adversarial-review-loop:implement <plan.md>.
+"""
+
+#: ``RESUMED``'s own message, because the one above would be a false claim here. A retired
+#: activation is terminal for its *document* but not for the worktree: ``pretool`` denies every
+#: mutation under ``RESUMED`` (see ``pretool.RESUMED``), so telling the user commits are ungated
+#: would leave them believing a wedged worktree is free.
+#:
+#: Reachable two ways, and the message has to cover both because nothing on disk tells them
+#: apart. A cross-session resume retires the predecessor **before** it publishes the successor
+#: or repoints ``latest`` -- the fail-closed order AGENTS.md requires, which has no automatic
+#: rollback -- so a ``/stop`` running inside that window, or after a crash in it, resolves the
+#: retired predecessor. If the resume went on to finish, the successor is live and is what to
+#: continue in or stop; if it died, both sides deny and `implement` is the recovery.
+ALREADY_RETIRED = """\
+adversarial-review-loop: this worktree's activation was retired by a resume ({successor} took over), so nothing was changed.
+
+A retired activation cannot be stopped and must not be rewritten -- and it is **not** a
+worktree where commits are ungated: every mutation is still denied under this status.
+
+If that resume completed, continue in {successor}, or run /adversarial-review-loop:stop
+again now that this worktree's pointer names it. If it did not, re-arm from scratch with
+/adversarial-review-loop:implement <plan.md>.
+
+State and reports are at:
+  {act_dir}
+"""
+
+
+class _AlreadyEnded(Exception):
+    """Raised inside ``deactivate``'s transaction to abandon it **without saving**.
+
+    Mirrors ``stop._Terminal``, for the same reason: ``transaction()``'s exit calls ``save()``
+    unconditionally, so a plain ``return`` would resave the document -- including a retired one
+    AGENTS.md forbids mutating, and including stamping *today's* HEAD in as the end-of-mode
+    evidence of a mode that ended long ago.
+    """
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+        super().__init__(status)
+
+
 def deactivate(argv: list[str]) -> int:
     """Leave the mode. Nothing is reverted and nothing is deleted.
 
@@ -508,6 +570,21 @@ def deactivate(argv: list[str]) -> int:
     session, and a missing pointer is what "arming never executed" looks like, so removing it
     would turn every later tool call into a denial. ``DISARMED`` is what makes the gates pass
     through.
+
+    **A second run over an already-terminal document is a no-op.**
+    ``commands.resolve_local_activation()`` filters on loadability, never on status, so this
+    used to rewrite a ``COMPLETE`` document with ``DISARMED`` unconditionally, discarding which
+    of the two actually ended the mode. Once the end-state record exists that is worse than
+    untidy: re-running ``/adversarial-review-loop:stop`` -- the obvious remedy for a report the
+    user disagrees with -- would stamp today's unapproved HEAD in as the evidence and make the
+    alarm permanent and "evidenced". First terminal transition wins, always.
+
+    **The no-op is not one message but two**, because ``RESUMED`` is terminal for the document
+    and *not* for the worktree: ``pretool`` denies every mutation under it. A cross-session
+    resume retires the predecessor before publishing the successor or repointing ``latest``,
+    so a ``/stop`` inside that window -- or after a crash in it -- resolves the retired
+    predecessor, and telling the user commits are ungated there would describe a wedged
+    worktree as a free one. See :data:`ALREADY_RETIRED`.
     """
     discarded = _discard_intent(_session_arg(argv))
     activation = commands.resolve_local_activation()
@@ -517,8 +594,24 @@ def deactivate(argv: list[str]) -> int:
     sys.stdout.write(discarded)
 
     state = activation.state
-    with state.transaction():
-        state.update(status="DISARMED", reason="stopped by the user")
+    try:
+        with state.transaction():
+            # The *stored* status, not the effective one: a TTL-expired `ACTIVE` activation is
+            # still live enforcement the user is entitled to stop.
+            stored = state.get("status")
+            if stored in _ALREADY_ENDED_STATUSES:
+                raise _AlreadyEnded(stored)
+            # `ended_evidence` is folded into the same write as the status, so the record and
+            # the transition land together or not at all. This is the only git call on this
+            # path, and it can never fail the transition -- it records failure as an outcome.
+            state.update(status="DISARMED", reason="stopped by the user", **hooks.ended_evidence(activation.repo))
+    except _AlreadyEnded as ended:
+        if ended.status in _ENFORCEMENT_OVER_STATUSES:
+            sys.stdout.write(ALREADY_ENDED.format(status=ended.status, act_dir=activation.act_dir))
+        else:
+            successor = state.get("resumed_into") or "the successor session"
+            sys.stdout.write(ALREADY_RETIRED.format(successor=successor, act_dir=activation.act_dir))
+        return 0
 
     sys.stdout.write(
         f"""\

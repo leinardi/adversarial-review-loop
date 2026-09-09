@@ -63,7 +63,7 @@ from typing import Any, Final
 from arl import commands, gitsnap, guide, harness, paths, planrev
 from arl import config as config_module
 from arl.atomic import DIR_MODE, FILE_MODE, ensure_private_dir, write_private_atomic
-from arl.commands import arm
+from arl.commands import arm, hooks
 from arl.errors import StateLoadError
 from arl.state import State, pointer_read, pointer_write
 from arl.util import now, stdin_argument
@@ -593,6 +593,13 @@ def _build_successor_document(
         # process that no longer exists is not what "carried forward like the reports" means.
         active_review={},
         review_attempts={},
+        # The inverted carry-forward rule: the successor is live, so it has not ended, and
+        # inheriting the predecessor's end-state record would have the new activation report
+        # an escape against history it never gated.
+        ended_capture="",
+        ended_head="",
+        ended_tree="",
+        ended_at=0,
         resumed_from=identity.prev_session,
         resumed_into="",
         resume_count=int(data.get("resume_count") or 0) + 1,
@@ -990,6 +997,14 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
                 stop_blocks=0,
                 stop_marker="",
                 defer_pending=False,
+                # Same reset table as `_build_successor_document`, and the two must agree: a
+                # same-session resume of a `DISARMED` activation reactivates it, so the record
+                # of how it ended describes a mode that is live again. Leaving it would have
+                # the reactivated activation report an escape the moment it next ends.
+                ended_capture="",
+                ended_head="",
+                ended_tree="",
+                ended_at=0,
             )
 
             # Verified with the *checked* read, inside the transaction, so a genuine git
@@ -1084,6 +1099,23 @@ def _resume_cross_session(*, prev_state: State, identity: _Identity, flags: _Fla
         # the abandon-pending mutation above, so the marker travels with it, and *before* the
         # retirement note below, so the successor never inherits RESUMED or its reason.
         snapshot = copy.deepcopy(prev_state.data)
+        # Decided from the **stored status**, never from whether a record is already there.
+        # `_RESUMABLE` includes `DISARMED`, and `DISARMED` is the only terminal status in it,
+        # so this one comparison is the whole rule: enforcement in a stopped activation ended
+        # at the `deactivate`, not here, and re-capturing would record today's ungated HEAD and
+        # have the retired session accuse work the user was entitled to do after stopping.
+        #
+        # A truthiness test ("capture if the record is empty") would be wrong twice over: a
+        # legacy `DISARMED` document has no `ended_capture` at all, which reintroduces exactly
+        # this bug for the documents the change was reported against, and a `False`/`None`/`0`
+        # capture is corruption evidence `hooks.end_state` reports as malformed, which such a
+        # test would silently overwrite. First terminal transition wins, always.
+        #
+        # Written *after* the snapshot above, so the retirement's own evidence never reaches
+        # the successor -- which resets the four fields regardless, in
+        # `_build_successor_document`'s table.
+        if prev_state.get("status") != "DISARMED":
+            prev_state.update(**hooks.ended_evidence(repo))
         prev_state.update(status="RESUMED", resumed_into=session, reason=f"retired by resume into session {session}")
 
     try:
