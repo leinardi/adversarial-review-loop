@@ -1022,3 +1022,35 @@ def test_migration_runs_only_once(state_env: dict[str, str]) -> None:
     assert reread.load()
     assert len(reread.data["plan_revisions"]) == 1
     assert reread.data["reason"] == "second"
+
+
+def test_a_fresh_document_carries_the_end_state_fields_empty(state_env: dict[str, str]) -> None:
+    """The four ``ended_*`` fields exist from arming, and say nothing has ended."""
+    doc = state.new_state_document()
+    assert doc["ended_capture"] == ""
+    assert doc["ended_head"] == ""
+    assert doc["ended_tree"] == ""
+    assert doc["ended_at"] == 0
+
+
+def test_migration_never_backfills_ended_capture(state_env: dict[str, str]) -> None:
+    """``ended_capture``'s **absence** is the legacy signal, so no arm may ``setdefault`` it.
+
+    A document written before the end-state record existed must come out of the migration
+    still missing the key: that is what both reporting channels read as "this activation
+    predates the check, say nothing", and a backfilled ``""`` would be indistinguishable only
+    by luck while a backfilled anything-else would invent evidence.
+    """
+    st = _install_v3_state(WORKTREE, SESSION)
+    doc = json.loads(st.state_file.read_text())
+    for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
+        doc.pop(key, None)
+    write_private_atomic(st.state_file, json.dumps(doc), root=paths.state_root())
+
+    with state.State(WORKTREE, SESSION).transaction() as live:
+        live.update(reason="migrated")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["version"] == 4
+    assert "ended_capture" not in reread.data

@@ -100,6 +100,29 @@ def new_state_document() -> dict[str, Any]:
         "defers": 0,
         "defer_pending": False,
         "final_done_tree": "",
+        #: What the gate could see about the repository at the moment enforcement stopped,
+        #: written **only** inside the transaction that performs a terminal transition, and
+        #: **write-once** -- the first terminal transition wins. The two reporting channels
+        #: (``stop._ended``, ``posttool._guard_ended_head``) read these instead of current
+        #: HEAD, so a commit made *after* the mode ended is silent while the documented
+        #: ``git commit && arl.sh deactivate`` escape is still reported, from evidence
+        #: recorded at that moment. See ``commands.hooks.ended_evidence`` / ``end_state``.
+        #:
+        #: ``ended_capture`` is the discriminator, not ``ended_at``: a freshly armed document
+        #: already carries ``ended_at: 0``. It is one of ``"recorded"`` (HEAD and its tree
+        #: were read), ``"unborn"`` (git answered, HEAD does not exist) or ``"unreadable"``
+        #: (git could not answer), so a capture that *failed* stays reportable instead of
+        #: degrading into "nothing to see".
+        #:
+        #: **Its absence is load-bearing** and marks a document written before this check
+        #: existed, which both readers treat as silence. No ``_migrate`` arm may ever
+        #: ``setdefault`` it -- backfilling ``""`` is harmless, backfilling anything else
+        #: would invent evidence, and backfilling at all would remove the one signal that
+        #: tells a legacy document apart from a captured one.
+        "ended_capture": "",
+        "ended_head": "",
+        "ended_tree": "",
+        "ended_at": 0,
         "report_seq": 0,
         "stop_after_phase": 0,
         "resumed_from": "",

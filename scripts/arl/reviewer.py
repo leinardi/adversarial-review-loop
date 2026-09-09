@@ -104,7 +104,6 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
-import datetime
 import difflib
 import hashlib
 import math
@@ -129,7 +128,7 @@ from arl.gitsnap import ChangedPathsUnavailable, changed_paths_strict, checked_t
 from arl.harness import opencode as opencode_harness
 from arl.paths import sha256_hex, state_root
 from arl.state import State
-from arl.util import log, now
+from arl.util import format_at, log, now
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle broken for the type checker only
     from arl.commands import hooks
@@ -989,17 +988,6 @@ def _phase_list(state: State) -> str:
     return "".join(f"{index + 1}. {desc}\n" for index, desc in enumerate(state.get_array("phases")))
 
 
-def _format_at(at: object) -> str:
-    """A ``plan_revisions`` entry's ``at`` (epoch seconds) as UTC, for a human reading range.txt."""
-    if isinstance(at, bool) or not isinstance(at, (int, float, str)):
-        return "(unknown time)"
-    try:
-        seconds = int(at)
-    except (TypeError, ValueError):
-        return "(unknown time)"
-    return datetime.datetime.fromtimestamp(seconds, tz=datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 #: What every "omitted" outcome says, whichever check triggered it -- the reader only needs
 #: one message, and a shared constant keeps the two checks below from drifting apart.
 #:
@@ -1078,9 +1066,7 @@ def _plan_revisions_section(revisions: list[tuple[dict[str, Any], bytes]]) -> st
     )
     for index, (entry, content) in enumerate(revisions):
         truncated = f" -- TRUNCATED at {PLAN_EXCERPT_BYTES} bytes, this is not the complete revision" if len(content) > PLAN_EXCERPT_BYTES else ""
-        out.append(
-            f"- revision {index}: recorded at phase {entry.get('phase')}, {_format_at(entry.get('at'))} -- see plan.rev{index}.md{truncated}\n"
-        )
+        out.append(f"- revision {index}: recorded at phase {entry.get('phase')}, {format_at(entry.get('at'))} -- see plan.rev{index}.md{truncated}\n")
     for index in range(1, len(revisions)):
         out.append(f"\n### revision {index - 1} -> revision {index}\n\n")
         out.append(_revision_diff(revisions[index - 1][1], revisions[index][1]))
@@ -1107,7 +1093,7 @@ def _manual_accepts_section(state: State) -> str:
     for entry in accepts:
         phase = entry.get("phase")
         tree = entry.get("tree")
-        at = _format_at(entry.get("at"))
+        at = format_at(entry.get("at"))
         reviews = entry.get("reviews")
         reason = entry.get("reason") or "(none given)"
         out.append(f"- phase {phase}, tree `{tree}`, accepted at {at}, overriding {reviews} prior review(s): {reason}\n")
@@ -1412,7 +1398,7 @@ def _guide_section(active: ActiveGuide) -> str:
         )
         for index, entry in enumerate(active.revisions):
             recorded = str(entry.get("sha256") or "")
-            out.append(f"- revision {index}: recorded at phase {entry.get('phase')}, {_format_at(entry.get('at'))} -- sha256 {recorded}\n")
+            out.append(f"- revision {index}: recorded at phase {entry.get('phase')}, {format_at(entry.get('at'))} -- sha256 {recorded}\n")
     return "".join(out)
 
 
