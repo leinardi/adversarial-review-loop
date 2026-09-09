@@ -507,9 +507,9 @@ def compose(prompt_text: str, *, guide: bytes | None, path: str = "", sha256: st
     byte-identical: contract repair must not carry extra instructions, and a clarify answers a
     question about a review that has already been given.
 
-    The nonce is fresh per **call**, not per invocation. A warm review and its cold
-    confirmation share one composed file, hence one nonce -- required, since the confirmation
-    has to be checking the same work under identical instructions.
+    The nonce is fresh per **call**, not per invocation. A review and any contract repair that
+    follows it share one composed file, hence one nonce -- required, since the second call has
+    to be reading the same work under identical instructions.
 
     **The guide's bytes go inside the fence verbatim**, not stripped or normalised: the
     sha256 disclosed a few lines above them is the hash of exactly these bytes, and a

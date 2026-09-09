@@ -2,8 +2,8 @@
 
 The gate is not tied to one reviewer CLI. Everything that decides an *outcome* --
 bundle building, staging and manifest verification, the ``FINDING``/``VERDICT``
-contract, the cold-approval invariant, ``round_history`` bookkeeping, the retry
-classes -- lives in :mod:`arl.reviewer` and is harness-agnostic. What varies per
+contract, ``round_history`` bookkeeping, the retry classes -- lives in
+:mod:`arl.reviewer` and is harness-agnostic. What varies per
 harness is narrow and mechanical: how one invocation is spelled as a command, how a
 session is named and continued, and whether the reviewer's model list can be probed
 at all.
@@ -297,12 +297,12 @@ class SessionStrategy(Protocol):
     id is to list sessions and match the unique ``--title`` the run was given. Claude Code
     *assigns* one up front: the gate mints a uuid, hands it over, and there is nothing to
     look up afterwards. Everything else about continuity -- the claim, the round cap, the
-    structural pointer checks, the cold-approval invariant -- is shared, so only this seam
-    varies.
+    structural pointer checks -- is shared, so only this seam varies.
 
     Everything a strategy produces is a continuity **hint**. Nothing here can authorise an
-    approval: the cold-approval invariant in ``reviewer.execute`` is what makes a tampered or
-    wrong pointer unable to turn a review into a pass, and it does not consult this at all.
+    approval: what a verdict must survive in ``reviewer.execute`` -- the contract parse,
+    ``block_severity``, "no operational failure is an approval" -- is what makes a tampered or
+    wrong pointer unable to turn a review into a pass, and none of it consults this at all.
     """
 
     @property

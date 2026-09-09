@@ -143,11 +143,11 @@ def _session_line(review: Review) -> str:
     return f"- reviewer session: `{review.session}` (round {review.round}{suffix})\n"
 
 
-def _findings_and_raw(review: Review, *, heading_level: str = "##") -> str:
-    out = [f"\n{heading_level} Blocking findings\n\n"]
+def _findings_and_raw(review: Review) -> str:
+    out = ["\n## Blocking findings\n\n"]
     out.append(f"```\n{review.findings}```\n" if review.findings else "(none)\n")
     if review.deferred:
-        out.append(f"\n{heading_level} Deferred findings\n\n")
+        out.append("\n## Deferred findings\n\n")
         out.append(
             "Actionable and at or above block_severity, but new, outside the paths changed since the previous "
             "round, and below late_block_severity -- so they did not block this round. Recorded: a later review "
@@ -155,9 +155,9 @@ def _findings_and_raw(review: Review, *, heading_level: str = "##") -> str:
         )
         out.append(f"```\n{review.deferred}```\n")
     if review.supersedes:
-        out.append(f"\n{heading_level} Reversals of earlier rounds (SUPERSEDES)\n\n")
+        out.append("\n## Reversals of earlier rounds (SUPERSEDES)\n\n")
         out.append(f"```\n{review.supersedes}```\n")
-    out.append(f"\n{heading_level} Raw reviewer output\n\n")
+    out.append("\n## Raw reviewer output\n\n")
     out.append("````\n")
     out.append(_raw_text(review.raw))
     out.append("\n````\n")
@@ -165,7 +165,7 @@ def _findings_and_raw(review: Review, *, heading_level: str = "##") -> str:
         # Both transcripts, because neither is the whole story on its own: the block above was
         # re-emitted by the repair call, and the review it describes -- the prose, the
         # reasoning, everything written before the malformed block -- is only in this one.
-        out.append(f"\n{heading_level} Malformed primary transcript\n\n")
+        out.append("\n## Malformed primary transcript\n\n")
         out.append(
             "The reviewer ran to completion and then wrote a findings block the gate could not parse. The block "
             "above was re-emitted by a separate repair call, which is shown as the raw output; this is the review "
@@ -221,38 +221,8 @@ def _usage_line(review: Review) -> str:
     return f"- cost: {' — '.join(parts)}\n" if parts else ""
 
 
-def _invocation_section(review: Review, *, heading: str) -> str:
-    """One invocation's own verdict, session, findings and transcript, under ``## heading``.
-
-    Used only for the two-invocation case (``render_report`` inlines the single-invocation
-    shape directly, unchanged, so an ordinary report's headings are exactly what they always
-    were).
-    """
-    out = [f"\n## {heading}\n\n"]
-    out.append(f"- verdict: **{review.verdict or 'UNKNOWN'}**\n")
-    out.append(_session_line(review))
-    # Per invocation, not once at the top: under `cold_confirm` a round is two model calls,
-    # and what the confirmation costs is the whole argument about whether to run it.
-    out.append(_usage_line(review))
-    if review.error:
-        out.append(f"- gate note: {review.error}\n")
-    out.append(_findings_and_raw(review, heading_level="###"))
-    return "".join(out)
-
-
 def render_report(review: Review, target: Target, *, seq: str, config: Config) -> str:
-    """The stored report's full text, raw reviewer output included verbatim.
-
-    When ``review.confirmed`` is set -- only reachable under ``cold_confirm``, which is off by
-    default -- ``review`` is the cold confirmation and ``review.confirmed`` the approving round
-    it exists to check: a round that held model-influenced context, meaning a continued session,
-    a ``context/`` attachment carrying an earlier round's findings, or both; see
-    ``reviewer.execute``'s docstring for the rule this reflects and why it is opt-in.
-    Both get their own verdict, findings, session id, round and raw
-    transcript, under headings that say which is which, because the cold verdict recorded at
-    the top is the one the gate acted on and a reader has to be able to tell that apart from
-    the round that triggered it.
-    """
+    """The stored report's full text, raw reviewer output included verbatim."""
     verdict = review.verdict or "UNKNOWN"
     variant = config.as_str("variant")
 
@@ -278,30 +248,12 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
     out.append(f"- generated: {_timestamp()}\n")
     if review.repaired:
         out.append(f"- findings block: re-emitted by a repair call; the primary transcript is `{review.repaired}`\n")
-    if review.confirmed is None:
-        out.append(_session_line(review))
-        out.append(_usage_line(review))
+    out.append(_session_line(review))
+    out.append(_usage_line(review))
     if review.error:
         out.append(f"- gate note: {review.error}\n")
 
-    if review.confirmed is not None:
-        continued = review.confirmed
-        out.append(
-            "\nThis round was shown model-influenced context -- a continued session, an "
-            "earlier round's own findings, or both -- and independently returned "
-            f"{continued.verdict or 'UNKNOWN'}. `cold_confirm` is on, so such an approval was "
-            "not acted on by itself: one more, cold review of the same bundle decided, and "
-            "that cold verdict -- the one recorded at the top of this report -- is the one "
-            "acted on.\n\nThe cold section's finding lists are this **round's record**: the "
-            "cold call's own lines plus any the round with context reported and the cold one "
-            "did not, since a confirmation replaces the verdict, not the record. Each "
-            "section's raw transcript below it is that one invocation's own output, which is "
-            "what to read to tell which call said what.\n"
-        )
-        out.append(_invocation_section(continued, heading="Round with context (not the verdict acted on)"))
-        out.append(_invocation_section(review, heading="Cold confirmation (the verdict acted on)"))
-    else:
-        out.append(_findings_and_raw(review))
+    out.append(_findings_and_raw(review))
     return "".join(out)
 
 

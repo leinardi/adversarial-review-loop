@@ -1775,39 +1775,14 @@ def test_a_needs_human_review_appends_no_round_history_entry(activation: state.S
     assert activation.get_array_of_dicts("round_history") == []
 
 
-def test_the_cold_confirmation_verdict_is_the_one_recorded(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
-    """When ``cold_confirm`` overrides a continued APPROVED, the cold verdict is what lands in
-    round_history -- not the continued one. Mirrors
-    ``test_capture_and_reuse_a_session_across_rounds``."""
-    cold_config = discovery_config(cold_confirm=True)
-    target = target_for(git_repo)
-    label = f"{activation.get_int('report_seq') + 1:03d}"
-    title = reviewer._unique_title(activation, target, label)
-    session_id = "ses_deadbeef01"
-    row = {"id": session_id, "title": title, "created": _future_ms(), "directory": str(git_repo)}
-
-    os.environ["ARL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
-    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
-
-    reviewer.execute(target, state=activation, config=cold_config)
-    second = reviewer.execute(target_for(git_repo), state=activation, config=cold_config)
-
-    assert second.verdict == "CHANGES_REQUIRED"
-    assert second.confirmed is not None and second.confirmed.verdict == "APPROVED"
-
-    history = activation.get_array_of_dicts("round_history")
-    assert [(e["round"], e["verdict"]) for e in history] == [(1, "CHANGES_REQUIRED"), (2, "CHANGES_REQUIRED")]
-
-
-def test_by_default_a_warm_approval_is_acted_on_without_a_second_call(
+def test_a_continued_approval_is_acted_on_with_one_invocation(
     activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``cold_confirm`` is off by default, so the round above's *warm* APPROVED is the verdict.
+    """A continued round's APPROVED is the verdict: it is returned, recorded and reported.
 
-    Exactly the setup of ``test_the_cold_confirmation_verdict_is_the_one_recorded``, minus the
-    key: the continued round approves, and with no confirmation to contradict it that approval
-    is what is returned, recorded and reported. One invocation per round -- no ``-cold.out``,
-    no ``confirmed`` -- which is the 11-of-45-rounds cost the default gives back."""
+    One invocation per round, and nothing else follows it -- a review is a single model call
+    unless the reviewer wrote a block the gate could not parse, which is the contract repair's
+    business and nothing to do with a verdict."""
     target = target_for(git_repo)
     label = f"{activation.get_int('report_seq') + 1:03d}"
     title = reviewer._unique_title(activation, target, label)
@@ -1829,12 +1804,10 @@ def test_by_default_a_warm_approval_is_acted_on_without_a_second_call(
     reviewer.execute(target, state=activation, config=discovery_config())
     second = reviewer.execute(target_for(git_repo), state=activation, config=discovery_config())
 
-    assert second.verdict == "APPROVED", "the warm verdict is the one acted on"
-    assert second.confirmed is None
+    assert second.verdict == "APPROVED", "the reviewer's verdict is the one acted on"
     assert second.session == session_id, "and it is still the continued round's own"
     assert [run for run in seen if run.cold] == [], "no second provider call"
     assert len(seen) == 2, "one invocation per round"
-    assert not any("cold" in path.name for path in (activation.act_dir / "raw").iterdir())
 
     history = activation.get_array_of_dicts("round_history")
     assert [(e["round"], e["verdict"]) for e in history] == [(1, "CHANGES_REQUIRED"), (2, "APPROVED")]
@@ -2141,10 +2114,8 @@ def test_a_concurrently_completed_round_overrides_this_invocations_own_approval(
         "import json, pathlib\n"
         f"p = pathlib.Path({str(state_path)!r})\n"
         "d = json.loads(p.read_text())\n"
-        # Injected once, however many times this stand-in runs -- twice if `cold_confirm` is
-        # ever turned on for this fixture, since round 1 left a `round_history` entry and so
-        # this round was attached `prior-rounds.txt`. One concurrent round is what this test is
-        # about; two would be a fixture artifact.
+        # Injected once, however many times this stand-in runs. One concurrent round is what
+        # this test is about; two would be a fixture artifact.
         "entry = {\n"
         "    'seq': 999, 'label': 'phase1', 'phase': 1, 'generation': d.get('activation_generation', 0),\n"
         "    'round': 1, 'verdict': 'CHANGES_REQUIRED', 'tree': 'a' * 40, 'base': 'b' * 40, 'at': 0,\n"
@@ -2212,10 +2183,8 @@ def test_the_stored_report_reflects_the_override_even_when_only_the_late_authori
         "import json, pathlib\n"
         f"p = pathlib.Path({str(state_path)!r})\n"
         "d = json.loads(p.read_text())\n"
-        # Injected once, however many times this stand-in runs -- twice if `cold_confirm` is
-        # ever turned on for this fixture, since round 1 left a `round_history` entry and so
-        # this round was attached `prior-rounds.txt`. One concurrent round is what this test is
-        # about; two would be a fixture artifact.
+        # Injected once, however many times this stand-in runs. One concurrent round is what
+        # this test is about; two would be a fixture artifact.
         "entry = {\n"
         "    'seq': 999, 'label': 'phase1', 'phase': 1, 'generation': d.get('activation_generation', 0),\n"
         "    'round': 1, 'verdict': 'CHANGES_REQUIRED', 'tree': 'a' * 40, 'base': 'b' * 40, 'at': 0,\n"
@@ -2243,9 +2212,8 @@ def test_the_stored_report_reflects_the_override_even_when_only_the_late_authori
     assert Path(review.report).name.endswith("-needs_human.md"), "the filename itself must not say approved"
     report_text = Path(review.report).read_text()
     # The headline verdict is the one the gate acted on. Asserted through the "recomputed by
-    # the gate" line rather than a bare `**APPROVED**` search because an `**APPROVED**` may
-    # legitimately appear further down -- under `cold_confirm` a confirmation's report renders
-    # the round that triggered it alongside the verdict acted on.
+    # the gate" line rather than a bare `**APPROVED**` search, which the reviewer's own quoted
+    # transcript further down could satisfy without the gate ever having acted on it.
     assert "- verdict (recomputed by the gate): **NEEDS_HUMAN**" in report_text
     assert "- verdict (recomputed by the gate): **APPROVED**" not in report_text
 
@@ -2295,15 +2263,14 @@ def test_an_expired_claim_is_reclaimable(activation: state.State, git_repo: Path
     assert claim_id != "dead-token"
 
 
-def test_the_active_review_window_survives_a_cold_confirmations_own_timeout(activation: state.State, git_repo: Path) -> None:
-    """The claim's lifetime is not `_reclaim_after` -- that window covers only one
-    `timeout_sec`, sized for the session pointer's own shorter lifecycle (released right after
-    the primary invocation, before a cold confirmation ever runs). One `execute()` call can
-    spend a *second* full `timeout_sec` inside `_confirm_cold`, after the primary invocation
-    already returned -- a claim aged past the session pointer's own window, but still well
-    inside the active-review one, must still be treated as live, or a second, overlapping call
-    could reclaim the slot while the first is still legitimately inside its own cold
-    confirmation."""
+def test_the_active_review_window_survives_a_contract_repairs_own_timeout(activation: state.State, git_repo: Path) -> None:
+    """The claim's lifetime is not `_reclaim_after` -- that window is sized for the session
+    pointer's own shorter lifecycle, released right after the primary invocation, before a
+    contract repair ever runs. One `execute()` call can spend a further `REPAIR_TIMEOUT_SEC`
+    inside `_repair_contract` after the primary invocation already returned -- a claim aged
+    past the session pointer's own window, but still inside the active-review one, must still
+    be treated as live, or a second, overlapping call could reclaim the slot while the first
+    is still legitimately inside its own repair."""
     target = target_for(git_repo)
     config = config_with(timeout_sec=900)
     old_window = reviewer._reclaim_after(config)
@@ -2522,99 +2489,32 @@ def test_review_argv_attaches_prior_rounds_after_the_plan_revisions(tmp_path: Pa
     assert staged[-2][0].name == "plan.rev1.md"
 
 
-def test_a_cold_confirmation_stages_no_context_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_session_less_invocation_stages_no_context_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``include_context=False`` -- what a contract repair is staged with -- attaches the same
+    gate-generated evidence and none of the model-derived text."""
     monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
     bundle, digest = _intact_bundle(tmp_path, chunks=1, context=True)
 
-    warm, warm_context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "warm", include_context=True)
-    cold, cold_context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "cold", include_context=False)
+    full, full_context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "full", include_context=True)
+    bare, bare_context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "bare", include_context=False)
 
-    assert warm_context, "an ordinary run is shown the earlier round"
-    assert cold_context == ()
-    assert any("prior-rounds" in path.name for path, _ in warm)
-    assert not any("prior-rounds" in path.name for path, _ in cold)
-
-
-def test_confirm_cold_runs_a_context_free_bundle_scoped_invocation(
-    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The cold confirmation receives none of the model-authored ``context/`` attachments."""
-    cold_config = discovery_config(cold_confirm=True)
-    target = target_for(git_repo)
-    label = f"{activation.get_int('report_seq') + 1:03d}"
-    title = reviewer._unique_title(activation, target, label)
-    row = {"id": "ses_deadbeef01", "title": title, "created": _future_ms(), "directory": str(git_repo)}
-    os.environ["ARL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
-    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
-
-    seen: list[Invocation] = []
-    real = reviewer._run_invocation
-
-    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
-        seen.append(run)
-        return real(tgt, run, config=config, scope=scope)
-
-    monkeypatch.setattr(reviewer, "_run_invocation", spy)
-
-    reviewer.execute(target, state=activation, config=cold_config)
-    reviewer.execute(target_for(git_repo), state=activation, config=cold_config)
-
-    cold = [run for run in seen if run.cold]
-    assert cold, "the continued APPROVED was cold-confirmed"
-    assert all(run.context_files == () for run in cold)
+    assert full_context, "an ordinary run is shown the earlier round"
+    assert bare_context == ()
+    assert any("prior-rounds" in path.name for path, _ in full)
+    assert not any("prior-rounds" in path.name for path, _ in bare)
 
 
-def test_a_fresh_approval_shown_prior_rounds_is_still_cold_confirmed(
-    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With ``cold_confirm`` on, the confirmation is about *context*, not about ``-s``.
-
-    Session continuity is best-effort and drops silently, but ``prior-rounds.txt`` is written
-    from ``round_history`` regardless -- so a **fresh**, session-less round can still be shown
-    an earlier round's ``FINDING`` detail. Gating the confirmation on ``ref.session_id`` alone
-    let exactly those rounds skip it, which is not a distinction the key's own threat model
-    makes.
-
-    No ``ARL_SESSION_LIST_CMD`` here, so continuity genuinely does not hold. Fails on the old
-    code, which found no cold invocation at all."""
-    cold_config = config_with(cold_confirm=True)
-    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
-    context_dir = activation.act_dir / "context"
-    assert list(context_dir.glob("*-prior-rounds.txt")) == [], "round 1 saw no earlier round"
-
-    seen: list[Invocation] = []
-    real = reviewer._run_invocation
-
-    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
-        seen.append(run)
-        return real(tgt, run, config=config, scope=scope)
-
-    monkeypatch.setattr(reviewer, "_run_invocation", spy)
-    _scripted_reviewer(tmp_path, "round2", _APPROVES)
-    review = reviewer.execute(target_for(git_repo), state=activation, config=cold_config)
-
-    assert "ARL_SESSION_LIST_CMD" not in os.environ, "this round had no continuity to lose"
-    assert [run for run in seen if run.session_id] == [], "round 2 ran fresh, with no -s"
-    assert list(context_dir.glob("002-prior-rounds.txt")), "round 2 was shown round 1's findings"
-    cold = [run for run in seen if run.cold]
-    assert cold, "an approval that saw model-authored context must be cold-confirmed even without a session"
-    assert all(run.context_files == () for run in cold), "and the confirmation itself sees none of it"
-    assert review.confirmed is not None, "the report must be able to show both verdicts"
-
-
-def test_context_vanishing_mid_review_does_not_skip_the_cold_confirmation(
+def test_what_a_round_was_shown_survives_the_context_file_vanishing(
     activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """What was attached is a property of the invocation, not a question the filesystem is
     asked twice.
 
-    ``context/<seq>-prior-rounds.txt`` is written before ``invoke`` and the cold-confirmation
-    decision is taken after it -- minutes later. Re-listing ``context/`` at the second moment
-    let a file unlinked in between turn "this round was shown model-authored prose" into "it
-    was not", skipping the confirmation that prose is the entire reason for. The reviewer
-    stand-in unlinks it mid-run, which is exactly the window.
-
-    Fails on the old code, which took no cold confirmation at all."""
+    ``context/<seq>-prior-rounds.txt`` is written before ``invoke`` and the review runs for
+    minutes afterwards. ``Invocation.context_files`` is the round's record of the model-authored
+    prose it was shown, so it is fixed when the argv is built; re-deriving it from ``context/``
+    later would let a file unlinked mid-run rewrite that record after the fact. The reviewer
+    stand-in unlinks it mid-run, which is exactly the window."""
     _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
     context_dir = activation.act_dir / "context"
 
@@ -2639,35 +2539,11 @@ def test_context_vanishing_mid_review_does_not_skip_the_cold_confirmation(
     script.chmod(0o755)
     os.environ["ARL_REVIEWER_CMD"] = str(script)
 
-    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True))
-
-    assert list(context_dir.glob("*-prior-rounds.txt")) == [], "the stand-in really did unlink it"
-    assert seen[0].context_files, "the primary invocation was built with the context attached"
-    assert [run for run in seen if run.cold], "and the approval must still be cold-confirmed"
-    assert review.confirmed is not None
-
-
-def test_an_approval_with_no_context_at_all_is_not_cold_confirmed(
-    activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The other half of the rule, so the fix above is a *condition* and not a blanket second
-    invocation: even with ``cold_confirm`` on, round 1 has no session and no
-    ``prior-rounds.txt``, so there is no model-influenced context for a cold run to check, and
-    paying for a second provider call on every approval would be waste."""
-    seen: list[Invocation] = []
-    real = reviewer._run_invocation
-
-    def spy(tgt: Target, run: Invocation, *, config: Config, scope: reviewer.LateScope | None = None) -> tuple[Review, bool]:
-        seen.append(run)
-        return real(tgt, run, config=config, scope=scope)
-
-    monkeypatch.setattr(reviewer, "_run_invocation", spy)
-    _scripted_reviewer(tmp_path, "round1", _APPROVES)
-    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True))
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
 
     assert review.verdict == "APPROVED"
-    assert review.confirmed is None
-    assert [run for run in seen if run.cold] == [], "nothing to confirm against"
+    assert list(context_dir.glob("*-prior-rounds.txt")) == [], "the stand-in really did unlink it"
+    assert seen[0].context_files, "the record of what the round was shown outlives the file"
 
 
 def test_a_context_attachment_below_a_symlinked_directory_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2748,10 +2624,11 @@ def test_staged_attachments_are_removed_after_the_invocation(activation: state.S
 def test_an_unreadable_context_attachment_fails_the_review_rather_than_dropping_it(
     activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Dropping an attachment that cannot be read would also shorten ``context_files`` -- and
-    an empty ``context_files`` is what tells ``execute`` no cold confirmation is needed. A
-    silent drop is therefore a route back to the very hole the cold confirmation closes, so
-    it must be a hard failure instead."""
+    """A review must refuse rather than judge evidence it could not fully stage.
+
+    Dropping an attachment that cannot be read would also shorten ``context_files``, the
+    round's only record of the model-authored prose it was shown, so a silent drop is a
+    verdict reached on evidence nobody can reconstruct. It has to be a hard failure."""
     _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
     monkeypatch.setattr(reviewer, "read_verified_file", lambda path, *, root: None)
 
@@ -3077,10 +2954,13 @@ def test_the_round_line_correction_refuses_a_tampered_range_txt(tmp_path: Path, 
 
 
 def test_a_cold_permission_narrows_to_the_single_bundle(tmp_path: Path) -> None:
+    """The wildcard exists so a *continued* reviewer can re-open paths it remembers from an
+    earlier round's bundle. A session-less call -- a contract repair, a ``clarify`` -- carries
+    no such memory, so it is scoped to the one bundle it was handed."""
     bundle = tmp_path / "bundles" / "007"
-    warm = json.loads(reviewer.permission(bundle))
+    continued = json.loads(reviewer.permission(bundle))
     cold = json.loads(reviewer.permission(bundle, cold=True))
-    assert warm["external_directory"] == {"*": "deny", f"{bundle.parent}/**": "allow"}
+    assert continued["external_directory"] == {"*": "deny", f"{bundle.parent}/**": "allow"}
     assert cold["external_directory"] == {"*": "deny", f"{bundle}/**": "allow"}
 
 
@@ -3117,9 +2997,8 @@ def test_a_real_base_tree_still_diffs_normally(activation: state.State, git_repo
 
 def continuity_reviewer(tmp_path: Path) -> Path:
     """Approves iff told it is continuing a session, via ``ARL_SESSION_ID`` -- the env hook
-    ``invoke`` sets on the stub path when ``run.session_id`` is non-empty. Drives the
-    cold-approval invariant deterministically: the continued round approves, the cold
-    confirmation (which never carries a session id) does not.
+    ``invoke`` sets on the stub path when ``run.session_id`` is non-empty. Makes continuity
+    observable in the verdict itself: a continued round approves, a fresh one does not.
     """
     script = tmp_path / "continuity-reviewer.sh"
     script.write_text(
@@ -3127,7 +3006,7 @@ def continuity_reviewer(tmp_path: Path) -> Path:
         'if [ -n "${ARL_SESSION_ID:-}" ]; then\n'
         "    printf 'Continuing.\\n\\n<<<ARL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<ARL-END>>>\\n'\n"
         "else\n"
-        "    printf 'Fresh or cold.\\n\\n<<<ARL-FINDINGS>>>\\n"
+        "    printf 'Fresh.\\n\\n<<<ARL-FINDINGS>>>\\n"
         "FINDING severity=high actionable=yes file=a.txt:1 | still there\\n"
         "VERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n'\n"
         "fi\n"
@@ -3588,12 +3467,12 @@ def test_capture_session_survives_a_non_json_listing(activation: state.State, gi
     assert not captured
 
 
-# -- the cold-approval invariant ----------------------------------------------
+# -- session capture and reuse ------------------------------------------------
 
 
 def test_capture_and_reuse_a_session_across_rounds(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
-    """``cold_confirm`` on: capture, continue, and then override the continued approval."""
-    cold_config = discovery_config(cold_confirm=True)
+    """Round 1 captures a session, round 2 continues it, and the pointer records both."""
+    discovery = discovery_config()
     target = target_for(git_repo)
     label = f"{activation.get_int('report_seq') + 1:03d}"
     title = reviewer._unique_title(activation, target, label)
@@ -3603,13 +3482,12 @@ def test_capture_and_reuse_a_session_across_rounds(activation: state.State, git_
     os.environ["ARL_REVIEWER_CMD"] = str(continuity_reviewer(tmp_path))
     os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
 
-    first = reviewer.execute(target, state=activation, config=cold_config)
+    first = reviewer.execute(target, state=activation, config=discovery)
     assert first.verdict == "CHANGES_REQUIRED"
     # The captured session is not known until after the round ran, but the round's own
     # report must still be able to say which session it created.
     assert first.session == session_id
     assert first.round == 1
-    assert first.confirmed is None
 
     pointer = activation.data["reviewer_session"]
     assert pointer["id"] == session_id
@@ -3618,17 +3496,13 @@ def test_capture_and_reuse_a_session_across_rounds(activation: state.State, git_
     assert pointer["claim_id"] == ""
     assert pointer["claimed_at"] == ""
 
-    second = reviewer.execute(target_for(git_repo), state=activation, config=cold_config)
+    second = reviewer.execute(target_for(git_repo), state=activation, config=discovery)
 
-    # With the key on: the continued round approved, but the returned, acted-on review is the
-    # cold confirmation -- which this stub always denies.
-    assert second.verdict == "CHANGES_REQUIRED"
-    assert second.session == ""
-    assert second.round == 0
-    assert second.confirmed is not None
-    assert second.confirmed.verdict == "APPROVED"
-    assert second.confirmed.session == session_id
-    assert second.confirmed.round == 2
+    # The stub approves only when it was handed a session id, so this verdict *is* the proof
+    # that round 2 really continued round 1's conversation.
+    assert second.verdict == "APPROVED"
+    assert second.session == session_id
+    assert second.round == 2
 
     pointer = activation.data["reviewer_session"]
     assert pointer["round"] == 2
@@ -3637,40 +3511,10 @@ def test_capture_and_reuse_a_session_across_rounds(activation: state.State, git_
 
     raw_dir = activation.act_dir / "raw"
     assert (raw_dir / f"002-{target.label}.out").is_file()
-    assert (raw_dir / f"002-{target.label}-cold.out").is_file()
-
-
-def test_a_continued_changes_required_triggers_no_cold_call(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
-    """Even with ``cold_confirm`` on: only an approval is worth a second read."""
-    cold_config = discovery_config(cold_confirm=True)
-    target = target_for(git_repo)
-    label = f"{activation.get_int('report_seq') + 1:03d}"
-    title = reviewer._unique_title(activation, target, label)
-    session_id = "ses_cafebabe1"
-    row = {"id": session_id, "title": title, "created": _future_ms(), "directory": str(git_repo)}
-
-    os.environ["ARL_REVIEWER_CMD"] = str(FAKE_REVIEWER)
-    os.environ["ARL_FAKE_MODE"] = "changes"
-    os.environ["ARL_SESSION_LIST_CMD"] = str(session_list_script(tmp_path, [row]))
-
-    reviewer.execute(target, state=activation, config=cold_config)
-    second = reviewer.execute(target_for(git_repo), state=activation, config=cold_config)
-
-    assert second.session == session_id
-    assert second.verdict == "CHANGES_REQUIRED"
-    assert second.confirmed is None
-
-    raw_names = {p.name for p in (activation.act_dir / "raw").iterdir()}
-    assert not any("cold" in name for name in raw_names)
-
-
-def test_a_cold_approval_triggers_no_second_call(activation: state.State, git_repo: Path) -> None:
-    """No ``ARL_SESSION_LIST_CMD`` -- capture and verify are both skipped, so every review
-    here is cold by construction, and a first, already-cold approval must not double-review
-    even with ``cold_confirm`` on."""
-    review = execute_fake(activation, git_repo, "approve", config=config_with(cold_confirm=True))
-    assert review.verdict == "APPROVED"
-    assert review.confirmed is None
+    assert {path.name for path in raw_dir.iterdir() if path.name.startswith("002-")} == {
+        f"002-{target.label}.out",
+        "002-prompt.md",
+    }, "one round, one invocation"
 
 
 def test_capture_is_fingerprinted_against_a_concurrent_generation_bump(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
@@ -4054,20 +3898,17 @@ def test_a_review_whose_slot_was_stolen_mid_run_publishes_nothing(activation: st
     assert not reports.exists() or list(reports.iterdir()) == [], "and no report either"
 
 
-def test_the_cold_confirmation_is_not_run_once_the_slot_is_lost(
+def test_an_approval_is_not_published_once_the_slot_is_lost(
     activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The second renewal, and why losing there cannot mean "keep the APPROVED".
+    """Renewal only narrows the window; `_publish` is what closes it.
 
-    The cold confirmation is a *second* full model call; between it and the primary sit the
-    SIGTERM grace a timed-out invocation pays and the session-list call. That sequence can
-    outlast a lease sized from the first renewal, so the clock is restarted before it -- and if
-    the slot has gone, the confirmation that would have checked this approval cannot be run
-    under this review's own claim. The approval must not survive that.
-
-    ``cold_confirm`` on throughout: with the key off there is no confirmation to lose the slot
-    before, and the approval stands on its own terms."""
-    cold_config = config_with(cold_confirm=True)
+    A review slower than its own lease can have the slot reclaimed while it is still
+    legitimately running, and a second review of the same label is then in flight. Whichever
+    finishes first must not be allowed to record a round and store a report on a claim it no
+    longer holds -- the verdict it is holding was decided blind to the other's evidence. The
+    stand-in steals the claim mid-invocation, and the `APPROVED` it then returns must come back
+    as an `OP_FAILURE` rather than as an approval."""
     _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
 
     seen: list[Invocation] = []
@@ -4080,15 +3921,15 @@ def test_the_cold_confirmation_is_not_run_once_the_slot_is_lost(
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
     os.environ["ARL_REVIEWER_CMD"] = str(_slot_stealing_reviewer(tmp_path, activation.state_file, "APPROVED", "thief-approve"))
 
-    review = reviewer.execute(target_for(git_repo), state=activation, config=cold_config)
+    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
 
-    assert seen and seen[0].context_files, "round 2 was shown round 1's findings, so it needed confirming"
-    assert [run for run in seen if run.cold] == [], "the confirmation must not run under a claim we no longer hold"
-    assert review.verdict == "OP_FAILURE", "and the unconfirmed APPROVED must not be returned"
+    assert seen and seen[0].context_files, "round 2 really did run as an ordinary continued round"
+    assert review.verdict == "OP_FAILURE", "the APPROVED must not be published on a lost claim"
+    assert activation.get_array_of_dicts("round_history")[-1]["round"] == 1, "and no round was recorded for it"
 
 
 def test_bundles_directory_holds_only_gate_generated_evidence(activation: state.State, git_repo: Path) -> None:
-    """The invariant the cold-approval design rests on: a continued reviewer's
+    """The invariant the evidence boundary rests on: a continued reviewer's
     ``external_directory`` reach is the bundles root, so nothing in here may be model output."""
     execute_fake(activation, git_repo, "approve")
     bundle_dir = activation.act_dir / "bundles" / "001"
@@ -4348,11 +4189,10 @@ def test_execute_falls_back_to_fresh_when_the_claim_is_lost_before_invoking(
     # `continuity_reviewer` approves iff ARL_SESSION_ID is set -- it must not be, since the
     # claim was lost before invoke ran, so this must be a fresh, uncontinued round.
     assert review.verdict == "CHANGES_REQUIRED"
-    assert review.confirmed is None
     assert review.session == ""
 
     # The bundle was built disclosing the old, continued round (2) -- it must not still tell
-    # the reviewer that, now that the invocation actually sent is cold.
+    # the reviewer that, now that the invocation actually sent is session-less.
     range_text = (activation.act_dir / "bundles" / "001" / "range.txt").read_text()
     assert "round: 1\n" in range_text
     assert "round: 2\n" not in range_text
@@ -4936,118 +4776,6 @@ def test_a_dot_slash_deferred_finding_still_blocks_the_next_review(activation: s
     assert review.deferred == ""
 
 
-def _two_call_reviewer(tmp_path: Path, first: str, second: str) -> None:
-    """A stand-in whose first invocation and every later one emit different blocks.
-
-    The cold confirmation is a second call in the same ``execute``, so this is how a test
-    gives the warm round and the cold one different output.
-    """
-    counter = tmp_path / "call-count"
-    script = tmp_path / "two-call.sh"
-    script.write_text(
-        "#!/usr/bin/env bash\n"
-        f"n=$(cat {counter} 2>/dev/null || echo 0)\n"
-        f"n=$((n+1)); printf '%s' \"$n\" > {counter}\n"
-        f"if [ \"$n\" = 1 ]; then printf '%b' '{first}'; else printf '%b' '{second}'; fi\n"
-    )
-    script.chmod(0o755)
-    os.environ["ARL_REVIEWER_CMD"] = str(script)
-
-
-_WARM_DEFERS = (
-    "A medium elsewhere.\\n\\n<<<ARL-FINDINGS>>>\\n"
-    "FINDING severity=medium actionable=yes file=README.md:4 | new medium in an untouched file\\n"
-    "VERDICT APPROVED\\n<<<ARL-END>>>\\n"
-)
-
-
-def test_a_cold_approval_keeps_the_warm_rounds_deferred_findings(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
-    """Turning ``cold_confirm`` on must not *lose* what the warm round reported.
-
-    The cold call replaces the warm round's **verdict**, not its record: a deferred finding
-    the warm round raised has to reach the approval message and ``round_history``, or the key
-    that exists to add scrutiny would silently drop findings the default keeps."""
-    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
-    (git_repo / "b.txt").write_text("second round\n")
-    _two_call_reviewer(tmp_path, _WARM_DEFERS, _APPROVES)
-
-    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True))
-
-    assert review.verdict == "APPROVED"
-    assert review.confirmed is not None, "the warm round is attached"
-    assert review.confirmed.deferred == "FINDING severity=medium actionable=yes file=README.md:4 | new medium in an untouched file\n"
-    assert "README.md:4" in review.deferred, "the acted-on review carries the warm round's deferred lines"
-    assert "README.md:4" in review.all_findings
-
-    entry = activation.get_array_of_dicts("round_history")[-1]
-    assert any("README.md:4" in line for line in entry["findings"]), "recorded, so a later round blocks on it"
-
-
-def test_a_finding_a_cold_approval_dropped_still_blocks_the_next_review(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
-    """The consequence the record exists for: deferral lasts one approval, cold or not."""
-    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
-    (git_repo / "b.txt").write_text("second round\n")
-    _two_call_reviewer(tmp_path, _WARM_DEFERS, _APPROVES)
-    assert reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True)).verdict == "APPROVED"
-
-    (git_repo / "b.txt").write_text("third round\n")
-    os.environ["ARL_FAKE_FILE"] = "README.md:4"
-    review = execute_fake(activation, git_repo, "medium-file", config=config_with())
-
-    assert review.verdict == "CHANGES_REQUIRED"
-    assert "README.md:4" in review.findings
-
-
-def test_carry_forward_deduplicates_lines_both_invocations_reported() -> None:
-    line = "FINDING severity=medium actionable=yes file=README.md:4 | same finding\n"
-    cold = Review(verdict="APPROVED", all_findings=line, deferred=line)
-    warm = Review(verdict="APPROVED", all_findings=line, deferred=line)
-    reviewer._carry_forward(cold, warm)
-    assert cold.all_findings == line
-    assert cold.deferred == line
-
-
-def test_carry_forward_never_lists_a_line_as_both_blocking_and_deferred() -> None:
-    """The cold call blocked on what the warm one deferred: it is blocking, not deferred."""
-    line = "FINDING severity=medium actionable=yes file=README.md:4 | same finding\n"
-    cold = Review(verdict="CHANGES_REQUIRED", findings=line, all_findings=line)
-    warm = Review(verdict="APPROVED", all_findings=line, deferred=line)
-    reviewer._carry_forward(cold, warm)
-    assert cold.findings == line
-    assert cold.deferred == ""
-    assert cold.all_findings == line
-
-
-def test_carry_forward_leaves_a_failed_cold_call_alone() -> None:
-    """An ``OP_FAILURE`` keeps its finding fields empty on purpose and records no round."""
-    warm = Review(verdict="APPROVED", all_findings="FINDING severity=low actionable=no file=a.py:1 | x\n")
-    cold = Review(verdict="OP_FAILURE", kind="contract", error="no VERDICT line")
-    reviewer._carry_forward(cold, warm)
-    assert cold.all_findings == ""
-    assert cold.deferred == ""
-
-
-def test_carry_forward_keeps_the_warm_rounds_supersedes_lines() -> None:
-    """Merging findings but not retractions would make a round look more stuck than it was."""
-    warm = Review(verdict="APPROVED", supersedes="SUPERSEDES round=1 file=a.py:1 | retracted\n")
-    cold = Review(verdict="APPROVED")
-    reviewer._carry_forward(cold, warm)
-    assert cold.supersedes == "SUPERSEDES round=1 file=a.py:1 | retracted\n"
-
-
-def test_a_cold_confirmed_report_shows_each_invocations_own_transcript(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
-    _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
-    (git_repo / "b.txt").write_text("second round\n")
-    _two_call_reviewer(tmp_path, _WARM_DEFERS, _APPROVES)
-
-    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True))
-    text = Path(review.report).read_text()
-
-    assert "The cold section's finding lists are this **round's record**" in text
-    assert "Round with context (not the verdict acted on)" in text
-    assert "Cold confirmation (the verdict acted on)" in text
-
-
 # --------------------------------------------------------------------------
 # Contract repair
 # --------------------------------------------------------------------------
@@ -5292,10 +5020,11 @@ def test_remaining_budget_counts_down_from_process_entry(monkeypatch: pytest.Mon
     assert remaining is not None and 95 < remaining <= 100
 
 
-def test_the_invoking_lease_covers_a_primary_call_plus_the_larger_second_one() -> None:
-    """The cold confirmation and the repair are mutually exclusive, so the lease is a max."""
-    assert reviewer._invoking_budget(900) == 1800, "a cold confirmation dominates at the default timeout"
-    assert reviewer._invoking_budget(30) == 30 + reviewer.REPAIR_TIMEOUT_SEC, "the repair dominates below two minutes"
+def test_the_invoking_lease_covers_a_primary_call_plus_the_contract_repair() -> None:
+    """A contract repair is the only call that can follow the primary invocation under the
+    lease, so the invoking stretch is exactly the two of them."""
+    assert reviewer._invoking_budget(900) == 900 + reviewer.REPAIR_TIMEOUT_SEC
+    assert reviewer._invoking_budget(30) == 30 + reviewer.REPAIR_TIMEOUT_SEC
     assert (
         max(reviewer._building_budget(reviewer._MAX_CAPTURE_TIMEOUT_SEC), reviewer._invoking_budget(reviewer.MAX_TIMEOUT_SEC))
         + reviewer._lease_slack(reviewer._MAX_CAPTURE_TIMEOUT_SEC)
@@ -5353,15 +5082,14 @@ class _MintingSessions(_StubSessions):
 def test_every_fresh_invocation_carries_the_id_its_harness_minted(
     activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Not just the primary round: the cold confirmation and the contract repair too.
+    """Not just the primary round: the contract repair too.
 
-    **Fails on a ``_confirm_cold`` or ``_repair_contract`` that leaves ``new_session_id``
-    defaulted.** Both are as session-less as a first round, so a harness that pre-assigns has
-    to be able to name them; leaving them empty forces that harness to mint outside
-    :func:`reviewer._mint_session`, which is exactly the seam this split exists to keep whole.
-    The id is safe to carry precisely because these calls are ``capture=False`` and it names a
-    *new, empty* session -- never a resume, which ``tests/unit/test_harness.py`` asserts no
-    harness can spell.
+    **Fails on a ``_repair_contract`` that leaves ``new_session_id`` defaulted.** It is as
+    session-less as a first round, so a harness that pre-assigns has to be able to name it;
+    leaving it empty forces that harness to mint outside :func:`reviewer._mint_session`, which
+    is exactly the seam this split exists to keep whole. The id is safe to carry precisely
+    because the call is ``capture=False`` and it names a *new, empty* session -- never a
+    resume, which ``tests/unit/test_harness.py`` asserts no harness can spell.
     """
     monkeypatch.setattr(reviewer, "_sessions", lambda _config: _MintingSessions())
     seen: list[Invocation] = []
@@ -5373,12 +5101,9 @@ def test_every_fresh_invocation_carries_the_id_its_harness_minted(
 
     monkeypatch.setattr(reviewer, "_run_invocation", spy)
 
-    # Round 1 leaves `prior-rounds.txt` behind, which is what makes round 2's APPROVED worth
-    # confirming cold -- otherwise there is no model-influenced context and no second call.
     _run_scripted(activation, git_repo, tmp_path, "round1", _ROUND_1)
     _scripted_reviewer(tmp_path, "round2", _APPROVES)
-    reviewer.execute(target_for(git_repo), state=activation, config=config_with(cold_confirm=True))
-    assert [run for run in seen if run.cold], "the approval really was cold-confirmed"
+    reviewer.execute(target_for(git_repo), state=activation, config=config_with())
 
     execute_repair(activation, git_repo)
     assert [run for run in seen if not run.allow_supersedes], "a contract repair really did run"

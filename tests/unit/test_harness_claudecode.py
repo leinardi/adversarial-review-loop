@@ -215,8 +215,8 @@ def test_the_repository_is_reachable_but_the_activation_directory_is_not(tmp_pat
     In ``-p`` mode the file tools are confined to the working directory plus each ``--add-dir``
     (measured: a ``Read`` outside both was refused and recorded in ``permission_denials``), so
     this list *is* the read boundary. ``context/`` is a sibling of ``bundles/`` and must be
-    outside it -- otherwise the model-derived prose the cold-approval invariant excludes would
-    sit at a stable, readable path.
+    outside it -- otherwise the model-derived prose a session-less call is deliberately not
+    given would sit at a stable, readable path it could open anyway.
     """
     built = claudecode.HARNESS.review_command(spec(tmp_path))
     granted = flag_values(built.argv, "--add-dir")
@@ -228,8 +228,8 @@ def test_the_repository_is_reachable_but_the_activation_directory_is_not(tmp_pat
 
 
 def test_a_cold_run_narrows_the_grant_to_its_own_bundle(tmp_path: Path) -> None:
-    """The same narrowing ``permission(..., cold=True)`` makes: a cold invocation remembers no
-    earlier round, so it needs no earlier round's bundle."""
+    """The same narrowing ``permission(..., cold=True)`` makes: a session-less invocation
+    remembers no earlier round, so it needs no earlier round's bundle."""
     granted = flag_values(claudecode.HARNESS.review_command(spec(tmp_path, cold=True)).argv, "--add-dir")
     assert str(tmp_path / "bundles" / "001") in granted
     assert str(tmp_path / "bundles") not in granted
@@ -358,11 +358,11 @@ def test_an_attachment_that_changed_after_staging_is_refused(tmp_path: Path) -> 
 
 
 def test_a_cold_command_inlines_no_context_file(tmp_path: Path) -> None:
-    """The cold-approval invariant, expressed where this harness could break it.
+    """The context boundary, expressed where this harness could break it.
 
-    ``execute`` decides *which* attachments a cold invocation gets (``include_context=False``);
-    what this asserts is that the harness adds nothing back -- no ``--add-dir`` reaching
-    ``context/``, and no file inlined that was not handed over.
+    ``execute`` decides *which* attachments a session-less invocation gets
+    (``include_context=False``); what this asserts is that the harness adds nothing back -- no
+    ``--add-dir`` reaching ``context/``, and no file inlined that was not handed over.
     """
     write(tmp_path / "context" / "1-question.txt", _COLD_PROSE)
     built = claudecode.HARNESS.review_command(spec(tmp_path, cold=True, new_session_id=claudecode.SESSIONS.mint()))

@@ -7,13 +7,13 @@ right. ``clarify`` is the cheaper move: one bounded, prose-only question against
 that has already run, with no new commit attempt and no new round.
 
 **It runs cold, always, and against the most recent round's own bundle -- never against the
-continuity pointer.** ``reviewer_session`` may name a session that returned a *continued*
-``APPROVED`` which the cold-approval invariant then overrode with ``CHANGES_REQUIRED``
-(``reviewer._confirm_cold``): the acted-on verdict there came from a fresh, uncaptured cold
-run whose id is stored nowhere. Binding clarify to ``reviewer_session`` in that case would
-ask the approving session to explain a rejection it never issued. So clarify never uses
-``-s``, never claims or releases the continuity pointer, and never touches ``session_ref``
--- it invokes exactly like a cold confirmation: fresh, session-less, against
+continuity pointer.** ``reviewer_session`` is advisory: continuity is best-effort and drops
+silently, so the pointer may name a session that did not produce the verdict being asked
+about -- a round that ran fresh after losing the claim, or one whose block was re-emitted by a
+session-less contract repair whose id is stored nowhere. Binding clarify to
+``reviewer_session`` would then ask one session to explain another's verdict. So clarify never
+uses ``-s``, never claims or releases the continuity pointer, and never touches
+``session_ref`` -- it invokes exactly like a contract repair: fresh, session-less, against
 ``bundles/<seq>/`` for the ``seq`` of the last ``round_history`` entry of this phase's label
 at the current ``activation_generation``.
 

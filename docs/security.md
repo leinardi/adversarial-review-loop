@@ -268,8 +268,8 @@ compacted by the provider, and a compaction landing mid-review has twice returne
 findings block — and the security effect is a side benefit, not a guarantee: within the cap the
 channel is exactly as unbounded and as uninspectable as described above, and a phase still runs
 as many rounds as it takes, just across several sessions. `0` disables the cap. Do not quote it
-as a mitigation for injection persistence; the label-keyed reset and `cold_confirm` are what
-that argument rests on.
+as a mitigation for injection persistence; the label-keyed reset is what that argument rests
+on.
 
 What is true of both channels, and is doing the real work: neither is an approval path on its
 own. A verdict comes back only through the same contract parse, an actionable finding at or
@@ -277,37 +277,10 @@ above `block_severity` blocks whatever the reviewer concluded, no operational fa
 approval, and the label-keyed reset (a new phase, or `final`, always starts a fresh session)
 bounds any one poisoned session to a single phase.
 
-### `cold_confirm`: the second, cold read — off by default
+### What backs the verdict the gate acts on
 
-`cold_confirm` (default `false`) adds a stricter rule on top: **an approving verdict must come
-from an invocation whose entire content the gate created.** With the key on, when a review that
-held any model-influenced context returns `APPROVED` the gate does not act on it — it runs one
-more review of the same bundle cold (no `-s`, no `context/` attachments, evidence built from
-git, no memory of anything the earlier round said), and that cold review's verdict is the one
-that counts. The stricter of the two always wins. It gates on *either* kind of context, not on
-`-s` alone: gating on the session would exempt exactly the rounds that lost continuity but were
-still shown `prior-rounds.txt`, which is the population the key exists to cover.
-
-What the key buys, when it is on: a tampered `reviewer_session.id`, or a tampered
-`round_history` rendered into `prior-rounds.txt`, can make the reviewer hold extra, possibly
-misleading context and produce a verdict — but that verdict can never be an approval by itself.
-At worst it denies, which is a stronger failure mode than most of this document's findings (a
-denial-of-service, not a wrong grant), and the user's answer to it is
-`/adversarial-review-loop:accept`.
-
-**Why it is not the default, and what that costs — stated without averaging the two channels
-together.** The cost of the key being *on* is a full second model call on every approving round
-past the first, and a *full* one: the confirmation is session-less by construction, so it shares
-no prefix with anything and reads nothing from the provider's prompt cache — measured against a
-20k-token bundle, 20124 input tokens with 0 cached. Measured over a real 45-round, 7-phase run:
-11 rounds were cold confirmations, and in every one of those the cold call raised *new*, medium
-findings the warm round had not — a second read of the same evidence with strictly less of it,
-disagreeing with itself rather than catching anything the first read had missed. Both manual
-`accept`s in that run followed such an override. An invariant whose observed effect is to make a
-converging phase stop converging is one worth paying for deliberately rather than by default.
-
-The cost of the key being *off* is equally concrete, and it is **not** "a re-read of validated
-`FINDING` lines is skipped". For a round that continued a session, it is that an approval may
+**An approving verdict may come from an invocation that held model-influenced context, and the
+honest statement of the design says so.** For a round that continued a session, an approval may
 have been produced by a reviewer holding the whole unbounded conversation described above — the
 earlier diffs and any injection inside them, its own earlier prose, possibly compacted. Nothing
 in the gate bounds or inspects that. What is left standing is the list at the end of the
@@ -315,24 +288,33 @@ previous section: the contract parse, `block_severity`, the deny-list, `confirm-
 ancestry evidence, `approval_is_current`, and the label-keyed reset that confines a poisoned
 session to one phase. That is a real defence in depth and it is *not* the same guarantee as
 "every approving verdict came from an invocation whose entire content the gate created". The
-default gives that sentence up. Say so when quoting this section.
+gate does not claim that sentence. Say so when quoting this section.
 
-- **Injection persistence, and how the two settings differ on it.** A poisoned diff used to
-  influence exactly one review; with continuity it can influence every remaining round of that
-  phase, since the reviewer's session may hold it in context across rounds — including rounds
-  whose own bundle no longer contains it. The label-keyed reset bounds the blast radius to one
-  phase either way. With `cold_confirm` **on**, that persistence can only ever cause a
-  *denial*, because the verdict acted on came from a call that never saw it. With it **off**,
-  an approving verdict may have been shaped by it, and the backstops above are what remains. A
-  review loop that will not converge — whether from injected content or an ordinary
-  disagreement — is exactly what `/adversarial-review-loop:accept` exists to break out of.
+The `context/` channel is the checkable half, and it is checkable by construction rather than by
+trust: `prior-rounds.txt` is the gate's own rendering of `FINDING` lines, each validated by
+`_FINDING_RE` before it was stored and re-validated before it is rendered, out of entries whose
+`verdict`/`seq`/`tree` are type-checked on the way out and bounded by
+`max_findings`/`max_findings_bytes`. A tampered `round_history` degrades to a *shorter*
+attachment, never to smuggled prose. A continued session is none of those things.
 
-Turn it on — `/adversarial-review-loop:config cold_confirm true`, or `ARL_COLD_CONFIRM=true` for
-a single run — when the threat model is a tampered `state.json`, or a diff plausibly carrying an
-injection, rather than a review loop that will not settle. Like every other key it is
-repo-settable, and the note under "Repo config is not trusted for policy" applies: a repository
-config can set it back to `false`, which is a strictly smaller lever than `ignore_globs: ["**"]`
-already sitting open beside it.
+**A second, cold read of every approving round was tried and removed.** Under it an `APPROVED`
+from a round that held any model-influenced context was re-reviewed session-less, and that
+verdict decided. Measured over a real 45-round, 7-phase run: 11 rounds paid the second call, and
+in every one of those the cold call raised *new*, medium findings the first had not — a second
+read of the same evidence with strictly less of it, disagreeing with itself rather than catching
+anything the first read had missed. Both manual `accept`s in that run followed such an override.
+It also cost a full model call each time: session-less by construction, so it shared no prefix
+and read nothing from the provider's prompt cache — 20124 input tokens with 0 cached against a
+20k-token bundle. An invariant whose observed effect is to make a converging phase stop
+converging, at that price, is not one to carry.
+
+- **Injection persistence.** A poisoned diff used to influence exactly one review; with
+  continuity it can influence every remaining round of that phase, since the reviewer's session
+  may hold it in context across rounds — including rounds whose own bundle no longer contains
+  it. The label-keyed reset bounds the blast radius to one phase, and an approving verdict may
+  have been shaped by it, with the backstops above what remains. A review loop that will not
+  converge — whether from injected content or an ordinary disagreement — is exactly what
+  `/adversarial-review-loop:accept` exists to break out of.
 
 And one thing continuity is *not*, so nobody spends the safety budget above chasing it: **it is
 not a large token saving.** Measured against the same 20k-token bundle, a continued round reads
@@ -443,9 +425,8 @@ itself, minutes later. Two exposures live in that gap, and only one of them is c
   descriptor walk that validated the path, so the bytes that leave are the bytes of the inode
   that was checked. There is no window, because the check and the read are one operation on
   one descriptor. A source that cannot be read that way fails the review; it is never a
-  silently dropped attachment — quite apart from the evidence lost, dropping one could also
-  talk the gate out of the cold confirmation an attached context requires when `cold_confirm`
-  is on.
+  silently dropped attachment — quite apart from the evidence lost, dropping one would also
+  shorten the round's only record of the model-authored prose it was shown.
 - **Handing over a pathname that later means something else — narrowed, not closed.** What
   `-f` names is a staged copy in a directory created fresh for that one invocation, with an
   unpredictable name, removed when the call returns (`reviewer.stage_attachments`). **Every**
@@ -516,16 +497,15 @@ directory.
 ### The two harnesses, and which of these arguments is per-harness
 
 The reviewer CLI is configurable (`harness`: `claude-code` by default, `opencode`). Most of
-this page does not depend on which one runs — the contract parse, `block_severity`, the
-cold-approval invariant, `confirm-commit`, the deny-list and `pretool` are all upstream of the
-choice. Three things are per-harness, and each was measured rather than assumed
+this page does not depend on which one runs — the contract parse, `block_severity`,
+`confirm-commit`, the deny-list and `pretool` are all upstream of the choice. Three things are per-harness, and each was measured rather than assumed
 (`tests/STEP0.md` records the probes):
 
 - **The evidence boundary holds under both, by the same mechanism.** Both inline every
   attachment: OpenCode through `-f`, Claude Code by concatenating them into the payload it
   writes to the child's stdin. So under both, a `context/` file exists only as bytes inside one
-  invocation, never at a path the reviewer can re-open — which is what makes a cold
-  confirmation, handed none of them, structurally unable to have seen model-authored prose.
+  invocation, never at a path the reviewer can re-open — which is what makes a session-less
+  call, handed none of them, structurally unable to have seen model-authored prose.
   A path-based delivery channel would break that argument, and must not be introduced without
   replacing it. On Claude Code the read grants say the same thing a second way: `--add-dir`
   covers the repository and the bundles root, and `context/` is a sibling of `bundles/`,

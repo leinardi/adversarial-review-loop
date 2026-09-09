@@ -10,8 +10,8 @@ decision below.
 fences and :func:`arl.reviewer.run_bounded` writes the whole thing to the child's standard
 input. Nothing repo-derived and nothing bundle-derived is named in the argv. That is what
 carries the evidence boundary across unchanged: a ``context/`` attachment exists only as
-bytes inside one process's stdin, never at a path the reviewer could re-open, so a cold
-confirmation -- handed none of them -- structurally cannot have seen model-authored prose.
+bytes inside one process's stdin, never at a path the reviewer could re-open, so a
+session-less call -- handed none of them -- structurally cannot have seen model-authored prose.
 It is also ``-f``'s completeness guarantee: the reviewer provably received every byte, so the
 gate never has to verify that a file it named was actually read.
 
@@ -119,7 +119,7 @@ def session_cwd(act_dir: Path) -> Path:
     tools are confined to the working directory plus each ``--add-dir`` (measured: a ``Read`` of
     an absolute path outside both was refused and recorded in ``permission_denials``, with no
     prompt), so *whatever this directory contains is readable by the reviewer*. Pointing it at
-    the activation directory would put ``context/`` -- the model-derived prose the cold-approval
+    the activation directory would put ``context/`` -- the model-derived prose the evidence
     invariant exists to keep out -- inside the reviewer's reach at a stable path. Nothing is
     ever written here: the transcripts live under the CLI's own config directory, outside this
     directory and outside every ``--add-dir``, so they are not readable either.
@@ -222,7 +222,7 @@ def _read_directories(repo: str, bundle_dir: Path, *, cold: bool) -> list[str]:
     A faithful port of :func:`arl.harness.opencode.permission`'s ``external_directory``
     document, including its ``cold`` narrowing. The repository is what the OpenCode reviewer
     reaches through ``--dir``; the bundles root is what a *continued* reviewer needs so it can
-    re-open a path it remembers from an earlier round, and a cold invocation -- which remembers
+    re-open a path it remembers from an earlier round, and a session-less one -- which remembers
     nothing -- gets this one bundle instead. Everything under either is gate-generated evidence;
     ``context/`` is a sibling of ``bundles/`` and outside both, which is the boundary.
 
@@ -331,7 +331,7 @@ def payload(prompt_text: str, attachments: Sequence[Attachment], *, act_dir: Pat
     Order is the caller's, never re-derived here, for the same two reasons
     :func:`arl.harness.opencode.review_argv` gives: a directory listing attaches whatever
     happens to be sitting there, and "what was attached" has to be one value decided once,
-    because ``execute`` gates its cold confirmation on it.
+    because it is the round's record of the model-derived context it was shown.
     """
     nonce = secrets.token_hex(8)
     total = len(attachments)

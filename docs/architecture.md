@@ -170,9 +170,8 @@ just gave, without attempting a commit or spending a new round. It is Claude-inv
 it parses no `VERDICT`, writes nothing that can approve anything, and reaches
 `hook.pass_()` under `ACTIVE` without any gate change. It runs **cold and session-less**,
 against `bundles/<seq>/` for the most recent `round_history` entry of the current phase —
-never the `reviewer_session` continuity pointer, which under `cold_confirm` may name a session
-whose continued `APPROVED` was overridden by a cold `CHANGES_REQUIRED` the acting verdict came
-from. The
+never the `reviewer_session` continuity pointer, which is advisory and may name a session that
+did not produce the verdict being asked about. The
 question is written to `context/<n>-question.txt` (a sibling of `bundles/`, inlined with
 `-f`, never re-openable by path) wrapped in an evidence-not-instruction fence. Two counters
 bound and number it: `clarifications` (capped by `max_clarifications`, reset by `resume`)
@@ -270,8 +269,8 @@ The default is `claude-code` — the gate ships as a Claude Code plugin, so that
 every user already has — and `opencode` is one config key away.
 
 Everything that decides an *outcome* stays in `reviewer.py` and never learns which CLI ran:
-bundle building, staging and manifest verification, the `FINDING`/`VERDICT` contract, the
-cold-approval invariant, `round_history`, the retry classes. A harness answers with a
+bundle building, staging and manifest verification, the `FINDING`/`VERDICT` contract,
+`round_history`, the retry classes. A harness answers with a
 `Command` — argv, environment *overrides*, optional stdin, optional working directory — and
 `reviewer.py` runs it. It reads no verdict and writes no state.
 
@@ -286,8 +285,8 @@ than assumed (`tests/STEP0.md`):
 
 **Both inline their attachments, and that is load-bearing rather than incidental.** It is what
 keeps `context/` — the only model-derived evidence the gate ever produces — from existing at a
-path the reviewer could re-open, which is what makes a cold confirmation structurally unable to
-have seen model-authored prose. See [security.md](security.md).
+path the reviewer could re-open, which is what makes a session-less call — a contract repair, a
+`clarify` — structurally unable to have seen model-authored prose. See [security.md](security.md).
 
 ### What each one actually runs
 
@@ -360,14 +359,6 @@ resetting, because the memory does not live in the conversation: `prior-rounds.t
 every earlier round's verdict and `FINDING` lines, and `incremental.diff` carries what
 changed since the previous round, both as bounded evidence the gate itself renders.
 
-`cold_confirm` (**off by default**) adds a second, cold read on top of that: an approving
-verdict from a round that was shown model-influenced context — a continued session, or an
-earlier round's own findings — is not acted on by itself; the gate re-reviews the same
-evidence with none of it attached, and that cold verdict decides. It is off because it is a
-full second model call on every approving round past the first. See
-[security.md](security.md#cold_confirm-the-second-cold-read--off-by-default) for the
-argument in both directions.
-
 ## Resume and plan revision
 
 `resume` is a second arming path — it continues an activation instead of starting one.
@@ -407,10 +398,10 @@ $XDG_STATE_HOME/adversarial-review-loop/
         ├── plan.rev<n>.md           later revisions, each immutable once written
         ├── phases.frozen            the split phase list
         ├── reports/NNN-*.md         every review, in full, never deleted
-        ├── raw/NNN-<label>[-cold].out  the reviewer's own transcript for report NNN — never inside bundles/
+        ├── raw/NNN-<label>.out         the reviewer's own transcript for report NNN — never inside bundles/
         ├── raw/NNN-<label>-repair.out  a contract-repair call's transcript, when the review's own block was malformed
         ├── raw/NNN-clarify.out      a clarify exchange's transcript (NNN is clarify_seq, not report_seq)
-        ├── context/NNN-prior-rounds.txt  earlier rounds' verdicts+findings for report NNN — a sibling of bundles/, passed with -f and never re-openable by path; omitted from a cold confirmation
+        ├── context/NNN-prior-rounds.txt  earlier rounds' verdicts+findings for report NNN — a sibling of bundles/, passed with -f and never re-openable by path; omitted from a session-less call
         ├── context/NNN-question.txt  a Claude-composed clarify question (NNN is clarify_seq) — same sibling directory, same -f-only channel
         ├── context/NNN-repair.txt   the fenced tail of a malformed transcript, the only thing a repair call is shown besides range.txt
         └── bundles/NNN/             gate-generated evidence shown to the reviewer for report NNN — no model output, ever

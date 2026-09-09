@@ -20,67 +20,42 @@ markers or emits a verdict the gate does not recognise -- each maps to ``OP_FAIL
 reviewer's own verdict is advisory: an actionable finding at or above ``block_severity``
 blocks regardless of what the reviewer concluded.
 
-**Session continuity, and the confirmation that used to be unconditional.** Within one review
-label (``phase3``, or ``final``) consecutive reviews continue the same OpenCode session where
-one can be found and safely claimed (``session_ref``); a resume or a new phase starts fresh.
-The session id travels through ``state.json``, which ``AGENTS.md`` is explicit is not a trust
+**Session continuity, and what it does and does not authorize.** Within one review label
+(``phase3``, or ``final``) consecutive reviews continue the same OpenCode session where one
+can be found and safely claimed (``session_ref``); a resume or a new phase starts fresh. The
+session id travels through ``state.json``, which ``AGENTS.md`` is explicit is not a trust
 boundary -- so it must never be able to *authorize* anything, and it cannot: the pointer
-selects which conversation a review continues, never whether a verdict is acted on. Under
-``cold_confirm`` (**off by default**) ``execute`` goes one step further: an ``APPROVED`` from a
-round that held *any* model-influenced context is not acted on directly, and one more review of
-the same bundle runs cold -- no ``-s``, no ``context/`` attachments, evidence built from git --
-whose verdict is the one every caller acts on. The stricter of the two always wins.
+selects which conversation a review continues, never whether a verdict is acted on.
 
-**Why the default is off.** The confirmation costs a second full model call on every approving
-round past the first, and it is a *full* one: a session-less call shares no prefix and reads
-nothing from the provider's prompt cache. Measured over a real 45-round run, 11 of those rounds
-were cold confirmations, and in every one the cold call raised *new* medium findings the warm
-round had not -- a re-read of the same evidence with strictly less of it, disagreeing with
-itself rather than catching anything the first read missed; both manual ``accept``s in that run
-followed such an override.
-
-**The two context channels are not equally checkable, and the honest statement of the default
-says so rather than averaging them.** ``NNN-prior-rounds.txt`` is narrow and gate-controlled:
-it is this module's *own rendering* (``_prior_rounds_section``) of ``FINDING`` lines, each
-validated by ``_FINDING_RE`` before it was stored and re-validated before it is rendered, out of
-entries whose ``verdict``/``seq``/``tree`` are type-checked on the way out, bounded by
+**The two context channels are not equally checkable, and the honest statement says so
+rather than averaging them.** ``NNN-prior-rounds.txt`` is narrow and gate-controlled: it is
+this module's *own rendering* (``_prior_rounds_section``) of ``FINDING`` lines, each validated
+by ``_FINDING_RE`` before it was stored and re-validated before it is rendered, out of entries
+whose ``verdict``/``seq``/``tree`` are type-checked on the way out, bounded by
 ``max_findings``/``max_findings_bytes`` -- a tampered history degrades to a *shorter*
 attachment, never to smuggled prose. **A continued session is none of those things.** ``-s``
 hands the reviewer the whole earlier conversation: every earlier round's attachments, the
 repository content inside those diffs, and the reviewer's own free prose, held by OpenCode,
 never re-read or re-validated by the gate, and possibly compacted by the provider into a lossy
-summary the gate cannot see either. So with ``cold_confirm`` off, an approval may come from a
-reviewer that was holding all of that, and nothing in this module bounds it. That is the cost
-of the default, stated plainly; ``cold_confirm`` on is what removes *both* influences from the
-verdict acted on.
+summary the gate cannot see either. So an approval may come from a reviewer that was holding
+all of that, and nothing in this module bounds it. That is the cost, stated plainly.
 
-What still holds either way, and is what the default actually rests on: a verdict comes back
-only through the same contract parse, an actionable finding at or above ``block_severity``
-blocks whatever the reviewer concluded, no operational failure becomes an approval, and the
+What holds regardless, and is what the design actually rests on: a verdict comes back only
+through the same contract parse, an actionable finding at or above ``block_severity`` blocks
+whatever the reviewer concluded, no operational failure becomes an approval, and the
 label-keyed reset (a new phase, or ``final``, always starts fresh) bounds any one poisoned
-session to one phase. Turn ``cold_confirm`` on where the threat model is a tampered
-``state.json`` or a diff that may be carrying an injection, rather than a slow loop;
-``docs/security.md`` carries the full argument in both directions.
-
-**Two things count as model-influenced context, not one.** A continued session (``-s``) is
-the obvious one. The other is a ``context/`` attachment: ``NNN-prior-rounds.txt`` carries
-earlier rounds' ``FINDING`` detail, and it is attached to a *fresh* invocation just as readily
-as to a continued one -- session continuity is best-effort and drops silently (a listing
-failure, a generation bump, a held claim), while the prior-rounds attachment does not. Gating
-the cold confirmation on ``-s`` alone would therefore let exactly the runs that lost continuity
-approve on prose an earlier round wrote. :func:`execute` gates on either, whenever it gates at
-all.
+session to one phase. ``docs/security.md`` carries the full argument in both directions.
 
 **The evidence boundary.** ``bundles/`` holds gate-generated evidence only -- no model
-output, ever (``docs/architecture.md``): a cold confirmation reuses an earlier round's
+output, ever (``docs/architecture.md``): a session-less invocation reuses an earlier round's
 ``bundle_dir`` and is granted read access across the whole bundles root, so model-authored
-text placed there would be readable by the one invocation whose purpose is to judge with no
-model-influenced context. Model-derived attachments therefore live in a separate
-``context/`` directory -- ``state.act_dir / "context"``, a *sibling* of ``bundles/`` and
-outside ``permission()``'s allow-list. ``NNN-prior-rounds.txt`` (this module) and
-``NNN-question.txt`` (``commands/clarify.py``) live only there; they reach OpenCode through
-``-f``, which inlines them, so no invocation can re-open one by path, and a cold
-confirmation is passed none of them (``_confirm_cold``, ``Invocation.attach_context``).
+text placed there would be readable by an invocation that carries none of the conversation it
+came from. Model-derived attachments therefore live in a separate ``context/`` directory --
+``state.act_dir / "context"``, a *sibling* of ``bundles/`` and outside ``permission()``'s
+allow-list. ``NNN-prior-rounds.txt`` (this module) and ``NNN-question.txt``
+(``commands/clarify.py``) live only there; they reach OpenCode through ``-f``, which inlines
+them, so no invocation can re-open one by path, and a session-less call -- a contract repair,
+a ``clarify`` -- is passed none of them (``Invocation.attach_context``).
 """
 
 #  This file is part of adversarial-review-loop.
@@ -264,12 +239,12 @@ def _mint_session(config: Config) -> str:
     pre-assign one.
 
     **Every** fresh invocation mints its own, not just the ones a continuity pointer can be
-    captured from: a cold confirmation and a contract repair are as session-less as a first
-    round, and a pre-assigning harness has to be able to name each of them or it is minting
-    ids outside this seam. What separates them is ``capture``, not the id -- these two are
-    never stored and never continued, so the id they carry names a *new, empty* session and
-    can never be spelled as a resume. That is the cold-approval invariant's whole point, and
-    ``tests/unit/test_harness.py`` asserts no harness can spell it any other way.
+    captured from: a contract repair and a ``clarify`` are as session-less as a first round,
+    and a pre-assigning harness has to be able to name each of them or it is minting ids
+    outside this seam. What separates them is ``capture``, not the id -- these are never
+    stored and never continued, so the id they carry names a *new, empty* session and can
+    never be spelled as a resume. ``tests/unit/test_harness.py`` asserts no harness can spell
+    it any other way.
 
     The one reader, so a second call site cannot start minting differently.
     """
@@ -280,12 +255,11 @@ def _lease_slack(capture_timeout_sec: int) -> int:
     """Flat slack the lease carries for everything neither of its two stretches bounds.
 
     Staging, the transactions either side, the SIGTERM-to-SIGKILL grace each invocation may
-    pay (:data:`KILL_GRACE_SEC`), and the session-capture call `_settle_pointer` can make
-    *between* the primary invocation and the cold confirmation. That last one is why this is
-    not simply 60: the two model calls are not back to back, and a window sized as though they
-    were expires while its owner is still legitimately between them. It is also why the term
-    is the *harness's* capture timeout rather than a constant -- a strategy that captures
-    without a subprocess spends none of it.
+    pay (:data:`KILL_GRACE_SEC`), and the session-capture call `_settle_pointer` makes after
+    the primary invocation. That last one is why this is not simply 60: a window sized as
+    though nothing sat between the model calls and the publish expires while its owner is
+    still legitimately in between. It is also why the term is the *harness's* capture timeout
+    rather than a constant -- a strategy that captures without a subprocess spends none of it.
     """
     return capture_timeout_sec + 120
 
@@ -362,15 +336,12 @@ REPAIR_TAIL_BYTES: Final = 16384
 def _invoking_budget(timeout_sec: int) -> int:
     """The "invoking" stretch: the primary invocation plus the one call that can follow it.
 
-    ``max``, not a sum of all three, because the two possible second calls are mutually
-    exclusive: :func:`_confirm_cold` runs only after an ``APPROVED``, and
-    :func:`_repair_contract` only after a contract failure, which is not a verdict at all. So
-    one review is at most a primary call plus *either* a cold confirmation (``timeout_sec``)
-    or a repair (:data:`REPAIR_TIMEOUT_SEC`), and the lease has to cover the larger of the two
-    -- which is the cold confirmation for any ``timeout_sec`` above two minutes, and the
-    repair below that.
+    A review is at most a ``timeout_sec``-bounded primary invocation and, when that invocation
+    wrote a block the gate cannot read, one :data:`REPAIR_TIMEOUT_SEC`-bounded
+    :func:`_repair_contract` call. Nothing else runs under the lease's invoking stretch, so
+    the sum of the two is the whole of it.
     """
-    return max(2 * timeout_sec, timeout_sec + REPAIR_TIMEOUT_SEC)
+    return timeout_sec + REPAIR_TIMEOUT_SEC
 
 
 def _timeout_sec(config: Config) -> int:
@@ -618,33 +589,30 @@ class Invocation:
     (``-s``, no ``--title``) -- see ``review_argv``. ``new_session_id`` is its mirror: the id
     a pre-assigning harness minted for a *fresh* run, "" under a harness that discovers its
     sessions instead. They are never both set, and **every** fresh invocation carries one --
-    the cold confirmation and the contract repair included, both of which are as session-less
-    as a first round (see :func:`_mint_session`). ``capture`` is only ever true for a fresh
-    run whose session, once it exists, is eligible to become the phase's continuity pointer;
-    a cold confirmation is always ``capture=False``, and so is a fresh run reached because the
-    real pointer was claimed by a live owner elsewhere. See ``session_ref``.
+    the contract repair included, which is as session-less as a first round (see
+    :func:`_mint_session`). ``capture`` is only ever true for a fresh run whose session, once
+    it exists, is eligible to become the phase's continuity pointer; a repair is always
+    ``capture=False``, and so is a fresh run reached because the real pointer was claimed by a
+    live owner elsewhere. See ``session_ref``.
 
     ``attachments`` is the complete, ordered ``-f`` list this invocation was launched with --
     staged copies, not the bundle's own stable paths (:func:`stage_attachments`) -- and
     ``context_files`` is the subset of it that is model-derived. They answer two different
     questions and both are stored: the first is what the argv is built from, the second is
-    what ``execute`` gates its cold confirmation on.
+    the record of what model-authored prose this invocation was shown.
 
     ``context_files`` is **the** record of which model-derived ``context/`` attachments this
     invocation was given (``NNN-prior-rounds.txt``), and it is deliberately a stored tuple
-    rather than something re-derived from the filesystem when a caller needs to know. Two
-    things read it -- the argv built here, and ``execute``'s decision to cold-confirm an
-    approval -- and they must not be able to disagree. Re-listing ``context/`` at the second
-    of those was a real hole: the file is written before ``invoke`` and read again after it,
-    so a ``context/`` entry unlinked while the reviewer ran made the second listing empty, and
-    an approval that genuinely *had* been shown model-authored prose skipped its cold
-    confirmation. What was attached is a property of the invocation, fixed the moment its argv
-    was built; recording it is what makes it immutable. Empty for a cold confirmation, which
-    receives none of it, inline or by path.
+    rather than something re-derived from the filesystem when a caller needs to know. What was
+    attached is a property of the invocation, fixed the moment its argv was built; recording
+    it is what makes it immutable, so a ``context/`` entry unlinked while the reviewer ran
+    cannot rewrite after the fact what the round was shown. Empty for a session-less call --
+    a contract repair, a ``clarify`` -- which receives none of it, inline or by path.
 
     ``cold`` narrows the permission document to this one bundle rather than the whole bundles
-    root (defence in depth behind the same point). See ``permission`` and the module
-    docstring.
+    root. The wildcard exists so a *continued* reviewer can re-open paths it remembers from an
+    earlier round's bundle; an invocation that carries no such memory needs none of it. See
+    ``permission`` and the module docstring.
 
     ``timeout_sec`` is ``0`` for every ordinary invocation, meaning "the configured
     ``timeout_sec``, clamped". It is set only by the contract repair, which is not a review
@@ -753,16 +721,11 @@ class Review:
     #: Read by :func:`approval_is_current`, which is what binds a caller's approval to *this*
     #: review rather than to whatever the label's newest verdict has become since.
     seq: int = 0
-    #: The OpenCode session this review ran in, "" for a cold one.
+    #: The OpenCode session this review ran in, "" for a session-less one.
     session: str = ""
-    #: Which round of that session this was. 0 for a cold confirmation -- it is not a round
-    #: of the continued session, and is never stored as one (see ``session_ref``).
+    #: Which round of that session this was. 0 for a session-less call, which is not a round
+    #: of any continued session and is never stored as one (see ``session_ref``).
     round: int = 0
-    #: Set only on the *returned* ``Review`` of an approving continued round: the continued
-    #: verdict that triggered the cold confirmation, kept so the report can show both. The
-    #: returned review is always the cold one -- see ``execute``'s docstring for why that is
-    #: the verdict every caller must act on.
-    confirmed: Review | None = None
     #: Path of the **malformed primary transcript** whose findings block this review's lines
     #: were re-emitted from, set only by a successful :func:`_repair_contract`. ``raw`` is
     #: then the repair call's own transcript, so a report can show both: the block that was
@@ -771,9 +734,7 @@ class Review:
     #: What this invocation cost, when its harness reports it -- display only, never read by
     #: any branch (:class:`arl.harness.Usage`). ``None`` for a harness with no accounting to
     #: offer, for the ``ARL_REVIEWER_CMD`` test seam, and for every failure path, where the
-    #: transcript is deliberately left exactly as the CLI wrote it. Under ``cold_confirm``
-    #: each invocation carries its own: ``confirmed.usage`` is the round with context, and
-    #: this is the cold call that decided.
+    #: transcript is deliberately left exactly as the CLI wrote it.
     usage: harness.Usage | None = None
 
 
@@ -944,7 +905,7 @@ class SessionRef:
     harness that discovers its sessions after the fact instead. See :func:`_fresh_ref`.
 
     A ``session_id`` here is a hint the reviewer may hold extra context, never an
-    authorization: see the module docstring, "the cold-approval invariant".
+    authorization: see the module docstring, "session continuity".
     """
 
     session_id: str
@@ -1282,9 +1243,9 @@ def _bundle_contents_section(*, chunks: int, revisions: int, incremental: bool, 
     """``## Bundle contents`` -- the files that exist in this bundle directory, named exactly.
 
     Deliberately a statement about the *directory*, never about the invocation: the primary
-    call, a cold confirmation, a repair and a ``clarify`` are each handed a different subset
-    (a clarify gets ``range.txt`` and the diff chunks and nothing else), so a list claiming
-    "these were attached" would be false for three of the four. What the reviewer needs from
+    call, a repair and a ``clarify`` are each handed a different subset (a clarify gets
+    ``range.txt`` and the diff chunks and nothing else), so a list claiming "these were
+    attached" would be false for two of the three. What the reviewer needs from
     it is the negative: 26 permission errors across 24 real transcripts came from globbing
     and reading ``context/.staged-*`` for a ``verify.txt``/``prior-rounds.txt`` that either
     never existed or was already inline. The prompts carry the matching rule -- everything
@@ -1453,10 +1414,9 @@ def _render_plan_excerpt(content: bytes) -> str:
 #: every later round (~16k tokens at the 64 KiB cap) to tell the reviewer something it is
 #: already holding.
 #:
-#: **Never used when the round might not have that history**, which is three cases, all
-#: handled by the caller: a fresh session, a cold confirmation (``cold_confirm``, which is
-#: session-less by construction), and the post-build fallback in :func:`_reconfirm_claim`,
-#: where :func:`_downgrade_bundle_round` puts the excerpt back.
+#: **Never used when the round might not have that history**, which is two cases, both
+#: handled by the caller: a fresh session, and the post-build fallback in
+#: :func:`_reconfirm_claim`, where :func:`_downgrade_bundle_round` puts the excerpt back.
 _PLAN_IN_SESSION: Final = (
     "Unchanged since the first round of this session, where it was given in full -- it is "
     "already in your context, and the plan cannot be revised without ending this session. "
@@ -1810,16 +1770,15 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
     itself cannot be produced. All three are refusals to review, never a review that found
     nothing.
 
-    ``round_number`` is disclosed in ``range.txt`` (0 omits the line -- a cold confirmation's
-    bundle says nothing about rounds, since it is not part of any session). Bundle content is
-    otherwise identical for a continued and a cold call, which is what lets the cold
-    confirmation reuse this same bundle rather than building a second one.
+    ``round_number`` is disclosed in ``range.txt`` (0 omits the line, for a call that is not
+    part of any session and so has no round to name). Bundle content is otherwise identical
+    for a continued and a session-less call, which is what lets a contract repair reuse this
+    same bundle rather than building a second one.
 
     ``plan_in_session`` omits the frozen plan excerpt in favour of a one-line note, for a round
     that continues a session which already received it (:data:`_PLAN_IN_SESSION`). The caller
     decides it, because only the caller knows whether the invocation will actually carry that
-    history -- and it must be false whenever a *cold* call may read this same bundle, which is
-    what ``cold_confirm`` makes possible.
+    history.
 
     Answers the SHA-256 of the ``manifest`` it writes last (:func:`_write_manifest`) -- the
     caller records that digest outside this directory, and every later read of the bundle is
@@ -1904,8 +1863,8 @@ def build_bundle(  # noqa: PLR0913 - one independently meaningful piece of evide
     _write_private(dest / "range.txt", _encode(range_text))
 
     # `context/<seq>-prior-rounds.txt` -- a sibling of `bundles/`, never inside it. Written
-    # only when an earlier round of this label has run; attached with `-f` on every
-    # invocation except the cold confirmation. See `_prior_rounds_section`.
+    # only when an earlier round of this label has run; attached with `-f` on the round's own
+    # invocation and on no session-less one. See `_prior_rounds_section`.
     prior_rounds = _prior_rounds_section(state, target, config)
     if prior_rounds:
         context_dir = state.act_dir / "context"
@@ -2137,8 +2096,8 @@ def context_attachments(bundle_dir: Path) -> list[Path]:
     inside it, and never covered by ``permission()``'s ``external_directory`` allow. It holds
     the only model-derived / Claude-derived attachments the reviewer ever sees
     (``NNN-prior-rounds.txt``); they reach OpenCode through ``-f``, which inlines the file, so
-    no read permission is needed or granted and no invocation can re-open one by path. A cold
-    confirmation omits them entirely -- see :class:`Invocation`.
+    no read permission is needed or granted and no invocation can re-open one by path. A
+    session-less call omits them entirely -- see :class:`Invocation`.
 
     Validated with :func:`arl.atomic.verified_file`, not ``Path.is_file()``. ``-f`` uploads
     whatever the path resolves to, and the state root is not a trust boundary, so a
@@ -2169,7 +2128,7 @@ def bundle_manifest(bundle_dir: Path, act_dir: Path, expected_digest: str, *, in
     rewrite of both the files and the manifest: an attacker must now also reach a value held
     under the activation lock, in the document the whole gate is already anchored to.
 
-    ``include_context=False`` drops the ``context/`` rows, which is how a cold confirmation
+    ``include_context=False`` drops the ``context/`` rows, which is how a contract repair
     attaches the same evidence and none of the model-derived text.
 
     Answers ``None`` on any failure -- a missing manifest, a digest mismatch, a malformed row,
@@ -2214,8 +2173,8 @@ def stage_attachments(sources: Sequence[tuple[Path, str]], staging_dir: Path) ->
       path-shape check there is -- is caught too. A source that cannot be read, or that no
       longer hashes to what was recorded, is a hard failure (:class:`BundleError`), never a
       silently dropped attachment: dropping one would also shorten
-      ``Invocation.context_files`` and could talk ``execute`` out of the cold confirmation an
-      attached context requires.
+      ``Invocation.context_files``, and that tuple is the round's only record of what
+      model-authored prose it was shown.
     - *Handing over a pathname that later means something else.* **Narrowed, not closed.** The
       staged copy is written into a directory created fresh for this one invocation, with an
       unpredictable name, immediately before the reviewer is launched. That replaces a stable,
@@ -2621,7 +2580,7 @@ def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invoc
 ) -> str:
     """Answer one question about a review already given, from its stored bundle.
 
-    Cold and session-less, like :func:`_confirm_cold`: no ``-s``, the bundle-scoped
+    Cold and session-less, like the contract repair: no ``-s``, the bundle-scoped
     ``permission`` document, and the ``context/`` question is the only model-derived text in
     the call. ``bundle_dir`` scopes the permission document; ``attachments`` is the exact,
     manifest-validated list, **each with the digest it was staged under** -- carried through
@@ -2928,7 +2887,7 @@ def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False, sco
 # Session continuity
 #
 # Everything here is an optimisation hint, never an authorization -- see the module
-# docstring's "cold-approval invariant". Every failure mode in this section is `log(...)`
+# docstring's "session continuity". Every failure mode in this section is `log(...)`
 # plus a fresh, uncaptured session; nothing here may ever raise into a review.
 # --------------------------------------------------------------------------
 
@@ -2984,9 +2943,9 @@ def _claim_is_live(pointer: dict[str, Any], reclaim_after: int) -> bool:
     ``reclaim_after`` is a caller-computed *fallback*, not derived here, because it is not the
     same window for every claim this shape is reused for: :func:`_reclaim_after` sizes it for
     the session-continuity pointer's own, shorter lifetime (released right after the primary
-    invocation, well before a cold confirmation ever runs -- see ``_settle_pointer``), while
+    invocation, well before a contract repair ever runs -- see ``_settle_pointer``), while
     :func:`_active_review_reclaim_after` sizes it for the active-review slot, which is held for
-    the *whole* ``execute()`` call, cold confirmation included. Passing the wrong one in either
+    the *whole* ``execute()`` call, contract repair included. Passing the wrong one in either
     direction would either reclaim a still-legitimate owner's slot early or hold a genuinely
     abandoned one far longer than it needs to be honoured.
 
@@ -3131,8 +3090,9 @@ def session_ref(state: State, target: Target, *, config: Config) -> SessionRef:
     These checks catch a stale id, an accidental collision and a wrong-project match, which
     are the failures that will actually happen -- but they are **not** what makes continuity
     safe, and that has to stay true reading this function in isolation: the safety comes from
-    the cold-approval invariant in :func:`execute`, not from anything here. Anything
-    unverifiable falls back to a fresh session, never to an error (Rule 1).
+    what a verdict must survive in :func:`execute` -- the contract parse, ``block_severity``,
+    "no operational failure is an approval" -- not from anything here. Anything unverifiable
+    falls back to a fresh session, never to an error (Rule 1).
 
     **Every fall-back logs a distinguishable reason, and that is the only thing the logging is
     for.** Continuity dropping is invisible from the outside -- a fresh review looks identical
@@ -3297,7 +3257,7 @@ def _downgrade_bundle_round(bundle_dir: Path, act_dir: Path, digest: str, plan_e
     never a reason to fail the review over it: this is orientation text, not evidence the
     verdict is computed from, so a failure here is logged and left as it was rather than
     raised. Left uncorrected, the bundle would tell the reviewer it is round N of a
-    continuing session while the invocation that follows is cold and carries no such
+    continuing session while the invocation that follows is session-less and carries no such
     history, which is exactly the confusion the continuation paragraph in the prompt exists
     to prevent.
 
@@ -3342,7 +3302,8 @@ def _downgrade_bundle_round(bundle_dir: Path, act_dir: Path, digest: str, plan_e
 
     # **The plan has to come back, and getting it back is not optional.** The bundle was built
     # for a continued session, so `_PLAN_IN_SESSION` may stand where the plan should be -- and
-    # the invocation that now follows is cold, with none of the history that note asserts. A
+    # the invocation that now follows is session-less, with none of the history that note
+    # asserts. A
     # reviewer told "it is already in your context" when it is not would judge plan fidelity
     # against nothing.
     #
@@ -3353,7 +3314,7 @@ def _downgrade_bundle_round(bundle_dir: Path, act_dir: Path, digest: str, plan_e
         if not plan_excerpt:
             # Fail closed: the returned digest no longer matches the bundle only if we write,
             # so writing nothing leaves it valid -- but a valid bundle still carrying the note
-            # is the wrong evidence for the cold call about to run. Refuse to bless it instead;
+            # is the wrong evidence for the session-less call about to run. Refuse to bless it;
             # staging then rejects the bundle and the review fails rather than misleads.
             log("range.txt: the plan was omitted for a continued session and no excerpt was supplied to restore it; not reissuing this bundle")
             return ""
@@ -3508,14 +3469,13 @@ def _active_review_reclaim_after(config: Config) -> int:
 
     **Not** :func:`_reclaim_after` -- that window is sized for the session-continuity
     pointer's own, shorter lifetime: it is released (``_settle_pointer``) right after the
-    primary invocation, well before a cold confirmation ever runs. This slot is held for the
-    *whole* :func:`execute` call instead, and the cold-approval invariant means that call can
-    include a **second** full invocation: when a continued session returns ``APPROVED``,
-    :func:`_confirm_cold` runs one more, ``timeout_sec``-bounded review of the same bundle
-    before ``execute`` ever returns. Reusing :func:`_reclaim_after`'s narrower window here
-    would let a second, overlapping call reclaim this slot *while the first is still
-    legitimately inside its own cold confirmation* -- reopening the exact race this slot
-    exists to close, through the one path built to be safe by design.
+    primary invocation, while everything below still has to run. This slot is held for the
+    *whole* :func:`execute` call instead, which can include a **second** model call: when the
+    primary invocation writes a block the gate cannot read, :func:`_repair_contract` runs one
+    more, :data:`REPAIR_TIMEOUT_SEC`-bounded call before ``execute`` ever returns. Reusing
+    :func:`_reclaim_after`'s narrower window here would let a second, overlapping call reclaim
+    this slot *while the first is still legitimately inside its own repair* -- reopening the
+    exact race this slot exists to close, through the one path built to be safe by design.
 
     **The window is a max, not a sum, because the claim is renewed once.** ``execute`` splits
     into two stretches with :func:`_renew_active_review` between them, so the lease only ever
@@ -3526,11 +3486,9 @@ def _active_review_reclaim_after(config: Config) -> int:
       ``verify_cmd`` (:data:`VERIFY_TIMEOUT_SEC`), the two bundle diffs
       (:data:`GIT_DIFF_TIMEOUT_SEC` each) and the bundle's metadata git calls
       (:data:`BUNDLE_GIT_BUDGET_SEC`);
-    - *invoking* -- the primary invocation and whichever single call may follow it: a cold
-      confirmation (another full ``timeout_sec``) or a contract repair
-      (:data:`REPAIR_TIMEOUT_SEC`). They are mutually exclusive -- one follows an
-      ``APPROVED``, the other a contract failure -- so :func:`_invoking_budget` takes the
-      larger, not the sum.
+    - *invoking* -- the primary invocation (``timeout_sec``) and the one call that may follow
+      it, a contract repair (:data:`REPAIR_TIMEOUT_SEC`); :func:`_invoking_budget` sums the
+      two, which is the whole of that stretch.
 
     Summing them instead would make the lease grow without bound as either side is configured
     up, and a lease nobody can ever reclaim is as bad as one that expires early: a crashed
@@ -3650,7 +3608,7 @@ def _require_slot(state: State, *, claim_id: str, expected: hooks.Activation, co
     """Renew the active-review claim, or raise :class:`_SlotLost`.
 
     Called at each point where the lease's clock must restart: once before the primary
-    invocation, and again before the cold confirmation. The second is not redundant -- see
+    invocation, and again before the contract repair. The second is not redundant -- see
     :func:`execute`, where the reasoning about what sits between the two model calls lives.
     """
     if not _renew_active_review(state, claim_id=claim_id, expected=expected, config=config):
@@ -3738,8 +3696,8 @@ def _run_invocation(target: Target, run: Invocation, *, config: Config, scope: L
     """One invoke()+parse() cycle. The bool says whether the process ran to completion --
     only then is there anything for ``capture_session``/``_release_claim`` to act on.
 
-    ``scope`` is handed straight to :func:`parse`; the same one serves the primary and the
-    cold invocation of a review, since both judge the same bundle under the same rules.
+    ``scope`` is handed straight to :func:`parse`; the same one serves the primary invocation
+    and the contract repair, since both judge the same bundle under the same rules.
 
     ``SUPERSEDES`` is permitted only when the *target* is a phase **and** the invocation
     itself allows it -- an AND, so a call that forbids it can never widen what the target
@@ -3798,9 +3756,9 @@ class _ReviewRun:
     #: The repo-supplied guide this run's ``prompt_file`` was composed with, for the stored
     #: report's disclosure. ``ActiveGuide()`` -- content ``None`` -- when there is none.
     guide: ActiveGuide = field(default_factory=ActiveGuide)
-    #: The composed prompt's own bytes. Carried so every invocation this run makes -- warm and
-    #: the cold confirmation alike -- is told exactly what this process composed, rather than
-    #: whatever ``prompt_file`` holds by the time each one opens it. See
+    #: The composed prompt's own bytes. Carried so every invocation this run makes -- the
+    #: primary call and the contract repair alike -- is told exactly what this process
+    #: composed, rather than whatever ``prompt_file`` holds by the time each one opens it. See
     #: :func:`_confirm_prompt_unchanged`.
     prompt_text: str = ""
 
@@ -3826,10 +3784,10 @@ def _compose_prompt(state: State, raw_dir: Path, label: str, *, is_phase: bool) 
     review told to do" answerable afterwards rather than reconstructable.
 
     The composed file is written once per ``execute`` and reused by everything downstream:
-    :func:`invoke`, :func:`run_clarify` and, above all, :func:`_confirm_cold`, which reuses
-    the same :class:`_ReviewRun`. Warm and cold therefore share one file and one nonce --
-    required, not incidental: the cold confirmation exists to check the same work, and it
-    cannot do that under different instructions.
+    :func:`invoke`, :func:`run_clarify` and :func:`_repair_contract`, which reuses the same
+    :class:`_ReviewRun`. One file and one nonce per review, not one per call -- required, not
+    incidental: a second call about the same work cannot be run under instructions that have
+    moved since the first.
 
     ``reviewer-repair.md`` and ``reviewer-clarify.md`` carry no placeholder, so they are never
     composed into and are used from the plugin directory as before: a contract repair must not
@@ -3889,9 +3847,8 @@ def stage_invocation(
     :func:`stage_attachments`. The order is the order the reviewer has always seen them in;
     ``verify.txt`` staying last is why :func:`bundle_manifest` does not include it.
 
-    ``include_context=False`` is the cold confirmation: it stages the same evidence and none
-    of the model-derived text, so the run whose whole purpose is to judge with no
-    model-influenced context receives none of it, inline or by path.
+    ``include_context=False`` is the contract repair: it stages the same evidence and none of
+    the model-derived text, so a session-less call receives none of it, inline or by path.
 
     A bundle that does not answer :func:`bundle_manifest` is a :class:`BundleError` -- the
     evidence a verdict would be judged against is not intact, and there is no degraded mode
@@ -3904,110 +3861,6 @@ def stage_invocation(
     staged = stage_attachments(entries, staging_dir)
     context_staged = [staged[index][0] for index, (source, _digest) in enumerate(entries) if source.parent == context_dir]
     return tuple(staged), tuple(context_staged)
-
-
-def _merge_lines(primary: str, extra: str) -> str:
-    """Union of two newline-terminated line blocks: ``primary``'s order first, deduplicated.
-
-    Split with :func:`_records` -- ``\\n`` only -- for the reason ``_record_round`` documents:
-    ``str.splitlines`` would break a ``FINDING`` detail carrying a stray ``\\r`` or U+2028 into
-    two fragments, and a fragment is not a line the contract allows.
-    """
-    seen: set[str] = set()
-    out: list[str] = []
-    for block in (primary, extra):
-        for line in _records(block):
-            if line and line not in seen:
-                seen.add(line)
-                out.append(line)
-    return "".join(f"{line}\n" for line in out)
-
-
-def _carry_forward(cold: Review, continued: Review) -> None:
-    """Fold the warm round's reported lines into the cold review that replaces it.
-
-    **A cold confirmation replaces the warm round's verdict, not its record of findings.**
-    Both invocations read the same bundle, and the gate acts on the cold verdict -- but the
-    warm one genuinely reported what it reported, and two things downstream depend on that
-    record surviving: the approval message a caller shows (``report.deferred_text``) and the
-    ``round_history`` entry, whose ``findings`` become the next round's ``prior_files``. Left
-    unmerged, a warm round that raised a medium in an untouched file -- deferred, so the
-    verdict was still ``APPROVED`` -- lost it the moment a cold call approved without
-    mentioning it: nothing showed it to anyone, and the *next* round did not know the path,
-    so the deferral that is meant to last one approval repeated indefinitely. Turning on a key
-    whose whole purpose is more scrutiny must not drop findings the default keeps.
-
-    Merged only when the cold call produced a **parsed verdict**. An ``OP_FAILURE`` keeps its
-    finding fields deliberately empty (:func:`_fail`: half-read evidence would suggest the
-    parse succeeded) and records no round, so there is nothing for the merge to serve there.
-
-    ``findings`` -- the blocking set -- is **not** merged: ``_confirm_cold`` runs only for a
-    warm ``APPROVED``, which by construction has an empty blocking set (:func:`parse` returns
-    ``CHANGES_REQUIRED`` whenever one is non-empty), and merging blocking lines without
-    recomputing the verdict would produce a ``Review`` whose verdict and findings contradict
-    each other. A line the cold call blocks on is dropped from the merged ``deferred`` for the
-    same reason: it cannot be both.
-    """
-    if cold.verdict not in _ROUND_VERDICTS:
-        return
-    cold.all_findings = _merge_lines(cold.all_findings, continued.all_findings)
-    cold.supersedes = _merge_lines(cold.supersedes, continued.supersedes)
-    blocking = set(_records(cold.findings))
-    cold.deferred = "".join(f"{line}\n" for line in _records(_merge_lines(cold.deferred, continued.deferred)) if line not in blocking)
-
-
-def _confirm_cold(rr: _ReviewRun, continued: Review) -> Review:
-    """The ``cold_confirm`` path: one more, session-less review of the same bundle, in
-    place of ``continued`` -- with ``continued`` attached via ``.confirmed`` so the report can
-    show both. Reached only when the key is on; see ``execute``'s own docstring for when, and
-    the module docstring for why it is not the default.
-
-    ``include_context=False`` and ``cold=True``: the invocation whose whole purpose is to judge
-    gate-generated evidence with no model-influenced context receives none of the ``context/``
-    attachments (inline or by path) and gets the bundle-scoped permission.
-
-    **It stages its own copies rather than reusing the primary invocation's.** The primary's
-    staging directory is removed the moment that call returns, and re-validating the bundle
-    here is the point anyway: this is a second, independent read of the same evidence, and it
-    should be as unwilling to attach a bundle that has stopped being intact as the first was.
-    A staging failure makes the confirmation an ``OP_FAILURE``, which is not an approval --
-    the only direction Rule 1 allows when the cold check cannot be carried out.
-
-    The warm round's own reported lines are folded into the returned review by
-    :func:`_carry_forward`, which is what keeps the *record* whole while the *verdict* is
-    replaced -- see its docstring. ``continued`` itself is left exactly as it was, so the
-    report can still show each invocation's own words next to its own transcript.
-    """
-    cold_staging = staging_dir_for(rr.state.act_dir, f"{rr.label}-cold")
-    try:
-        attachments, _context = stage_invocation(rr.bundle_dir, rr.state.act_dir, rr.bundle_digest, cold_staging, include_context=False)
-    except (BundleError, OSError) as exc:
-        return Review(verdict="OP_FAILURE", kind="bundle", error=str(exc), confirmed=continued)
-
-    cold_run = Invocation(
-        bundle_dir=rr.bundle_dir,
-        prompt_file=rr.prompt_file,
-        # The warm call's own composed bytes, not a re-read: the cold confirmation exists to
-        # check the same work, and it cannot do that under instructions that may have moved.
-        prompt_text=rr.prompt_text,
-        title=rr.title,
-        out_path=rr.raw_dir / f"{rr.label}-{rr.target.label}-cold.out",
-        session_id="",
-        # A brand-new, empty session -- never a resume. `capture=False` is what keeps it out
-        # of the continuity pointer; the id only names the conversation this one call opens.
-        new_session_id=_mint_session(rr.config),
-        capture=False,
-        attachments=attachments,
-        context_files=(),
-        cold=True,
-    )
-    try:
-        cold, _invoked = _run_invocation(rr.target, cold_run, config=rr.config, scope=rr.scope)
-    finally:
-        shutil.rmtree(cold_staging, ignore_errors=True)
-    cold.confirmed = continued
-    _carry_forward(cold, continued)
-    return cold
 
 
 #: The evidence-not-instruction fence the repair transcript is wrapped in, exactly the
@@ -4103,9 +3956,9 @@ def _repair_contract(rr: _ReviewRun, failed: Review, out_path: Path) -> Review:
       rather than harsh: dropping just the line would keep a block the reviewer wrote against
       instructions it was given, and there is no reason to trust the rest of it more.
 
-    Because a repair can only produce a blocking verdict, it needs no cold confirmation and
-    never interacts with ``cold_confirm``: the two second calls are mutually exclusive, which
-    is what lets :func:`_invoking_budget` take a max rather than a sum.
+    This is the only call that can follow the primary invocation under the active-review
+    lease, which is what makes :func:`_invoking_budget` a two-term sum rather than an
+    open-ended one.
 
     The recovered review keeps the repair call's own transcript as ``raw`` and records the
     malformed primary's path in ``Review.repaired``, so the report shows both.
@@ -4125,7 +3978,8 @@ def _repair_contract(rr: _ReviewRun, failed: Review, out_path: Path) -> Review:
         title=f"{rr.title} repair",
         out_path=rr.raw_dir / f"{rr.label}-{rr.target.label}-repair.out",
         session_id="",
-        # Its own new session, for the same reason the cold confirmation gets one.
+        # Its own new session: never a resume, so it cannot inherit the malformed round's
+        # conversation, and `capture=False` keeps it out of the continuity pointer.
         new_session_id=_mint_session(rr.config),
         capture=False,
         attachments=tuple(attachments),
@@ -4179,9 +4033,9 @@ def _publish(rr: _ReviewRun, review: Review, *, round_number: int) -> bool:
     record the transaction is *aborted* rather than allowed to exit cleanly, because
     ``State.transaction`` saves on a clean exit and there is nothing here worth rewriting
     ``state.json`` for; the report has already been written by then, and it is a file, not
-    state. When the cold-approval invariant has already replaced an ``APPROVED`` with a cold
-    ``CHANGES_REQUIRED``, ``review`` is the cold one by the time this runs, so the acted-on
-    verdict is what is recorded *and* what the report shows.
+    state. When a contract repair has already replaced an unreadable block with the blocking
+    verdict it recovered, ``review`` is the repaired one by the time this runs, so the
+    acted-on verdict is what is recorded *and* what the report shows.
 
     **The authoritative half of phase 5's concurrent-stall guard lives here.**
     :func:`execute`'s earlier call to :func:`_concurrent_stall_check` is a lock-free,
@@ -4242,8 +4096,8 @@ def _publish(rr: _ReviewRun, review: Review, *, round_number: int) -> bool:
             # Set here, from the guide this run actually composed with, so the stored report
             # names it even on the failure paths -- and so a later `resume --guide` cannot
             # change what an already-written report says an earlier round ran under. One line
-            # for the pair under `cold_confirm`: warm and cold share the composed prompt, so a
-            # per-sub-review line would say the same thing twice.
+            # per review, not per call: every invocation this review makes shares the composed
+            # prompt, so a per-call line would say the same thing twice.
             review.guide = guide_disclosure(rr.guide)
             report.store(review, target, seq=rr.label, act_dir=state.act_dir, config=config)
             if not record:
@@ -4634,22 +4488,15 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     concurrent reviews from claiming the same sequence number and overwriting each other's
     report.
 
-    **The cold confirmation lives here, behind ``cold_confirm`` (off by default).** With the key
-    on, an ``APPROVED`` from a round that held any model-influenced context is never acted on
-    directly: :func:`_confirm_cold` runs one more, cold review of the same bundle, and its
-    verdict is what this function returns. **Two things count as such context** -- a continued
-    session (``ref.session_id``) *and* a ``context/`` attachment
-    (:func:`context_attachments`, ``NNN-prior-rounds.txt``, which carries earlier rounds'
-    finding detail). The second is not implied by the first: continuity is best-effort and
-    drops silently, while the prior-rounds attachment is written from ``round_history``
-    regardless, so a run with ``ref.session_id == ""`` can still have been shown an earlier
-    round's lines. Gating on the session alone would let precisely those runs skip the check.
-    With the key off -- the default -- the warm verdict is the one acted on, for the reasons
-    the module docstring and ``docs/security.md`` set out: the attachment is the gate's own
-    rendering of ``_FINDING_RE``-validated, bounded lines, and it authorises nothing on its
-    own. Neither setting changes what a verdict has to survive afterwards: an actionable
-    finding at or above ``block_severity`` still blocks, and every operational failure is
-    still not an approval.
+    **The verdict this returns is the one the invocation produced**, model-influenced context
+    and all. A round may continue a session (``ref.session_id``) and may be shown a
+    ``context/`` attachment (:func:`context_attachments`, ``NNN-prior-rounds.txt``, which
+    carries earlier rounds' finding detail); neither is treated as disqualifying, for the
+    reasons the module docstring and ``docs/security.md`` set out -- the attachment is the
+    gate's own rendering of ``_FINDING_RE``-validated, bounded lines, and it authorises
+    nothing on its own. What a verdict has to survive afterwards is unchanged either way: an
+    actionable finding at or above ``block_severity`` still blocks, and every operational
+    failure is still not an approval.
 
     **A contract failure gets one repair call, and it can only recover a blocking verdict.**
     When the reviewer runs to completion and then writes a block the gate cannot parse,
@@ -4658,8 +4505,8 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     is ``CHANGES_REQUIRED`` with a blocking finding in it. Anything else, including a repair
     that approves, leaves the original ``OP_FAILURE kind="contract"`` standing. It runs only
     when :func:`_repair_fits` says the hook's own remaining budget (:func:`remaining_budget`)
-    covers it and the publishing that follows, and it is mutually exclusive with the cold
-    confirmation, which only ever follows an ``APPROVED``.
+    covers it and the publishing that follows. It is the only call that can follow the primary
+    invocation, which is what :func:`_invoking_budget` is sized from.
 
     **Phase 5's stall check also lives here, ahead of everything else.** :func:`_stall_review`
     runs first, inside the same lock that reserves the report sequence -- both callers of this
@@ -4687,9 +4534,8 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     -- its own expiry (:func:`_reclaim_after`) letting a second invocation start while the
     first, unusually slow, is still legitimately running:
 
-    - :func:`_concurrent_stall_check` runs right after ``invoke`` and the cold-approval
-      override, on a fresh but **lock-free** read -- best-effort, and it only narrows the
-      window;
+    - :func:`_concurrent_stall_check` runs right after ``invoke`` and any contract repair, on
+      a fresh but **lock-free** read -- best-effort, and it only narrows the window;
     - :func:`_publish` re-runs the same check itself, **inside its own
       ``state.transaction()``**, right before it would append this round -- authoritative,
       because the lock underneath ``state.transaction()`` still serialises two calls racing to
@@ -4731,12 +4577,12 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     # that does not exist until the bundle does. The late-round scope comes first: `range.txt`
     # discloses the rule it implies, and `parse` decides by it, so it is one value read from
     # the same in-memory `state` the bundle's own previous-round lookup reads.
-    # The plan is omitted only for a round that continues a session which already holds it,
-    # and only when no *cold* call can read this same bundle. `cold_confirm` is exactly that
-    # possibility: `_confirm_cold` reuses `bundle_dir` with no session at all, so under it the
-    # excerpt always ships. One bundle per round is worth more than the tokens here, and the
-    # setting already trades tokens for independence.
-    plan_in_session = bool(ref.session_id) and not config.as_bool("cold_confirm")
+    # The plan is omitted only for a round that continues a session which already holds it
+    # from an earlier round. The one other invocation that reads this same bundle is a
+    # contract repair, which is session-less but needs only the malformed transcript's
+    # blocking lines -- it is barred from producing an approval at all (`_repair_contract`),
+    # so the plan it never sees cannot be the thing it judged against.
+    plan_in_session = bool(ref.session_id)
     try:
         scope = late_scope(target, state=state)
         digest = build_bundle(
@@ -4768,7 +4614,7 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
     )
 
     try:
-        return _invoke_and_confirm(rr, ref, claim_id=claim_id, expected=expected, seq=seq)
+        return _invoke_and_publish(rr, ref, claim_id=claim_id, expected=expected, seq=seq)
     except _SlotLost:
         # The session pointer is still ours to release; the active-review slot is not, and
         # releasing a claim id someone else now holds is the ABA overwrite
@@ -4778,8 +4624,8 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
         return Review(verdict="OP_FAILURE", kind="transient", error=_ACTIVE_REVIEW_LOST.format(label=target.label))
 
 
-def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expected: hooks.Activation, seq: int) -> Review:
-    """Stage, invoke, repair or cold-confirm if required, settle the pointer, and publish.
+def _invoke_and_publish(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expected: hooks.Activation, seq: int) -> Review:
+    """Stage, invoke, repair if required, settle the pointer, and publish.
 
     Split out of :func:`execute` so every point that can lose the active-review slot shares one
     handler there (:class:`_SlotLost`) rather than repeating the release-and-fail pair.
@@ -4800,20 +4646,20 @@ def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expec
         # fresh, non-capturable round rather than risk `-s <id>` against a conversation this
         # call no longer owns. The bundle was already built disclosing the old (continued)
         # round -- corrected here so the reviewer is not told it is round N of a session this
-        # cold invocation carries no history of.
+        # session-less invocation carries no history of.
         log(f"session claim: lost ownership before invoking; falling back to a fresh review for {target.label}")
         # The plan excerpt goes with it: this bundle may have omitted the plan on the strength
-        # of a session this call no longer owns, and the invocation that follows is cold.
+        # of a session this call no longer owns, and the invocation that follows carries none
+        # of that history.
         rr = dataclasses.replace(
             rr, bundle_digest=_downgrade_bundle_round(bundle_dir, state.act_dir, rr.bundle_digest, plan_excerpt=_plan_excerpt(state))
         )
         ref = _fresh_ref(config, capturable=False)
 
-    # Listed exactly once, here, and carried on the invocation from this point on. Both the
-    # argv and the cold-confirmation decision below read `run.context_files` rather than
-    # asking the filesystem again: re-listing `context/` after `invoke` returned would let a
-    # `context/` entry unlinked mid-review turn "this round was shown model-authored prose"
-    # into "it was not", and skip the confirmation that prose is the whole reason for.
+    # Listed exactly once, here, and carried on the invocation from this point on: the argv
+    # reads `run.context_files` rather than asking the filesystem again, so a `context/` entry
+    # unlinked mid-review cannot turn "this round was shown model-authored prose" into "it was
+    # not" after the fact.
     # Staged, not attached in place, so what `-f` names is a fresh per-invocation copy of
     # bytes read through the descriptors that validated them -- see `stage_attachments` for
     # what that closes and what it only narrows.
@@ -4842,8 +4688,8 @@ def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expec
         review, invoked = _run_invocation(target, run, config=config, scope=rr.scope)
     finally:
         # The staged copies exist only for the length of this call. `run.context_files` keeps
-        # the record of what was attached, so removing the files cannot affect the
-        # cold-confirmation decision below -- that reads the tuple, never the filesystem.
+        # the record of what was attached, so removing the files loses nothing downstream --
+        # every later reader takes the tuple, never the filesystem.
         shutil.rmtree(staging_dir, ignore_errors=True)
 
     if review.verdict == "OP_FAILURE" and review.kind == "contract" and _repair_fits(config):
@@ -4851,9 +4697,9 @@ def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expec
         # cheap, session-less call can recover the *blocking* findings that transcript states
         # -- and only those; see `_repair_contract` for why no approval may come out of it.
         # Placed ahead of `_settle_pointer` so the session/round fields below land on
-        # whichever review is returned, and behind the same `_require_slot` the cold
-        # confirmation takes: this is a second model call, and the lease is sized for the
-        # longer of the two stretches, not their sum, so its clock has to restart here too.
+        # whichever review is returned, and behind its own `_require_slot`: this is a second
+        # model call, and the lease is sized for the longer of the two stretches, not their
+        # sum, so its clock has to restart here too.
         # Only reached for a failure, never for a verdict, so it can never keep an `APPROVED`.
         _require_slot(state, claim_id=claim_id, expected=expected, config=config)
         review = _repair_contract(rr, review, run.out_path)
@@ -4866,20 +4712,6 @@ def _invoke_and_confirm(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expec
         # A fresh round's own session is not known until after it ran -- record it now so
         # this round's report can name the session it just created.
         review.session = captured_id
-
-    if review.verdict == "APPROVED" and (ref.session_id or run.context_files) and config.as_bool("cold_confirm"):
-        # A second renewal, and it is not belt-and-braces. The lease is sized for the longer of
-        # "building" and "invoking", restarted once before the primary call -- but the cold
-        # confirmation is a *second* full model call, and between the two sit the SIGTERM grace
-        # a timed-out invocation pays and `_settle_pointer`'s session-list call. Sized from the
-        # renewal before the primary invocation, that sequence can outlast its own lease, and
-        # the slot is then reclaimed while this review is still legitimately working. Restart
-        # the clock here so the confirmation runs inside a window that covers it.
-        # Losing the slot here is emphatically not "keep the APPROVED": that verdict came from
-        # an invocation shown model-influenced context, and the confirmation that would have
-        # checked it cannot be run under a claim this review no longer holds.
-        _require_slot(state, claim_id=claim_id, expected=expected, config=config)
-        review = _confirm_cold(rr, review)
 
     _override_if_concurrently_stalled(rr, review)
 

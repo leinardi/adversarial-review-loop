@@ -172,18 +172,19 @@ def test_a_review_command_starts_with_the_harness_binary(implementation: harness
 
 @pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
 def test_a_cold_review_never_carries_a_session(implementation: harness.Harness, tmp_path: Path) -> None:
-    """A cold confirmation must not continue a session under any harness.
+    """A session-less invocation -- a contract repair -- must not continue a session under any
+    harness.
 
-    The cold-approval invariant is the gate's, but every harness has to be incapable of
-    quietly reintroducing continuity into the one invocation that must not have it.
+    The gate decides which calls are session-less, but every harness has to be incapable of
+    quietly reintroducing continuity into one that must not have it.
 
-    Driven with the ``new_session_id`` a cold confirmation really carries, not with an empty
-    spec: a cold confirmation is a *fresh* invocation, so ``reviewer._mint_session`` gives it
-    an id of its own (`_confirm_cold`), and a harness that spelled that as a resume rather
-    than as a new, empty session would hand the one call that must remember nothing the entire
-    warm conversation. ``session_id`` stays "" because that is what the gate passes here --
-    the seam's structural refusal of a *continuation* is asserted by ``ClarifySpec`` having no
-    such field at all, in the test below.
+    Driven with the ``new_session_id`` such a call really carries, not with an empty spec: it
+    is a *fresh* invocation, so ``reviewer._mint_session`` gives it an id of its own, and a
+    harness that spelled that as a resume rather than as a new, empty session would hand the
+    one call that must remember nothing the entire earlier conversation. ``session_id`` stays
+    "" because that is what the gate passes here -- the seam's structural refusal of a
+    *continuation* is asserted by ``ClarifySpec`` having no such field at all, in the test
+    below.
     """
     spec = dataclasses.replace(
         spec_for(implementation, tmp_path, cold=True),
