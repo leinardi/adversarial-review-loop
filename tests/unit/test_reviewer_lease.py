@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -174,9 +175,15 @@ def test_a_second_overlapping_execute_is_refused_without_invoking_and_a_retry_af
     assert review.kind == "transient"
     assert review.contended is True
     assert "/adversarial-review-loop:resume" in review.error, "the way out is named, not just the wait"
+    # Compared as a number, and against the window recomputed *now*: the message was formatted
+    # earlier in this call, so a slow machine legitimately makes the two differ by a second or
+    # two. What must hold is that the figure named is this claim's own remaining lease, not that
+    # it matches a recomputation to the second.
+    named = re.search(r"another (\d+)s", review.error)
+    assert named, f"the remaining lease has to be named: {review.error}"
     remaining = reviewer._claim_remaining_sec(activation.data["active_review"][target.label], reviewer._active_review_reclaim_after(config))
-    assert f"another {remaining}s" in review.error, "the number named is the one being enforced"
     assert remaining > 0
+    assert 0 <= int(named.group(1)) - remaining <= 5, "the number named is the one being enforced, modulo the time since"
     assert activation.get_int("report_seq") == 0, "the refused attempt reserved nothing"
 
     reviewer._release_active_review(activation, claim_id=held, expected=expected, config=config)
