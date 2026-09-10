@@ -177,7 +177,11 @@ question is written to `context/<n>-question.txt` (a sibling of `bundles/`, inli
 bound and number it: `clarifications` (capped by `max_clarifications`, reset by `resume`)
 and `clarify_seq` (carried across a `resume` like `report_seq`, since it names files under
 the copied-forward `context/`). A clarify leaves every `hooks.Activation` field and
-`round_history` byte-identical.
+`round_history` byte-identical, and records at most a retraction: when the question shows a
+finding of that round was wrong, the reviewer may end its answer with `SUPERSEDES` lines, and
+each one that names exactly one finding of that round is appended to `clarify_history` and shown
+to the next round under the round it retracts. The verdict stands either way, and the next round
+still judges its own diff. A review of the phase in flight refuses a clarify outright.
 
 Discovery is the hard part: across two full activations Claude reached for it zero times.
 So every **phase-scoped** blocking verdict — the commit gate's `CHANGES_REQUIRED` and the

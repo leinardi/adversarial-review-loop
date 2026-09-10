@@ -1119,3 +1119,34 @@ def test_the_4_to_5_arm_preserves_an_existing_record(state_env: dict[str, str]) 
     assert reread.load()
     assert reread.data["ended_capture"] == "recorded"
     assert reread.data["ended_head"] == "a" * 40
+
+
+# -- clarify_history ----------------------------------------------------------
+
+
+def test_a_new_document_starts_with_no_clarify_history() -> None:
+    assert state.new_state_document()["clarify_history"] == []
+
+
+@pytest.mark.parametrize("version", [2, state.STATE_VERSION])
+def test_a_document_written_before_clarify_history_needs_no_migration(state_env: dict[str, str], version: int) -> None:
+    """No ``STATE_VERSION`` bump and no migration arm: an absent ``clarify_history`` reads as
+    empty through ``get_array_of_dicts``, the precedent ``active_review`` set."""
+    st = state.State(WORKTREE, SESSION)
+    doc = state.new_state_document()
+    del doc["clarify_history"]
+    if version == 2:
+        for key in ("round_history", "transient_failures", "retry_not_before", "clarifications"):
+            del doc[key]
+    doc["version"] = version
+    doc.update(status="ACTIVE", phases=["one"], phase=1, report_seq=4)
+    write_private_atomic(st.state_file, json.dumps(doc), root=paths.state_root())
+
+    with st.transaction():
+        assert st.get_array_of_dicts("clarify_history") == []
+        st.update(reason="touched")
+
+    reread = state.State(WORKTREE, SESSION)
+    assert reread.load()
+    assert reread.data["version"] == state.STATE_VERSION
+    assert reread.get_array_of_dicts("clarify_history") == []

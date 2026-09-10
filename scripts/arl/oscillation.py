@@ -81,16 +81,14 @@ from typing import Final
 
 from arl.config import severity_rank, threshold_rank
 
-__all__ = ["Anchor", "OscillationPoint", "PersistingPoint", "persisting", "render", "render_persisting", "reversals"]
+__all__ = ["Anchor", "OscillationPoint", "PersistingPoint", "ordinal_of", "persisting", "render", "render_persisting", "reversals"]
 
 #: POSIX ``[[:space:]]`` in the C locale, spelled out rather than left to ``\s`` -- the same
 #: reasoning and the same literal class as ``reviewer._SPACE``.
 _SPACE: Final = " \t\n\r\f\v"
 
 #: The full ``FINDING`` / ``SUPERSEDES`` grammar, byte-for-byte the same character classes
-#: as ``reviewer._FINDING_RE`` / ``reviewer._SUPERSEDES_RE``, just with a named ``file``
-#: group added (and a ``round`` group on ``_SUPERSEDES_RE``) -- the reviewer's own regexes
-#: validate the grammar but never capture the fields out. This module keeps its own copy rather than importing ``reviewer``'s:
+#: and named groups as ``reviewer._FINDING_RE`` / ``reviewer._SUPERSEDES_RE``. This module keeps its own copy rather than importing ``reviewer``'s:
 #: ``reviewer.py`` is this module's caller (``_prior_rounds_section``, ``execute``), and
 #: importing back would cycle. Matching only a loose ``severity=`` / ``file=...|`` fragment
 #: (an earlier version of this module did) accepts a line like
@@ -262,6 +260,30 @@ def _ordered_rounds(history: Sequence[Mapping[str, object]], label: str) -> tupl
         previous = seq
         rounds.append((seq, entry))
     return rounds, trustworthy
+
+
+def ordinal_of(history: Sequence[Mapping[str, object]], label: str, seq: int) -> int | None:
+    """The round number the reviewer was shown for the round of ``label`` whose ``seq`` is ``seq``, or
+    ``None`` when that cannot be proved.
+
+    ``round=N`` means the 1-based **stored-order** position ``reviewer._prior_rounds_section``
+    renders and ``range.txt``'s ``review round of this phase`` counts, so this is
+    :func:`_ordered_rounds`' numbering and nothing re-derived from ``seq``. ``None`` when that
+    numbering is not trustworthy (a dropped or non-increasing ``seq`` anywhere in the label), and
+    when ``seq`` names no round or more than one -- a duplicate is already non-increasing, but the
+    answer does not rest on that. ``history`` should already be narrowed to one
+    ``activation_generation``, as for :func:`reversals`.
+
+    Read-only, and neither signal calls it. Its callers are ``commands.clarify``, which records a
+    clarify's retraction only against a proved ordinal, and ``reviewer._prior_rounds_section``,
+    which renders one only under the same proof -- so the two cannot disagree about which round a
+    ``SUPERSEDES`` line names.
+    """
+    rounds, trustworthy = _ordered_rounds(history, label)
+    if not trustworthy or isinstance(seq, bool):
+        return None
+    positions = [position for position, (entry_seq, _entry) in enumerate(rounds, start=1) if entry_seq == seq]
+    return positions[0] if len(positions) == 1 else None
 
 
 def _retirements(

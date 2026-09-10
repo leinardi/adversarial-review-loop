@@ -305,7 +305,12 @@ trust: `prior-rounds.txt` is the gate's own rendering of `FINDING` lines, each v
 `_FINDING_RE` before it was stored and re-validated before it is rendered, out of entries whose
 `verdict`/`seq`/`tree` are type-checked on the way out and bounded by
 `max_findings`/`max_findings_bytes`. A tampered `round_history` degrades to a *shorter*
-attachment, never to smuggled prose. A continued session is none of those things.
+attachment, never to smuggled prose. The one other model-authored line that reaches it is a
+clarify's retraction (`clarify_history`): a `SUPERSEDES` line grammar-checked before it is
+stored and re-validated before it is rendered exactly as a `FINDING` line is, admitted only when
+it names exactly one of that round's re-validated findings at a provable round number, under a
+fixed gate-written lead-in, and counted against the same caps. `context/` and the clarify channel
+are otherwise unchanged in shape. A continued session is none of those things.
 
 **A second, cold read of every approving round was tried and removed.** Under it an `APPROVED`
 from a round that held any model-influenced context was re-reviewed session-less, and that

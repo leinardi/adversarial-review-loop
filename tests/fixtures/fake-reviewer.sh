@@ -421,6 +421,51 @@ case "$mode" in
         fi
         printf 'Clarification about a round that just got superseded.\n'
         ;;
+    clarify-retract)
+        # A clarify whose reviewer concedes a finding's premise was wrong: prose, then the one
+        # block prompts/reviewer-clarify.md allows. ARL_FAKE_FILE defaults to the `changes`
+        # mode's finding and ARL_FAKE_ROUND to round 1; ARL_FAKE_REPEAT=1 retracts it twice.
+        printf 'You are right, the premise was wrong.\n\n'
+        printf '<<<ARL-FINDINGS>>>\n'
+        printf 'SUPERSEDES round=%s file=%s | the premise was wrong\n' "${ARL_FAKE_ROUND:-1}" "${ARL_FAKE_FILE:-a.txt:1}"
+        if [ "${ARL_FAKE_REPEAT:-}" = 1 ]; then
+            printf 'SUPERSEDES round=%s file=%s | said a second time\n' "${ARL_FAKE_ROUND:-1}" "${ARL_FAKE_FILE:-a.txt:1}"
+        fi
+        printf '<<<ARL-END>>>\n'
+        ;;
+    clarify-retract-malformed)
+        # A re-review dressed as a clarification: a FINDING and a VERDICT inside the block.
+        printf 'On reflection, there is a different problem.\n\n'
+        printf '<<<ARL-FINDINGS>>>\n'
+        printf 'FINDING severity=high actionable=yes file=b.txt:2 | a brand-new finding\n'
+        printf 'VERDICT CHANGES_REQUIRED\n'
+        printf '<<<ARL-END>>>\n'
+        ;;
+    clarify-retract-unmatched)
+        # Grammatical retractions that name no finding of the round: an unknown file, and `-`.
+        printf 'Retracting things that were never raised.\n\n'
+        printf '<<<ARL-FINDINGS>>>\n'
+        printf 'SUPERSEDES round=1 file=nope.txt:9 | never raised\n'
+        printf 'SUPERSEDES round=1 file=- | names no path\n'
+        printf '<<<ARL-END>>>\n'
+        ;;
+    clarify-claim)
+        # A review of this phase starts while the clarify runs: plants a live active_review claim
+        # for the label -- no hooks.Activation field moves -- then retracts round 1's finding.
+        # Same technique as clarify-supersede.
+        root="${ARL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/adversarial-review-loop}"
+        sf=$(find "$root" -name state.json 2>/dev/null | head -n1)
+        if [ -n "$sf" ]; then
+            tmp=$(mktemp)
+            jq --argjson now "$(date +%s)" '.active_review[("phase" + (.phase | tostring))] = {
+                "generation": .activation_generation, "claimed_at": $now, "claim_id": "planted-by-clarify-claim"
+            }' "$sf" >"$tmp" && mv "$tmp" "$sf"
+        fi
+        printf 'You are right, the premise was wrong.\n\n'
+        printf '<<<ARL-FINDINGS>>>\n'
+        printf 'SUPERSEDES round=1 file=a.txt:1 | the premise was wrong\n'
+        printf '<<<ARL-END>>>\n'
+        ;;
     clarify)
         # A clarify run: prose only, no findings block. Echoes the bundle it was pointed at
         # and the question it was handed, so the tests can assert both.
