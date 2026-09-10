@@ -28,6 +28,7 @@ The invariant every test in this file is ultimately about: **no failure becomes 
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -1174,7 +1175,13 @@ def test_a_held_review_slot_names_its_expiry_and_the_way_out(git_repo: Path, tmp
     verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
 
     assert verdict == "deny"
-    assert "lasts another 9" in reason, "the remaining lease, not a bare 'wait and try again'"
+    # Matched as a number rather than as literal text: what has to be true is that the denial
+    # names the lease actually left, and that figure drops by however long the hook took to
+    # reach the check. Asserting on a spelling made this fail on a slower runner for the one
+    # reason it must not care about.
+    named = re.search(r"lasts another (\d+)s", reason)
+    assert named, f"the remaining lease has to be named, not a bare 'wait and try again': {reason}"
+    assert 0 < int(named.group(1)) <= 900, "and it has to be this claim's own remaining lease"
     assert "/adversarial-review-loop:resume" in reason
     assert "lock" not in reason, "the state mutex is not what holds this, and naming it invites deleting it"
 
