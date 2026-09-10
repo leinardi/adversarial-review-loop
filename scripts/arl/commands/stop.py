@@ -1,21 +1,22 @@
-"""``gate-stop`` -- the Stop gate. Ports ``cmd_gate_stop`` and ``arl_stop_block_counted``.
+"""``gate-stop`` -- the Stop gate, and the backstop for everything the per-commit gate can miss:
+uncommitted work nobody reviewed, phases nobody implemented, a reconcile nobody finished.
 
-This is the backstop. Everything the per-commit gate can miss ends up here: uncommitted work
-nobody reviewed, phases nobody implemented, a reconcile nobody finished, and finally the
-cumulative review of the whole activation from the frozen baseline to HEAD.
+**The cumulative review of the whole activation is not part of that list unconditionally.** It
+runs only when ``final_review`` is on -- it is **off by default** -- or when the user asks for
+it through ``finish``, which ignores that key. On a default install this gate completes through
+``_complete_without_review``, and the protection standing behind that completion is the
+per-commit gate plus ``confirm-commit``, not a cumulative read of the end state. Never write
+"the Stop gate will catch it" without saying which configuration is meant.
 
-Two shapes of answer, and the difference matters:
-
-- ``stop_block`` sends the turn back to Claude with a reason. It is **counted**, because a
-  gate that blocks forever with no progress is a wedged session rather than an enforcement.
-  ``max_stop_blocks`` consecutive no-progress blocks escalate to ``NEEDS_HUMAN``.
-- ``stop_ok`` lets the turn end. It is used for every terminal state -- including the
-  escalations, which end the turn while leaving every mutation denied. **Letting a turn end
-  is not an approval**, and the messages say so wherever it could be misread.
+Two shapes of answer. ``stop_block`` sends the turn back to Claude and is **counted**, because
+a gate that blocks forever with no progress is a wedged session rather than an enforcement --
+``max_stop_blocks`` consecutive no-progress blocks escalate to ``NEEDS_HUMAN``. ``stop_ok``
+lets the turn end, including for every terminal state and both escalations: **letting a turn
+end is not an approval**, and the messages say so wherever it could be misread.
 
 A block is only worth sending when Claude could act on it. ``STALE`` is the one non-terminal
 status where it cannot -- only the user's ``resume`` refreshes ``armed_at`` -- so it ends the
-turn too, through the same reasoning an unscopable intent does in :func:`_gate_stop`.
+turn too.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -124,7 +125,7 @@ adversarial-review-loop: the activation state for this session could not be read
 
 This is an enforcement failure, not a review finding: the session pointer says this worktree was armed, but its state.json is missing or unreadable. It has escalated to NEEDS_HUMAN, so every mutation stays denied.
 
-Tell the user. They can re-arm with /adversarial-review-loop:implement <plan.md>, or leave the mode with /adversarial-review-loop:stop.
+Tell the user. They can re-arm with /adversarial-review-loop:implement <plan.md> or leave the mode with /adversarial-review-loop:stop.
 """
 
 STILL_NEEDS_HUMAN: Final = (
@@ -143,22 +144,32 @@ Tell the user. They can re-run /adversarial-review-loop:implement <plan.md> or /
 
 #: Addressed to the **user**, not to Claude: this one goes out as a ``systemMessage`` rather
 #: than as a block reason, because Claude has nothing to do about it.
+#: The recovery both expiry messages end on. One text, because they describe one situation from
+#: two moments, and a reader who sees them in either order has to be told the same thing.
+_STALE_RECOVERY: Final = (
+    "Continue with /adversarial-review-loop:resume, which refreshes the activation and keeps the baseline and every "
+    "approval. /adversarial-review-loop:implement <plan.md> starts over from scratch; "
+    "/adversarial-review-loop:stop leaves the mode."
+)
+
 STALE: Final = (
     "adversarial-review-loop: this activation is past ttl_hours ({ttl_hours}), so it is STALE and blocks rather than "
     "silently disarming: every mutation is denied, and nothing in this turn was reviewed -- this is NOT an approval. "
-    "Continue with /adversarial-review-loop:resume, which refreshes the activation and keeps the baseline and every "
-    "approval -- that is usually the right recovery. Re-arm with /adversarial-review-loop:implement <plan.md> only to "
-    "start over from scratch, or leave the mode with /adversarial-review-loop:stop."
-)
+) + _STALE_RECOVERY
 
 #: The same recovery, for a turn that was still ``ACTIVE`` when it started. ``reason`` carries
 #: whatever this turn had already found -- often a real review's findings -- because unlike the
 #: constant above, this one cannot claim nothing was reviewed.
-STALE_MIDTURN: Final = """\
-{reason}
-
-adversarial-review-loop: the activation passed ttl_hours ({ttl_hours}) while this turn was running, so it is now STALE: every mutation is denied and nothing above was approved. The turn ends rather than being sent back, and it was not counted against max_stop_blocks -- only you can clear a STALE activation. Continue with /adversarial-review-loop:resume, which refreshes the activation and keeps the baseline and every approval -- that is usually the right recovery. Re-arm with /adversarial-review-loop:implement <plan.md> only to start over from scratch, or leave the mode with /adversarial-review-loop:stop.
-"""
+STALE_MIDTURN: Final = (
+    (
+        "{reason}\n\n"
+        "adversarial-review-loop: the activation passed ttl_hours ({ttl_hours}) while this turn was running, so it is now "
+        "STALE: every mutation is denied and nothing above was approved. The turn ends rather than being sent back, and it "
+        "was not counted against max_stop_blocks -- only you can clear a STALE activation. "
+    )
+    + _STALE_RECOVERY
+    + "\n"
+)
 
 #: What an escalation refused by an expiry says before :data:`STALE_MIDTURN`. The escalation
 #: genuinely did not stick, so this says so rather than implying the loop is now NEEDS_HUMAN --
@@ -212,7 +223,7 @@ adversarial-review-loop: the mode is {status}, and when it ended ({at}) HEAD was
 
 Work was committed in this worktree without passing the review gate. If you did not stop the mode yourself, it was ended from inside a Bash command — the gate cannot tell those apart, so it reports rather than acts.
 
-This describes the state recorded at the moment enforcement stopped, and nothing after it: commits made since then are ungated by design and are not what this reports.
+Commits made after the mode ended are ungated by design and are not what this reports.
 
 Review commit {head} yourself, or re-arm with /adversarial-review-loop:implement <plan.md>.
 """
@@ -289,15 +300,14 @@ adversarial-review-loop: the worktree is not clean, so the last of the work is n
 EXCLUDE_MOVED: Final = """\
 adversarial-review-loop: {path} changed while this activation was live, so the worktree cannot be shown to be clean.
 
-That file decides what `git add -A` ignores, and every tree this gate reviews is built with \
-`git add -A`. It is outside the repository, so no commit carries it and no review has seen \
-this change -- which means anything newly listed in it is in the worktree but invisible to the \
+That file decides what `git add -A` ignores and lives outside the repository, so no review \
+has seen this change: anything newly listed in it is in the worktree but invisible to the \
 unreviewed-work sweep, and "clean" can no longer be proven.
 
 Restore it to what it was when the activation was armed and end the turn again. If the change \
-was deliberate and should stand, the user can end the mode with /adversarial-review-loop:stop, \
-or re-arm with /adversarial-review-loop:implement <plan.md> to take the new contents as the \
-baseline. This is not a finding about the code.
+should stand, the user can end the mode with /adversarial-review-loop:stop, or re-arm with \
+/adversarial-review-loop:implement <plan.md> to take the new contents as the baseline. This is \
+not a finding about the code.
 """
 
 #: The baseline is present but empty, which no ``arm`` writes -- it refuses rather than record
@@ -307,9 +317,9 @@ EXCLUDE_TAMPERED: Final = """\
 adversarial-review-loop: this activation's {path} baseline is empty, which no arming writes, so the check that file guards cannot run.
 
 `arm` refuses rather than record a baseline it could not establish, so an empty one means \
-state.json was edited or written by another tool. Nothing here observed a change to the file \
-itself -- what is missing is anything to compare it against, and that file decides what \
-`git add -A` ignores, so "the worktree is clean" cannot be proven without it.
+state.json was edited. Nothing here observed a change to the file itself; what is missing is \
+anything to compare it against, and that file decides what `git add -A` ignores, so "the \
+worktree is clean" cannot be proven without it.
 
 Tell the user. Re-arm with /adversarial-review-loop:implement <plan.md> to take a fresh \
 baseline, or leave the mode with /adversarial-review-loop:stop. This is not a finding about \
@@ -324,10 +334,9 @@ the code.
 EXCLUDE_UNREADABLE: Final = """\
 adversarial-review-loop: {path} could not be read, so the worktree cannot be shown to be clean.
 
-That file decides what `git add -A` ignores, and every tree this gate reviews is built with \
-`git add -A`, so without reading it there is no way to tell whether anything is being hidden \
-from the unreviewed-work sweep. git answered for the snapshot a moment ago, so this is not a \
-repository the gate cannot see -- something about this one file or this one call failed.
+That file decides what `git add -A` ignores, so without reading it there is no way to tell \
+whether anything is being hidden from the unreviewed-work sweep. git answered for the snapshot \
+a moment ago, so this is one file or one call failing, not a repository the gate cannot see.
 
 This is not a finding about the code, and it is not a claim that anything was hidden. Retry \
 the turn; if it persists, tell the user -- they can leave the mode with \
@@ -342,10 +351,9 @@ activation is still ARMED. Next up, phase {phase} of {total}:
 
     {description}
 
-The target stays set, and it has now been passed -- so every turn end pauses here until you \
-name a new one. Continue with /adversarial-review-loop:resume --until 0 to run to the end of \
-the plan, or --until M to stop again at phase M. Or finish the whole plan now with \
-/adversarial-review-loop:finish.
+The target has been passed, so every turn end pauses here until you name a new one. Continue \
+with /adversarial-review-loop:resume --until 0 to run to the end of the plan, or --until M to \
+stop again at phase M. Or finish the whole plan now with /adversarial-review-loop:finish.
 """
 
 COMPLETE: Final = """\
@@ -355,7 +363,7 @@ Full report: {report}
 """
 
 COMPLETE_UNREVIEWED: Final = """\
-adversarial-review-loop: COMPLETE. Every one of the {total} phases landed through the per-commit gate, and git still vouches for the commit each one produced: {total} distinct commits, in phase order, each moving the tree. That is not the same as a model having read every line -- an already-approved or ignore_globs-matched tree passes the gate without a call. A commit made outside the gate does not become a phase; it enters RECONCILE, and end-state work the unreviewed-work sweep caught was reviewed on its own terms, not as a phase. What did not run is the final cumulative review across the whole activation (final_review is disabled). The mode has disarmed itself; further commits are ungated.
+adversarial-review-loop: COMPLETE. Every one of the {total} phases landed through the per-commit gate, and git still vouches for the commit each one produced: {total} distinct commits, in phase order, each moving the tree. That is not the same as a model having read every line -- an already-approved or ignore_globs-matched tree passes the gate without a call. What did not run is the final cumulative review across the whole activation (final_review is disabled). The mode has disarmed itself; further commits are ungated.
 
 This activation is now closed, so it cannot be reviewed cumulatively after the fact -- there is no remedy for this run. Set final_review=true (`config final_review true`, or ARL_FINAL_REVIEW=true for one run) before the next /adversarial-review-loop:implement to get one.
 """
@@ -374,11 +382,11 @@ SKIP_PATH_UNPROVEN: Final = (
 UNANCHORED_COMPLETION: Final = """\
 adversarial-review-loop: all {total} phases are committed and every one of them passed the per-commit gate, but this activation cannot complete itself.
 
-It was armed on a repository with no commits, so it has no activation commit for the phase chain to be anchored to, and the no-review completion path will not disarm on a chain it cannot check against git history. Nothing is wrong with the work or with the state; this activation simply cannot use that path.
+It was armed on a repository with no commits, so it has no activation commit to anchor the phase chain to, and the no-review completion path will not disarm on a chain it cannot check against git history. Nothing is wrong with the work or with the state.
 
 Two ways to end it, both of which work right now:
 
-- /adversarial-review-loop:finish — runs the cumulative review across the whole activation and completes the mode if it approves. This is the one that ends with a review.
+- /adversarial-review-loop:finish — runs the cumulative review across the whole activation and completes the mode if it approves.
 - /adversarial-review-loop:stop — leaves the mode without that review. The per-phase reviews already happened and their commits stand.
 
 The mode stays armed until you pick one: commits here are still gated, and nothing was approved or disarmed by this message. Tell the user; do not pick for them.
@@ -497,17 +505,14 @@ def _no_pointer(hook: Hook, *, session: str, cwd: str) -> NoReturn:
 class _Terminal(Exception):
     """Raised inside a ``state.transaction()`` to abandon it **without saving**.
 
-    ``State.transaction``'s own docstring is explicit that raising out of the block leaves the
-    previous document exactly as it was -- the established escape hatch ``Completion.commit``
-    already uses for its own refusals. Used here for the identical reason: a locked reload that
-    finds the activation already terminal (``COMPLETE``/``DISARMED``/``RESUMED``) must not
-    resave it, not even with an unchanged ``self.data`` (``transaction()``'s exit calls
-    ``save()`` unconditionally, regardless of whether anything called ``update()``), because
-    that document may belong to a *retired* activation AGENTS.md forbids mutating again.
+    ``transaction()``'s exit calls ``save()`` unconditionally, whether or not anything called
+    ``update()``, so a locked reload that finds the activation already terminal
+    (``COMPLETE``/``DISARMED``/``RESUMED``) must raise rather than return: that document may belong
+    to a *retired* activation, which must never be mutated again.
 
-    ``STALE`` is raised through here too, on a different ground: nothing forbids writing to a
-    stale document, but the counters are exactly what must not be written into one -- see
-    :func:`_uncountable_status_or_none`. The caller sorts the two apart by ``status``.
+    ``STALE`` is raised through here too, on a different ground -- nothing forbids writing to a
+    stale document, but the counters must not be written into one (see
+    :func:`_uncountable_status_or_none`). The caller sorts the two apart by ``status``.
     """
 
     def __init__(self, status: str) -> None:
@@ -534,19 +539,14 @@ def _terminal_status_or_none(state: State, config: Config) -> str:
 def _uncountable_status_or_none(state: State, config: Config) -> str:
     """A plain, unlocked read of the current status, if it is one no block may be counted in.
 
-    :func:`_terminal_status_or_none`'s three, for the reason it documents, **plus ``STALE``**.
-    Stale is not terminal, but it is equally not Claude's to fix, and the TTL is a wall clock:
-    ``_by_status`` only reads the status once, at the top of the hook, so a turn that began
-    ``ACTIVE`` can arrive here stale after a review that took minutes. Counting that block put
-    the loop straight back on the path this gate stopped taking -- an escalation to
-    ``NEEDS_HUMAN`` that only ``accept`` can clear -- and left a ``stop_marker`` behind that
-    the next genuine block resumed counting from.
+    :func:`_terminal_status_or_none`'s three, **plus ``STALE``**. Stale is not terminal but is
+    equally not Claude's to fix, and the TTL is a wall clock: ``_by_status`` reads the status once
+    at the top of the hook, so a turn that began ``ACTIVE`` can arrive here stale after a review
+    that took minutes. Counting that block escalated to ``NEEDS_HUMAN`` -- which only ``accept``
+    clears -- and left a ``stop_marker`` the next genuine block resumed counting from.
 
-    Kept separate from :func:`_terminal_status_or_none` rather than widening it: ``_sweep``'s
-    approving path routes its result straight into :func:`_ended`, which is the wrong answer
-    for a status that has not disarmed anything. That path reaches this one anyway -- a stale
-    crossing moves ``completion.fingerprint``, so it lands in :func:`_block_counted` through
-    ``SWEEP_ACTIVATION_MOVED``.
+    Kept separate rather than widening :func:`_terminal_status_or_none`, whose callers route into
+    :func:`_ended`, the wrong answer for a status that has disarmed nothing.
     """
     if not state.load():
         return ""
@@ -573,43 +573,28 @@ def _say(gate: _Gate, text: str) -> str:
 def _block_counted(gate: _Gate, reason: str, *, after_completion_refusal: bool = False) -> NoReturn:
     """Block the turn, but account for whether anything moved since the last block.
 
-    Only genuine stalls count toward ``max_stop_blocks``: the marker is the tuple of things
-    that change when the loop makes progress, so a block that follows a new approved tree, a
-    new phase or a status transition starts the count again.
+    Only genuine stalls count toward ``max_stop_blocks``: the marker is the tuple of things that
+    change when the loop makes progress. The count is taken **inside** the transaction, against
+    the document it reloads, or two overlapping Stop hooks both write the same value and the limit
+    is never reached.
 
-    The count is taken **inside** the transaction, against the document it reloads, for the
-    reason ``defer`` documents: two overlapping Stop hooks reading the same starting value
-    would both write the same one, and the limit would never be reached.
+    **A terminal activation is never counted, whatever the caller.** Writing
+    ``stop_blocks``/``stop_marker`` into a ``RESUMED``, ``DISARMED`` or ``COMPLETE`` document is
+    the mutation forbidden once an activation is no longer live, so this never calls ``update()``
+    on one -- via :func:`_terminal_status_or_none` first and, if that read was stale, via
+    :class:`_Terminal` aborting the locked reload without saving.
 
-    **A terminal activation is never counted, regardless of caller** -- ``CHANGES_REQUIRED``, a
-    snapshot failure, a dirty worktree, outstanding phases, a sweep failure included. If a
-    cross-session ``resume`` retired this activation (``RESUMED``), or the user left the mode
-    (``DISARMED``), or it already completed (``COMPLETE``) by the time this runs, writing
-    ``stop_blocks``/``stop_marker`` into that document is exactly the mutation AGENTS.md
-    forbids once an activation is no longer live -- so this never calls ``update()`` on one,
-    via :func:`_terminal_status_or_none` first and, if that read was stale, via
-    :class:`_Terminal` aborting the locked reload below **without saving** either.
+    ``after_completion_refusal`` decides only what a *concurrent* ``COMPLETE`` means, not whether
+    writing is safe, and is narrowed to one caller: ``_commit_or_yield_to_terminal``, when
+    ``pending.commit()`` was refused on a moved fingerprint. There, a concurrent ``finish`` or
+    another Stop turn completing the activation ends the turn quietly. Every other caller still
+    reports its own block reason -- a ``CHANGES_REQUIRED`` is this turn's genuine finding about a
+    tree another completion does not retroactively un-review, and swallowing it is the
+    failure-into-approval Rule 1 forbids.
 
-    ``after_completion_refusal`` decides only what a *concurrent* ``COMPLETE`` means here, not
-    whether it is safe to write: narrowed to exactly one caller, ``_commit_or_yield_to_terminal``,
-    when ``pending.commit()`` was refused because the fingerprint moved. That refusal's cause is
-    ambiguous -- most causes genuinely need attention, but one is harmless: a concurrent
-    ``finish``, or another Stop turn, already completed the activation while this one was still
-    working, and ``commit()`` refuses on the fingerprint mismatch either way; for exactly that
-    one caller, finding ``COMPLETE`` ends the turn quietly through ``_ended`` instead of
-    reporting a block. Every other caller still reports its own block reason on a concurrent
-    ``COMPLETE``: ``CHANGES_REQUIRED`` is this turn's own genuine finding, made about a tree a
-    *different* concurrent completion does not retroactively un-review, and silently swallowing
-    it would be the failure-into-approval Rule 1 forbids.
-
-    ``DISARMED`` and ``RESUMED`` are not scoped the same way, for every caller alike: unlike a
-    concurrent success, a retirement or a user-initiated stop means *this session's own
-    continued involvement* is moot, not merely that one particular finding might be stale --
-    the same reasoning ``_by_status`` already applies for a status known from the very start of
-    the turn, just discovered here mid-turn instead. Rule 4 (a failing review must not undo a
-    stop the user ran while it was running) is satisfied by routing through ``_ended`` rather
-    than by ``_escalate``'s comparison against ``gate.expected``, which existed only to
-    reconstruct, indirectly, the same fact a fresh reload now answers directly.
+    ``DISARMED`` and ``RESUMED`` are not scoped that way for any caller: a retirement or a
+    user-initiated stop makes this session's continued involvement moot, not merely one finding
+    stale. Rule 4 is satisfied by routing through ``_ended``.
     """
     reason = _say(gate, reason)
     state = gate.state
@@ -647,32 +632,26 @@ def _block_counted(gate: _Gate, reason: str, *, after_completion_refusal: bool =
 def _ended(gate: _Gate, status: str) -> NoReturn:
     """The mode is off. Let the turn end -- but not silently if work went unreviewed *then*.
 
-    ``systemMessage`` rather than a block, and that choice is the point: it reaches the
-    **user** instead of the model, and the model does not get to decide whether to relay it.
+    ``systemMessage`` rather than a block, and that choice is the point: it reaches the **user**
+    instead of the model, so relaying it is not the model's decision.
 
-    This is the only place a Rule 4 escape becomes visible. A Bash command that commits and
-    then runs ``arl.sh deactivate`` leaves exactly this shape behind -- an unapproved HEAD
-    under a mode that looks deliberately stopped -- and the gate cannot tell it apart from a
-    user who stopped the mode with work outstanding. So it reports rather than acts: reverting
-    would take an exit away from the user, which is the same rule in the other direction.
+    This is the only place a Rule 4 escape becomes visible. A Bash command that commits and then
+    runs ``arl.sh deactivate`` leaves exactly this shape, and the gate cannot tell it from a user
+    who stopped the mode with work outstanding -- so it reports rather than acts, because
+    reverting would take an exit away from the user.
 
-    **What changed is the question, not the choice.** This used to ask "is current HEAD
-    approved?", which is not a question about the gate at all: nothing recorded HEAD at the
-    moment enforcement stopped, so an ordinary commit made hours after a terminal transition
-    was indistinguishable from the escape above and fired the same alarm -- on every turn end,
-    forever. It now reads the record ``hooks.end_state`` validates, so it reports what the gate
-    could observe when enforcement stopped and nothing after it.
+    **What changed is the question, not the choice.** Asking "is current HEAD approved?" is not a
+    question about this gate: an ordinary commit made hours after a terminal transition was
+    indistinguishable from the escape and fired the same alarm on every turn end, forever. It now
+    reads the record ``hooks.end_state`` validates.
 
-    **Detection is exactly "the recorded tree is absent from ``approved_trees``".** That is not
-    proof of review and not proof of commit identity: the set also holds the baseline tree and
-    any tree the gate passed without a reviewer call. A wrapper that lands an *empty* commit,
-    or rewrites history onto a tree already in the set, is silent -- before this change as much
-    as after; see ``docs/security.md``. And an escape ordered ``deactivate && commit`` records
-    an approved tree and goes silent, which the previous code "caught" only by also firing on
-    every legitimate post-stop commit.
+    **Detection is exactly "the recorded tree is absent from ``approved_trees``"** -- not proof of
+    review, not proof of commit identity. An empty commit, a rewrite onto a tree already in the
+    set, or an escape ordered ``deactivate && commit`` is silent. See
+    ``docs/design/end-state-record.md``.
 
-    Makes **no git call on any path**, so every ended session stops paying one ``git
-    rev-parse`` per turn end.
+    Makes **no git call on any path**, so an ended session stops paying one ``git rev-parse`` per
+    turn end.
     """
     end = hooks.end_state(gate.state)
     if end.malformed:
@@ -719,30 +698,22 @@ def _named_plan_file(gate: _Gate) -> str:
 def _escalate(gate: _Gate, reason: str) -> None:
     """Escalate, or end the turn saying the activation moved and nothing was written.
 
-    Guarded because the user can run ``/adversarial-review-loop:stop`` while a review runs, and
-    an escalation landing afterwards turns their ``DISARMED`` back into a state that denies
-    every mutation -- the gate re-enabling itself after they left the mode (Rule 4).
+    Guarded because the user can run ``/adversarial-review-loop:stop`` while a review runs, and an
+    escalation landing afterwards turns their ``DISARMED`` back into a state that denies every
+    mutation -- the gate re-enabling itself after they left (Rule 4). When it has moved, ending
+    the turn is right: blocking would refuse them their exit, and the message says plainly that
+    nothing here is an approval.
 
-    Ending the turn is the right answer when it *has* moved: if the move was the user leaving,
-    blocking would refuse them their exit, and the message says plainly that nothing here is
-    an approval.
+    Reading the moved-to activation uses a plain ``load()``, not a transaction: the read exists
+    only to name the new state in a message, and ``transaction()``'s exit always saves -- which,
+    when a cross-session ``resume`` moved it, rewrites a retired document. ``load()`` reads the
+    file in one go against an atomically-renamed writer, so the snapshot is consistent without the
+    lock.
 
-    Reading the moved-to activation uses a plain, unlocked ``load()`` rather than a
-    ``state.transaction()``: this read exists only to name the new state in a message, and
-    ``transaction()``'s exit always ``save()``s -- which, when what moved the activation was a
-    cross-session ``resume``, would rewrite a document that is now retired and must not be
-    touched again. ``load()`` reads the whole file in one go against an atomically-renamed
-    writer, so the snapshot is internally consistent even without the lock; a stale-by-
-    microseconds label in a message is not worth a write to somebody else's activation.
-
-    **An expiry is reported as an expiry.** ``hooks.Activation`` carries the effective status,
-    so a TTL crossed during a minutes-long review refuses the escalation here exactly as a
-    genuine move does -- and it is right to refuse, since nothing may be written. But
-    ``ACTIVATION_MOVED`` then blames "whatever moved it", drops ``reason`` (the reviewer's own
-    finding, which nothing else in this response carries) and names no way out. The recovery is
-    the ordinary stale one, so it is the ordinary stale message that goes out, with ``reason``
-    kept in front of it. Narrowed to the case where the TTL is the *only* difference: anything
-    else that moved underneath this turn is the more important fact and still reports as a move.
+    **An expiry is reported as an expiry.** A TTL crossed during a long review refuses the
+    escalation exactly as a genuine move does, but ``ACTIVATION_MOVED`` would blame "whatever
+    moved it", drop ``reason`` -- the reviewer's own finding, carried nowhere else in this
+    response -- and name no way out. Narrowed to the case where the TTL is the only difference.
     """
     if hooks.escalate(gate.state, gate.config, gate.expected, reason):
         return
@@ -794,20 +765,16 @@ def _by_status(gate: _Gate) -> None:
 def _finish_requested_after_sweep(gate: _Gate) -> bool:
     """Read ``finish_requested`` fresh, under lock, once, after the sweep.
 
-    The sweep may have just spent minutes in the reviewer; a ``finish`` invoked concurrently
-    during that window takes the same lock to record ``finish_requested=True`` before its own
-    review even starts, so this reflects it. ``_review`` shares this one read across every
-    check that follows rather than each answering from its own, differently-stale snapshot --
-    deciding the outstanding-phase or pause checks from a value captured before the sweep,
-    while only the skip-path decision re-read afterward, let a ``finish`` that landed during
-    the sweep still be blocked or paused on the plan it was explicitly asked to finish.
+    The sweep may have just spent minutes in the reviewer, and a concurrent ``finish`` records
+    ``finish_requested=True`` under the same lock before its own review starts. ``_review`` shares
+    this one read across every check that follows: deciding the outstanding-phase or pause checks
+    from a value captured *before* the sweep let a ``finish`` that landed during it still be
+    blocked on the plan it was asked to finish.
 
-    A plain, unlocked peek is tried first: if the sweep's own reviewer call ran long enough for
-    a cross-session ``resume`` to retire this activation, entering ``state.transaction()`` just
-    to read ``finish_requested`` would still resave a document AGENTS.md forbids mutating again
-    -- its exit always calls ``save()``, even when nothing inside it called ``update()``. The
-    locked reload is still the correctness backstop for a transition landing in the instant
-    after the peek, and it raises :class:`_Terminal` rather than saving if it finds one too.
+    A plain, unlocked peek runs first, because entering a transaction just to read this would
+    resave a document a concurrent retirement may have made retired. The locked reload is the
+    backstop for a transition landing in the instant after the peek, and raises :class:`_Terminal`
+    rather than saving if it finds one.
     """
     state = gate.state
     peeked = _terminal_status_or_none(state, gate.config)
@@ -942,15 +909,14 @@ def _guard_exclude(gate: _Gate, worktree: str) -> None:
     """Block the turn end when ``info/exclude`` has moved since arming, else return.
 
     **Called before the sweep and again after every reviewer call**, because a review is a
-    minutes-long window in which the worktree keeps moving. Checked only up front, an exclude
-    file edited *during* the sweep would hide a file created alongside it, and the cleanliness
-    check that follows -- built on ``git add -A``, which obeys the new rules -- would then
-    report the worktree clean and let the activation complete. The check is cheap (one
-    ``rev-parse`` and one file read) and the thing it guards is the gate's central claim, so it
-    runs at each point where a decision is about to be taken on a snapshot's word.
+    minutes-long window in which the worktree keeps moving: an exclude file edited during the
+    sweep hides a file created alongside it, and the cleanliness check that follows -- built on
+    ``git add -A``, which obeys the new rules -- then reports the worktree clean and lets the
+    activation complete. The check is one ``rev-parse`` and one file read, and what it guards is
+    the gate's central claim.
 
-    Kept off ``_review``'s own body so the decision and its reason live together, and so the
-    lazy ``gitsnap`` import stays out of a path that may never need git at all.
+    Kept off ``_review``'s body so the decision and its reason live together, and so the lazy
+    ``gitsnap`` import stays out of a path that may never need git.
     """
     verdict = _exclude_verdict(gate.state, worktree)
     if verdict == _EXCLUDE_OK:
@@ -978,29 +944,22 @@ _EXCLUDE_UNREADABLE: Final = "unreadable"
 def _exclude_verdict(state: State, worktree: str) -> str:
     """Has ``info/exclude`` changed since this activation was armed, and can that be told?
 
-    **An absent field and a present-empty one are not the same thing, and conflating them is
-    how this check turns itself off.** Absent means a document written before the field
-    existed: there is nothing to compare against, and calling that a change would fire on every
-    activation already on disk -- the permanent-alarm failure the end-state record exists to
-    avoid. That is the *only* case here that passes silently. Present-and-empty cannot be
-    produced by any current ``arm``, which refuses rather than store a baseline it could not
-    establish, so it means an edited document -- reported as such, not as a change nobody
-    observed.
+    **An absent field and a present-empty one are not the same thing, and conflating them turns
+    this check off.** Absent means a document written before the field existed; calling that a
+    change would fire on every activation already on disk, and it is the only case here that
+    passes silently. Present-and-empty cannot be produced by any current ``arm``, which refuses
+    rather than store a baseline it could not establish, so it means an edited document.
 
-    **An unreadable current reading blocks too, and calling it "unchanged" was a real hole.**
-    ``gitsnap.exclude_digest`` answers ``""`` for a ``rev-parse`` that failed or timed out
-    (``git_run`` reports an expiry as status 124, which every other caller treats as a denial)
-    and for a file it cannot read. Passing on that lets a transient failure in this one call
-    complete an activation under ignore rules nothing compared -- while the snapshot calls
-    around it succeed. The sandbox argument that once justified passing does not survive
-    contact with the order things run in: ``_review`` blocks on ``SnapshotError`` before this
-    is ever reached, so git has already answered by the time it runs, and a repository that
-    genuinely cannot be read never gets this far.
+    **An unreadable current reading blocks too**, and calling it "unchanged" was a real hole:
+    ``gitsnap.exclude_digest`` answers ``""`` for a ``rev-parse`` that failed or timed out --
+    ``git_run`` reports an expiry as status 124, a denial everywhere else -- so passing lets one
+    transient failure complete an activation under ignore rules nothing compared. The sandbox
+    argument that once justified passing does not survive the order things run in: ``_review``
+    blocks on ``SnapshotError`` before this is reached.
 
-    Directional in neither sense: a file appearing where there was none and one being emptied
-    are both changes. What matters is that the set of paths ``git add -A`` skips is no longer
-    the set the baseline was taken under. ``EXCLUDE_ABSENT`` on both sides is the ordinary
-    answer for a worktree that never had the file and still does not.
+    Directional in neither sense: a file appearing and one being emptied are both changes. What
+    matters is that the set of paths ``git add -A`` skips is no longer the set the baseline was
+    taken under. See ``docs/design/resume-and-retirement.md``.
     """
     baseline = state.data.get("exclude_digest", _ABSENT)
     if baseline is _ABSENT:

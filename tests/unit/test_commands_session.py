@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_REVIEWER, git, run_bootstrap
+from conftest import FAKE_REVIEWER, git, run_bootstrap, set_phases
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
 
 from arl import commands as commands_module
@@ -62,14 +62,6 @@ def marking_reviewer(tmp_path: Path, marker: Path) -> Path:
     )
     stub.chmod(0o755)
     return stub
-
-
-def set_phases(repo: Path, env: dict[str, str], *phases: str) -> None:
-    argv = ["set-phases"]
-    for phase in phases:
-        argv += ["--phase", phase]
-    proc = run_bootstrap(argv, cwd=repo, env=env)
-    assert proc.returncode == 0, proc.stderr
 
 
 # --------------------------------------------------------------------------
@@ -630,7 +622,7 @@ def test_deactivate_says_plainly_that_it_cannot_free_an_unpublished_retirement(g
     assert "retired by a resume that never finished" in proc.stdout
     assert "cannot free this worktree" in proc.stdout
     # Rule 0: a session with no document denies; it does not "gate nothing".
-    assert "can prove nothing about" in proc.stdout
+    assert "both sides deny" in proc.stdout
     assert pointer.read_text() == "s1\n"
     assert read_state(env, git_repo, "s1")["status"] == "RESUMED"
 

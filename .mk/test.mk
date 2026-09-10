@@ -12,7 +12,7 @@ PYTEST_WORKERS ?= auto
 # to touch the system interpreter (PEP 668). It is a developer convenience only -- uv is
 # deliberately **not** on the runtime path, because `uv run` reads `pyproject.toml` and
 # `.python-version` from the current directory, which under a hook is the repository under
-# review. See AGENTS.md, "Why the gate does not run under uv".
+# review. See docs/design/interpreter-and-watchdog.md.
 #
 # An explicit PYTHON= on the command line wins, and so does ARL_NO_UV=1.
 UV := $(shell command -v uv 2>/dev/null)
@@ -41,7 +41,7 @@ sync-pins: ## Rewrite the .pre-commit-config.yaml pins to match requirements-dev
 	@$(PYTHON) $(REPO_ROOT)/scripts/sync_pins.py
 
 .PHONY: test
-test: test-unit test-accept ## Run the unit tests and the arl selftest (no model is called)
+test: test-unit test-accept ## Run the unit tests and the shim selftest (no model is called)
 
 .PHONY: test-unit
 test-unit: ## Run the Python unit tests
@@ -65,11 +65,11 @@ endif
 .PHONY: test-accept
 # The selftest shards itself across the cores by default; ARL_SELFTEST_JOBS=1 runs it
 # straight through with its output unbuffered, which is what you want when a section fails.
-test-accept: ## Run the arl selftest against scratch repositories (no model is called)
+test-accept: ## Run the shim selftest: interpreter probe, shim contract, watchdog (no model is called)
 	@$(REPO_ROOT)/tests/selftest-parallel.sh
 
 .PHONY: test-filter
-test-filter: ## Run only the selftest sections matching FILTER=<substring>, serially
+test-filter: ## Run only the shim selftest sections matching FILTER=<substring>, serially
 	@$(REPO_ROOT)/tests/selftest.sh "$(FILTER)"
 
 .PHONY: dry-run

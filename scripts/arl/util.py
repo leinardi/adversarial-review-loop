@@ -85,7 +85,7 @@ def stdin_argument() -> str:
     slash command is therefore parsed as shell source, so a quote in it ends the argument
     early and a ``$(...)`` or a ``;`` in it runs. A quoted here-document is the one shell
     construct whose body is never parsed, which is how the skills now hand the string over;
-    this is the receiving end. See AGENTS.md, "The argument channel".
+    this is the receiving end. See docs/design/argument-channel.md.
 
     A trailing newline is stripped because the here-document adds one that the user did not
     type. Nothing else is touched: leading whitespace, embedded newlines, quotes and dollar

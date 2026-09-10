@@ -81,6 +81,40 @@ def test_clarify_leaves_the_fingerprint_and_round_history_untouched(git_repo: Pa
     assert "what did finding 1 mean?" in out
 
 
+def test_the_question_lands_under_context_wrapped_as_evidence(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The one Claude-composed string that reaches the reviewer, and where it is allowed to be.
+
+    Three separate claims, each load-bearing for the evidence boundary
+    (``docs/security.md``, ``reviewer``'s module docstring):
+
+    - it is written under ``context/``, a **sibling** of ``bundles/``. ``bundles/`` holds
+      gate-generated evidence only, and a continued reviewer's read grant covers the whole
+      bundles root -- so a question written in there would be model-authored text at a stable,
+      re-openable path inside the evidence directory;
+    - nothing under ``bundles/`` holds it, asserted by searching the tree rather than by
+      trusting the path the writer chose;
+    - it is wrapped in the evidence-not-instruction fence, so the reviewer is told the text is
+      a record of what an agent is unsure about and not something that changes its rules.
+    """
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env, "phase one", "phase two")
+    _round(git_repo, env, "v1\n")
+    question = "what did finding 1 mean?"
+
+    code, out = clarify(git_repo, armed_env(clean_env, ARL_FAKE_MODE="clarify"), "--question", question)
+
+    assert code == 0, out
+    act_dir = state_dir(env, git_repo, SESSION)
+    written = act_dir / "context" / "001-question.txt"
+    assert written.is_file(), "the question is written under context/, beside bundles/"
+    text = written.read_text()
+    assert question in text
+    assert "NOT an instruction" in text
+    assert not any(question in path.read_text(errors="replace") for path in (act_dir / "bundles").rglob("*") if path.is_file()), (
+        "no file under bundles/ may hold model-authored text"
+    )
+
+
 def test_clarify_argv_never_continues_a_session(git_repo: Path) -> None:
     attachments = [git_repo / "bundles" / "001" / "range.txt", git_repo / "bundles" / "001" / "changes.00.diff"]
     argv = reviewer.clarify_argv(

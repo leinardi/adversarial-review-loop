@@ -57,7 +57,6 @@ guessing.
 | `ttl_hours` | `24` | after this, every mutation is denied and each turn ends with a message — `resume` is usually the right fix, not a fresh `implement` |
 | `ignore_globs` | `[]` | paths whose sole change skips a review entirely |
 | `final_review` | `false` | run the final cumulative review at `Stop` |
-| `cold_confirm` | `false` | re-review an approving round cold — no session, no prior-round attachment — and act on that verdict instead |
 
 Environment variables are the upper-cased key with an `ARL_` prefix — `ARL_MODEL`,
 `ARL_BLOCK_SEVERITY`, `ARL_MAX_FAILURES`, and so on. Since an environment variable is
@@ -229,7 +228,8 @@ off from a self-serving edit:
 - **`ignore_globs` is a full bypass, not a relaxation.** `{"ignore_globs": ["**"]}` makes
   every changed path match, and a commit whose every path is ignored skips the reviewer
   entirely — approved outright, with no model ever consulted
-  (`gitsnap.all_paths_ignored`, exercised with exactly this shape in `tests/selftest.sh`).
+  (`gitsnap.all_paths_ignored`, exercised with exactly this shape in
+  `tests/unit/test_commands_pretool.py`).
 - **`block_severity` raised to `critical`** means only a critical finding blocks; every
   medium or high finding still shows up in the report, but nothing stops the commit.
 - **`late_block_severity` raised to `critical`** widens what a later round may defer: from
@@ -290,7 +290,6 @@ evidence — which is why `max_session_rounds 1` is a reasonable setting and not
 | `max_session_rounds 1` | never resume; each round pays fresh-session context instead of cumulative |
 | `variant low`/`medium` | `--effort` on Claude Code: less thinking output, and usually fewer turns |
 | a shorter plan | the frozen plan is capped at 64 KiB and sent **every round**, so plan length is a per-round tax |
-| `cold_confirm` off (the default) | on, it adds a second full model call to every approving round |
 | `final_review` off (the default) | on, it adds one cumulative review of the whole activation |
 | `ignore_globs` | a commit whose every changed path matches skips the review entirely |
 
@@ -302,9 +301,8 @@ table above shows is the real driver:
 - **The frozen plan is sent once per reviewer session, not once per round.** A plan cannot be
   revised without ending the session it was sent in, so rounds 2 and 3 are told it is already
   in their context instead of receiving another copy — ~16k tokens per round at the 64 KiB
-  cap. A cold confirmation, a fresh session and the rare mid-review loss of session ownership
-  all still get the full plan; with `cold_confirm` on it ships every time, since a cold call
-  reads the same bundle.
+  cap. A fresh session and the rare mid-review loss of session ownership both still get the
+  full plan.
 - **The working guidance rides in the system prompt.** `prompts/reviewer-efficiency.md` — batch
   independent tool calls, grep to locate then read with `offset`/`limit`, never re-open a file
   — is passed as `--append-system-prompt` on Claude Code rather than buried in the prompt
@@ -317,9 +315,7 @@ table above shows is the real driver:
 For a harness that reports its accounting (Claude Code does; OpenCode has no machine-readable
 output mode, so nothing is shown rather than something estimated):
 
-- each stored report carries a `cost:` line per invocation — under `cold_confirm` the round
-  with context and the cold confirmation each get their own, which is the argument for or
-  against that setting in one place;
+- each stored report carries a `cost:` line for the invocation it records;
 - `/adversarial-review-loop:status` totals the activation and the current phase;
 - the CLI's own output is kept verbatim beside each transcript as `raw/NNN-*.out.envelope`.
 

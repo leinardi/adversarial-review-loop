@@ -50,9 +50,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from conftest import BOOTSTRAP, git, run_bootstrap
+from conftest import BOOTSTRAP, git, run_bootstrap, set_phases
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
-from test_commands_session import arm, set_phases
+from test_commands_session import arm
 
 from arl.commands import resume
 
@@ -589,7 +589,7 @@ def test_mixed_same_and_cross_session_resumes_do_not_duplicate_a_revision(
     in-process, in a background thread, and monkeypatches ``resume._decide_revision`` for the
     duration of this test only, to pause the cross-session resume's first (pre-lock) decision
     until the same-session resume -- run to completion on the main thread in between -- has
-    published. Same technique ``test_reviewer.review_env`` already uses to make ``os.environ``
+    published. Same technique the ``review_env`` fixture already uses to make ``os.environ``
     match an isolated env dict for in-process calls.
     """
     env = armed_env(clean_env)

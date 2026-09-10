@@ -1,22 +1,19 @@
 """The reviewer-harness seam: which CLI the gate actually asks for a review.
 
-The gate is not tied to one reviewer CLI. Everything that decides an *outcome* --
-bundle building, staging and manifest verification, the ``FINDING``/``VERDICT``
-contract, the cold-approval invariant, ``round_history`` bookkeeping, the retry
-classes -- lives in :mod:`arl.reviewer` and is harness-agnostic. What varies per
-harness is narrow and mechanical: how one invocation is spelled as a command, how a
-session is named and continued, and whether the reviewer's model list can be probed
-at all.
+Everything that decides an *outcome* -- bundle building, staging and manifest verification, the
+``FINDING``/``VERDICT`` contract, ``round_history`` bookkeeping, the retry classes -- lives in
+:mod:`arl.reviewer` and is harness-agnostic. What varies is narrow and mechanical: how one
+invocation is spelled, how a session is named and continued, and whether the model list can be
+probed at all.
 
-**A harness composes a command; it never decides anything.** Nothing here reads a
-verdict, touches ``state.json``, or may turn a failure into an approval (Rule 1) --
-it answers with a :class:`Command` and :mod:`arl.reviewer` runs it. That is what
-keeps "add a third harness" a new module rather than another pass over the gate.
+**A harness composes a command; it never decides anything.** Nothing here reads a verdict,
+touches ``state.json``, or may turn a failure into an approval (Rule 1). That is what keeps
+"add a third harness" a new module rather than another pass over the gate.
 
-**The test seam sits above this layer, deliberately.** ``ARL_REVIEWER_CMD`` (and
-``ARL_SESSION_LIST_CMD``) short-circuit in :mod:`arl.reviewer` *before* a harness is
-consulted, so ``tests/selftest.sh`` exercises the loop without any harness being
-involved and a new harness cannot quietly change what the selftest measures.
+**The test seam sits above this layer, deliberately.** ``ARL_REVIEWER_CMD`` and
+``ARL_SESSION_LIST_CMD`` short-circuit in :mod:`arl.reviewer` *before* a harness is consulted,
+so a new harness cannot quietly change what those tests measure. See
+``docs/design/adding-a-harness.md``.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -105,18 +102,14 @@ class UnknownHarness(Exception):
 class Command:
     """One fully-composed reviewer invocation, ready for :func:`arl.reviewer.run_bounded`.
 
-    ``env`` is *overrides*, not a whole environment: the caller layers it onto the
-    environment it already decided on, so a harness cannot drop a variable it does not
-    know about. ``stdin`` is the bytes to feed the child, or ``None`` for a child that
-    reads nothing -- OpenCode takes its prompt as an argument, so it is ``None`` there;
-    a harness whose prompt does not fit an argv uses this instead.
+    ``env`` is *overrides*, not a whole environment, so a harness cannot drop a variable it does
+    not know about. ``stdin`` is the bytes to feed the child, or ``None`` for one that reads
+    nothing.
 
-    ``cwd`` is the directory the child runs in, or ``None`` to inherit the gate's own.
-    A harness that names the repository with a flag (OpenCode's ``--dir``) leaves it
-    ``None``; one that has no such flag sets it. It is part of *composing the command*
-    rather than something :mod:`arl.reviewer` decides, because where a reviewer runs is
-    also where some CLIs persist their sessions -- a harness must be able to keep that
-    out of the user's own working directory without the gate knowing why.
+    ``cwd`` is the directory the child runs in, or ``None`` to inherit. It is part of *composing
+    the command* rather than something :mod:`arl.reviewer` decides, because where a reviewer runs
+    is also where some CLIs persist their sessions -- a harness must be able to keep that out of
+    the user's own working directory without the gate knowing why.
     """
 
     argv: list[str]
@@ -129,17 +122,14 @@ class Command:
 class Attachment:
     """One thing the reviewer is given, and the bytes it is required to be.
 
-    **The digest travels with the path because the two delivery styles differ in who opens
-    the file.** A harness that names the attachment in an argv hands the pathname to another
-    process, which opens it later -- the gate's own check can only be moved close to that
-    open, never made to cover it (see ``arl.reviewer.stage_attachments``). A harness that
-    *inlines* the attachment reads it in this process, which means the gap between the check
-    and the read is one this code can close outright -- but only if it knows what the bytes
-    were supposed to be. Carrying the path alone would silently leave the second kind as
-    exposed as the first, while looking safer.
+    **The digest travels with the path because the two delivery styles differ in who opens the
+    file.** A harness that names the attachment in an argv hands the pathname to another process,
+    and the gate's check can only be moved close to that open, never made to cover it. One that
+    *inlines* it reads it in this process, so that gap can be closed outright -- but only if it
+    knows what the bytes were supposed to be. Carrying the path alone would leave the second kind
+    as exposed as the first while looking safer.
 
-    ``digest`` is the sha256 hex of the bytes the gate staged and verified. It is required
-    rather than defaulted: an attachment nobody vouched for is exactly the case that must be
+    ``digest`` is required rather than defaulted: an attachment nobody vouched for must be
     impossible to construct by accident.
     """
 
@@ -151,18 +141,15 @@ class Attachment:
 class ReviewSpec:
     """Everything one review invocation needs, in harness-neutral terms.
 
-    Deliberately says *what the invocation is*, never how to spell it: the prompt is
-    already-decoded text, ``attachments`` is the exact ordered list
-    :func:`arl.reviewer.stage_invocation` staged (never a directory to glob), and
-    ``cold`` states the intent -- "this run must see no model-influenced context" --
-    which each harness honours in whatever way its own CLI provides.
+    Deliberately says *what the invocation is*, never how to spell it: the prompt is already-decoded
+    text, ``attachments`` is the exact ordered list :func:`arl.reviewer.stage_invocation` staged
+    (never a directory to glob), and ``cold`` states the intent -- this run must see no
+    model-influenced context.
 
-    **The two session fields are never both set, and they mean different things.**
-    ``session_id`` is a session that already exists and this run continues; it is only ever
-    non-empty when the gate decided continuity holds. ``new_session_id`` is an id
-    :meth:`SessionStrategy.mint` produced for a *fresh* run, so a CLI that pre-assigns
-    sessions can name the one it is about to create -- empty for a harness that cannot
-    pre-assign, which is what leaves post-hoc discovery the only way to learn it.
+    **The two session fields are never both set.** ``session_id`` is a session that already exists
+    and this run continues, non-empty only when the gate decided continuity holds.
+    ``new_session_id`` is an id :meth:`SessionStrategy.mint` produced for a *fresh* run, empty for a
+    harness that cannot pre-assign.
     """
 
     repo: str
@@ -259,22 +246,16 @@ class Captured:
 class Usage:
     """What one reviewer invocation cost, as its CLI reported it.
 
-    **Observability only. Nothing in the gate reads this to decide anything** -- not a verdict,
-    not a budget, not a retry. It exists because the cost of a round was previously invisible:
-    the figures were sitting in the CLI's own output, which
-    :func:`arl.reviewer._reduce_transcript` moved aside into an ``.envelope`` file nobody
-    reads. A round that costs several dollars should say so in its report rather than only in
-    the provider's billing page.
+    **Observability only. Nothing in the gate reads this to decide anything** -- not a verdict, not
+    a budget, not a retry. It exists because the cost of a round was otherwise invisible.
 
-    Every field is ``None`` when the CLI did not report it or reported it as something other
-    than a number, and the whole object is ``None`` when there is nothing to read at all
-    (:meth:`Harness.usage`). A missing figure is displayed as missing; it is never defaulted to
-    ``0``, which would read as "this round was free".
+    Every field is ``None`` when the CLI did not report it or reported a non-number, and the whole
+    object is ``None`` when there is nothing to read. A missing figure is displayed as missing,
+    never defaulted to ``0``, which would read as "this round was free".
 
-    ``cache_read_tokens`` is the one worth understanding: an agentic review re-reads its whole
-    context on every turn, so this is roughly *context size x turns* and is normally the
-    largest number here by an order of magnitude. It is what makes turn count, not payload
-    size alone, the thing that drives the bill.
+    ``cache_read_tokens`` is roughly *context size x turns*, normally the largest number here by an
+    order of magnitude -- which is what makes turn count, not payload size, the thing that drives
+    the bill.
     """
 
     #: Agentic turns the run took -- each one a full re-read of the context.
@@ -292,17 +273,13 @@ class Usage:
 class SessionStrategy(Protocol):
     """How one harness's sessions come into existence, and how one is recognised.
 
-    **The two harness families differ in kind here, not in detail.** OpenCode *discovers* a
-    session after the fact -- it is created by the run itself, and the only way to learn its
-    id is to list sessions and match the unique ``--title`` the run was given. Claude Code
-    *assigns* one up front: the gate mints a uuid, hands it over, and there is nothing to
-    look up afterwards. Everything else about continuity -- the claim, the round cap, the
-    structural pointer checks, the cold-approval invariant -- is shared, so only this seam
-    varies.
+    **The two families differ in kind, not detail.** OpenCode *discovers* a session after the fact
+    -- it is created by the run, and the only way to learn its id is to list sessions and match the
+    unique ``--title``. Claude Code *assigns* one up front. Everything else about continuity is
+    shared, so only this seam varies.
 
-    Everything a strategy produces is a continuity **hint**. Nothing here can authorise an
-    approval: the cold-approval invariant in ``reviewer.execute`` is what makes a tampered or
-    wrong pointer unable to turn a review into a pass, and it does not consult this at all.
+    Everything a strategy produces is a continuity **hint**: nothing here can authorise an
+    approval, and what a verdict must survive in ``reviewer.execute`` consults none of it.
     """
 
     @property
@@ -382,16 +359,14 @@ class Harness(Protocol):
     def transcript(self, raw: bytes) -> bytes:
         """The reviewer's answer, extracted from whatever its CLI actually wrote.
 
-        The gate parses **one** thing -- the ``FINDING``/``VERDICT`` contract -- and it parses
-        it out of prose. A CLI that answers in prose returns ``raw`` unchanged; one that wraps
-        the answer in a report of its own unwraps it here, so
-        :func:`arl.reviewer.parse` never learns that more than one shape exists.
+        The gate parses **one** thing, the ``FINDING``/``VERDICT`` contract, out of prose. A CLI that
+        answers in prose returns ``raw`` unchanged; one that wraps the answer unwraps it here, so
+        :func:`arl.reviewer.parse` never learns more than one shape exists.
 
-        **This is also where a run that "succeeded" is refused.** Some CLIs report a failed
-        turn, or a tool call they denied, in that wrapper while still exiting ``0`` -- measured
-        on Claude Code. Anything of that kind raises :class:`TranscriptError` rather than
-        returning text, because a review of less evidence than the gate believes it sent must
-        never reach the parser as a verdict (Rule 1).
+        **This is also where a run that "succeeded" is refused.** Some CLIs report a failed turn, or a
+        tool call they denied, in that wrapper while still exiting ``0`` -- measured on Claude Code.
+        Anything of that kind raises :class:`TranscriptError`, because a review of less evidence than
+        the gate believes it sent must never reach the parser as a verdict (Rule 1).
         """
 
     def usage(self, raw: bytes) -> Usage | None:

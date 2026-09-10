@@ -62,9 +62,8 @@ Arming never ran, so nothing was frozen, nothing is being reviewed, and this
 mutation is denied.
 
 /adversarial-review-loop:implement or :resume was submitted in this session, but
-the arm command itself never executed. The usual causes are a sandbox that
-refused to run it, an unreadable or non-executable scripts/arl.sh, or a
-missing interpreter.
+the arm command itself never executed -- a sandbox that refused to run it, an
+unreadable or non-executable scripts/arl.sh, or a missing interpreter.
 
 Tell the user. They can look at the error the slash command printed, fix the
 cause and run /adversarial-review-loop:implement <plan.md> again, or leave the
@@ -119,7 +118,7 @@ without another review and continue, or leave the mode with /adversarial-review-
 STALE: Final = """\
 This activation is older than ttl_hours ({ttl_hours}) and is presumed abandoned. It blocks rather than silently disarming.
 
-Continue it with /adversarial-review-loop:resume, which keeps the baseline and every approval and re-verifies the worktree before picking back up — that is usually the right recovery. Re-arm with /adversarial-review-loop:implement <plan.md> only to start over from scratch, or leave the mode with /adversarial-review-loop:stop.
+Continue it with /adversarial-review-loop:resume, which keeps the baseline and every approval and re-verifies the worktree before picking back up. /adversarial-review-loop:implement <plan.md> starts over from scratch; /adversarial-review-loop:stop leaves the mode.
 """
 
 RESUMED: Final = """\
@@ -163,15 +162,14 @@ allowed; that one command is the only Bash this gate accepts until it has run.
 SET_PHASES_REFUSED: Final = """\
 That is the right command, but this spelling of it was refused: {error}
 
-The phase descriptions are ordinary text and the tokenizer reads them as shell words, so a
-description cannot contain a backtick or a "$" -- both are command substitution to the shell,
-and neither is worth risking at the one moment nothing else may run. Rewrite them as plain
-prose, drop any code formatting, and run it again:
+The descriptions are read as shell words, so one cannot contain a backtick or a "$" -- both
+are command substitution. Rewrite them as plain prose, drop any code formatting, and run it
+again:
 
     {plugin_root}/scripts/arl.sh set-phases --phase "…" --phase "…"
 
-The wording of a phase is yours to choose; only the characters are constrained. Nothing else
-about the activation has changed, and no attempt has been counted against you.
+The wording is yours to choose; only the characters are constrained. Nothing else about the
+activation has changed, and no attempt has been counted against you.
 """
 
 SET_PHASES_ALLOWED: Final = "adversarial-review-loop: set-phases is the one command allowed before the phase list is frozen."
@@ -193,8 +191,7 @@ with a blank line:
 
   git add -A && git commit -m "subject" -m "first para" -m "second para"
 
-A real newline inside one -m, and -F/--file, are both refused. Repeated -m is
-the way to write a body here, not a workaround.
+A real newline inside one -m, and -F/--file, are both refused.
 
 Run builds, tests, formatters and `git rm` as their own separate Bash calls
 first; the next snapshot picks their result up. Then commit with one of the
@@ -234,9 +231,8 @@ This tool would write inside the review loop's own state directory:
 
   {path}
 
-That directory ({root}) holds the frozen plan, the record of what has been reviewed, and the
-status this gate enforces. Nothing in the repository under review has any reason to edit it,
-and editing it is how the mode gets switched off without anyone deciding to.
+That directory ({root}) holds the frozen plan and the record of what has been reviewed.
+Editing it is how the mode gets switched off without anyone deciding to.
 
 If you believe the loop should end, say so and let the user run /adversarial-review-loop:stop.
 """
@@ -244,8 +240,8 @@ If you believe the loop should end, say so and let the user run /adversarial-rev
 EXPANSION_DENIED: Final = """\
 This command contains {expansion}, so the gate cannot tell what program it will run.
 
-That is not a guess it may make: a command name produced by an expansion can be `git`, and a
-commit created that way would never reach the review gate at all.
+An expanded command name can be `git`, and a commit created that way would never reach the
+review gate at all.
 
 Only the **command name** is refused. An expansion in an argument is fine -- `echo "exit=$?"`
 runs `echo` -- and so is anything inside the body of a heredoc whose delimiter is quoted
@@ -306,6 +302,19 @@ RETRY_BACKOFF: Final = """\
 The reviewer hit a transient failure (a timeout, a rate/usage limit, or contention with another review of this phase already in progress) and this commit is denied without spending another provider call while it paces retries.
 
 Retry in {remaining}s.
+"""
+
+#: How long a contention denial paces before the next attempt. Flat, not the transient
+#: counter's doubling: nothing is being counted, so there is no exponent to raise, and the
+#: wait a caller actually owes is named in the message itself -- the holder's remaining lease.
+_CONTENDED_BACKOFF_SEC: Final = 30
+
+CONTENDED_REVIEW: Final = """\
+The review of this phase could not start because another one holds the slot, so nothing was invoked. This is NOT an approval, and it was NOT counted against the review budget -- no provider call was made.
+
+{error}
+
+The next attempt will wait at least {backoff}s.
 """
 
 TRANSIENT_FAILURES_EXHAUSTED: Final = """\
@@ -405,9 +414,8 @@ RESET_UNREADABLE: Final = """\
 This reset was not accepted: {error}
 
 Outside a reconcile the only reset this gate can reason about is `git reset --soft <target>`,
-and it must not move HEAD off a commit that was reviewed. A reset it cannot read is denied
-rather than passed through: every commit in this history is a tree that was actually
-reviewed, and rewinding one breaks that guarantee.
+and it must not move HEAD off a commit that was reviewed: every commit in this history is a
+tree a review approved, and rewinding one breaks that guarantee.
 
 If you meant to unstage something, there is no need — the review snapshot is taken through a
 throwaway index and never reads the real one.
@@ -443,8 +451,8 @@ def _guard_state_root(hook: Hook, payload: HookInput) -> None:
 
     This closes the *tool* route and only that. A Bash command can still write the same file,
     and no check inside this process can prevent it -- the gate runs as the same user, and by
-    the time it is asked about a command that command is about to run. See AGENTS.md, "What
-    Rule 4 does and does not guarantee". Worth having anyway: it is one string comparison, and
+    the time it is asked about a command that command is about to run. See
+    docs/design/end-state-record.md. Worth having anyway: it is one string comparison, and
     it removes the route that needs no shell at all.
     """
     if not payload.path:
@@ -599,24 +607,16 @@ def _deny_set_phases_shape(hook: Hook, *, tool: str, command: str) -> None:
 def _verified_plan_file(hook: Hook, *, state: State, config: Config) -> str:
     """The active plan revision's file name, fully verified, or escalate and deny.
 
-    **Verifies before ``set-phases`` is ever considered for an allow**, not only when this is
-    reached to build a denial message: both ``ARMED`` and ``replan_pending`` are about to let
-    the model redefine phase scope from whatever it read, and if the activation's own record
-    of what that evidence *is* cannot be trusted, that must block the freeze itself, not just
-    the wording of an unrelated denial. So this reads and hash-verifies the active revision in
-    full (:func:`planrev.verified_revisions`, the same check ``reviewer.build_bundle`` runs
-    before a review), not merely its name -- a corrupted or tampered entry must not let
-    ``set-phases`` through on the strength of "the filename looked safe".
+    **Verifies before ``set-phases`` is ever considered for an allow**, not only when building a
+    denial message: ``ARMED`` and ``replan_pending`` are about to let the model redefine phase
+    scope from whatever it read, so an untrustworthy record of what that evidence *is* must block
+    the freeze itself. Hash-verifies the active revision in full, not merely its name -- a
+    tampered entry must not let ``set-phases`` through on "the filename looked safe".
 
-    Escalation is **guarded**, exactly as ``pretool._escalate``/``stop._escalate`` already are
-    for every other path that writes ``NEEDS_HUMAN``: ``expected`` is captured before the
-    verification runs, and ``hooks.escalate`` only writes if the activation still matches it
-    when the write actually happens. An unconditional ``state.needs_human(...)`` here could
-    otherwise land after a concurrent ``/adversarial-review-loop:stop`` and re-enable the gate the
-    user just turned off (Rule 4) -- the same failure the reviewer-escalation path already
-    guards against, reached this time from a check with no slow operation in between, but the
-    same race in miniature: nothing here holds the lock continuously between the read and the
-    write.
+    Escalation is **guarded**, like every other path that writes ``NEEDS_HUMAN``: ``expected`` is
+    captured before verification and only written if the activation still matches, or it could
+    land after a concurrent ``/adversarial-review-loop:stop`` and re-enable the gate the user just
+    turned off (Rule 4).
     """
     from arl import planrev  # noqa: PLC0415 - not on the read-only hot path
 
@@ -636,32 +636,23 @@ def _verified_plan_file(hook: Hook, *, state: State, config: Config) -> str:
 def _upgrade_stale_document(state: State) -> None:
     """Run any pending migration once, here, on the first tool call this gate decides about.
 
-    ``State._migrate`` runs inside :meth:`State.transaction`, and both hooks read without one,
-    so a document written by an older build stays un-migrated for as long as nothing happens to
-    write to it. That is a correctness gap rather than untidiness, because of what the 4 -> 5
-    arm decides: it reads the stored status to work out whether an absent ``ended_*`` record
-    means "this ended before the record existed" (silence) or "this is live and will record
-    properly when it ends" (so a later hand-edited status is reported). Left un-migrated, a
-    legacy activation that is still live keeps the absent record, and writing ``status:
-    DISARMED`` straight into ``state.json`` -- the Rule 4 bypass that leaves no command to
-    inspect -- reads as the first case and goes unreported.
+    ``State._migrate`` runs inside :meth:`State.transaction` and both hooks read without one, so a
+    legacy document stays un-migrated until something writes to it. That is a correctness gap
+    because of what the 4 -> 5 arm decides: left un-migrated, a legacy activation that is still
+    live keeps the absent ``ended_*`` record, and writing ``status: DISARMED`` straight into
+    ``state.json`` -- the Rule 4 bypass -- reads as "ended before the record existed" and goes
+    unreported.
 
-    This is the earliest point that closes it, and it closes it for the shape that matters: the
-    wrapper has to run at least one tool call to do anything, and every one of them arrives
-    here first. What it cannot cover is a status edited by something that never passes a hook
-    at all -- the user's own shell -- which is not the threat model.
+    This is the earliest point that closes it for the shape that matters: the wrapper has to run at
+    least one tool call, and every one arrives here first. It cannot cover a status edited by
+    something that never passes a hook, which is not the threat model.
 
-    **Costs one write per activation, ever**, not one per call: after the first upgrade the
-    version check matches and this returns on a dict lookup. The lock is taken only on that
-    same first call. It is deliberately *not* hoisted above ``hooks.tool_is_readonly``, so a
-    read-only tool still answers before state is loaded at all (see AGENTS.md, "Hot-path
-    rules").
+    **Costs one write per activation, ever** -- afterwards the version check matches and this
+    returns on a dict lookup. Deliberately *not* hoisted above ``hooks.tool_is_readonly``, so a
+    read-only tool still answers before state is loaded (docs/design/interpreter-and-watchdog.md).
 
-    A migration that cannot complete raises ``StateLoadError`` exactly as it does on every
-    other path, and the fail-closed guard in ``hookio.Hook.run`` turns that into a denial --
-    the right answer for a document the gate cannot bring up to date. That does mean a legacy
-    activation whose ``plan.frozen.md`` is gone reaches its ``ARM_FAILED`` escalation on the
-    next tool call rather than on the next write; earlier, and in the denying direction.
+    A migration that cannot complete raises ``StateLoadError``, which the fail-closed guard turns
+    into a denial.
     """
     if state.data.get("version") == STATE_VERSION:
         return
@@ -703,7 +694,7 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
     if status == "ACTIVE" and state.get("replan_pending") == "true":
         # Same fence as ARMED, and for the same reason: a phase list that can be rewritten
         # while other tool calls are permitted lets work happen, or even be reviewed, before
-        # the description it is meant to match exists. See AGENTS.md, "the replan fence".
+        # the description it is meant to match exists. See docs/design/state-fields.md.
         # Verified before the allow-check, same as the ARMED branch above.
         plan_file = _verified_plan_file(hook, state=state, config=config)
         if tool == "Bash" and cmdshape.is_set_phases(command, commands.entrypoint()):
@@ -796,21 +787,19 @@ def _checked_base_tree(hook: Hook, state: State) -> str:
 
 
 def _check_retry_backoff(hook: Hook, state: State) -> None:
-    """Phase 6: a transient failure (timeout, rate limit, or busy-slot contention) paces its
-    own retries.
+    """Phase 6: a transient failure (timeout, rate limit, or busy-slot contention) paces its own
+    retries.
 
-    Called from ``_gate_commit`` only once every free shortcut (byte-identical tree, an
-    already-approved tree, no content diff, an ignore_globs-only change) has been ruled out
-    -- ahead of the reviewer call itself, so a backoff denies without spending another
-    provider call, but **never** ahead of those shortcuts. It used to run first, before even
-    ``_prepare``; moved here because a stale ``retry_not_before`` -- set by a review that lost
-    a busy-slot race and only got around to recording its own failure *after* a genuinely
-    concurrent review for the same label had already approved the tree -- must not then block
-    the commit ``state.tree_approved(tree)`` would otherwise allow for free. The counter
-    mutation in ``_review_failed`` still is not made fully race-proof by this (that would need
-    the busy check and the failure recording to share one lock, which they structurally do
-    not); this closes the actual, observable failure instead: an already-approved tree is
-    never denied by a backoff, whichever order the two writes land in.
+    Called from ``_gate_commit`` only once every free shortcut -- byte-identical tree, an
+    already-approved tree, no content diff, an ignore_globs-only change -- has been ruled out, and
+    ahead of the reviewer call so a backoff denies without spending a provider call. It used to run
+    first; moved because a stale ``retry_not_before``, set by a review that lost a busy-slot race
+    and recorded its failure only after a concurrent review had already approved the tree, must not
+    block the commit ``state.tree_approved(tree)`` would allow for free.
+
+    This does not make the counter mutation race-proof -- that needs the busy check and the failure
+    recording to share one lock, which they structurally do not. It closes the observable failure:
+    an already-approved tree is never denied by a backoff, whichever order the writes land in.
     """
     retry_not_before = state.get_int("retry_not_before")
     if not retry_not_before:
@@ -821,24 +810,19 @@ def _check_retry_backoff(hook: Hook, state: State) -> None:
 
 
 def _refuse_if_stale(state: State, config: Config, *, expected: hooks.Activation, phase: int, review: reviewer.Review | None) -> None:
-    """Both "is this decision still valid?" questions, asked inside ``approve()``'s own
-    transaction against the document it reloaded. Raises :class:`commands.Refused` on either.
+    """Both "is this decision still valid?" questions, asked inside ``approve()``'s own transaction
+    against the document it reloaded. Raises :class:`commands.Refused` on either.
 
-    They are separate questions and neither subsumes the other:
+    Neither subsumes the other. The ``hooks.Activation`` fingerprint catches the activation itself
+    moving -- escalated, expired, stopped, re-armed, entered ``RECONCILE`` -- while the reviewer
+    ran; reloading alone would not help, since the write would still land over whatever the
+    activation became. ``reviewer.approval_is_current`` catches a *newer review of the same phase*
+    landing between ``reviewer.execute`` releasing its claim and this transaction opening:
+    ``round_history`` is not one of the fingerprint's fields, so a ``CHANGES_REQUIRED`` moves
+    nothing it compares and a stale ``APPROVED`` would be written over the newer, blocking verdict.
 
-    - the ``hooks.Activation`` fingerprint catches the activation *itself* moving -- escalated,
-      expired, stopped, re-armed, entered ``RECONCILE`` -- while the reviewer ran. Reloading
-      alone would not be enough: the write would still land, over the top of whatever the
-      activation became. That is the failure-into-approval direction Rule 1 forbids;
-    - ``reviewer.approval_is_current`` catches a *newer review of the same phase* landing in
-      the window between ``reviewer.execute`` releasing its active-review claim and this
-      transaction opening. ``round_history`` is not one of the fingerprint's fields and a
-      ``CHANGES_REQUIRED`` moves nothing else it compares, so the first check passes and a
-      stale ``APPROVED`` would be written straight over the newer, blocking verdict.
-
-    ``review is None`` on the four shortcut approvals: none of them rests on a verdict at all
-    (a byte-identical tree, an already-approved tree, an empty diff, an all-ignored diff), so
-    there is no verdict for a later one to supersede and only the first question applies.
+    ``review is None`` on the four shortcut approvals: none rests on a verdict, so only the first
+    question applies.
     """
     from arl import reviewer  # noqa: PLC0415 - reached only by a commit, like `_gate_commit`'s own import
 
@@ -966,27 +950,39 @@ def _escalate(hook: Hook, *, state: State, config: Config, expected: hooks.Activ
 def _review_failed(hook: Hook, *, state: State, config: Config, expected: hooks.Activation, review: reviewer.Review) -> NoReturn:
     """An operational failure. Counted, and escalated once the run of them is long enough.
 
-    Counted **inside** the transaction, against the document it reloads: two overlapping
-    commits that each read the same starting count would otherwise both write the same value,
-    so a run of failures would never reach the limit.
+    Counted **inside** the transaction, against the document it reloads: two overlapping commits
+    reading the same starting count would both write the same value, so a run of failures would
+    never reach the limit.
 
-    ``review.kind == "transient"`` (a timeout, a matched rate/usage-limit signal, or a busy
-    active-review slot -- ``reviewer._classify_op_failure`` and ``_reserve_round``) is counted
-    and paced separately from every other operational failure (phase 6): a missing binary, a
-    bad ``--model``, an expired credential or a malformed-contract response burns the ordinary
-    ``failures``/``max_failures`` budget unchanged, with no retry pacing, because retrying
-    sooner cannot fix any of those.
+    ``review.kind == "transient"`` -- a timeout, a matched rate-limit signal, or a busy
+    active-review slot -- is counted and paced separately. Every other operational failure burns
+    the ordinary ``failures``/``max_failures`` budget with no pacing, because retrying sooner
+    cannot fix a missing binary or a bad ``--model``.
 
-    The transient counter's mutation is guarded by the same ``expected`` fingerprint check
-    ``approve()`` uses, and for the identical reason: a busy-slot refusal is decided quickly,
-    but *this* function -- the one that actually counts it -- can run much later relative to a
-    genuinely concurrent, winning review of the same label, which may have approved the tree,
-    advanced the phase, or otherwise moved the activation in the meantime (``approve()`` does
-    change the fingerprint: it writes ``pending_approved_tree``, which is one of
-    ``hooks.Activation``'s own fields). Counting the failure against whatever state exists by
-    the time this runs would attribute it to a phase or activation it has nothing to do with;
-    the mismatch denies this specific attempt instead, without touching the counter at all.
+    ``review.contended`` narrows that further: the slot was held, so **nothing was invoked**. It
+    is paced but not counted, and never escalates. Every other transient failure spends a real
+    provider call to earn its place in ``max_transient_failures``; this one spends none, and the
+    holder may already be dead -- nothing releases the claim of a hook that was ``SIGKILL``-ed, so
+    counting it lets one interrupted turn escalate an activation to ``NEEDS_HUMAN`` on a wall
+    clock. See :attr:`arl.reviewer.Review.contended`.
+
+    The transient counter's mutation is guarded by the same ``expected`` fingerprint ``approve()``
+    uses: a busy-slot refusal is decided quickly but counted much later relative to a genuinely
+    concurrent winning review, which may by then have approved the tree (``approve()`` writes
+    ``pending_approved_tree``, one of ``hooks.Activation``'s own fields). A mismatch denies this
+    attempt without touching the counter. See ``docs/design/state-fields.md``.
     """
+    if review.contended:
+        try:
+            with state.transaction():
+                current = hooks.activation(state, config)
+                if current != expected:
+                    raise commands.Refused(ACTIVATION_MOVED.format(change=hooks.describe_move(expected, current), now=current.summary))
+                state.update(retry_not_before=now() + _CONTENDED_BACKOFF_SEC)
+        except commands.Refused as exc:
+            hooks.deny(hook, str(exc))
+        hooks.deny(hook, CONTENDED_REVIEW.format(error=review.error, backoff=_CONTENDED_BACKOFF_SEC))
+
     if review.kind == "transient":
         try:
             with state.transaction():
@@ -1075,26 +1071,19 @@ def _gate_reset(hook: Hook, *, state: State, repo: str, command: str) -> NoRetur
 
 
 def _gate_root_undo(hook: Hook, *, state: State, repo: str, command: str) -> NoReturn:
-    """The one bounded ``git update-ref -d HEAD`` permitted while a *root-commit* reconcile is unfinished.
+    """The one bounded ``git update-ref -d HEAD`` permitted while a *root-commit* reconcile is
+    unfinished.
 
-    Without it that reconcile has no exit at all. ``_gate_reset``'s recovery is
-    ``git reset --soft <the diverging commit's parent>``, and a root commit has no parent:
-    ``bad_commit_parent`` is empty, no target can ever equal it, and ``reset --soft`` refuses a
-    missing target anyway. The activation then sits in ``RECONCILE`` -- which the Stop gate
-    will not let the session complete through -- until the user stops the loop and re-arms,
-    which is not a recovery, it is giving up on the activation.
+    Without it that reconcile has no exit: ``_gate_reset``'s recovery is ``git reset --soft <the
+    diverging commit's parent>``, and a root commit has no parent, so the activation sits in
+    ``RECONCILE`` until the user gives up on it.
 
-    Four things are checked before this is allowed, and each one is a way the deletion would
-    drop something other than the single diverging commit:
+    Four things are checked, each a way the deletion would drop something other than the single
+    diverging commit: the reconcile really has no parent to reset to; ``HEAD`` is still exactly the
+    commit the reconcile recorded; that commit really is a root commit; and the activation began in
+    an empty repository, which is the only way its root-ness means nothing older is rewound.
 
-    - the reconcile really has no parent to reset to (otherwise the ordinary reset is the
-      recovery, and a ref deletion here would drop reviewed history);
-    - ``HEAD`` is still exactly the commit the reconcile recorded as diverging;
-    - that commit really is a root commit -- no parent -- so deleting the ref drops it alone;
-    - and the activation began in an empty repository (``activation_commit`` empty), which is
-      the only way the diverging commit's own root-ness means nothing older is being rewound.
-
-    An unreadable history denies, like everywhere else (Rule 1).
+    An unreadable history denies (Rule 1).
     """
     from arl import cmdshape, gitsnap  # noqa: PLC0415 - reached only during a reconcile
 

@@ -48,14 +48,10 @@ from arl.util import format_at
 
 __all__ = ["confirm_commit", "posttool_failure"]
 
-RECONCILE_CONTEXT: Final = """\
-**adversarial-review-loop: the commit that landed is not the tree that was reviewed.**
-
-{detail}
-
-The phase has NOT advanced. Recover explicitly, in this order:
-
-1. `git reset --soft {parent}`   (permitted only during this reconcile)
+#: The half of the reconcile recovery that does not depend on whether the diverging commit has
+#: a parent. One text, so the two recoveries cannot drift into contradicting each other about
+#: what happens after the undo.
+_RECONCILE_TAIL: Final = """\
 2. rebuild the intended complete tree for this phase
 3. commit again with `git add -A && git commit -m "…"` — it goes through the
    normal review gate
@@ -65,13 +61,27 @@ is recorded as broken, and while it is, the Stop gate will not complete this
 activation at all.
 """
 
+RECONCILE_CONTEXT: Final = (
+    """\
+**adversarial-review-loop: the commit that landed is not the tree that was reviewed.**
+
+{detail}
+
+The phase has NOT advanced. Recover explicitly, in this order:
+
+1. `git reset --soft {parent}`   (permitted only during this reconcile)
+"""
+    + _RECONCILE_TAIL
+)
+
 #: The recovery for a diverging **root** commit. ``git reset --soft`` cannot be spelled here:
 #: the commit has no parent, so there is no target that exists, and the reconcile printed
 #: ``git reset --soft `` with an empty target -- advice the gate itself then refused, leaving
 #: the activation with no exit but abandoning it. Deleting the branch ref removes that one
 #: commit and leaves the index and worktree untouched, which is what ``--soft`` does everywhere
 #: else. ``pretool._gate_root_undo`` re-checks every claim in this message before allowing it.
-RECONCILE_CONTEXT_ROOT: Final = """\
+RECONCILE_CONTEXT_ROOT: Final = (
+    """\
 **adversarial-review-loop: the commit that landed is not the tree that was reviewed.**
 
 {detail}
@@ -82,14 +92,9 @@ NOT advanced. Recover explicitly, in this order:
 1. `git update-ref -d HEAD`   (permitted only during this reconcile, and only while HEAD is
    still that root commit — it drops the commit and leaves the index and working tree exactly
    as they are)
-2. rebuild the intended complete tree for this phase
-3. commit again with `git add -A && git commit -m "…"` — it goes through the
-   normal review gate
-
-Do not commit forward on top of the diverging commit: the per-commit invariant
-is recorded as broken, and while it is, the Stop gate will not complete this
-activation at all.
 """
+    + _RECONCILE_TAIL
+)
 
 #: The recovery when no commit landed at all and there is no earlier commit to reset to -- an
 #: activation armed in an empty repository whose ``git commit`` reported success without

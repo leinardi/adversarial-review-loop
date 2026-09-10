@@ -32,7 +32,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import git, run_bootstrap, run_hook
+from conftest import git, run_bootstrap, run_hook, set_phases
 from test_commands_arm import (
     _path_without_a_watchdog,
     _path_without_opencode,
@@ -69,14 +69,6 @@ def arm(repo: Path, tmp_path: Path, env: dict[str, str], session: str = S1, extr
     proc = run_bootstrap(["arm", "--session", session, "--args", f"{plan} {extra_args}".strip()], cwd=repo, env=env)
     assert proc.returncode == 0, proc.stdout
     return plan
-
-
-def set_phases(repo: Path, env: dict[str, str], *phases: str) -> None:
-    argv = ["set-phases"]
-    for phase in phases:
-        argv += ["--phase", phase]
-    proc = run_bootstrap(argv, cwd=repo, env=env)
-    assert proc.returncode == 0, proc.stderr
 
 
 def active(repo: Path, tmp_path: Path, env: dict[str, str], *phases: str, extra_args: str = "") -> Path:
@@ -184,6 +176,40 @@ def test_resume_carries_round_history_but_resets_the_convergence_counters(git_re
     assert after["stop_blocks"] == 0
     assert after["stop_marker"] == ""
     assert after["defer_pending"] is False
+
+
+def test_the_stored_reports_are_copied_and_the_sequence_keeps_counting(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Reports are evidence, so they are carried forward -- and ``report_seq`` counts on.
+
+    The two halves are one claim. A successor that copied the reports but restarted the
+    sequence would have its first review overwrite the carried-forward ``001``, destroying the
+    evidence the copy exists to preserve; one that continued the sequence without copying
+    would leave every denial before the resume pointing at a report that is not there. The
+    retired directory itself is never mutated -- the successor gets a copy.
+    """
+    env = armed(clean_env, ARL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env)
+    (git_repo / "a.txt").write_text("first round\n")
+    assert pretool(git_repo, env, command=COMMIT)[0] == "deny"
+    before = sorted(path.name for path in (state_dir(env, git_repo, S1) / "reports").glob("*.md"))
+    assert [name[:3] for name in before] == ["001"], "one round ran under the predecessor"
+
+    code, banner = resume(git_repo, env, args="--allow-dirty")
+    assert code == 0, banner
+    assert "RESUMED for this worktree" in banner
+
+    successor = state_dir(env, git_repo, S2)
+    assert sorted(path.name for path in (successor / "reports").glob("*.md")) == before, "carried forward byte-for-byte"
+
+    # A second round, under the successor. It must take 002, not overwrite the copied 001.
+    (git_repo / "a.txt").write_text("second round\n")
+    assert pretool(git_repo, env, command=COMMIT, session=S2)[0] == "deny"
+
+    after = sorted(path.name[:3] for path in (successor / "reports").glob("*.md"))
+    assert after == ["001", "002"], "the sequence continues rather than restarting"
+    assert sorted(path.name for path in (state_dir(env, git_repo, S1) / "reports").glob("*.md")) == before, (
+        "and the retired predecessor's own directory was never written to"
+    )
 
 
 def test_the_predecessor_is_retired_and_denies_every_mutation(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -1646,7 +1672,7 @@ def test_stopping_a_retired_activation_does_not_call_the_worktree_ungated(
 
     assert proc.returncode == 0, proc.stdout
     assert S2 in proc.stdout
-    assert "A Claude session still *bound* to any retired activation" in proc.stdout
+    assert "a session still *bound* to any retired activation" in proc.stdout
     assert f"({S1})" in proc.stdout, "and the chain it names has to include this one"
     # And the one document AGENTS.md forbids mutating at all is untouched.
     assert (state_dir(env, git_repo, S1) / "state.json").read_bytes() == before

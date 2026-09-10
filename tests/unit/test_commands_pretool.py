@@ -32,10 +32,10 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_REVIEWER, decision, git, run_bootstrap, run_hook
+from conftest import FAKE_REVIEWER, decision, git, run_bootstrap, run_hook, set_phases, unborn_repo
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
 
-from arl import paths
+from arl import config, paths
 
 SESSION = "s1"
 
@@ -68,14 +68,6 @@ def pretool(repo: Path, env: dict[str, str], **kwargs: object) -> tuple[str, str
 def arm(repo: Path, tmp_path: Path, env: dict[str, str]) -> None:
     proc = run_bootstrap(["arm", "--session", SESSION, "--plan", str(plan_file(tmp_path))], cwd=repo, env=env)
     assert proc.returncode == 0, proc.stdout
-
-
-def set_phases(repo: Path, env: dict[str, str], *phases: str) -> None:
-    argv = ["set-phases"]
-    for phase in phases:
-        argv += ["--phase", phase]
-    proc = run_bootstrap(argv, cwd=repo, env=env)
-    assert proc.returncode == 0, proc.stderr
 
 
 def active(repo: Path, tmp_path: Path, env: dict[str, str], *phases: str) -> None:
@@ -445,6 +437,11 @@ def test_an_expired_activation_blocks_rather_than_disarming(git_repo: Path, tmp_
 
     assert verdict == "deny"
     assert "older than ttl_hours" in reason
+    # A denial with no way out is where a run gets stuck. `resume` is the recovery that keeps
+    # the baseline and every approval; re-arming is the destructive one, and both are named so
+    # the model does not pick the second by default.
+    assert "/adversarial-review-loop:resume" in reason
+    assert "/adversarial-review-loop:implement <plan.md> starts over" in reason
 
 
 def test_nothing_may_change_before_the_phase_list_is_frozen(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -703,6 +700,169 @@ def test_a_refused_commit_body_is_told_how_to_write_one(
     assert 'git add -A && git commit -m "subject" -m "first para" -m "second para"' in reason
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git commit -m x", id="bare"),
+        pytest.param('git commit -m "feat(x): a message with spaces"', id="quoted-message"),
+        pytest.param("git add -A && git commit -m x", id="add-all-first"),
+        pytest.param("git add -A && git status --porcelain && git commit -m x", id="a-read-only-step-between"),
+        pytest.param('git commit -am "both"', id="add-and-commit-in-one-flag"),
+        pytest.param('git add -u && git commit --message="long form"', id="long-form-message"),
+        pytest.param("git add src lib && git commit -m x", id="add-named-paths"),
+        pytest.param('git commit -m "subject" -m "body"', id="repeated-m-body"),
+        pytest.param('git add -A && git commit -m "s" -m "b1" -m "b2"', id="repeated-m-multi-paragraph"),
+    ],
+)
+def test_the_accepted_commit_shapes_reach_the_gate_through_a_real_pretool(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str
+) -> None:
+    """The allowlist table, asserted where it is actually enforced.
+
+    ``test_cmdshape.py`` proves the same table against ``validate_commit`` directly; this
+    proves the hook routes each shape to it and acts on the answer. Every shape here leaves the
+    worktree untouched, so each lands on the "byte-identical to the last approved tree" cache
+    hit -- which is what makes the ``allow`` mean "the shape passed", not "there was something
+    worth approving". Repeated ``-m`` is the only supported way to write a commit body (a real
+    newline is refused by the deny-list, ``-F`` is off the allowlist), so it is what every
+    banner and denial tells the model to use and it has to work end to end.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "allow", reason
+    assert "byte-identical to the last approved tree" in reason
+
+
+def test_a_backgrounded_commit_is_denied_as_backgrounding(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``&`` and ``&>`` are different operators and get different reasons.
+
+    ``&>`` is one redirect token, not ``&`` followed by ``>``; reading it as backgrounding sent
+    it down the wrong denial and never reached the redirect reason the piped case gets."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command="git commit -m x &")
+
+    assert verdict == "deny"
+    assert 'backgrounds a process ("&")' in reason
+
+
+def test_a_read_only_git_command_never_reaches_the_shape_validator(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``git status`` mentions neither an expansion nor a commit, so it is ordinary Bash."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    proc = run_hook("pretool", payload(git_repo, command="git status"), cwd=git_repo, env=env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == "", "a passed-through command emits no decision at all"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git -C . commit -m x", id="dash-C-this-very-worktree"),
+        pytest.param("git -C /other commit -m x", id="dash-C-elsewhere"),
+        pytest.param("git -c user.name=x commit -m y", id="dash-c-config"),
+        pytest.param("git --git-dir .git commit -m z", id="git-dir-separate-value"),
+        pytest.param("git --work-tree . commit -m w", id="work-tree-separate-value"),
+        pytest.param("git --namespace ns commit -m n", id="namespace-separate-value"),
+        # Quoting the value used to destroy the word boundary the detector needed: flattened,
+        # `git -C "dir with space" commit` reads as `git -C dir with space commit`, and nothing
+        # could tell the path from the subcommand. Measured: bash runs the commit.
+        pytest.param('git -C "dir with space" commit -m x', id="a-quoted-option-value"),
+        pytest.param("git -C 'dir with space' commit -m x", id="a-single-quoted-option-value"),
+    ],
+)
+def test_a_global_option_taking_a_separate_value_still_reaches_the_gate(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str
+) -> None:
+    """**Regression for a live bypass**, and the reason the detector is generic.
+
+    ``mentions_commit`` used to read an option as one space-free token, so ``-C <path>`` broke
+    the pattern at the path and the subcommand was never found. ``git -C . commit -m x``
+    matched nothing, was passed straight through, and landed an unreviewed commit in the very
+    worktree under review. Every spelling below was measured against real git first: all six
+    create a commit.
+
+    They are denied rather than allowed because ``validate_commit`` refuses a global option
+    before the subcommand outright -- it can retarget the commit away from the worktree that
+    was reviewed. Detecting is the half that was missing.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny", reason
+    assert "global options before the subcommand" in reason
+
+
+def test_a_line_continuation_does_not_hide_a_commit(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """**Regression for a live bypass.** A backslash before a newline is a line continuation:
+    bash removes both characters and splices the word, so ``git com<continuation>mit -m x``
+    runs ``git commit``. Detection escaped the newline instead of dropping it, leaving
+    ``com\\nmit`` in the detection form -- which nothing matched, so the command reached the
+    shell with the gate never consulted. Measured against real bash: it lands the commit.
+
+    Once detected it is denied by the shape validator, because the real newline it still
+    contains is on the deny-list -- but *denied* is the point, against a pass-through that
+    committed. The same splice hid ``git re<continuation>set --hard`` from the reset guard and
+    ``arl.sh fin<continuation>ish`` from the Rule 4 denial.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command="git com\\\nmit -m x")
+
+    assert verdict == "deny", reason
+    assert "This commit command was not accepted" in reason
+
+
+def test_quotes_inside_the_subcommand_still_reach_the_review(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``git "com"mit -m x`` is ``git commit`` to bash, and it is a perfectly valid shape.
+
+    So the proof that detection saw it is not a denial from the validator -- it is that the
+    *reviewer* ran and blocked. With real changes in the worktree an ``allow`` cannot come
+    from the unchanged-tree cache hit either, so the finding in the denial is the evidence.
+    """
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env)
+    (git_repo / "work.txt").write_text("unreviewed\n")
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git "com"mit -m x')
+
+    assert verdict == "deny", reason
+    assert "FINDING" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git -C . reset --hard HEAD~1", id="reset"),
+        pytest.param('git -C "d d" reset --hard HEAD~1', id="reset-behind-a-quoted-value"),
+        pytest.param("git re\\\nset --hard HEAD~1", id="reset-behind-a-continuation"),
+        pytest.param("git -c x=y update-ref -d HEAD", id="update-ref"),
+    ],
+)
+def test_a_global_option_does_not_hide_a_ref_moving_command_either(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
+    """The same gap defeated the two guards that stop ``HEAD`` moving off a reviewed commit.
+
+    ``mentions_reset`` and ``mentions_update_ref`` share the detector's shape, so ``-C .``
+    hid them exactly as it hid a commit -- and a reset or a ref deletion the gate never sees
+    is a reviewed commit undone with nothing recorded.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+
+    verdict, _ = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+
+
 def test_an_unchanged_tree_needs_no_review(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
@@ -711,6 +871,80 @@ def test_an_unchanged_tree_needs_no_review(git_repo: Path, tmp_path: Path, clean
 
     assert verdict == "allow"
     assert "byte-identical to the last approved tree" in reason
+
+
+def test_the_findings_cap_escalates_through_the_hook_and_keeps_the_report(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A reviewer past ``max_findings`` escalates rather than being trimmed to fit.
+
+    ``test_reviewer_parse.test_the_findings_cap_escalates_instead_of_trimming`` proves ``parse``
+    returns ``NEEDS_HUMAN`` and keeps every line; this proves the hook acts on that -- denies,
+    writes the escalation to ``state.json``, and still stores the full report. A cap that
+    silently dropped the surplus would be a review whose findings the user can never see, and
+    a report the escalation discarded would leave the denial pointing at nothing.
+    """
+    env = armed_env(clean_env, ARL_MAX_FINDINGS="5", ARL_FAKE_COUNT="6", ARL_FAKE_MODE="many")
+    active(git_repo, tmp_path, env)
+    (git_repo / "a.txt").write_text("x\n")
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "NEEDS_HUMAN" in reason
+    assert "max_findings" in reason, "the reviewer's own reason survives the escalation"
+    assert read_state(env, git_repo, SESSION)["status"] == "NEEDS_HUMAN"
+    reports = list((state_dir(env, git_repo, SESSION) / "reports").glob("*.md"))
+    assert reports, "the full report is retained on disk, which is what the denial points at"
+    assert reports[0].read_text().count("FINDING") >= 6, "kept whole, not trimmed to the cap"
+
+
+def test_a_repository_config_can_switch_the_review_off_entirely(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``{"ignore_globs": ["**"]}`` in a repository config is a full, silent review bypass.
+
+    This is the exact input ``docs/security.md`` names under "Repo config is not trusted for
+    policy" as the most direct self-serving edit available: write that one line and every
+    subsequent commit is approved with no model consulted. It is asserted here, through the
+    repository config layer and the real hook, rather than only through ``config.load`` and
+    ``gitsnap.all_paths_ignored`` -- the claim in that document is about what a commit does,
+    and each half of it can be right while the wiring between them is wrong.
+
+    Deliberately *not* a denial: the bypass is admissible, argued for on that page against
+    ``verify_cmd`` already running repository-authored code. Pinning it is what stops it
+    becoming a bypass nobody documented.
+
+    Several paths change at once, and none of them matches a glob narrower than ``**``, so an
+    ``allow`` here can only come from the universal match. The reviewer stand-in is set to
+    block, so it cannot be a review that passed either.
+    """
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env)
+    (git_repo / config.REPO_CONFIG_NAME).write_text(json.dumps({"ignore_globs": ["**"]}))
+    (git_repo / "NOTES.md").write_text("notes\n")
+    (git_repo / "src").mkdir()
+    (git_repo / "src" / "main.py").write_text("print('x')\n")
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "allow", reason
+    assert "ignore_globs" in reason
+
+
+def test_a_change_outside_ignore_globs_is_still_reviewed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The other half, so the bypass above is a *match* and not "ignore_globs disables reviews".
+
+    One changed path outside the globs is enough: the skip requires **every** changed path to
+    match (``gitsnap.all_paths_ignored``), and a partial match that skipped anyway would be a
+    bypass reachable without ``**`` at all.
+    """
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env)
+    (git_repo / config.REPO_CONFIG_NAME).write_text(json.dumps({"ignore_globs": ["*.md"]}))
+    (git_repo / "NOTES.md").write_text("notes\n")
+    (git_repo / "code.py").write_text("print('x')\n")
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny", reason
+    assert "ignore_globs" not in reason
 
 
 def test_a_git_option_shaped_base_tree_in_state_is_refused_not_run(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -879,6 +1113,70 @@ def test_a_backoff_in_effect_denies_without_invoking_the_reviewer(git_repo: Path
     assert verdict == "deny"
     assert "Retry in" in reason
     assert read_state(env, git_repo, SESSION)["report_seq"] == before
+
+
+def _held_slot(env: dict[str, str], repo: Path, *, label: str = "phase1", lease_sec: int = 1920) -> None:
+    """Plant a live active-review claim, as a hook that was killed mid-review leaves behind."""
+    patch_state(
+        env,
+        repo,
+        active_review={label: {"generation": 0, "claimed_at": int(time.time()), "claim_id": "deadbeefdeadbeef", "lease_sec": lease_sec}},
+    )
+
+
+def test_a_held_review_slot_denies_without_spending_the_transient_budget(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Contention is paced but never counted, and never escalates.
+
+    Nothing was invoked -- the slot is checked before the reviewer is reached -- so there is no
+    provider call to charge to ``max_transient_failures``. It matters because the holder may not
+    exist: nothing releases the claim of a hook that was killed mid-review, so counting would let
+    one interrupted turn walk an activation to NEEDS_HUMAN on a wall clock. ``ARL_MAX_TRANSIENT_FAILURES=1``
+    here so a counted failure would escalate on the second attempt, and the assertion is that it
+    does not.
+    """
+    env = armed_env(clean_env, ARL_MAX_TRANSIENT_FAILURES="1")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    command = 'git add -A && git commit -m "x"'
+    _held_slot(env, git_repo)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "already in progress" in reason
+    assert "NOT counted against the review budget" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["transient_failures"] == 0, "no provider call was made, so none may be charged"
+    assert document["failures"] == 0
+    assert int(document["retry_not_before"]) > 0, "still paced -- a tight retry loop against a live holder helps nobody"  # type: ignore[call-overload]
+
+    patch_state(env, git_repo, retry_not_before=0)
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "escalated to NEEDS_HUMAN" not in reason
+    assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
+
+
+def test_a_held_review_slot_names_its_expiry_and_the_way_out(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """ "Wait for it to finish" is unactionable when the holder is dead.
+
+    The claim outlives the process that took it, for up to the whole lease, so the denial states
+    how long is left and that a resume clears it now -- a resume bumps ``activation_generation``,
+    which the claim is keyed on. Without both, a reader reaches for the activation's ``lock``
+    file, which is the state mutex and holds none of this.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    _held_slot(env, git_repo, lease_sec=900)
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "lasts another 9" in reason, "the remaining lease, not a bare 'wait and try again'"
+    assert "/adversarial-review-loop:resume" in reason
+    assert "lock" not in reason, "the state mutex is not what holds this, and naming it invites deleting it"
 
 
 def test_exhausting_the_transient_budget_escalates_to_needs_human(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -1056,22 +1354,6 @@ def test_a_bounded_reset_is_permitted_during_a_reconcile(git_repo: Path, tmp_pat
 
     assert verdict == "allow"
     assert "bounded recovery reset" in reason
-
-
-def unborn_repo(tmp_path: Path) -> Path:
-    """A repository with no commits at all -- what ``arm`` sees as an unborn HEAD.
-
-    ``git_repo`` is seeded, so the root-commit reconcile cannot be reached by patching a
-    field: that only produces a document making a claim git would refuse. This is the real
-    thing. Mirrors ``test_commands_stop.unborn_repo``.
-    """
-    repo = tmp_path / "unborn"
-    repo.mkdir()
-    git(repo, "init", "-q", "-b", "main")
-    git(repo, "config", "user.email", "selftest@example.invalid")
-    git(repo, "config", "user.name", "arl selftest")
-    git(repo, "config", "commit.gpgsign", "false")
-    return repo
 
 
 def unborn_active(repo: Path, tmp_path: Path, env: dict[str, str]) -> None:

@@ -335,6 +335,8 @@ today's unapproved HEAD in as the end-of-mode evidence — making the alarm perm
 document but **not** a worktree where commits are ungated, since every mutation is still
 denied under that status.
 
+*Why it is built this way, at length: [`design/end-state-record.md`](design/end-state-record.md).*
+
 ## The phase cap
 
 `set-phases` refuses more than `MAX_PHASES` (64) phases in one frozen list — a bound
@@ -370,6 +372,8 @@ session is simply gone (crashed, closed) rather than mid-commit. If you abandon 
 approval and that commit *does* land later (a killed session recovering, or landing out of
 band), the gate still notices: it enters `RECONCILE` rather than silently accepting a
 commit nobody's current activation ever reviewed.
+
+*Why it is built this way, at length: [`design/resume-and-retirement.md`](design/resume-and-retirement.md).*
 
 ## History rewritten under a resume
 
@@ -469,6 +473,8 @@ second, overlapping attempt is refused outright instead, before it ever builds a
 calls the reviewer — it denies as an ordinary operational failure and simply needs retrying
 once the first review has finished.
 
+*Why it is built this way, at length: [`design/state-fields.md`](design/state-fields.md).*
+
 ## The findings cap escalates, it never trims
 
 If a review comes back with more findings than `max_findings` (or their combined size
@@ -489,47 +495,34 @@ ignored paths included.
 
 ## `.git/info/exclude` changing mid-activation
 
-`ignore_globs` and `.gitignore` are configuration the gate reads on purpose. `.git/info/exclude`
-is different in one way that matters: it lives **outside** the worktree, so no commit carries
-it, no review ever sees it, and nothing about it is under version control — while every tree
-this gate builds comes out of `git add -A`, which obeys it. One line written there turns a file
-that is really sitting in the worktree into a clean worktree. Measured: a `backdoor.py` went
-from `?? backdoor.py` to `worktree_clean = True`, with the snapshot tree falling back to the
-baseline and the file still on disk holding its contents.
+`ignore_globs` and `.gitignore` are configuration the gate reads on purpose.
+`.git/info/exclude` is different in one way that matters: it lives **outside** the worktree,
+so no commit carries it and no review ever sees it — while every tree this gate builds comes
+out of `git add -A`, which obeys it. One line written there turns a file really sitting in
+the worktree into a clean worktree. Measured: a `backdoor.py` went from `?? backdoor.py` to
+`worktree_clean = True`, with the file still on disk holding its contents. It cannot get
+unreviewed code into history — an excluded path is never staged — but it can leave work in a
+repository the gate called clean, which is exactly the guarantee `confirm-commit` states out
+loud.
 
-That defeats the dirty check and the turn-end unreviewed-work sweep at once, which is the exact
-guarantee `confirm-commit` states out loud (*"the turn-end sweep still covers anything left
-uncommitted"*). It cannot get unreviewed code into history — an excluded path is not staged, so
-it never enters a commit's tree — but it can leave work in the repository that the gate called
-clean.
+So `arm` records `gitsnap.exclude_digest` as a baseline, and the Stop gate compares against
+it — after every reviewer call, not only once up front. What you will see:
 
-The answer is not to look *through* the file: legitimately ignored paths are what it exists for,
-and sweeping `node_modules` into a review would make every turn end unusable. `arm` records
-`gitsnap.exclude_digest` instead, and the Stop gate blocks when it no longer matches, naming the
-file and the recovery (restore it, or re-arm to take the new contents as the baseline). `/status`
-prints which of the three states it is in.
+| State | What happens |
+| --- | --- |
+| the digest changed | the Stop gate blocks, naming the file and the recovery: restore it, or re-arm to take the new contents as the baseline |
+| the baseline is present but empty | blocks — no `arm` can produce that, so the document was edited |
+| the current file could not be read | blocks as *unverifiable*; a git timeout is a denial here as everywhere else |
+| the activation predates the field | silent, the one state that passes |
 
-`arm` refuses outright when it cannot establish the baseline, rather than storing an empty one:
-an empty baseline is indistinguishable from a document that predates the field, so recording one
-would leave the check off for the life of the activation. The digest is taken *before* the
-cleanliness check and re-verified just before the document is written, so both describe the same
-ignore rules; and the Stop gate re-checks after every reviewer call, because a review is a
-minutes-long window in which an exclude edit can hide a file created beside it.
+`arm` refuses to activate at all when it cannot establish the baseline, rather than storing
+an empty one. `resume` does not reset the field: the successor keeps the predecessor's
+baseline. `/status` prints which state you are in.
 
-The comparison is tri-state, not a boolean, because "it changed", "the baseline is not one an
-arm wrote" and "the current state could not be read" are three different claims and only the
-first is evidence about the worktree — each gets its own message, and none of the three passes.
-A reading git will not give blocks as *unverifiable*: `git_run` reports a timeout as status 124,
-which every other caller treats as a denial, and passing on it would let one transient failure
-complete an activation under ignore rules nothing compared. (There is no sandbox exemption to
-make here: `Stop` blocks on a failed snapshot before the exclude guard is ever reached, so git
-has already answered by then.)
-
-Exactly one state is silent: an activation armed before the field existed has no baseline, and
-calling that a change would block every document already on disk — the permanent-alarm failure
-the end-state record exists to avoid. And `resume` does not reset the field: the successor keeps
-the predecessor's baseline, or one resume would launder an edit made under the predecessor into
-the successor's starting truth.
+*Why it is built this way — why the answer is not to look through the file, why the
+comparison is tri-state rather than boolean, and why the digest is captured before the
+cleanliness check and re-verified before the document is written — at length:
+[`design/resume-and-retirement.md`](design/resume-and-retirement.md).*
 
 ## Empty diffs are cache hits, not free passes
 
@@ -636,69 +629,39 @@ The README's [sandbox section](../README.md#if-you-use-claude-codes-sandbox) has
 ## Hooks are plugin-level, not skill-level
 
 Every hook is registered by `hooks/hooks.json` at plugin load, so the gate exists in every
-Claude Code process the plugin is enabled in. The original design registered them from the
-`implement` and `resume` skills' frontmatter instead, and that had a hole: skill hooks
-register *per process*, on invocation. Interrupt a run, quit, `claude --resume` the next
-day, type `continue` — the resumed process has the same session id, `state.json` says
-`ACTIVE`, `/adversarial-review-loop:status` agrees, and not one `arl` hook is registered.
-Every commit lands ungated while the state claims enforcement (measured 2026-08-30; see
-`tests/STEP0.md`).
+Claude Code process the plugin is enabled in — including a `claude --resume` of a session
+that armed the loop yesterday. Registering them from the `implement` and `resume` skills'
+frontmatter instead left a measured hole exactly there: skill hooks register per process, on
+invocation, so a resumed session had `state.json` saying `ACTIVE` and not one hook running
+(2026-08-30; see `tests/STEP0.md`).
 
-The cost is that the dispatcher now runs in sessions that never armed anything. That path is
-deliberately cheap and silent: no session pointer, no live activation for the worktree the
-call is about, nothing written, exit 0 in well under a second. The path that is *not* silent
-is a session with no pointer in a worktree whose `latest` activation is still live — a fresh
-`claude` opened there, or a resumed session that came back under a new id. That session is
-**unbound**: every mutation is denied, naming the activation and telling the user to run
-`/adversarial-review-loop:resume`, which binds the session and keeps every approval. The other
-session's document is never touched.
+What you will actually see, as a user:
 
-Two more things are needed for that to be fail-closed rather than merely convenient. First,
-"nothing to enforce" is proven, not defaulted to: the worktree is resolved with a git call
-that distinguishes "not a repository" from "git could not be run", and only the former
-passes — a `git` missing from the hook's PATH denies. Second, an `arm` that never started
-is still caught. The skills arm from a prompt-expansion line, and when that line cannot
-run, Claude Code aborts the skill and Claude gets no turn — the skill body's own warning
-never reaches it, and nothing has been persisted for the gate to find. So a
-`UserPromptSubmit` hook (`intent`) records a marker the moment a prompt *starting with*
-`/adversarial-review-loop:implement` or `:resume` is submitted, before any expansion, naming
-the worktree it was submitted from. A successful (or failed-but-recorded) arm supersedes it
-by writing the session pointer, which carries the marker's own token; an *unanswered* marker is read as "arming never ran"
-*whatever pointer the session held before* — an earlier activation that ended is still a
-pointer, and a re-arm whose expansion failed must not hide behind it — so it is checked
-ahead of the pointer, recorded as `ARM_FAILED` for the worktree it names, and denied until
-the user re-arms or stops. Calls from any other repository leave it untouched. Prose that
-merely mentions the command records nothing.
-
-Because the marker outranks the pointer, the two are *bound* rather than ordered: `intent`
-mints a token, `pointer_write` publishes the pointer carrying that token, and a marker whose
-token the pointer already names is answered — inert, cleaned up on the next check. Publishing
-first is what closes both crash windows: die after it and the leftover marker is harmless;
-die before it and the request is still pending, so the next mutation records `ARM_FAILED`.
-Unlinking first would have opened a window with nothing on disk at all — no marker, no
-pointer, no `latest` — in which a saved `ACTIVE` activation went ungated.
-
-The marker's write order is not guaranteed either way — measured live, it can land *after*
-the expansion it announces has already completed — so a marker whose worktree already has a
-live, gating activation bound to the same session is also read as answered, never as a
-failed arm: whichever side wrote last, the gate is enforcing.
-
-A marker that exists but cannot be read, names no absolute worktree, or carries no valid
-token is never "no intent" — but neither is it assigned to whatever repository the call
-happens to be in. It denies *everywhere*, records nothing and consumes nothing, and only
-`/adversarial-review-loop:stop` (which now passes `--session`) discards it. Otherwise a
-corrupted marker for repository A would be consumed by a call in repository B, and A would
-go ungated.
-
-"Proven" cuts the other way too. A bound session whose call comes from a *subdirectory* of
-the armed worktree needs git to place it; if git cannot run from the hook's PATH, the old
-lenient resolution read that as "another repository" and passed the call — including a
-commit run through an absolute `/usr/bin/git`. Every hook now treats an unanswerable
-resolution as a denial (`pretool`), a block (`gate-stop`) or an explicit "NOT confirmed"
-(`confirm-commit`); only git's own "not a repository" is a pass.
+- **A session that never armed anything** is not gated and writes nothing: no pointer, no
+  live activation for the worktree, exit 0 in well under a second. It is not free, though —
+  the dispatcher still starts the shim, its watchdog and Python on every tool call, which is
+  the ~111 ms per tool call measured in
+  [architecture.md](architecture.md#what-the-hot-path-costs).
+- **A session with no pointer in a worktree whose activation is still live** is *unbound*:
+  every mutation is denied, naming the activation and telling you to run
+  `/adversarial-review-loop:resume`, which binds the session and keeps every approval. The
+  other session's document is never touched.
+- **An `implement` or `resume` whose expansion never ran** is still caught. A
+  `UserPromptSubmit` hook records the request before expansion; an unanswered one is read as
+  "arming never ran", recorded as `ARM_FAILED` for the worktree it names, and denied until
+  you re-arm or stop. Calls from any other repository are untouched, and prose that merely
+  mentions the command records nothing.
+- **A request that cannot be read** — corrupt, or naming no worktree — denies *everywhere*
+  and is consumed by nothing but `/adversarial-review-loop:stop`.
+- **A worktree git cannot place** denies too. Only git's own "not a repository" is a pass;
+  git missing from the hook's PATH is not.
 
 It also settles item 15 in `tests/STEP0.md`: with one registration per process there is
 nothing left to register twice when `implement` and a same-session `resume` both run.
+
+*Why it is built this way — the token that binds a request to its pointer, the two crash
+windows publication order closes, and why a request is never assigned to whatever repository
+the call is in — at length: [`design/rule-0-intent.md`](design/rule-0-intent.md).*
 
 ## What isn't settled without a live session
 

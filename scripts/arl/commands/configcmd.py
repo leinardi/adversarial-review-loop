@@ -445,8 +445,9 @@ def _run(argv: list[str]) -> int:
     if not positionals:
         raise _ConfigFailure(f'"config {key}" needs a value, or --unset to remove it\n\n{USAGE}')
     # Everything that is not a recognised flag is the value, rejoined with a single space --
-    # the slash command hands over one whitespace-split string (AGENTS.md, "The argument
-    # channel"), so a multi-word value like a `verify_cmd` arrives as several tokens rather
+    # the slash command hands over one whitespace-split string
+    # (docs/design/argument-channel.md), so a multi-word value like a `verify_cmd` arrives
+    # as several tokens rather
     # than one quoted string.
     return _set(key, " ".join(positionals), repo_flag=repo_flag, force=force)
 

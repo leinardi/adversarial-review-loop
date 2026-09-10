@@ -2,31 +2,22 @@
 
 Everything here was measured against ``claude`` 2.1.251 on 2026-08-29 rather than assumed,
 because three of the four things this module depends on are not what the flag help implies.
-The probes are recorded in ``tests/STEP0.md``; the consequences are documented at each
-decision below.
+The probes are in ``tests/STEP0.md``; the consequences are documented at each decision.
 
-**Attachments arrive inlined on stdin, exactly as ``-f`` inlines them for OpenCode.**
-:func:`payload` concatenates the fixed reviewer prompt and every staged attachment between
-fences and :func:`arl.reviewer.run_bounded` writes the whole thing to the child's standard
-input. Nothing repo-derived and nothing bundle-derived is named in the argv. That is what
-carries the evidence boundary across unchanged: a ``context/`` attachment exists only as
-bytes inside one process's stdin, never at a path the reviewer could re-open, so a cold
-confirmation -- handed none of them -- structurally cannot have seen model-authored prose.
-It is also ``-f``'s completeness guarantee: the reviewer provably received every byte, so the
-gate never has to verify that a file it named was actually read.
+**Attachments arrive inlined on stdin**, exactly as ``-f`` inlines them for OpenCode, and
+nothing repo- or bundle-derived is named in the argv. That is what carries the evidence
+boundary across unchanged: a ``context/`` attachment exists only as bytes inside one process's
+stdin, never at a path the reviewer could re-open.
 
 **Session continuity here is assignment, not discovery** (:class:`AssignedSessions`):
-``--session-id`` names the session before it exists and ``--resume`` continues it, so
-:meth:`AssignedSessions.capture` has nothing to look up and runs no subprocess at all.
+``--session-id`` names the session before it exists, so :meth:`AssignedSessions.capture` runs
+no subprocess at all.
 
 **The isolation is two things that must not be confused.** ``--tools`` bounds only the
-*built-in* tool set -- a probe with ``--tools "Read,Grep,Glob"`` and nothing else still
-offered every connected MCP server's tools, write tools included. ``--strict-mcp-config`` is
-what removes them, so it is passed **unconditionally** and is not part of what ``pure``
-selects: it is this harness's share of the ``"*": "deny"`` at the head of OpenCode's
-permission document, not of ``--pure``. What ``pure`` selects is the *ambient instruction*
-isolation -- ``--safe-mode --disable-slash-commands``, measured to bring skills and slash
-commands to zero.
+*built-in* tool set -- a probe with ``--tools "Read,Grep,Glob"`` still offered every connected
+MCP server's tools, write tools included -- so ``--strict-mcp-config`` is passed
+**unconditionally** and is not part of what ``pure`` selects. What ``pure`` selects is the
+*ambient instruction* isolation: ``--safe-mode --disable-slash-commands``.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -108,21 +99,16 @@ def session_cwd(act_dir: Path) -> Path:
     """The working directory every invocation of this harness runs in.
 
     **Deliberately not the repository under review, and deliberately empty.** ``claude -p``
-    persists each session into a bucket keyed by its *cwd*, and that bucket is exactly what the
-    interactive ``/resume`` picker lists (verified: a probe run from ``…/iso/cwd`` landed in
-    ``~/.claude/projects/-…-iso-cwd/``). Running from the repository would spam the user's own
-    ``/resume`` list, for the one repository they are most likely to open a session in, with a
-    review round per commit. Turning persistence off instead is not an option --
-    ``--no-session-persistence`` would take ``--resume`` continuity with it.
+    persists each session into a bucket keyed by its *cwd*, and that bucket is what the interactive
+    ``/resume`` picker lists (verified). Running from the repository would spam the user's own
+    picker with a review round per commit, and ``--no-session-persistence`` would take ``--resume``
+    continuity with it.
 
     Empty is the other half, and it is a boundary rather than tidiness. In ``-p`` mode the file
-    tools are confined to the working directory plus each ``--add-dir`` (measured: a ``Read`` of
-    an absolute path outside both was refused and recorded in ``permission_denials``, with no
-    prompt), so *whatever this directory contains is readable by the reviewer*. Pointing it at
-    the activation directory would put ``context/`` -- the model-derived prose the cold-approval
-    invariant exists to keep out -- inside the reviewer's reach at a stable path. Nothing is
-    ever written here: the transcripts live under the CLI's own config directory, outside this
-    directory and outside every ``--add-dir``, so they are not readable either.
+    tools are confined to the working directory plus each ``--add-dir`` (measured), so whatever
+    this directory contains is readable by the reviewer -- pointing it at the activation directory
+    would put ``context/`` inside the reviewer's reach at a stable path. Nothing is ever written
+    here: the transcripts live under the CLI's own config directory.
     """
     return act_dir / "cwd"
 
@@ -147,16 +133,14 @@ def _config_dir() -> Path:
 def _session_file(session_id: str) -> Path | None:
     """The persisted transcript for ``session_id``, or ``None`` if there is not exactly one.
 
-    Found by globbing ``projects/*/<id>.jsonl`` rather than by deriving the bucket name from a
-    cwd. The bucket is a slug of the working directory and the slugging rule is the CLI's
-    private business -- a uuid, on the other hand, is unique on its own, so the glob needs no
-    rule to be correct. ``session_id`` is matched against :data:`SESSION_ID_RE` by every caller
-    before it arrives here, which is also what makes it safe to put in a glob pattern.
+    Found by globbing ``projects/*/<id>.jsonl`` rather than by deriving the bucket name from a cwd:
+    the bucket is a slug whose rule is the CLI's private business, while a uuid is unique on its
+    own. ``session_id`` is matched against :data:`SESSION_ID_RE` by every caller, which is also
+    what makes it safe in a glob pattern.
 
-    **Every failure answers ``None``, and every caller reads that as "no continuity".** This is
-    the one place that knows where the CLI keeps its sessions, so it is also the one place a
-    future layout change would break -- and it breaks toward a fresh review each round, which
-    costs tokens and cannot cost correctness.
+    **Every failure answers ``None``, and every caller reads that as "no continuity."** This is the
+    one place that knows where the CLI keeps its sessions, so it is where a future layout change
+    breaks -- toward a fresh review each round, which costs tokens and cannot cost correctness.
     """
     root = _config_dir() / _PROJECTS_DIR
     try:
@@ -172,25 +156,21 @@ def _session_file(session_id: str) -> Path | None:
 def isolation_argv(config: Config) -> list[str]:
     """The flags that keep a reviewer-adjacent Claude Code call structurally isolated.
 
-    Two groups, and the split is the whole point:
+    Two groups, and the split is the point:
 
-    - **Unconditional.** ``--tools`` bounds the built-in tools to a read-only set, and
-      ``--strict-mcp-config`` drops every MCP server the user has configured. Neither is
-      governed by ``pure``, because neither is about *ambient instructions*: they are this
-      harness's share of the ``"*": "deny"`` that opens OpenCode's permission document. A probe
-      that passed ``--tools "Read,Grep,Glob"`` alone still had Gmail, Drive and a code-editing
-      MCP server in its tool list; a reviewer that can send mail or rewrite a symbol is not a
-      reviewer, whatever ``pure`` is set to.
-    - **Selected by ``pure``.** ``--safe-mode`` disables the customizations that would
-      otherwise speak into the review -- ``CLAUDE.md``, hooks, plugins, agents, output styles --
-      and ``--disable-slash-commands`` disables skills. Measured together: ``skills`` and
-      ``slash_commands`` both came back empty, while ``plugins`` still *listed* the installed
-      plugins. That listing is inert metadata, not a live surface, which is what
-      ``tests/STEP0.md`` asked to be settled.
+    - **Unconditional.** ``--tools`` bounds the built-in tools to a read-only set and
+      ``--strict-mcp-config`` drops every configured MCP server. Neither is governed by ``pure``,
+      because neither is about *ambient instructions*: they are this harness's share of the
+      ``"*": "deny"`` that opens OpenCode's permission document. A probe passing ``--tools
+      "Read,Grep,Glob"`` alone still had Gmail, Drive and a code-editing MCP server in its tool
+      list.
+    - **Selected by ``pure``.** ``--safe-mode`` disables the customizations that would speak into
+      the review (``CLAUDE.md``, hooks, plugins, agents, output styles) and
+      ``--disable-slash-commands`` disables skills. Measured together: both came back empty, while
+      ``plugins`` still *listed* the installed plugins -- inert metadata, not a live surface.
 
-    ``disable_project_config`` narrows the settings files that load to the user's own, which is
-    what ``OPENCODE_DISABLE_PROJECT_CONFIG`` does on the other harness. It is a separate knob
-    because it is a separate question: whose settings, not whose instructions.
+    ``disable_project_config`` narrows the settings files that load to the user's own, a separate
+    knob because it is a separate question: whose settings, not whose instructions.
     """
     argv = ["--tools", TOOLS, "--strict-mcp-config"]
     if config.as_bool("pure"):
@@ -222,7 +202,7 @@ def _read_directories(repo: str, bundle_dir: Path, *, cold: bool) -> list[str]:
     A faithful port of :func:`arl.harness.opencode.permission`'s ``external_directory``
     document, including its ``cold`` narrowing. The repository is what the OpenCode reviewer
     reaches through ``--dir``; the bundles root is what a *continued* reviewer needs so it can
-    re-open a path it remembers from an earlier round, and a cold invocation -- which remembers
+    re-open a path it remembers from an earlier round, and a session-less one -- which remembers
     nothing -- gets this one bundle instead. Everything under either is gate-generated evidence;
     ``context/`` is a sibling of ``bundles/`` and outside both, which is the boundary.
 
@@ -255,18 +235,15 @@ def _base_argv(config: Config, system_prompt: str = "") -> list[str]:
 
     ``--output-format json`` is what makes the run's *own* report readable: whether a tool was
     denied, and whether the CLI itself failed, are facts the plain text output does not carry.
-    See :func:`transcript` for what is done with them.
 
-    ``--append-system-prompt`` carries :attr:`arl.harness.ReviewSpec.system_prompt`, and
-    *append* rather than ``--system-prompt`` is the whole point: replacing the system prompt
-    would take the CLI's own tool-use instructions with it, which is the opposite of what this
-    text is for. It is passed in the argv rather than inlined in the stdin payload because
-    that is the difference it exists to make -- an instruction about how to spend turns is
-    followed from the system prompt and was measured being ignored from inside a 100 KB user
-    message (0 batched tool calls across seven real rounds).
+    ``--append-system-prompt`` carries :attr:`arl.harness.ReviewSpec.system_prompt`, and *append*
+    rather than ``--system-prompt`` is the point -- replacing it would take the CLI's own tool-use
+    instructions with it. It goes in the argv rather than the stdin payload because that is the
+    difference it exists to make: an instruction about how to spend turns is followed from the
+    system prompt and was measured being ignored from inside a 100 KB user message (0 batched tool
+    calls across seven real rounds).
 
-    Empty is skipped rather than passed as ``""``: an empty flag value is a flag the CLI still
-    has to interpret, and there is nothing to say.
+    Empty is skipped rather than passed as ``""``.
     """
     argv = ["claude", "-p", "--output-format", "json", *_model_argv(config), *isolation_argv(config)]
     if system_prompt:
@@ -306,32 +283,24 @@ identifier is part of the evidence, not a boundary.
 def payload(prompt_text: str, attachments: Sequence[Attachment], *, act_dir: Path) -> bytes:
     """The prompt and every attachment, as the bytes one invocation reads on stdin.
 
-    Built as bytes throughout rather than as text: an attachment is a diff, and a diff carries
-    whatever the repository under review carries -- including sequences that are not valid
-    UTF-8. Decoding and re-encoding would be two more places to get that wrong, and the child
-    wants bytes either way.
+    Built as bytes throughout: an attachment is a diff, and a diff carries whatever the repository
+    carries -- including sequences that are not valid UTF-8.
 
-    **Every attachment is hashed as it is read, and a mismatch refuses the invocation.** This
-    is where inlining is strictly stronger than ``-f``, and it is the whole reason
-    :class:`~arl.harness.Attachment` carries a digest at all. The gate verified these bytes
-    when it staged them, but ``reviewer.invoke``'s launch-time re-check ends at a *pathname*:
-    for OpenCode the file is opened by another process afterwards, so nothing can close that
-    gap. Here the read happens in this process, so the check and the delivery can be made the
-    same operation -- and without it a same-user process could swap a staged file between the
-    re-check and this read, and the reviewer would judge substituted evidence while the
-    approval bound the original tree.
+    **Every attachment is hashed as it is read, and a mismatch refuses the invocation.** This is
+    where inlining is strictly stronger than ``-f``, and the whole reason
+    :class:`~arl.harness.Attachment` carries a digest. ``reviewer.invoke``'s launch-time re-check
+    ends at a *pathname*, and for OpenCode the file is opened by another process afterwards; here
+    the read happens in this process, so the check and the delivery are one operation. Without it a
+    same-user process could swap a staged file between the re-check and this read, and the reviewer
+    would judge substituted evidence while the approval bound the original tree.
 
-    :func:`arl.atomic.read_verified_file` rooted at ``act_dir`` is the same descriptor-walk
-    read :func:`arl.reviewer.stage_attachments` uses, so a symlink swapped in below the
-    activation directory is refused rather than followed; the digest comparison then covers a
-    substitution that kept the path a plain file. Either refusal raises
-    :class:`~arl.harness.PayloadError`, which the gate turns into a blocking failure with
-    nothing sent -- never a review of attachments it could not vouch for.
+    :func:`arl.atomic.read_verified_file` rooted at ``act_dir`` refuses a symlink swapped in below
+    the activation directory; the digest then covers a substitution that kept the path a plain
+    file. Either refusal raises :class:`~arl.harness.PayloadError`, which blocks with nothing sent.
 
-    Order is the caller's, never re-derived here, for the same two reasons
-    :func:`arl.harness.opencode.review_argv` gives: a directory listing attaches whatever
-    happens to be sitting there, and "what was attached" has to be one value decided once,
-    because ``execute`` gates its cold confirmation on it.
+    Order is the caller's, never re-derived: a directory listing attaches whatever happens to be
+    sitting there, and "what was attached" is the round's record of the model-derived context it
+    was shown.
     """
     nonce = secrets.token_hex(8)
     total = len(attachments)
@@ -386,28 +355,18 @@ def _result_event(raw: bytes) -> Mapping[str, Any]:
 def transcript(raw: bytes) -> bytes:
     """The reviewer's answer text, extracted from what ``claude -p`` actually wrote.
 
-    **Fails closed on three things the exit status does not report** -- all three were measured
-    to co-exist with a status of ``0``:
+    **Fails closed on three things the exit status does not report**, all measured to co-exist with
+    a status of ``0``: ``is_error``; a non-empty ``permission_denials``, which means the reviewer
+    tried to reach outside its bundle and wrote a review of less evidence than the gate believes it
+    saw; and a ``result`` that is not text.
 
-    - ``is_error``. The CLI reports a turn that ended badly in the result event and still
-      exits ``0``.
-    - a non-empty ``permission_denials``. A refused tool call means the reviewer tried to reach
-      outside the repository and the bundle it was given, and the review it then wrote is a
-      review of less evidence than the gate believes it saw. A probe whose ``Read`` of an
-      out-of-bounds path was refused finished with ``is_error: false`` and a plausible answer;
-      that is exactly the shape that must not become an approval (Rule 1).
-    - a ``result`` that is not text. There is nothing to parse and nothing to show.
+    **Each of the two is required to be present and to be its exact clean value** -- ``False`` and
+    an empty ``list``. Reading a missing field as "fine" is the fail-open shape this project
+    refuses: an event carrying nothing but ``{"type": "result", "result": "…APPROVED…"}`` would
+    reach :func:`arl.reviewer.parse` on the strength of two facts nobody established.
 
-    **Each of the two is required to be present and to be its exact clean value** -- ``False``
-    for ``is_error``, an empty ``list`` for ``permission_denials``. Reading a missing field as
-    "fine" is the fail-open shape this project refuses: an event carrying nothing but
-    ``{"type": "result", "result": "…APPROVED…"}`` would then reach :func:`arl.reviewer.parse`
-    on the strength of two facts nobody established. The gate must have the CLI's word that
-    nothing was denied, not merely the absence of its word that something was.
-
-    Every one of these reaches the gate as an ``OP_FAILURE``, which blocks. Returning the answer
-    text, and only the answer text, is what lets :func:`arl.reviewer.parse` run unchanged --
-    same markers, same grammar, same NUL and UTF-8 refusals.
+    Every one reaches the gate as an ``OP_FAILURE``, which blocks. Returning only the answer text
+    is what lets :func:`arl.reviewer.parse` run unchanged.
     """
     event = _result_event(raw)
     denials = event.get("permission_denials")
@@ -449,16 +408,15 @@ def _number(value: object, kind: type[int | float]) -> Any:
 def usage(raw: bytes) -> Usage | None:
     """What the run cost, out of ``--output-format json``'s result event.
 
-    Reads the same event :func:`transcript` does, and reads it defensively: every field is
-    optional, every non-numeric value becomes ``None``, and an output this cannot parse at all
-    -- including one :func:`transcript` would refuse -- is ``None`` rather than an exception.
-    That asymmetry is deliberate. :func:`transcript` decides whether a verdict may be acted on
-    and so must fail closed; this decides what a report *prints*, and a report that raises
-    while describing a review that already finished would destroy the record it exists to keep.
+    Read defensively: every field is optional, every non-numeric value becomes ``None``, and an
+    output this cannot parse -- including one :func:`transcript` would refuse -- is ``None`` rather
+    than an exception. The asymmetry is deliberate: :func:`transcript` decides whether a verdict
+    may be acted on and must fail closed, while this decides what a report *prints*, and a report
+    that raises would destroy the record it exists to keep.
 
-    ``usage.cache_read_input_tokens`` is the figure that explains a round's bill: measured on
-    two real rounds it was 5.6M and 6.3M against ~190k and ~150k of cache creation, because
-    every one of the 50 and 28 agentic turns re-read the whole context.
+    ``usage.cache_read_input_tokens`` is the figure that explains a round's bill: measured on two
+    real rounds it was 5.6M and 6.3M against ~190k and ~150k of cache creation, because every one
+    of the 50 and 28 agentic turns re-read the whole context.
     """
     try:
         event = _result_event(raw)
@@ -507,17 +465,14 @@ class AssignedSessions:
     def verify(self, pointer: Mapping[str, Any], *, repo: str, config: Config, act_dir: Path, seq: str) -> bool:
         """Does the remembered session still exist in the CLI's store?
 
-        **This check exists to stop a stale pointer from wedging the gate.** ``--resume`` on a
-        session the store no longer holds exits ``1`` with an empty stdout (measured), which
-        reaches ``execute`` as an ``OP_FAILURE`` and blocks the commit -- and blocks it again on
-        every retry, because the pointer that caused it is still stored. A harness that
-        pre-assigns its sessions has nothing to *list*, but it can still ask whether the
-        transcript is there, and answering "no" costs one fresh review instead.
+        **This stops a stale pointer from wedging the gate.** ``--resume`` on a session the store no
+        longer holds exits ``1`` with empty stdout (measured), which reaches ``execute`` as an
+        ``OP_FAILURE`` and blocks the commit -- again on every retry, because the pointer is still
+        stored. A harness that pre-assigns its sessions has nothing to list, but it can ask whether the
+        transcript is there, and answering "no" costs one fresh review.
 
-        Nothing beyond existence is checked. The id was minted by this gate, is unique, and is
-        re-derived from nothing -- there is no second row that could carry it, which is the
-        ambiguity OpenCode's title match has to rule out. ``repo``, ``config``, ``act_dir`` and
-        ``seq`` are the strategy contract's, and a lookup needs none of them.
+        Nothing beyond existence is checked: the id was minted by this gate and is unique, so there is
+        no second row that could carry it -- the ambiguity OpenCode's title match has to rule out.
         """
         del repo, config, act_dir, seq
         session_id = pointer.get("id")
@@ -544,7 +499,7 @@ class AssignedSessions:
         """
         if os.environ.get("ARL_REVIEWER_CMD", ""):
             # Under the test seam no `claude` ran, so there is no transcript to find and the
-            # lookup below would report a missing session on every round of `tests/selftest.sh`.
+            # lookup below would report a missing session on every round driven under the seam.
             # Skipped rather than merely un-logged, and skipped here rather than in
             # `_session_file`, for the same reason `opencode._list_sessions` short-circuits: a
             # reviewer-adjacent call has no business running when the reviewer itself did not.

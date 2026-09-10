@@ -31,6 +31,8 @@ from typing import Any
 import pytest
 
 import arl
+from arl import reviewer, state
+from arl.config import DEFAULTS, Config
 
 PLUGIN_ROOT = arl.PLUGIN_ROOT
 SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
@@ -242,6 +244,87 @@ def hostile_repo(tmp_path: Path) -> Path:
 
 def pycache_dirs(root: Path) -> set[Path]:
     return {p.relative_to(root) for p in root.rglob("__pycache__")}
+
+
+def set_phases(repo: Path, env: dict[str, str], *phases: str) -> None:
+    """Freeze the phase list, failing the test if the gate refused to."""
+    argv = ["set-phases"]
+    for phase in phases:
+        argv += ["--phase", phase]
+    proc = run_bootstrap(argv, cwd=repo, env=env)
+    assert proc.returncode == 0, proc.stderr
+
+
+def config_with(**overrides: object) -> Config:
+    """The defaults with ``overrides`` applied -- a config as ``load`` would have produced one."""
+    return Config({**DEFAULTS, **overrides})
+
+
+def unborn_repo(tmp_path: Path) -> Path:
+    """A repository with no commits at all -- what ``arm`` sees as an unborn HEAD.
+
+    ``git_repo`` is seeded, so the empty-repository paths cannot be reached by patching a
+    field: that only produces a document making a claim git would refuse. This is the real
+    thing.
+    """
+    repo = tmp_path / "unborn"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "selftest@example.invalid")
+    git(repo, "config", "user.name", "arl selftest")
+    git(repo, "config", "commit.gpgsign", "false")
+    return repo
+
+
+# --------------------------------------------------------------------------
+# The reviewer suite (``test_reviewer_*.py``, helpers in ``reviewer_common.py``)
+# --------------------------------------------------------------------------
+
+#: The session id every reviewer activation is armed under.
+SESSION = "revsess"
+
+
+@pytest.fixture
+def review_env(clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Apply the isolated environment to this process too, since paths reads os.environ."""
+    for key in list(os.environ):
+        if key.startswith(("ARL_", "XDG_")):
+            monkeypatch.delenv(key, raising=False)
+    for key, value in clean_env.items():
+        monkeypatch.setenv(key, value)
+    return clean_env
+
+
+@pytest.fixture
+def short_kill_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shorten the SIGTERM-to-SIGKILL grace for the modules that request it.
+
+    The escalation is what is under test, not how long the gate is willing to wait for a
+    build to tear itself down: production keeps the full ``KILL_GRACE_SEC``, and the tests
+    that assert a descendant died still assert exactly that. Left at 2s it was paid, in real
+    seconds, by every timeout test in the reviewer suite. Requested by ``pytestmark`` rather
+    than made autouse here, which would patch the constant for every unit test.
+    """
+    monkeypatch.setattr(reviewer, "KILL_GRACE_SEC", 0.2)
+
+
+@pytest.fixture
+def activation(review_env: dict[str, str], git_repo: Path) -> state.State:
+    """An armed activation for the scratch repository, with two frozen phases."""
+    st = state.State(str(git_repo), SESSION)
+    st.new()
+    st.update(
+        status="ACTIVE",
+        session_id=SESSION,
+        worktree=str(git_repo),
+        phases=["first phase", "second phase"],
+        phase=1,
+        activation_commit=git(git_repo, "rev-parse", "HEAD"),
+        baseline_tree=git(git_repo, "rev-parse", "HEAD^{tree}"),
+    )
+    st.save()
+    (st.act_dir / "plan.frozen.md").write_text("# The frozen plan\n\nDo the thing.\n")
+    return st
 
 
 def git_status_ignored(repo: Path) -> str:

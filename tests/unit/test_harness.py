@@ -1,6 +1,6 @@
 """The harness seam: the contract every reviewer CLI implementation must satisfy.
 
-Separate from ``test_reviewer.py`` because these are assertions about the *seam*, not about
+Separate from the ``test_reviewer_*`` modules because these are assertions about the *seam*, not about
 OpenCode: each one is parametrised over every registered harness, so a second implementation
 cannot be added without meeting them.
 """
@@ -30,19 +30,16 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import config_with
 
 from arl import harness, reviewer
-from arl.config import DEFAULTS, Config
+from arl.config import DEFAULTS
 
 #: Payloads the stdin tests round-trip. Named because ruff counts a bytes literal in a
 #: comparison as a magic value, and because both sides of each assertion must be the one
 #: value -- a test that echoes a different constant than it sent proves nothing.
 _STDIN_MARKER = b"contract-marker\n"
 _NO_STDIN_OUTPUT = b"ok\n"
-
-
-def config_with(**overrides: object) -> Config:
-    return Config({**DEFAULTS, **overrides})
 
 
 def every_harness() -> list[harness.Harness]:
@@ -83,7 +80,7 @@ def spec_for(implementation: harness.Harness, tmp_path: Path, *, cold: bool = Fa
 # --------------------------------------------------------------------------
 
 
-def test_stdin_write_is_inside_the_deadline(tmp_path: Path) -> None:
+def test_stdin_write_is_inside_the_deadline(tmp_path: Path, short_kill_grace: None) -> None:
     """A child that never drains stdin must still be killed at ``timeout_sec``.
 
     **Fails on the version of this function that wrote stdin before starting the timed
@@ -103,7 +100,9 @@ def test_stdin_write_is_inside_the_deadline(tmp_path: Path) -> None:
 
     assert status == 124, "a child killed at the deadline reports the timeout status"
     # The deadline plus the SIGTERM->SIGKILL grace, with room to spare -- and nowhere near
-    # the child's own 30s sleep, which is what the pre-fix version waited out in full.
+    # the child's own 30s sleep, which is what the pre-fix version waited out in full. The
+    # grace is the shortened one: what is under test is that the deadline binds at all, and
+    # the full 2s was paid in real time by a test that never asserts on it.
     assert elapsed < 1 + reviewer.KILL_GRACE_SEC + 5, f"the deadline did not bind the stdin write: {elapsed:.1f}s"
 
 
@@ -172,18 +171,19 @@ def test_a_review_command_starts_with_the_harness_binary(implementation: harness
 
 @pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
 def test_a_cold_review_never_carries_a_session(implementation: harness.Harness, tmp_path: Path) -> None:
-    """A cold confirmation must not continue a session under any harness.
+    """A session-less invocation -- a contract repair -- must not continue a session under any
+    harness.
 
-    The cold-approval invariant is the gate's, but every harness has to be incapable of
-    quietly reintroducing continuity into the one invocation that must not have it.
+    The gate decides which calls are session-less, but every harness has to be incapable of
+    quietly reintroducing continuity into one that must not have it.
 
-    Driven with the ``new_session_id`` a cold confirmation really carries, not with an empty
-    spec: a cold confirmation is a *fresh* invocation, so ``reviewer._mint_session`` gives it
-    an id of its own (`_confirm_cold`), and a harness that spelled that as a resume rather
-    than as a new, empty session would hand the one call that must remember nothing the entire
-    warm conversation. ``session_id`` stays "" because that is what the gate passes here --
-    the seam's structural refusal of a *continuation* is asserted by ``ClarifySpec`` having no
-    such field at all, in the test below.
+    Driven with the ``new_session_id`` such a call really carries, not with an empty spec: it
+    is a *fresh* invocation, so ``reviewer._mint_session`` gives it an id of its own, and a
+    harness that spelled that as a resume rather than as a new, empty session would hand the
+    one call that must remember nothing the entire earlier conversation. ``session_id`` stays
+    "" because that is what the gate passes here -- the seam's structural refusal of a
+    *continuation* is asserted by ``ClarifySpec`` having no such field at all, in the test
+    below.
     """
     spec = dataclasses.replace(
         spec_for(implementation, tmp_path, cold=True),

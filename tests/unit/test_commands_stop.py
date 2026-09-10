@@ -43,10 +43,10 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import BOOTSTRAP, git, run_bootstrap, run_hook
-from test_commands_arm import armed_env, plan_file, read_state, state_dir
-from test_commands_posttool import COMMIT, gated_commit
-from test_commands_pretool import SESSION, active, active_until, arm, patch_state, payload
+from conftest import BOOTSTRAP, git, run_bootstrap, run_hook, unborn_repo
+from test_commands_arm import armed_env, exclude_file, read_state, state_dir
+from test_commands_posttool import COMMIT, end_the_mode, gated_commit
+from test_commands_pretool import SESSION, active, active_until, arm, patch_state, payload, unborn_active
 from test_commands_races import activation_lock, reviewer_stub, settle
 
 from arl import commands as commands_module
@@ -189,7 +189,7 @@ def test_a_finished_activation_says_nothing(git_repo: Path, tmp_path: Path, clea
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
-    end_the_mode(git_repo, tmp_path, env, status)
+    end_the_mode(git_repo, env, status)
 
     assert stop(git_repo, env) == {}
 
@@ -289,9 +289,11 @@ def test_an_expired_activation_ends_the_turn_uncounted_and_never_escalates(git_r
 
 
 #: Seconds a mid-turn-expiry reviewer stub spends "reviewing", and the margin
-#: :func:`_expiring` leaves before the activation goes stale. The stub must outlast the margin.
+#: :func:`_expiring` leaves before the activation goes stale. The stub must outlast the margin,
+#: and the margin must outlast the hook's own start-up -- it is read as ACTIVE at the top of a
+#: run that takes ~150ms to get there, so 2s is slack, not ceremony.
 _EXPIRY_MARGIN = 2
-_EXPIRY_SLEEP = 4
+_EXPIRY_SLEEP = 3
 
 
 def _slow_reviewer(tmp_path: Path, name: str, verdict: str, findings: int = 0) -> Path:
@@ -1100,34 +1102,6 @@ def test_empty_commits_cannot_carry_an_unimplemented_plan_to_completion(git_repo
     assert document["final_done_tree"] == ""
 
 
-def unborn_repo(tmp_path: Path) -> Path:
-    """A repository with no commits at all -- what ``arm`` sees as an unborn HEAD.
-
-    ``git_repo`` is seeded, so the empty-repository path cannot be reached by patching a
-    field: that only produces a document making a claim git would refuse. This is the real
-    thing.
-    """
-    repo = tmp_path / "unborn"
-    repo.mkdir()
-    git(repo, "init", "-q", "-b", "main")
-    git(repo, "config", "user.email", "selftest@example.invalid")
-    git(repo, "config", "user.name", "arl selftest")
-    git(repo, "config", "commit.gpgsign", "false")
-    return repo
-
-
-def unborn_active(repo: Path, tmp_path: Path, env: dict[str, str]) -> None:
-    """``active`` for an unborn repository, which arming treats as dirty.
-
-    There is nothing to fold in -- ``--allow-dirty`` is only how an activation gets past a
-    HEAD that does not exist yet.
-    """
-    proc = run_bootstrap(["arm", "--session", SESSION, "--args", f"{plan_file(tmp_path)} --allow-dirty"], cwd=repo, env=env)
-    assert proc.returncode == 0, proc.stdout
-    proc = run_bootstrap(["set-phases", "--phase", "phase one"], cwd=repo, env=env)
-    assert proc.returncode == 0, proc.stderr
-
-
 def test_an_activation_armed_on_an_unborn_head_refuses_to_complete_without_wedging(tmp_path: Path, clean_env: dict[str, str]) -> None:
     """reports 025, 037 and 038 all landed here; the third settles the refusal, this settles its cost.
 
@@ -1257,7 +1231,7 @@ def test_commit_revalidates_phase_state_under_its_own_lock(
 
     The in-process ``State``/``Completion`` calls below read paths from ``os.environ`` at call
     time, the same as any subprocess would from ``env`` -- ``monkeypatch`` makes the two match,
-    the same technique ``test_reviewer.review_env`` and the cross-session resume races already
+    the same technique the ``review_env`` fixture and the cross-session resume races already
     use for this.
     """
     env = armed_env(clean_env)
@@ -1917,28 +1891,6 @@ def test_a_late_escalation_does_not_reopen_a_mode_the_user_stopped(git_repo: Pat
     assert document.get("stop_blocks", 0) == 0, "a retired activation must not be written to at all"
 
 
-def end_the_mode(repo: Path, tmp_path: Path, env: dict[str, str], status: str) -> None:
-    """Reach ``status`` through a **real** terminal transition, not a ``patch_state``.
-
-    ``patch_state`` writes the status word straight into the document, which produces a
-    *legacy* record -- no ``ended_capture`` at all -- and the reporting channels read that as
-    silence by design. Every one of these statuses has to be arrived at the way production
-    arrives at it, or the test pins nothing.
-    """
-    if status == "DISARMED":
-        proc = run_bootstrap(["deactivate"], cwd=repo, env=env)
-        assert proc.returncode == 0, proc.stdout
-    elif status == "COMPLETE":
-        proc = run_bootstrap(["finish"], cwd=repo, env={**env, "ARL_FAKE_MODE": "approve"})
-        assert proc.returncode == 0, proc.stdout
-    elif status == "RESUMED":
-        proc = run_bootstrap(["resume", "--session", "s2", "--args", ""], cwd=repo, env=env)
-        assert proc.returncode == 0, proc.stdout
-    else:  # pragma: no cover - a typo in a parametrize list, not a branch
-        raise AssertionError(f"no real transition reaches {status}")
-    assert read_state(env, repo, SESSION)["status"] == status
-
-
 #: The terminal statuses an activation can reach while *still* holding work no review
 #: approved. ``COMPLETE`` is deliberately absent: both routes to it run the final cumulative
 #: review, which now marks the tree it approved (see ``Completion.commit``), so a finished
@@ -1967,7 +1919,7 @@ def test_a_turn_ending_on_unreviewed_work_tells_the_user(
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "ungated")
     head = git(git_repo, "rev-parse", "HEAD")
-    end_the_mode(git_repo, tmp_path, env, status)
+    end_the_mode(git_repo, env, status)
 
     message = ended(stop(git_repo, env))
 
@@ -1994,7 +1946,7 @@ def test_the_report_survives_a_repository_broken_after_the_fact(
     (git_repo / "sneaked.txt").write_text("never gated\n")
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-qm", "ungated")
-    end_the_mode(git_repo, tmp_path, env, status)
+    end_the_mode(git_repo, env, status)
     (git_repo / ".git" / "HEAD").unlink()
 
     message = ended(stop(git_repo, env))
@@ -2013,7 +1965,7 @@ def test_a_turn_ending_cleanly_still_says_nothing(
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
-    end_the_mode(git_repo, tmp_path, env, status)
+    end_the_mode(git_repo, env, status)
 
     assert stop(git_repo, env) == {}
 
@@ -2033,7 +1985,7 @@ def test_an_ordinary_commit_after_the_mode_ended_is_silent(
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
-    end_the_mode(git_repo, tmp_path, env, status)
+    end_the_mode(git_repo, env, status)
 
     (git_repo / "ordinary.txt").write_text("ungated by design\n")
     git(git_repo, "add", "-A")
@@ -2054,7 +2006,7 @@ def test_a_status_edited_straight_into_the_document_is_still_reported(
     """The second documented Rule 4 bypass, which leaves no command to inspect at all.
 
     A wrapper commits unreviewed work and then writes ``status: DISARMED`` straight into
-    ``state.json`` -- AGENTS.md, "What Rule 4 does and does not guarantee". No terminal
+    ``state.json`` -- docs/design/end-state-record.md. No terminal
     transition ran, so the document carries the ``ended_*`` fields **empty rather than
     absent**, and reading that as a legacy document would hand this bypass its own
     suppression. It is reported as an edited record instead.
@@ -2251,13 +2203,6 @@ def gitsnap_tree(repo: Path) -> str:
 # --------------------------------------------------------------------------
 # info/exclude
 # --------------------------------------------------------------------------
-
-
-def exclude_file(repo: Path) -> Path:
-    path = gitsnap.exclude_path(str(repo))
-    assert path is not None
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def test_the_sweep_refuses_to_end_a_turn_behind_a_changed_exclude_file(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

@@ -33,7 +33,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_REVIEWER, git, run_bootstrap
+from conftest import FAKE_REVIEWER, git, run_bootstrap, unborn_repo
 
 from arl import gitsnap, harness, paths
 from arl.atomic import locked as _real_locked
@@ -72,9 +72,10 @@ def plan_file(tmp_path: Path, text: str = "# plan\n\nphase one\n") -> Path:
 # Argument splitting
 # --------------------------------------------------------------------------
 #
-# `split_args` is the only thing standing between `$ARGUMENTS` -- substituted into the skill
-# body unescaped, see "The argument channel is not escaped" in AGENTS.md -- and the plan path
-# `arm` actually opens, so its split points are a direct spec, not an implementation detail.
+# `split_args` is what turns the one string `--args-stdin` receives -- `$ARGUMENTS` verbatim,
+# carried through a quoted here-document rather than through the shell, see
+# docs/design/argument-channel.md -- into the plan path `arm` actually opens, so its split
+# points are a direct spec, not an implementation detail.
 # This corpus and its expected splits used to be asserted differentially, against the shell
 # port `arl_split_args` was translated from; that reference was retired in Phase 8, so the
 # split points below are now the specification.
@@ -158,6 +159,57 @@ def test_arm_freezes_the_plan_and_records_the_activation(git_repo: Path, tmp_pat
     assert revisions[0]["sha256"] == hashlib.sha256(frozen.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(("a plan with spaces.md", "", False), id="spaces-alone"),
+        pytest.param(("spaced plan.md", " --allow-dirty", True), id="spaces-plus-a-flag"),
+    ],
+)
+def test_a_plan_path_containing_spaces_arms_through_args(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], case: tuple[str, str, bool]
+) -> None:
+    """``--args`` is one string, so the split happens in the gate.
+
+    ``split_args`` is pinned directly above, but the property that matters end to end is that a
+    path the split kept whole still resolves: the plan is every token up to the first one
+    starting with ``--``, so a spaced path survives *and* a flag after it still applies.
+    """
+    name, extra, allow_dirty = case
+    env = armed_env(clean_env)
+    plan = tmp_path / name
+    plan.write_text("# plan\n\nphase one\n")
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--args", f"{plan}{extra}"], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    document = read_state(env, git_repo, "s1")
+    assert document["status"] == "ARMED"
+    assert document["plan_path"] == str(plan)
+    assert document["allow_dirty"] is allow_dirty
+
+
+def test_the_frozen_plan_is_byte_identical(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The frozen copy is what every review is shown; a re-encoded one is a different plan.
+
+    ``_freeze_plan`` must copy bytes, not text. A plan that is not valid UTF-8 -- a stray
+    latin-1 paste, a file with a BOM-less UTF-16 fragment -- has to survive unchanged, so a
+    later rewrite to text mode (which would re-encode or reject it) fails here rather than
+    silently narrowing the review scope.
+    """
+    env = armed_env(clean_env)
+    plan = tmp_path / "plan.md"
+    raw = b"# plan\n\n\xff\xfe raw bytes \xc3\xa9\n"
+    plan.write_bytes(raw)
+
+    proc = run_bootstrap(["arm", "--session", "s1", "--plan", str(plan)], cwd=git_repo, env=env)
+
+    assert proc.returncode == 0, proc.stdout
+    frozen = state_dir(env, git_repo, "s1") / "plan.frozen.md"
+    assert frozen.read_bytes() == raw
+    assert read_state(env, git_repo, "s1")["plan_revisions"][0]["sha256"] == hashlib.sha256(raw).hexdigest()  # type: ignore[index]
+
+
 @pytest.mark.parametrize(("setting", "expected"), [("false", "disabled (final_review)"), ("true", "enabled")])
 def test_the_arm_summary_says_whether_a_final_review_will_run(
     git_repo: Path, tmp_path: Path, clean_env: dict[str, str], setting: str, expected: str
@@ -176,17 +228,6 @@ def test_the_arm_summary_says_whether_a_final_review_will_run(
 
     assert proc.returncode == 0, proc.stderr
     assert f"- final cumulative review at the end: {expected}" in proc.stdout
-
-
-def unborn_repo(tmp_path: Path) -> Path:
-    """A repository with no commits at all -- what ``arm`` sees as an unborn HEAD."""
-    repo = tmp_path / "unborn"
-    repo.mkdir()
-    git(repo, "init", "-q", "-b", "main")
-    git(repo, "config", "user.email", "selftest@example.invalid")
-    git(repo, "config", "user.name", "arl selftest")
-    git(repo, "config", "commit.gpgsign", "false")
-    return repo
 
 
 def test_arming_an_empty_repository_says_it_cannot_complete_itself(tmp_path: Path, clean_env: dict[str, str]) -> None:

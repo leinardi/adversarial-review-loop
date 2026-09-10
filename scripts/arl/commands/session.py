@@ -1,17 +1,14 @@
 """The five commands a user runs against a live activation, and one hook that answers a
 compaction.
 
-Ports ``cmd_defer``, ``cmd_status``, ``cmd_report``, ``cmd_finish`` and ``cmd_deactivate``.
+``finish`` and ``deactivate`` are two of the three exits the user owns (Rule 4). Nothing here
+is reachable by Claude: the skills carry ``disable-model-invocation: true`` and ``pretool``
+denies the Bash route. What that means for this module is that its output is written for a
+human -- it is the last thing said before the mode ends.
 
-``finish`` and ``deactivate`` are two of the three exits the user owns (Rule 4). Nothing
-here is reachable by Claude: the skills carry ``disable-model-invocation: true``, and
-``pretool`` denies the Bash route to both. What that means for this module is that its
-output is written for a human -- it is the last thing said before the mode ends.
-
-:func:`reorient` is the exception on both counts: it is a ``SessionStart`` hook (compaction and
-resume) rather than a user command, and its reader is Claude rather than a human. It lives here
-because it is a *report* on the activation, assembled from the same fields :func:`status`
-prints -- and because, like everything else in this module, it decides nothing.
+:func:`reorient` is the exception on both counts: a ``SessionStart`` hook rather than a user
+command, and its reader is Claude. It lives here because it is a *report* assembled from the
+same fields :func:`status` prints, and because, like everything else here, it decides nothing.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -587,13 +584,12 @@ _ALREADY_ENDED_STATUSES: Final = _ENFORCEMENT_OVER_STATUSES | {"RESUMED"}
 ALREADY_ENDED = """\
 adversarial-review-loop: this worktree's activation already ended ({status}), so nothing was changed.
 
-Commits and file changes are not gated. The record of how the mode ended -- which the
-reporting channels read instead of current HEAD -- is kept exactly as it was written.
+Commits and file changes are not gated. The end-of-mode record is kept as written.
+
+Re-arm with /adversarial-review-loop:implement <plan.md>.
 
 State and reports are at:
   {act_dir}
-
-Re-arm at any time with /adversarial-review-loop:implement <plan.md>.
 """
 
 #: ``RESUMED``'s own message, because the one above would be a false claim here. A retired
@@ -620,19 +616,17 @@ Re-arm at any time with /adversarial-review-loop:implement <plan.md>.
 #: not just the one this command resolved -- an A-into-B-into-C history leaves sessions bound to
 #: A *and* to B denying, and naming only A would describe B's session as free.
 _BOUND_SESSION_CAVEAT = """\
-One exception is worth knowing about. A Claude session still *bound* to any retired activation
-in this worktree's chain ({retired}) keeps being denied, and its turn-end and post-commit
-reports keep reading that retired document rather than {successor}'s -- the gate resolves a
-bound session's own state before it ever looks at the worktree pointer. Every other session,
-including any new one, passes. If the session you are in is a denied one, re-arm with
-/adversarial-review-loop:implement <plan.md> or start a fresh session."""
+One exception: a session still *bound* to any retired activation in this worktree's chain
+({retired}) keeps being denied, and its reports keep reading that retired document rather than
+{successor}'s. Every other session, including a new one, passes. If this session is a denied
+one, re-arm with /adversarial-review-loop:implement <plan.md> or start a fresh session."""
 
 _RETIRED_STOPPED = """\
 adversarial-review-loop: STOPPED for this worktree -- through {successor}, which a resume had already handed it to.
 
-The activation this session resolved ({resolved}) was retired by that resume and must never be
-rewritten, so it was left exactly as it was. The resume died before it could repoint this
-worktree at {successor}; that pointer is now published, and {successor} itself is DISARMED.
+The activation this session resolved ({resolved}) was retired by that resume and was left as it
+was. The resume died before repointing this worktree at {successor}; that pointer is now
+published, and {successor} itself is DISARMED.
 
 Commits and file changes are no longer gated. {caveat}
 
@@ -646,9 +640,8 @@ State and reports are at:
 _RETIRED_SUCCESSOR_ENDED = """\
 adversarial-review-loop: this worktree's activation was retired by a resume ({successor} took over), and {successor} was no longer live ({status}).
 
-Neither document was changed. The resume died before it could repoint this worktree at
-{successor}; that pointer is now published, so commits and file changes are no longer gated.
-{caveat}
+Neither document was changed. The pointer the dead resume left behind now names {successor}, so
+commits and file changes are no longer gated. {caveat}
 
 State and reports are at:
   {act_dir}
@@ -662,10 +655,9 @@ State and reports are at:
 _RETIRED_POINTER_MOVED = """\
 adversarial-review-loop: this worktree's activation pointer moved while /stop was working, so nothing was changed.
 
-This command resolved the retired activation {resolved} and was finishing the pointer a dead
-resume left behind. Something else published a different activation in the meantime -- an
-/adversarial-review-loop:implement, or another resume -- and overwriting that could hide a live
-activation behind a stopped one.
+Something else published an activation while this command was finishing the pointer a dead
+resume left behind on {resolved}. Overwriting it could hide a live activation behind a stopped
+one.
 
 Run /adversarial-review-loop:stop again to act on whatever is armed now.
 
@@ -681,14 +673,12 @@ State and reports are at:
 _RETIRED_UNPUBLISHED = """\
 adversarial-review-loop: this worktree's activation was retired by a resume that never finished, so nothing was changed.
 
-The resume wrote this activation off in favour of {successor}, then died before publishing
-it -- {successor} has no state at all. Both sides deny by design: a retired activation cannot
-be stopped and must not be rewritten, and a session with no document can prove nothing about
-this armed worktree and therefore denies too (Rule 0). **/stop cannot free this worktree**,
-and running it again prints this same message.
+The resume wrote this activation off in favour of {successor}, then died before publishing it --
+{successor} has no state at all, so both sides deny. **/stop cannot free this worktree**, and
+running it again prints this same message.
 
-Re-arm from scratch with /adversarial-review-loop:implement <plan.md>. Nothing is lost --
-the retired activation's reports stay where they are.
+Re-arm from scratch with /adversarial-review-loop:implement <plan.md>. Nothing is lost -- the
+retired activation's reports stay where they are.
 
 State and reports are at:
   {act_dir}
@@ -701,10 +691,9 @@ State and reports are at:
 _RETIRED_UNLINKED = """\
 adversarial-review-loop: this worktree's activation names {successor} as its successor, but {successor} does not name it back.
 
-Nothing was changed. A retirement writes both halves of that link at once, so a chain that is
-only half there was not written by this gate -- state.json has been edited, or corrupted.
-Acting on it would mean stopping whatever session that field happens to name, so /stop refuses
-rather than guess.
+Nothing was changed. A retirement writes both halves of that link at once, so state.json has
+been edited or corrupted, and /stop refuses rather than stop whatever that field happens to
+name.
 
 Re-arm from scratch with /adversarial-review-loop:implement <plan.md>.
 
@@ -718,9 +707,9 @@ State and reports are at:
 _RETIRED_CONTENDED = """\
 adversarial-review-loop: this worktree is being resumed right now, so /stop had nothing stable to act on.
 
-Nothing was changed. Each time this command read the successor it had already been retired
-into another one. Wait for the resume in flight to finish, then run
-/adversarial-review-loop:stop again.
+Nothing was changed: each time this command read the successor it had already been retired into
+another one. Wait for the resume in flight to finish, then run /adversarial-review-loop:stop
+again.
 
 State and reports are at:
   {act_dir}
@@ -782,23 +771,19 @@ class _Successor(NamedTuple):
 def _successor_of(repo: str, retired: State, retired_session: str) -> _Successor:
     """Walk ``resumed_into`` to the activation a retirement handed this worktree to.
 
-    Chained retirements are real -- A retired into B, B into C -- and a crash anywhere in the
-    chain leaves ``latest`` on A. Walking to the end finds the one activation that is not
-    itself retired, which is the only one worth stopping or pointing at.
+    Chained retirements are real -- A into B, B into C -- and a crash anywhere leaves ``latest`` on
+    A. Walking to the end finds the one activation that is not itself retired.
 
     **Every link is checked in both directions before it is followed.** ``state.json`` is not a
-    trust boundary, so an edited or corrupt ``resumed_into`` can name *any* session in this
-    worktree -- and what this walk authorises is a status write and a ``latest`` publication
-    against whatever it names. Retirement writes the pair together (``resumed_into`` on the
-    predecessor, ``resumed_from`` on the successor), so a successor whose ``resumed_from`` does
-    not name the session that pointed at it was never handed this worktree by that retirement,
-    and is refused rather than stopped. Without that check, editing one field of a retired
-    document would let ``/stop`` disarm an unrelated live activation and publish it as
-    ``latest``, which is a wider escape than the state-edit bypass it would ride in on.
+    trust boundary, and what this walk authorises is a status write and a ``latest`` publication
+    against whatever it names. Retirement writes the pair together, so a successor whose
+    ``resumed_from`` does not name the session that pointed at it was never handed this worktree
+    and is refused -- otherwise editing one field of a retired document would let ``/stop`` disarm
+    an unrelated live activation and publish it as ``latest``, a wider escape than the state edit
+    it rides in on.
 
     Exhausting :data:`_RESUME_CHAIN_LIMIT` answers like an unpublished successor: both mean "no
-    successor this command may act on", and that case's reply -- re-arm, ``/stop`` cannot help
-    -- is the correct one for a corrupted chain too.
+    successor this command may act on".
     """
     seen: set[str] = set()
     chain: tuple[str, ...] = (retired_session,)
@@ -828,18 +813,15 @@ def _successor_of(repo: str, retired: State, retired_session: str) -> _Successor
 def _finish_the_retirement(activation: commands.Activation) -> str:
     """Honour ``/stop`` for a worktree whose retirement never finished publishing.
 
-    The retired document is never touched -- AGENTS.md forbids mutating one at all. What this
-    finishes is the *pointer*: ``resumed_into`` was committed under the predecessor's own lock,
-    so republishing ``latest`` as that successor is not inventing a transition, it is
-    converging on the value retirement already decided and the dead resume was on its way to
-    writing. Without it, ``/stop`` leaves ``latest`` naming a ``RESUMED`` document, every later
-    command resolves that same retired activation, and the worktree stays wedged under a mode
+    The retired document is never touched. What this finishes is the *pointer*: ``resumed_into``
+    was committed under the predecessor's own lock, so republishing ``latest`` as that successor
+    converges on the value retirement already decided rather than inventing a transition. Without
+    it, ``latest`` keeps naming a ``RESUMED`` document and the worktree stays wedged under a mode
     the user has asked twice to end.
 
-    The walk runs unlocked, so it is re-run whenever the locked write finds the world has
-    moved. Bounded by the same limit the walk itself uses: a chain that keeps growing under
-    this command is a resume storm, not a state to converge on, and saying so beats publishing
-    into it.
+    The walk runs unlocked and is re-run whenever the locked write finds the world has moved,
+    bounded by the same limit: a chain still growing under this command is a resume storm, not a
+    state to converge on. See ``docs/design/resume-and-retirement.md``.
     """
     for _ in range(_RESUME_CHAIN_LIMIT):
         found = _successor_of(activation.repo, activation.state, activation.session)
@@ -858,25 +840,19 @@ def _stop_the_successor(activation: commands.Activation, found: _Successor) -> s
     """Stop one successor and publish the pointer, both under that successor's own lock.
 
     **The pointer write belongs inside the transaction.** A retirement of this successor takes
-    exactly this lock (``resume``'s ``_retire`` runs inside the predecessor's own
-    ``transaction()``), so holding it across the publication is what stops a concurrent resume
-    from retiring this document and repointing ``latest`` at *its* successor, only for this
-    call to overwrite that pointer with a session that is now ``RESUMED`` -- wedging the
-    worktree while reporting it freed.
+    exactly this lock, so holding it across the publication is what stops a concurrent resume from
+    retiring this document and repointing ``latest`` at *its* successor, only for this call to
+    overwrite that pointer with a session now ``RESUMED`` -- wedging the worktree while reporting
+    it freed.
 
-    **That lock is not enough on its own, and nothing available here would be.** ``latest`` has
-    five publishers -- ``arm`` twice, ``resume``, ``hooks`` and this -- and none of them
-    serialise against each other, so the successor's lock orders this against a resume *of that
-    successor* and against nothing else. A concurrent ``implement`` can arm and publish a wholly
-    unrelated activation while this call is inside the lock, and overwriting that pointer would
-    leave ``latest`` on a stopped session while a live one gates every unbound session that
-    resolves through it: a fail-open. So the publication is conditional on ``latest`` still
-    naming the activation this repair was resolved from, which is the premise that made the
-    repair valid at all. That is a compare-and-swap without an atomic swap -- a publisher
-    landing between the read and the write still wins -- and closing it properly means putting
-    every ``latest`` write behind one worktree-scoped lock, which is a change to ``arm`` and
-    ``resume``, not to this. The residual window is the same one those publishers already race
-    among themselves; what this must not do is widen it by ignoring the pointer entirely.
+    **That lock is not enough on its own.** ``latest`` has five publishers and none serialise
+    against each other, so this is ordered against a resume *of that successor* and nothing else. A
+    concurrent ``implement`` can publish an unrelated activation mid-call, and overwriting that
+    pointer would leave ``latest`` on a stopped session while a live one gates every unbound
+    session resolving through it -- a fail-open. So publication is conditional on ``latest`` still
+    naming the activation this repair was resolved from: a compare-and-swap without an atomic
+    swap. Closing it properly means putting every ``latest`` write behind one worktree-scoped
+    lock, which is a change to ``arm`` and ``resume``.
     """
     successor = found.state
     assert successor is not None
@@ -916,26 +892,20 @@ def deactivate(argv: list[str]) -> int:
     """Leave the mode. Nothing is reverted and nothing is deleted.
 
     The session pointer deliberately stays (Rule 0): the hooks are still registered for this
-    session, and a missing pointer is what "arming never executed" looks like, so removing it
-    would turn every later tool call into a denial. ``DISARMED`` is what makes the gates pass
-    through.
+    session, and a missing pointer is what "arming never executed" looks like. ``DISARMED`` is
+    what makes the gates pass through.
 
     **A second run over an already-terminal document is a no-op.**
-    ``commands.resolve_local_activation()`` filters on loadability, never on status, so this
-    used to rewrite a ``COMPLETE`` document with ``DISARMED`` unconditionally, discarding which
-    of the two actually ended the mode. Once the end-state record exists that is worse than
-    untidy: re-running ``/adversarial-review-loop:stop`` -- the obvious remedy for a report the
-    user disagrees with -- would stamp today's unapproved HEAD in as the evidence and make the
-    alarm permanent and "evidenced". First terminal transition wins, always.
+    ``commands.resolve_local_activation()`` filters on loadability, never on status, so this used
+    to rewrite a ``COMPLETE`` document with ``DISARMED``, discarding which of the two ended the
+    mode -- and, with the end-state record in place, re-running ``/stop`` would stamp today's
+    unapproved HEAD in as the evidence. First terminal transition wins, always.
 
-    **``RESUMED`` is not a no-op at all**, because it is terminal for the document and *not*
-    for the worktree: ``pretool`` denies every mutation under it, so telling the user commits
-    are ungated would describe a wedged worktree as a free one. A cross-session resume retires
-    the predecessor before publishing the successor or repointing ``latest``, and resolution
-    reads that pointer -- so arriving here at all is proof the resume died mid-publication.
-    ``_finish_the_retirement`` reads the successor the retirement already named, stops it if it
-    is live, and publishes the pointer the dead resume did not, which is the only way ``/stop``
-    can honour its own name here. The retired document itself is never touched.
+    **``RESUMED`` is not a no-op**: it is terminal for the document and not for the worktree, so
+    telling the user commits are ungated would describe a wedged worktree as a free one. Arriving
+    here at all is proof the resume died mid-publication, since resolution reads the pointer.
+    ``_finish_the_retirement`` publishes the pointer the dead resume did not; the retired document
+    itself is never touched.
     """
     discarded = _discard_intent(_session_arg(argv))
     activation = commands.resolve_local_activation()
@@ -1074,22 +1044,20 @@ def _last_round_line(state: State, config: Config, phase: int) -> str:
 
 
 def reorient(argv: list[str]) -> int:
-    """``SessionStart(compact|resume)``: re-inject the loop's own state after a compaction or a resume.
+    """``SessionStart(compact|resume)``: re-inject the loop's own state after a compaction or resume.
 
-    **Plain text on stdout, never JSON.** ``SessionStart`` is one of the few events whose
-    plain stdout Claude Code adds to the context, which is the entire mechanism here; a JSON
-    object would be parsed as a decision document instead and the text would never be seen.
+    **Plain text on stdout, never JSON.** ``SessionStart`` is one of the few events whose plain
+    stdout Claude Code adds to the context, which is the entire mechanism; a JSON object would be
+    parsed as a decision document and the text never seen.
 
     **Silent on anything unexpected, and never a failure.** Not our session, not the armed
     worktree, no activation, a terminal one, an unreadable document -- each prints nothing and
-    exits 0. This hook grants nothing, blocks nothing and decides nothing: it is the one
-    entrypoint in the plugin with no fail-closed direction, because the failure it could cause
-    is noise in a session that is otherwise fine, and the failure it prevents is only that
-    Claude has to re-read the plan itself.
+    exits 0. This is the one entrypoint with no fail-closed direction: the failure it could cause
+    is noise in a session that is otherwise fine, and the failure it prevents is only that Claude
+    has to re-read the plan.
 
-    The plugin cannot trigger a compaction or a ``/clear`` -- no hook or plugin API exposes
-    that -- so this reacts to one rather than avoiding it. ``docs/how-it-works.md`` carries the
-    manual pattern for very long plans.
+    The plugin cannot trigger a compaction or a ``/clear``, so this reacts to one rather than
+    avoiding it.
     """
     del argv
     try:

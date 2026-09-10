@@ -1,21 +1,14 @@
 """``arm`` -- freeze a plan and put this worktree under the gate.
 
-Ports ``cmd_arm``, ``arl_arm_die`` and ``arl_split_args`` from ``scripts/arl.sh``.
-
-Two properties carry over unchanged, and both are load-bearing:
-
-**Every failure this command can observe is persisted as ``ARM_FAILED``** (Rule 0). Arming
-that fails must leave state saying so, because the alternative -- no state at all -- is
-indistinguishable from a session that was never armed, and the hooks would then be denying
-without being able to say why. The message printed here is what the user sees; the state is
-what the next tool call reads.
+**Every failure this command can observe is persisted as ``ARM_FAILED``** (Rule 0). No state
+at all is indistinguishable from a session that was never armed, and the hooks would then deny
+without being able to say why.
 
 **The character-set check on the plan path protects the loop's state, not the machine.**
-``skills/implement/SKILL.md`` interpolates ``$ARGUMENTS`` into a shell body that is then
-``eval``-ed, so anything injectable has already run by the time this code sees the string.
-The check is still worth keeping -- it stops a nonsense path from being frozen into an
-activation -- but it must not be mistaken for a sandbox. See AGENTS.md, "The argument
-channel is not escaped".
+``skills/implement/SKILL.md`` hands ``$ARGUMENTS`` over inside a quoted here-document, so the
+value reaches ``--args-stdin`` as bytes rather than shell source; that transport is what stops
+a hostile path from executing. This check refuses a path the activation could not honestly
+freeze. It is not a sandbox. See docs/design/argument-channel.md.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -214,25 +207,18 @@ def _rstrip_space(text: str) -> str:
 def split_args(raw: str) -> tuple[str, list[str]]:
     """Split the slash command's single argument string into ``(plan, flag_tokens)``.
 
-    The whole string arrives as one argument because Claude Code's positional substitution
-    is 0-based -- ``$1`` is the *second* argument, and an out-of-range ``$N`` is left in the
-    body literally, where the expansion shell turns it into the empty string. ``$ARGUMENTS``
-    is substituted unconditionally and keeps paths containing spaces intact, so the split
-    happens here.
+    The whole string arrives as one argument because Claude Code's positional substitution is
+    0-based and an out-of-range ``$N`` is left in the body literally; ``$ARGUMENTS`` is substituted
+    unconditionally and keeps paths containing spaces intact, so the split happens here.
 
-    Rule: the plan is every token up to the first one starting with ``--``; the rest are
-    flag tokens, whitespace-separated, each kept as its own element so a flag's value is
-    still a separate token from its name -- exactly like ``argv``. This is a strict
-    superset of the retired shell's ``arl_split_args`` for the cases that mattered (a path
-    with any run of spaces, ``--allow-dirty`` alone or trailing) but retires its pinned
-    oddity: ``"a -x b"`` used to yield ``("a -x", "b")`` by taking the last word as the flag
-    whatever it started with. A single ``-`` no longer starts a flag boundary either -- only
-    ``--`` does, matching every flag this gate accepts.
+    Rule: the plan is every token up to the first starting with ``--``; the rest are
+    whitespace-separated flag tokens, each its own element, exactly like ``argv``. A single ``-``
+    does not start a flag boundary -- only ``--`` does, matching every flag this gate accepts.
 
-    The plan is sliced out of the original string at the boundary's byte offset, not
-    rebuilt by rejoining tokens: a path legitimately containing more than one run of
-    whitespace (``"my  plans/plan.md"``) must come back exactly as typed, or a file that
-    really exists at that path stops resolving the moment a flag is added alongside it.
+    The plan is sliced out of the original string at the boundary's byte offset, never rebuilt by
+    rejoining tokens: a path legitimately containing more than one run of whitespace
+    (``"my  plans/plan.md"``) must come back exactly as typed, or a file that really exists there
+    stops resolving the moment a flag is added alongside it.
     """
     raw = raw.strip(_SPACE)
     if not raw:
@@ -249,21 +235,16 @@ def _parse(argv: list[str]) -> tuple[str, str, list[str]]:
     """``(session, plan, flag_tokens)`` from the dispatcher's arguments.
 
     ``--session``, ``--plan``, ``--args`` and ``--args-stdin`` are the only tokens treated
-    specially -- both argument forms are ``split_args`` on the slash command's single
-    substituted string, and every other token (whether it came from there or directly on
-    argv, in tests) is appended to the same flat token list, in order. Parsing those tokens
-    into named, validated flags happens in ``_arm``, exactly where the equivalent single-flag
-    check used to live.
+    specially; every other token is appended to one flat list, in order, and parsed into named,
+    validated flags in ``_arm``.
 
-    ``--args-stdin`` is what the skill body spells, because argv cannot carry the string
-    safely through Claude Code's unescaped ``$ARGUMENTS`` substitution; see
-    :func:`arl.util.stdin_argument`. ``--args`` stays for callers on a real command line, and
-    for the skill body an older install still serves from its cache.
+    ``--args-stdin`` is what the skill body spells, because argv cannot carry the string safely
+    through Claude Code's unescaped ``$ARGUMENTS`` substitution; see
+    :func:`arl.util.stdin_argument`. ``--args`` stays for real command lines and for a skill body
+    an older install still serves from its cache.
 
-    An option whose value is missing consumes what is there and stops, rather than the
-    shell's ``shift 2`` -- which fails on a one-element list, leaves the arguments untouched
-    and spins forever. That is a bug fix, not a behaviour change: no reachable caller can
-    tell the difference between "spun forever" and "was rejected".
+    An option whose value is missing consumes what is there and stops, rather than the shell's
+    ``shift 2`` -- which fails on a one-element list and spins forever.
     """
     session = plan = ""
     flag_tokens: list[str] = []
@@ -360,21 +341,17 @@ def _parse_flags(tokens: list[str]) -> _Flags:
 def resolve_until(raw: str, *, flag: str = "--until") -> int:
     """The pause target from ``--until``'s raw text. Raises ``_ArmFailure`` on nonsense.
 
-    ``""``, ``"0"`` and ``"all"`` all mean "no target" -- the flag was not given, or the
-    user explicitly cleared it. Anything else must be a plain positive integer; the upper
-    bound (``N <= phase_count``) cannot be checked yet, since phases are not frozen at arm
-    time, so ``commands/phases.py::run`` checks it again once they are.
+    ``""``, ``"0"`` and ``"all"`` all mean "no target". Anything else must be a plain positive
+    integer; the upper bound cannot be checked yet, since phases are not frozen at arm time, so
+    ``commands/phases.py::run`` checks it again once they are.
 
-    ``flag`` names the channel the text came from, for the rejection message only.
-    ``commands/pausecmd.py`` reads the same grammar off a bare positional, so its rejection
-    has to say ``pause "x"`` rather than blaming a ``--until`` the user never typed.
+    ``flag`` names the channel the text came from, for the rejection message only:
+    ``commands/pausecmd.py`` reads the same grammar off a bare positional.
 
-    ``str.isdigit()`` is deliberately not used: it answers ``True`` for Unicode digits that
-    ``int()`` cannot parse (superscripts among them), which would raise ``ValueError``
-    straight out of this function instead of the ``_ArmFailure`` every other rejection here
-    goes through -- crashing arming rather than persisting why it failed (Rule 0). A plain
-    ASCII-only pattern rules that out. ``int()`` is still wrapped: an absurdly long digit
-    string hits Python's own conversion length limit and raises ``ValueError`` on its own.
+    ``str.isdigit()`` is deliberately not used -- it answers ``True`` for Unicode digits ``int()``
+    cannot parse, which would raise ``ValueError`` straight out of this function instead of the
+    ``_ArmFailure`` every other rejection goes through, crashing arming rather than persisting why
+    it failed (Rule 0). ``int()`` is still wrapped for the conversion length limit.
     """
     if raw in ("", "0", "all"):
         return 0
@@ -436,21 +413,19 @@ def _perl_has_monotonic() -> bool:
 def _check_watchdog() -> None:
     """Refuse to arm when no usable outer watchdog exists. Raises ``_ArmFailure``.
 
-    ``scripts/arl.sh`` runs every hook under one of :data:`WATCHDOGS`, and without one the gate
-    cannot be bounded: the blocking ``flock`` in :mod:`arl.atomic` has no deadline of its own, so
-    a wedged lock holder would hang the hook until Claude Code tore it down with nothing. The
-    shim already fails closed by name in that case; refusing here means the user finds out while
-    they are watching the slash command, instead of one denied tool call at a time.
+    Without one the gate cannot be bounded: the blocking ``flock`` in :mod:`arl.atomic` has no
+    deadline of its own, so a wedged lock holder would hang the hook until Claude Code tore it down
+    with nothing. The shim already fails closed by name; refusing here means the user finds out
+    while watching the slash command instead of one denied tool call at a time.
 
-    "Usable" is why this resolves the layer rather than just counting: the perl supervisor needs
-    ``CLOCK_MONOTONIC``, because a deadline measured on the wall clock can be stretched past the
-    host's own hook timeout by a backwards clock adjustment -- and a stretched deadline means the
-    fail-closed response is never written at all. The shim refuses to run on a wall clock (125),
-    so a perl without it would arm cleanly and then deny every tool call; this turns that into
-    one refusal, here.
+    "Usable" is why this resolves the layer rather than counting: the perl supervisor needs
+    ``CLOCK_MONOTONIC``, since a wall-clock deadline can be stretched past the host's own timeout
+    by a backwards adjustment -- and a stretched deadline means the fail-closed response is never
+    written. The shim refuses to run on a wall clock (125), so a perl without it would arm cleanly
+    and then deny every tool call.
 
-    Checked ahead of the ``ARL_REVIEWER_CMD`` seam below, and never skipped by it: that seam
-    stands in for the reviewer, but the watchdog is needed whichever reviewer runs.
+    Checked ahead of the ``ARL_REVIEWER_CMD`` seam and never skipped by it: the watchdog is needed
+    whichever reviewer runs.
     """
     chosen = next((name for name in WATCHDOGS if paths.have(name)), None)
     if chosen is None:
@@ -469,20 +444,17 @@ def _check_watchdog() -> None:
 def _check_reviewer(config: Config) -> None:
     """Refuse to arm when the reviewer cannot be reached. Raises ``_ArmFailure``.
 
-    Arming with an unreachable reviewer would produce an activation whose every commit fails
-    the review for an operational reason -- denials that look like findings. Better to say so
-    now, while the user is watching the slash command's output.
+    Arming with an unreachable reviewer produces an activation whose every commit fails the review
+    for an operational reason -- denials that look like findings.
 
-    Three checks, narrowing: the ``harness`` names something this build implements, its binary
-    is on ``PATH``, and -- only for a CLI that can enumerate them -- the model is one it
-    reports. A harness whose ``probe_models`` answers ``None`` has no model list to check
-    against, and that is not a reason to refuse: a name it does not know exits non-zero, which
-    is an ``OP_FAILURE`` that blocks, so nothing is ever approved on the strength of a model
-    that was never reached (Rule 1).
+    Three checks, narrowing: the ``harness`` names something this build implements, its binary is
+    on ``PATH``, and -- only for a CLI that can enumerate them -- the model is one it reports. A
+    harness whose ``probe_models`` answers ``None`` has no list to check against, and that is not a
+    reason to refuse: an unknown name exits non-zero, which is an ``OP_FAILURE`` that blocks
+    (Rule 1).
 
-    The watchdog check rides along here because this is the one preflight both arming paths
-    share -- ``resume`` reaches it at ``resume.py:738`` -- so a check added here cannot be armed
-    around by resuming instead.
+    The watchdog check rides along here because this is the one preflight both arming paths share,
+    so a check added here cannot be armed around by resuming instead.
     """
     _check_watchdog()
     # Checked ahead of the test seam, and never skipped by it: the seam replaces the reviewer
@@ -800,8 +772,9 @@ def _arm(state: State, request: _Request) -> _Frozen:
     # drift silently voids the check just above: a repo config edited to another harness
     # mid-activation leaves every later review failing with "that binary is not on PATH", an
     # operational failure that reads as the reviewer's fault. `.adversarial-review-loop.json`
-    # travels with the tree under review and is not a trust boundary (AGENTS.md, "Adding
-    # config"), so "the reviewer this activation was armed against" must not be something an
+    # travels with the tree under review and is not a trust boundary
+    # (docs/design/config-keys-rationale.md), so "the reviewer this activation was armed
+    # against" must not be something an
     # edit to it can change. Pinning is also what makes a mid-activation switch *explicit*:
     # `--harness` on `resume`, or `ARL_HARNESS`, which still outranks this overlay.
     #

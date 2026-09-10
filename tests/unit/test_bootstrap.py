@@ -19,16 +19,20 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from conftest import (
+    PLUGIN_ROOT,
     SHADOWED_MODULES,
     git_status_ignored,
     pycache_dirs,
     run_bootstrap,
 )
+from test_commands_arm import armed_env, plan_file, state_dir
 
 
 def test_hostile_repo_cannot_shadow_the_gate(hostile_repo: Path, clean_env: dict[str, str]) -> None:
@@ -183,3 +187,59 @@ def test_unknown_subcommand_exits_two(hostile_repo: Path, clean_env: dict[str, s
     assert proc.returncode == 2
     assert proc.stdout == ""
     assert "usage: arl.sh <subcommand>" in proc.stderr
+
+
+#: Fields whose value is a clock reading; equality would be a flake, presence is the claim.
+_VOLATILE = ("armed_at", "ended_at")
+
+
+def _normalised_state(env: dict[str, str], repo: Path) -> dict[str, object]:
+    """The armed state document with its clock readings blanked."""
+    document: dict[str, object] = json.loads((state_dir(env, repo, "s1") / "state.json").read_text())
+    for key in _VOLATILE:
+        if key in document:
+            document[key] = "<volatile>"
+    revisions = document.get("plan_revisions")
+    if isinstance(revisions, list):
+        for entry in revisions:
+            if isinstance(entry, dict) and "at" in entry:
+                entry["at"] = "<volatile>"
+    return document
+
+
+def test_the_shim_passes_a_subcommand_through_unchanged(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``scripts/arl.sh`` ``exec``s the bootstrap for non-hook subcommands.
+
+    The shim is a guarded wrapper, not a reimplementation: the same argv in the same
+    repository must read identically whether it went through the shim or straight to the
+    bootstrap. Output alone would not catch a shim that rewrote an argument -- ``--session s2``
+    arms just as happily as ``s1`` and prints the same thing -- so the persisted state and the
+    session pointer are compared too, which is where a rewritten argv shows up.
+    """
+    env = armed_env(clean_env)
+    plan = plan_file(tmp_path)
+    state_root = Path(env["XDG_STATE_HOME"]) / "adversarial-review-loop"
+    argv = ["arm", "--session", "s1", "--plan", str(plan)]
+
+    shutil.rmtree(state_root, ignore_errors=True)
+    through_shim = subprocess.run(
+        [str(PLUGIN_ROOT / "scripts" / "arl.sh"), *argv],
+        cwd=str(git_repo),
+        env=dict(env),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    shim_state = _normalised_state(env, git_repo)
+    shim_pointer = sorted(path.name for path in (state_root / "sessions").iterdir())
+
+    shutil.rmtree(state_root, ignore_errors=True)
+    direct = run_bootstrap(argv, cwd=git_repo, env=env)
+    direct_state = _normalised_state(env, git_repo)
+    direct_pointer = sorted(path.name for path in (state_root / "sessions").iterdir())
+
+    assert through_shim.stdout == direct.stdout
+    assert through_shim.stderr == direct.stderr
+    assert through_shim.returncode == direct.returncode
+    assert shim_state == direct_state
+    assert shim_pointer == direct_pointer == ["s1"]

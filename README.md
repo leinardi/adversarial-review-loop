@@ -162,13 +162,16 @@ More — `RECONCILE`, `NEEDS_HUMAN`, rate limits, cost, running your tests as ev
 ## 🔨 Development
 
 ```console
-make test                    # 300+ acceptance assertions against scratch repos, plus the Python unit tests; no model is called
-make test-filter FILTER=stop # one section
+make test                    # 3900+ tests against scratch repos, plus the shim selftest; no model is called
+make test-unit               # the pytest half only
+make test-filter FILTER=watchdog # one shim selftest section
 make dry-run                 # print the exact reviewer argv and prompt, without invoking it
 make check                   # pre-commit (shellcheck, yamllint, markdownlint, …)
 ```
 
-The selftest drives the hook entrypoints with synthetic payloads and replaces the reviewer with `tests/fixtures/fake-reviewer.sh` (`ARL_REVIEWER_CMD`), so loop logic costs nothing to iterate on. It covers the snapshot layer, the command-shape table, every arm-failure mode, the fail-closed guards, commit divergence and reconcile, the findings cap, the Stop accounting, the watchdog layers, and the TTL.
+`tests/unit/` drives the hook entrypoints with synthetic payloads against scratch git repos — through the same bootstrap production uses — and replaces the reviewer with `tests/fixtures/fake-reviewer.sh` (`ARL_REVIEWER_CMD`), so loop logic costs nothing to iterate on. It covers the snapshot layer, the command-shape table, every arm-failure mode, the fail-closed guards, commit divergence and reconcile, the findings cap, the Stop accounting and the TTL.
+
+`tests/selftest.sh` is a separate, much smaller suite in bash, for the one layer pytest structurally cannot reach because it runs *inside* the Python being launched: the interpreter probe, the shim contract, the watchdog layers, socket stdin, and the hot path's process budget.
 
 Running the tests needs `jq`, and comparing the chunker against the real GNU `split` needs GNU coreutils (`gsplit`); both are **development-only** — the gate itself uses neither, and those comparisons skip cleanly where coreutils is absent, as on a stock Mac.
 

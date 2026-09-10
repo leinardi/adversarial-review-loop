@@ -8,8 +8,8 @@ live bugs; they are the argument for the code and travel with it.
 **Attachments reach OpenCode through ``-f``, which inlines them.** That is load-bearing
 for the evidence boundary :mod:`arl.reviewer` documents: a ``context/`` attachment is
 inlined into the prompt rather than handed over as a path, so no invocation can re-open
-one by name, and a cold confirmation -- passed none of them -- structurally cannot have
-seen model-authored prose.
+one by name, and a session-less call -- a contract repair, a ``clarify``, passed none of
+them -- structurally cannot have seen model-authored prose.
 
 **Session continuity here is discovery, not assignment** (:class:`DiscoveredSessions`):
 ``opencode run`` creates the session itself and offers no way to name it in advance, so the
@@ -136,9 +136,9 @@ def review_argv(repo: str, title: str, *, config: Config, session_id: str = "", 
       ``changes.99.diff`` symlink rode into the provider prompt. The list now comes from
       ``bundle_manifest``, which is driven by the bundle's own ``chunks`` count and
       rejects extras;
-    - "what was attached" must be **one** value, decided once. ``execute`` gates its cold
-      confirmation on whether model-derived context was among these, and a second, later
-      derivation from the filesystem could disagree with the first.
+    - "what was attached" must be **one** value, decided once. It is the round's record of
+      the model-derived context it was shown, and a second, later derivation from the
+      filesystem could disagree with the first.
 
     See ``reviewer.Invocation``, which carries both this list and the subset of it that is
     model-derived.
@@ -203,7 +203,7 @@ def permission(bundle_dir: Path, *, cold: bool = False) -> str:
 
     ``cold`` narrows the allow to *this one bundle* (``bundle_dir/**``). The wildcard above
     exists so a *continued* reviewer can re-open paths it remembers from an earlier round; a
-    cold invocation remembers nothing and needs none of it. Defence in depth behind the
+    session-less invocation remembers nothing and needs none of it. Defence in depth behind the
     ``context/`` boundary -- the ``context/`` directory is a sibling of ``bundles/`` and
     outside either allow regardless.
     """
