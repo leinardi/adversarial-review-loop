@@ -68,10 +68,14 @@ is genuine and which both channels pass over in silence —
 
 Everything else in the codebase is detail against these. Paraphrased from `AGENTS.md`:
 
-1. **A gate that cannot prove it's running denies.** If the hooks fire at all, the skill
-   was invoked. If arming itself then never executed — a refused sandbox, an unreadable
-   script — the dispatcher records that failure itself and denies. Absence of state is
-   never read as "nothing to enforce."
+1. **A gate that cannot prove it's running denies.** The hooks register at plugin load, so
+   the dispatcher runs in every session the plugin is enabled in — including ones that
+   armed nothing, which pass silently and write nothing. What decides a denial is what the
+   call can prove: a session pointer binding it to an activation, a recorded arming request
+   that nothing has answered, a repository git can actually resolve, and whether the
+   worktree's own activation is still live while this session is unbound. If arming never
+   executed — a refused sandbox, an unreadable script — the dispatcher records that failure
+   itself and denies. Absence of state is never read as "nothing to enforce."
 2. **Nothing converts a failure into an approval.** A timeout, malformed output, a
    non-zero exit, an unreadable state file — every one of these blocks or escalates.
    Operational uncertainty is never treated as "no findings."
@@ -102,6 +106,8 @@ Everything else in the codebase is detail against these. Paraphrased from `AGENT
 (A fifth property, unnumbered in `AGENTS.md` but load-bearing throughout: hook stdout is
 protocol. A hook entrypoint emits valid Claude hook JSON or nothing — never a stray
 `print`, which would corrupt the response the same way a crash would.)
+
+*Why it is built this way, at length: [`design/rule-0-intent.md`](design/rule-0-intent.md).*
 
 ## Command classification: defense in depth, not a single point of failure
 
@@ -135,6 +141,8 @@ did. **Narrowing that check did not move the deny-list**: on the commit path `$`
 `;`, `|`, redirection, subshells, globs and newlines are all still refused, `git commit -m
 "$(x)"` is denied exactly as before, and a heredoc whose body contains the words `git commit`
 is still detected and refused as a commit shape.
+
+*Why it is built this way, at length: [`design/deny-list-and-parser.md`](design/deny-list-and-parser.md).*
 
 ### The accepted shapes
 
@@ -222,6 +230,8 @@ directory with symlink-safe containment, and verified against a recorded SHA-256
 before its content is trusted for anything, including what gets shown to the reviewer. A
 failure here is a hard escalation to `needs-human`, never a silent skip or a fallback to a
 different file.
+
+*Why it is built this way, at length: [`design/state-fields.md`](design/state-fields.md).*
 
 ## Reviewer session continuity does not widen what `state.json` can do
 
@@ -444,9 +454,11 @@ itself, minutes later. Two exposures live in that gap, and only one of them is c
 `pretool` denies tool writes into the state root outright, so nothing Claude does on behalf of
 the reviewed repository can reach these files. What remains is something running as the user
 that does not go through the gate — a build script, a test, an MCP server — which is the same
-class AGENTS.md already records under "Known environment hazards". A third, quieter gain from
+class `docs/design/environment-hazards.md` already records. A third, quieter gain from
 staging: the staged bytes are the ones the gate already bounded by `max_findings_bytes`, so a
 swap cannot turn a capped attachment into an unbounded one.
+
+*Why it is built this way, at length: [`design/verify-cmd.md`](design/verify-cmd.md).*
 
 ### The one repository-authored channel that is instruction, not evidence
 
@@ -493,6 +505,8 @@ above. That is disclosed rather than fixed — the arming and resume banners, `/
 stored report, the reviewer's own `range.txt` and `make dry-run` all name the guide and its
 sha256, and every round leaves the exact prompt it ran under in the activation's `raw/`
 directory.
+
+*Why it is built this way, at length: [`design/config-keys-rationale.md`](design/config-keys-rationale.md).*
 
 ### The two harnesses, and which of these arguments is per-harness
 
@@ -543,6 +557,8 @@ but rude — `claude -p` persists each session into a bucket keyed by its cwd, a
 what the interactive `/resume` picker lists, so every review round would land in the user's own
 picker for the repository they are working in.
 
+*Why it is built this way, at length: [`design/adding-a-harness.md`](design/adding-a-harness.md).*
+
 ## Repo config is attacker-controlled input, full stop
 
 `.adversarial-review-loop.json`, when present, lives inside the repository under review — the
@@ -584,25 +600,23 @@ or self-serving agent could set to its own advantage, exactly as you'd treat any
 in the repository — because it *is* just another file in the repository. See
 [configuration.md](configuration.md#repo-config-is-not-trusted-for-policy).
 
+*Why it is built this way, at length: [`design/config-keys-rationale.md`](design/config-keys-rationale.md).*
+
 ## Interpreter invocation is hardened against two specific, confirmed exploits
 
-Both were found by experiment, not theory, and both look correct if reverted:
-
-- **`python3 -m` or a relative path, instead of an absolute one.** Hooks run with the
-  repository under review as the current directory. `-m` puts that directory at the front
-  of `sys.path`, so a repository shipping `arl/__main__.py` — or merely `json.py` — would
-  execute arbitrary code as the gate itself. The only sanctioned invocation is
-  `python3 -I <absolute path to the bootstrap>`.
-- **`uv run`, even with flags, on the hook path.** In a directory containing a
-  `pyproject.toml` with a custom build backend, `uv run python -I <bootstrap>` ran that
-  backend *before* the bootstrap started — the same class of exploit one layer up. A
-  `.python-version` file in the reviewed repo also silently redirected the interpreter uv
-  used, below the version floor this gate requires. `uv` is a developer convenience for
-  running the test suite; it must never appear on the path a hook actually executes.
+Both were found by experiment, not theory, and both look correct if reverted: invoking the
+gate as `python3 -m` or through a relative path puts the reviewed repository at the front of
+`sys.path`, and `uv run` on the hook path executes that repository's build backend before the
+gate starts and lets its `.python-version` redirect the interpreter. The only sanctioned
+invocation is `python3 -I <absolute path to the bootstrap>`, and `uv` is a developer
+convenience for the test suite that must never appear on the path a hook executes.
 
 `sys.pycache_prefix` is likewise pointed somewhere verified to overlap neither the plugin
 repo, the reviewed repo, nor the current directory — falling back to writing no bytecode at
-all if that can't be confirmed, rather than defaulting to writing beside the source.
+all if that cannot be confirmed, rather than defaulting to writing beside the source.
+
+*The measurements behind both, and the watchdog layers around them, at length:
+[`design/interpreter-and-watchdog.md`](design/interpreter-and-watchdog.md).*
 
 ## Writes are durable and permission-scoped
 
@@ -613,6 +627,8 @@ permitted to touch the repository under review (`config --repo`) chmods nothing 
 single file it writes, and never widens an existing file's permissions across a replace —
 a config file you deliberately left at `0600` comes back `0600`, not the process umask
 default.
+
+*Why it is built this way, at length: [`design/interpreter-and-watchdog.md`](design/interpreter-and-watchdog.md).*
 
 ## What this doesn't claim
 

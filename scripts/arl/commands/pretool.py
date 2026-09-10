@@ -443,8 +443,8 @@ def _guard_state_root(hook: Hook, payload: HookInput) -> None:
 
     This closes the *tool* route and only that. A Bash command can still write the same file,
     and no check inside this process can prevent it -- the gate runs as the same user, and by
-    the time it is asked about a command that command is about to run. See AGENTS.md, "What
-    Rule 4 does and does not guarantee". Worth having anyway: it is one string comparison, and
+    the time it is asked about a command that command is about to run. See
+    docs/design/end-state-record.md. Worth having anyway: it is one string comparison, and
     it removes the route that needs no shell at all.
     """
     if not payload.path:
@@ -654,8 +654,7 @@ def _upgrade_stale_document(state: State) -> None:
     **Costs one write per activation, ever**, not one per call: after the first upgrade the
     version check matches and this returns on a dict lookup. The lock is taken only on that
     same first call. It is deliberately *not* hoisted above ``hooks.tool_is_readonly``, so a
-    read-only tool still answers before state is loaded at all (see AGENTS.md, "Hot-path
-    rules").
+    read-only tool still answers before state is loaded at all (see docs/design/interpreter-and-watchdog.md).
 
     A migration that cannot complete raises ``StateLoadError`` exactly as it does on every
     other path, and the fail-closed guard in ``hookio.Hook.run`` turns that into a denial --
@@ -703,7 +702,7 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
     if status == "ACTIVE" and state.get("replan_pending") == "true":
         # Same fence as ARMED, and for the same reason: a phase list that can be rewritten
         # while other tool calls are permitted lets work happen, or even be reviewed, before
-        # the description it is meant to match exists. See AGENTS.md, "the replan fence".
+        # the description it is meant to match exists. See docs/design/state-fields.md.
         # Verified before the allow-check, same as the ARMED branch above.
         plan_file = _verified_plan_file(hook, state=state, config=config)
         if tool == "Bash" and cmdshape.is_set_phases(command, commands.entrypoint()):

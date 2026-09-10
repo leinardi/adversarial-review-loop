@@ -366,7 +366,8 @@ Two shapes:
 
 - **Cross-session** (a new Claude Code session picks the plan back up): the previous
   activation is retired into a blocking `RESUMED` status *before* the new one is
-  materialised — see the retire-first ordering and why it has no rollback in `AGENTS.md`.
+  materialised — see the retire-first ordering and why it has no rollback in
+  [`docs/design/resume-and-retirement.md`](design/resume-and-retirement.md).
   Exactly one activation may ever be live per worktree.
 - **Same-session** (re-running `resume` to change `--until`, the model, or the plan):
   the live document is mutated in place; nothing is retired.
@@ -442,7 +443,7 @@ around it.
 
 Latency does not track the process count, and the reason is `scripts/arl.sh` itself: every
 hook call is wrapped in an outer watchdog at `<N>` seconds (below the timeout Claude Code
-enforces — see "Interpreter invocation" in [`AGENTS.md`](../AGENTS.md)), so a hung parser
+enforces — see [`docs/design/interpreter-and-watchdog.md`](design/interpreter-and-watchdog.md)), so a hung parser
 still denies before the host tears the hook down with nothing. On this machine that wrapper
 alone measured **~90 ms**, flat, on every call — `timeout` here is `uutils-coreutils`' Rust
 reimplementation, and it appears to poll on a fixed interval rather than waking when the

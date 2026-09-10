@@ -447,8 +447,8 @@ class Completion:
         claim to keep accurate is therefore which *tree* is being completed and that a review
         was not skipped except by a value that read as permission at the last possible instant
         this function checked it, and every caller states the former; the latter is this
-        docstring. AGENTS.md already names the worktree hazard under "Known environment
-        hazards": gitignore such paths before arming.
+        docstring. docs/design/environment-hazards.md already names the worktree
+        hazard: gitignore such paths before arming.
         """
         state, repo = self.state, self.repo
         with state.transaction():

@@ -2185,8 +2185,8 @@ def stage_attachments(sources: Sequence[tuple[Path, str]], staging_dir: Path) ->
       directory. Genuinely closing this needs a descriptor passed to the child, which ``-f``
       has no way to accept.
 
-    The residual is therefore the same class AGENTS.md already records under "Known
-    environment hazards": something running as the user that does not go through the gate.
+    The residual is therefore the same class docs/design/environment-hazards.md already
+    records: something running as the user that does not go through the gate.
     The repository under review is *not* in that class -- ``pretool`` denies tool writes into
     the state root outright.
 

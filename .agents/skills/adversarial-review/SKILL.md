@@ -48,7 +48,32 @@ parsing → state persistence → hook response.
 
 ## 2. Load project authority
 
-Read `AGENTS.md` or `CLAUDE.md` when present. Load authority for changed paths:
+Read `AGENTS.md` or `CLAUDE.md` when present. `AGENTS.md` state each invariant in
+one line; argument behind it live in `docs/design/`.
+
+**Load before reviewing — mandatory.** Read every design note whose row match a
+touched file, before ranking findings. Invariant line alone no carry the evidence
+a plausible-looking change destroy.
+
+| Touched | Must load |
+| --- | --- |
+| `commands/hooks.py`, `commands/intent.py`, `commands/pretool.py` (`_no_pointer`, Rule 0 paths) | `docs/design/rule-0-intent.md` |
+| `state.py` `pointer_write`, `paths.py` `repo_root_or_raise`, `hooks.py` `_answered_by_live_activation`, `pending_intent`, `resolve_repo` | `docs/design/rule-0-intent.md` |
+| `commands/resume.py`, `commands/session.py` (`deactivate`, `_finish_the_retirement`) | `docs/design/resume-and-retirement.md`, `docs/design/end-state-record.md` |
+| `state.py` `_migrate`, `STATE_VERSION`, `commands/pretool.py` `_upgrade_stale_document` | `docs/design/state-fields.md`, `docs/design/end-state-record.md` |
+| `reviewer.py` (`_claim_*`, `_reserve_round`, `_publish`, `session_ref`, `_repair_*`), `oscillation.py` | `docs/design/state-fields.md` |
+| `cmdshape.py`, `_vendor/bashlex` | `docs/design/deny-list-and-parser.md` |
+| `skills/*/SKILL.md`, `util.stdin_argument`, `commands/arm.py` `split_args`, the `--args-stdin`/`--reason-stdin` parsers in `arm`/`resume`/`pausecmd`/`configcmd`/`accept` | `docs/design/argument-channel.md` |
+| `config.py`, `commands/configcmd.py`, `commands/arm.py` `_check_reviewer` | `docs/design/config-overlay.md`, `docs/design/config-keys-rationale.md` |
+| `scripts/arl.sh`, `arl-bootstrap.py`, `cli.py`, `atomic.py`, `hookio.py` | `docs/design/interpreter-and-watchdog.md` |
+| `reviewer.build_bundle`, `_hashed_rows`, `_confirm_*` | `docs/design/verify-cmd.md` |
+| `harness/` | `docs/design/adding-a-harness.md` |
+| `gitsnap.py`, `commands/stop.py` `_guard_exclude`, `commands/posttool.py` | `docs/design/environment-hazards.md`, `docs/design/end-state-record.md` |
+| `commands/pretool.py` `_review_failed`, `_check_retry_backoff`; `commands/posttool.py` `_advance` | `docs/design/state-fields.md` |
+| `commands/resume.py` `_refuse_if_the_overlay_moved`, `commands/arm.py` overlay writes | `docs/design/config-overlay.md` |
+| `commands/arm.py` `exclude_digest` capture, `gitsnap.exclude_digest` | `docs/design/resume-and-retirement.md` |
+
+Then load code authority for changed paths:
 
 | Changed area | Read | Review focus |
 | --- | --- | --- |

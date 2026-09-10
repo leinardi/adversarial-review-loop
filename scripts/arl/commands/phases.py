@@ -112,7 +112,7 @@ def _freeze_initial(state: State, config: Config, phases: list[str]) -> str:
         stop_after_phase = len(phases)
     # `replan_pending=False` is belt and braces: a fresh ARMED document already defaults to
     # it, but a token granted by a resume *before* this first freeze must not survive it --
-    # see AGENTS.md, "the replan fence". Without this, a second `set-phases` call at any later
+    # see docs/design/state-fields.md. Without this, a second `set-phases` call at any later
     # point, mid-implementation, would take the replan branch and rewrite the phase in flight.
     state.update(phases=phases, phase=1, status="ACTIVE", reason="", stop_after_phase=stop_after_phase, replan_pending=False)
     return clamp_warning

@@ -8,7 +8,7 @@ under-specifies everywhere or over-specifies for one repository.
 
 **This is the first config-reachable input that becomes *instruction* rather than evidence,
 so it is bounded rather than trusted.** It is admissible for the same reason ``verify_cmd``
-is (AGENTS.md, "Adding config"): the repo config layer can already set
+is (docs/design/config-keys-rationale.md): the repo config layer can already set
 ``ignore_globs: ["**"]``, a complete and strictly worse bypass of every per-commit review,
 and ``verify_cmd`` already runs attacker-authored code through ``bash -lc`` inside the gate.
 Guidance text is weaker than both. What contains it:

@@ -304,7 +304,7 @@ if start 'hot path: a read-only tool answers without loading config or state'; t
         edit_procs=$(trace_procs Edit)
 
         # The dispatcher runs on every tool call, so this is a real budget, not
-        # a style preference. See "Hot-path rules" in AGENTS.md.
+        # a style preference. See docs/design/interpreter-and-watchdog.md.
         #
         # Under the shell implementation, a mutating tool legitimately forked
         # more processes than a read-only one: config and state were loaded

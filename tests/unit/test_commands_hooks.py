@@ -99,7 +99,7 @@ def test_a_terminal_document_with_no_record_was_edited(status: str) -> None:
     All three production writes of a terminal status fold ``ended_evidence`` into the same
     ``state.update``, so this build cannot produce a terminal document carrying the field
     empty. Writing ``status: DISARMED`` straight into ``state.json`` ends the mode with no
-    command to inspect (AGENTS.md, "What Rule 4 does and does not guarantee") and leaves
+    command to inspect (docs/design/end-state-record.md) and leaves
     exactly this shape -- so collapsing it into the legacy case would hand that bypass its own
     suppression.
     """

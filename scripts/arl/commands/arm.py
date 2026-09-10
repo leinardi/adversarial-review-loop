@@ -11,11 +11,12 @@ without being able to say why. The message printed here is what the user sees; t
 what the next tool call reads.
 
 **The character-set check on the plan path protects the loop's state, not the machine.**
-``skills/implement/SKILL.md`` interpolates ``$ARGUMENTS`` into a shell body that is then
-``eval``-ed, so anything injectable has already run by the time this code sees the string.
-The check is still worth keeping -- it stops a nonsense path from being frozen into an
-activation -- but it must not be mistaken for a sandbox. See AGENTS.md, "The argument
-channel is not escaped".
+``skills/implement/SKILL.md`` hands ``$ARGUMENTS`` over inside a here-document with a quoted
+delimiter, so the value reaches ``--args-stdin`` as bytes rather than as shell source; that
+transport is what stops a hostile path from executing, and it is not this check. What this
+check does is refuse a path the activation could not honestly freeze -- a nonsense value that
+would otherwise be recorded as the reviewed scope. It must not be mistaken for a sandbox.
+See docs/design/argument-channel.md.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -800,8 +801,9 @@ def _arm(state: State, request: _Request) -> _Frozen:
     # drift silently voids the check just above: a repo config edited to another harness
     # mid-activation leaves every later review failing with "that binary is not on PATH", an
     # operational failure that reads as the reviewer's fault. `.adversarial-review-loop.json`
-    # travels with the tree under review and is not a trust boundary (AGENTS.md, "Adding
-    # config"), so "the reviewer this activation was armed against" must not be something an
+    # travels with the tree under review and is not a trust boundary
+    # (docs/design/config-keys-rationale.md), so "the reviewer this activation was armed
+    # against" must not be something an
     # edit to it can change. Pinning is also what makes a mid-activation switch *explicit*:
     # `--harness` on `resume`, or `ARL_HARNESS`, which still outranks this overlay.
     #

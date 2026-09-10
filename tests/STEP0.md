@@ -195,7 +195,7 @@ Note what a positive result would *not* fix. A model that can run arbitrary Bash
 
 ## Session E — does `{"decision":"block"}` work on a post-hook (items 13, 14)
 
-The Python port's fail-closed fallback table (see "The shim is not three lines" in `AGENTS.md`) gives `confirm-commit` (`PostToolUse`) and `posttool-failure` (`PostToolUseFailure`) weaker fallbacks than `pretool` and `gate-stop`, because neither can deny — the tool call has already run by the time either fires. `confirm-commit` falls back to `additionalContext`, which is known to work because the entrypoint already emits it on its ordinary path. `posttool-failure` stays silent, matching its current behaviour. A stronger `{"decision":"block"}` would be preferable for both, but it is documented as **unverified for these events** rather than assumed, and this is the item that settles it.
+The Python port's fail-closed fallback table (see docs/design/interpreter-and-watchdog.md) gives `confirm-commit` (`PostToolUse`) and `posttool-failure` (`PostToolUseFailure`) weaker fallbacks than `pretool` and `gate-stop`, because neither can deny — the tool call has already run by the time either fires. `confirm-commit` falls back to `additionalContext`, which is known to work because the entrypoint already emits it on its ordinary path. `posttool-failure` stays silent, matching its current behaviour. A stronger `{"decision":"block"}` would be preferable for both, but it is documented as **unverified for these events** rather than assumed, and this is the item that settles it.
 
 1. With the fixture armed and phases frozen, have Claude run a plain, successful `Bash` call that is not a commit (`echo hi`). Point `ARL_REVIEWER_CMD` or a scratch build of `confirm-commit` at a stub that returns `{"decision":"block","reason":"step0 probe"}` instead of its normal `additionalContext` response, and watch whether the turn is actually blocked, or whether `decision` is simply ignored on `PostToolUse` the way an unrecognised key would be.
 2. **Expect**, if it works: the turn does not end (or Claude is redirected) with `"step0 probe"` visible, the same way a `Stop`-hook block behaves.
@@ -207,9 +207,11 @@ The Python port's fail-closed fallback table (see "The shim is not three lines" 
 
 ---
 
-## Session F — hooks registered twice in one session (item 15)
+## Session F — hooks registered twice in one session (item 15) — superseded
 
-Untested: `implement` and `resume` both carry the identical `hooks:` block (deliberately — see AGENTS.md, "Resume: a second arming path"). If both run in the *same* session — arm, then later `resume` in that same session to change `--until`, the model, or the plan — Claude Code registers the `PreToolUse`/`PostToolUse`/`PostToolUseFailure`/`Stop` hooks a second time, pointing at the identical command.
+**This item is closed and the session below is obsolete.** It was written when `implement` and `resume` each carried their own `hooks:` block. They no longer do: every hook lives in `hooks/hooks.json` and registers once at plugin load, so a same-session `resume` registers nothing a second time and there is no double firing to measure. See "Plugin-level hooks, 2026-08-30" below for the result that moved them, and [`docs/design/resume-and-retirement.md`](../docs/design/resume-and-retirement.md) for why neither skill may grow one back. The rest of this section is kept only as the record of what was asked; do not run it.
+
+Untested at the time: `implement` and `resume` both carried an identical `hooks:` block. If both ran in the *same* session — arm, then later `resume` in that same session to change `--until`, the model, or the plan — Claude Code registers the `PreToolUse`/`PostToolUse`/`PostToolUseFailure`/`Stop` hooks a second time, pointing at the identical command.
 
 The handlers look idempotent by inspection: a second `confirm-commit` firing on the same tool call finds no `pending_approved_tree` and an already-approved `HEAD`, so it has nothing to do; a second `pretool` firing on the same commit finds the tree already approved and takes the cache-hit path rather than reviewing twice. But that is reasoning about what the handler does when called, not a measurement of *how many times Claude Code calls it* — once per tool call regardless of registration count, once per registration (so twice, sequentially), or with the second registration replacing the first. Any of those changes what "idempotent" needs to mean, and only one of the three costs nothing.
 

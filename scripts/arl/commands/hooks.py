@@ -286,8 +286,8 @@ def end_state(state: State) -> EndState:
     and no terminal transition filled it -- ordinary on a live activation, and impossible on
     one whose stored status a terminal transition writes, since all three of those writes fold
     :func:`ended_evidence` into the same ``state.update``. The documented Rule 4 bypass is
-    editing ``status`` straight into ``state.json`` (AGENTS.md, "What Rule 4 does and does not
-    guarantee"), which produces precisely that second shape, so it is reported as tampering.
+    editing ``status`` straight into ``state.json`` (docs/design/end-state-record.md), which
+    produces precisely that second shape, so it is reported as tampering.
 
     ``looks_like_object_id`` and **not** ``gitsnap.checked_tree``: ``checked_tree`` resolves
     against the repository as it is *now*, and a genuinely recorded tree legitimately stops

@@ -72,9 +72,10 @@ def plan_file(tmp_path: Path, text: str = "# plan\n\nphase one\n") -> Path:
 # Argument splitting
 # --------------------------------------------------------------------------
 #
-# `split_args` is the only thing standing between `$ARGUMENTS` -- substituted into the skill
-# body unescaped, see "The argument channel is not escaped" in AGENTS.md -- and the plan path
-# `arm` actually opens, so its split points are a direct spec, not an implementation detail.
+# `split_args` is what turns the one string `--args-stdin` receives -- `$ARGUMENTS` verbatim,
+# carried through a quoted here-document rather than through the shell, see
+# docs/design/argument-channel.md -- into the plan path `arm` actually opens, so its split
+# points are a direct spec, not an implementation detail.
 # This corpus and its expected splits used to be asserted differentially, against the shell
 # port `arl_split_args` was translated from; that reference was retired in Phase 8, so the
 # split points below are now the specification.

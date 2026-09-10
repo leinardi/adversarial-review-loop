@@ -2054,7 +2054,7 @@ def test_a_status_edited_straight_into_the_document_is_still_reported(
     """The second documented Rule 4 bypass, which leaves no command to inspect at all.
 
     A wrapper commits unreviewed work and then writes ``status: DISARMED`` straight into
-    ``state.json`` -- AGENTS.md, "What Rule 4 does and does not guarantee". No terminal
+    ``state.json`` -- docs/design/end-state-record.md. No terminal
     transition ran, so the document carries the ``ended_*`` fields **empty rather than
     absent**, and reading that as a legacy document would hand this bypass its own
     suppression. It is reported as an edited record instead.

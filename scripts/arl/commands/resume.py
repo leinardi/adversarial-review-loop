@@ -1,6 +1,6 @@
 """``resume`` -- continue an armed activation in a new session, or adjust it in this one.
 
-A second arming path (AGENTS.md calls it exactly that), used instead of ``arm`` when a plan
+A second arming path (docs/design/resume-and-retirement.md calls it exactly that), used instead of ``arm`` when a plan
 already has a frozen baseline and approvals that must not be lost: ``arm`` always starts a
 fresh activation, wiping ``phases``, ``approved_trees`` and the baseline tree, which is right
 for a new plan and wrong for coming back to an old one tomorrow.
@@ -260,8 +260,7 @@ def _parse(argv: list[str]) -> tuple[str, list[str]]:
     splits the flag half of its own input -- which carries the same limitation ``arm`` already
     has for ``--model``/``--variant``: a value containing whitespace cannot survive this
     channel. ``--args-stdin`` is what the skill body spells, and the one form that survives
-    Claude Code's unescaped ``$ARGUMENTS`` substitution intact; see AGENTS.md, "The argument
-    channel".
+    Claude Code's unescaped ``$ARGUMENTS`` substitution intact; see docs/design/argument-channel.md.
     """
     session = ""
     flag_tokens: list[str] = []
@@ -552,8 +551,8 @@ def _copy_activation_tree(src: Path, dst: Path) -> None:
             os.chmod(os.path.join(root, name), FILE_MODE)
 
 
-#: Fields reset on every cross-session resume. See the module docstring and AGENTS.md,
-#: "the inverted carry-forward rule": this is an allow-list of what to *reset*, not of what to
+#: Fields reset on every cross-session resume. See the module docstring and
+#: docs/design/resume-and-retirement.md: this is an allow-list of what to *reset*, not of what to
 #: keep, so a field added to ``new_state_document`` later is carried forward by default.
 def _build_successor_document(
     *,
@@ -579,7 +578,8 @@ def _build_successor_document(
         finish_requested=False,
         # Counters, not evidence: a fresh run starts its retry-pacing and clarify budgets
         # from zero. ``round_history`` is deliberately *not* here -- it is carried forward
-        # like the reports, per the inverted carry-forward rule in AGENTS.md. Nor is
+        # like the reports, per the inverted carry-forward rule
+        # (docs/design/resume-and-retirement.md). Nor is
         # ``clarify_seq``: it numbers ``context/`` question files, ``context/`` is copied
         # forward byte for byte, and resetting it would have a post-resume clarify overwrite
         # a carried-forward question file -- the same failure a reset ``report_seq`` causes.
@@ -797,7 +797,7 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
     # `--replan` grants permission to redefine the phases from the current one onward; there
     # is nothing to redefine until a first `set-phases` has run, and granting the token on an
     # unfrozen (`ARMED`) activation would leave it lying around for whatever `set-phases`
-    # freezes the list -- see `phases.py` and AGENTS.md, "the replan fence".
+    # freezes the list -- see `phases.py` and docs/design/state-fields.md.
     if flags.replan and not prev_state.get_array("phases"):
         raise _ResumeFailure("the phase list is not frozen yet, so there is nothing to replan. Run set-phases normally instead of --replan.")
 

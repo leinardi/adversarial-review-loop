@@ -12,7 +12,7 @@ PYTEST_WORKERS ?= auto
 # to touch the system interpreter (PEP 668). It is a developer convenience only -- uv is
 # deliberately **not** on the runtime path, because `uv run` reads `pyproject.toml` and
 # `.python-version` from the current directory, which under a hook is the repository under
-# review. See AGENTS.md, "Why the gate does not run under uv".
+# review. See docs/design/interpreter-and-watchdog.md.
 #
 # An explicit PYTHON= on the command line wins, and so does ARL_NO_UV=1.
 UV := $(shell command -v uv 2>/dev/null)
