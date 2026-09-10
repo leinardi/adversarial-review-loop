@@ -1,38 +1,22 @@
-r"""Command-shape classification: may this command be allowed to create a commit?
+"""Command-shape classification: may this command be allowed to create a commit?
 
-Two layers decide, and only the first one is policy:
+Two layers decide, and only the first is policy. **The deny-list**
+(:func:`_deny_shell_grammar`) refuses nearly the whole shell grammar -- ``$``, backticks,
+``;``, ``|``, redirection, subshells, braces, unquoted globs, a bare ``&``, newlines,
+comments -- and runs first. What survives is a flat sequence of words joined by ``&&``, and
+**bashlex**, vendored under :mod:`arl._vendor`, turns that into words.
 
-* **The deny-list** refuses nearly the whole shell grammar -- ``$``, backticks, ``;``,
-  ``|``, redirection, subshells, braces, unquoted globs, a bare ``&``, newlines, comments.
-  Ported arm-for-arm from the plugin's now-retired shell implementation, character for
-  character and message for message, and it still runs first. What survives it is a flat
-  sequence of words joined by ``&&``.
-* **bashlex** -- a real bash parser, vendored under :mod:`arl._vendor` -- turns that into
-  words. It replaced a hand-rolled quote-and-escape loop, which is the one thing in this
-  module a reader could not check against bash without re-deriving bash's own rules.
-
-The deny-list did not move when the parser arrived, and that is deliberate. A parser makes
-it *possible* to reason about a pipeline or a subshell; it does not make it wise. Relaxing
-what is accepted is a separate change, with its own evidence, and the invariant to carry
-into it is that the accepted grammar and the thing that reads it are one design. Widening
-the deny-list without re-reading :func:`_words` breaks that, and neither will tell you.
-
-Detection -- which commands are sent to the gate at all -- is still textual, and cannot be
+Detection -- which commands reach the gate at all -- is still textual and cannot be
 otherwise: it runs on commands the deny-list *would* refuse, so there may be nothing
-parseable to work with. See :func:`detection_form` and :func:`is_set_phases`, which document
-the two bypasses that the shell's raw-string matching left open.
+parseable to work with. See :func:`detection_form` and :func:`is_set_phases`.
 
-A third check, :func:`unresolved_expansion`, runs on **every** Bash call rather than only on
-the commit path, and is not the boundary either. It exists so textual detection cannot go
-blind on a command *name*, and it is scoped to exactly that: a name whose value an expansion
-decides. It deliberately does not refuse an expansion in an argument or in a quoted heredoc
-body -- refusing those bought no part of the guarantee and cost the loop a Bash call every
-time it wanted to write a script. **The deny-list did not move for it**: on the commit path
-``$``, backticks, ``;``, ``|``, redirection, subshells, globs and newlines are all still
-refused, so ``git commit -m "$(x)"`` is denied exactly as before.
+:func:`unresolved_expansion` runs on **every** Bash call rather than only the commit path,
+and is not the boundary either: it exists so textual detection cannot go blind on a command
+*name*, and is scoped to exactly that.
 
-Every rejection raises ``CommandShapeError``; its message is the explanation the shell kept
-in ``ARL_CMD_ERROR`` and the gate shows to the model.
+**The deny-list and the parser are one design.** Relaxing what is accepted without re-reading
+:func:`_words` is the specific change that breaks this module, and neither will tell you. See
+``docs/design/deny-list-and-parser.md``.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -124,35 +108,21 @@ _GLOB_CHARACTERS: Final = "*?[]"
 def tokenize(command: str) -> list[str]:
     """Split a command into words, with ``&&`` surviving as its own token.
 
-    Two layers, in this order, and the order **is** the design:
+    Two layers, and the order **is** the design: :func:`_deny_shell_grammar` refuses nearly the
+    whole shell grammar, and bashlex splits whatever survives.
 
-    1. :func:`_deny_shell_grammar` refuses nearly the whole shell grammar. It is the
-       hand-rolled scanner that used to do the splitting too, with the token accumulation
-       taken out: the same characters are refused, in the same order, with the same
-       messages.
-    2. Whatever survives that is a flat sequence of words joined by ``&&``, and *bashlex*
-       -- a real bash parser, vendored -- is what turns it into words.
+    Keeping the deny-list in front of the parser is not belt-and-braces. bashlex parses the whole
+    language, so alone it would hand back a clean AST for a pipeline or a subshell and leave the
+    gate deciding node by node which constructs cannot reach the filesystem -- the same policy,
+    re-expressed against a grammar large enough to hide a mistake in.
 
-    Keeping the deny-list in front of the parser is not belt-and-braces. bashlex parses the
-    whole language, so on its own it would happily hand back a clean AST for a pipeline, a
-    subshell or a redirection; the gate would then have to decide, node by node, which
-    constructs cannot reach the filesystem after the snapshot -- the same policy as today,
-    re-expressed against a grammar large enough to hide a mistake in. The deny-list keeps
-    that decision a short list of characters a reader can check.
+    What the parser buys is word splitting, quote removal and escape handling as bash's own rules
+    rather than re-derived here. Two consequences, both intended: a command bashlex cannot parse
+    is refused rather than tokenized on a guess (the hand-rolled loop read a trailing backslash as
+    if it were not there), and a syntactically broken command's refusal is now worded by the
+    parser. The verdict is the same in every such case.
 
-    What the parser buys is the *other* half: word splitting, quote removal and escape
-    handling are now bash's rules as implemented by a parser, not as re-derived by a loop
-    of this repository's own. Two things follow, both intended:
-
-    - a command bashlex cannot parse is refused rather than tokenized on a guess. The
-      hand-rolled loop read ``git commit -m x\\`` -- a trailing backslash -- as ``x``, where
-      bash keeps the backslash and bashlex calls it an unexpected EOF. The gate now denies
-      it. Denying a command whose words three implementations disagree about is the safe
-      direction, and the model can re-issue it quoted.
-    - the wording of a refusal for a *syntactically* broken command comes from the parser
-      now (``git commit -m x && `` was "the command contains an empty segment", and is now
-      a parse failure). The verdict is the same in every such case; only the explanation
-      moved, and ``tests/unit/test_cmdshape.py`` asserts each one that did.
+    See ``docs/design/deny-list-and-parser.md``.
     """
     _deny_shell_grammar(command)
     # bashlex has no concept of an empty program: `parse("")` walks off the end of its own
@@ -164,32 +134,24 @@ def tokenize(command: str) -> list[str]:
 
 
 def _deny_shell_grammar(command: str) -> None:  # noqa: PLR0912 - one branch per shell `case` arm; splitting it would hide the deny-list
-    """Refuse everything that could run a second program or touch a file after the snapshot.
+    r"""Refuse everything that could run a second program or touch a file after the snapshot.
 
-    **This is the security boundary.** Ported arm-for-arm from the plugin's retired shell
-    implementation's ``case`` statement (now gone; see ``git log`` before the Phase 8 removal
-    for the original), deliberately kept as one flat loop rather than split up, so a reviewer
-    can read it top to bottom and see that nothing was dropped. ``tests/unit/test_cmdshape.py``
-    is what now proves that claim, not a diff against the shell.
+    **This is the security boundary.** Deliberately one flat loop rather than split up, so a
+    reviewer can read it top to bottom and see that nothing was dropped;
+    ``tests/unit/test_cmdshape.py`` is what proves that claim.
 
-    Quote-aware, which is the whole subtlety: ``git commit -m "a;b"`` is a legitimate commit
-    message and ``git commit -m x; rm -rf /`` is two commands. The scan therefore tracks
-    quotes and escapes exactly as the splitting loop used to -- it *is* that loop, with the
-    token accumulation removed and ``started`` kept, since a ``#`` is a comment only where a
-    word is not already open.
+    Quote-aware, which is the whole subtlety: ``git commit -m "a;b"`` is a legitimate message and
+    ``git commit -m x; rm -rf /`` is two commands. ``started`` is kept because a ``#`` is a
+    comment only where a word is not already open.
 
-    "Exactly as the shell does" is load-bearing in **both** directions. Reading a quote as
-    still open where the shell has closed it would let a metacharacter through, which is the
-    dangerous mistake; reading it as closed where the shell has not is the safe one, and it
-    is what the missing backslash arm below used to do -- refusing ``-m "handle \\"this\\""``,
-    a command bash accepts, with a message about an unterminated quote that named nothing the
-    model could act on.
+    "Exactly as bash does" is load-bearing in **both** directions. Reading a quote as still open
+    where bash has closed it lets a metacharacter through and is the dangerous mistake; reading it
+    as closed where bash has not is the safe one, and it is what a missing backslash arm did --
+    refusing ``-m "handle \"this\""``, which bash accepts.
 
-    **One message differs from the shell's deliberately, and no verdict does.** ``&>`` and
-    ``&>>`` are bash's "redirect stdout and stderr" operators; the shell's ``&`` arm caught
-    them first and called them backgrounding. Both were refused then and are refused now --
-    what changed is only that they are now named as the redirection they are, which is also
-    what lets :func:`validate_commit` give them the redirect denial it gives ``>`` and ``|``.
+    ``&>`` and ``&>>`` are named as the redirection they are rather than as backgrounding, which
+    is what lets :func:`validate_commit` give them the redirect denial. Both were refused before
+    and are refused now; only the message moved.
     """
     if "$" in command:
         raise CommandShapeError('the command contains "$" (variable or command substitution)')
@@ -619,26 +581,19 @@ def _subcommand_is(words: list[str], index: int, sub: str) -> bool:
 def _mentions(command: str, sub: str) -> bool:
     """Does any segment of ``command`` run ``git <sub>``, however it is spelled?
 
-    Every position is tried, not only word 0, because the old regex matched ``git`` anywhere
-    after a separator and that looseness is deliberate: over-detection routes a command into
-    the gate, which then proves it is one of the accepted shapes or denies it.
+    Every position is tried, not only word 0: over-detection routes a command into the gate, which
+    then proves it is one of the accepted shapes or denies it.
 
-    The dashed executable is the other spelling. git still installs ``git-commit``,
-    ``git-reset`` and ``git-update-ref`` in ``$(git --exec-path)`` -- measured on git 2.55 --
-    and each does exactly what its subcommand does, so a detector that knows only the
-    subcommand form lets ``/usr/lib/git-core/git-commit -m x`` reach the shell with no gate
-    consulted. Compared as a whole basename, which is what keeps ``git-commit-graph write``
-    and ``legit-commit -m x`` out.
+    The dashed executable is the other spelling. git installs ``git-commit``, ``git-reset`` and
+    ``git-update-ref`` in ``$(git --exec-path)`` -- measured on git 2.55 -- and each does what its
+    subcommand does. Compared as a whole basename, which keeps ``git-commit-graph write`` and
+    ``legit-commit -m x`` out.
 
-    **Each segment is read two ways, and the union is the answer.** Respecting the quotes is
-    what finds ``git -C "dir with space" commit``; ignoring them -- splitting every word again
-    on the whitespace inside it -- is what keeps ``sh -c "git commit -m x"`` and a ``git
-    commit`` written inside a heredoc body. Those are not the same question. The first asks
-    what bash will run *here*; the second asks whether the text names a commit at all, which
-    is the older and deliberately looser reading, and dropping it would hand back exactly the
-    exec-wrapper bypass the quote removal was added to close. Neither view alone is safe, so
-    both run: a hit in either routes the command to the gate, which then proves it is one of
-    the accepted shapes or denies it.
+    **Each segment is read two ways and the union is the answer.** Respecting the quotes finds
+    ``git -C "dir with space" commit``; ignoring them -- splitting every word again on its inner
+    whitespace -- keeps ``sh -c "git commit -m x"`` and a ``git commit`` inside a heredoc body.
+    The first asks what bash runs *here*, the second whether the text names a commit at all, and
+    dropping the second hands back the exec-wrapper bypass quote removal was added to close.
     """
     dashed = f"git-{sub}"
     for segment in detection_words(command):
@@ -658,48 +613,25 @@ _ESCAPE_RE: Final = re.compile(rf"arl(\.sh)?{_SPACE}+(finish|deactivate|resume|c
 def detection_form(command: str) -> str:
     r"""Undo backslash escapes and quoting, so detection reads a command as bash will.
 
-    **This is the fix for a real bypass, not a tidy-up.** The three detectors below matched
-    the raw string, so ``g\it commit -m x`` -- which bash runs as ``git commit`` -- contained
-    no literal ``git`` and was not detected as a commit at all. ``pretool`` then passed it
-    straight through to be executed, ungated. The same trick hid ``g\it reset --hard`` from
-    the reset guard and ``oc\rl.sh finish`` from the Rule 4 denial. Quoting does it too:
-    ``'g'it commit`` and ``g"i"t commit`` are both ``git commit`` to bash.
+    **This is the fix for a real bypass, not a tidy-up.** Matching the raw string missed
+    ``g\it commit -m x`` -- which bash runs as ``git commit`` -- so ``pretool`` passed it through
+    ungated. The same trick hid ``g\it reset --hard`` and ``arl.sh finish``, and quoting does it
+    too: ``'g'it commit`` and ``g"i"t commit`` are both ``git commit`` to bash. So the
+    word-removal half of bash's expansion is applied first.
 
-    So the word-removal half of bash's expansion is applied first: a backslash outside single
-    quotes escapes the next character, quote delimiters vanish, and everything else survives
-    in place.
+    **A backslash before a newline is a line continuation: both characters disappear.** Bash
+    splices the line, so ``git com\<newline>mit -m x`` runs ``git commit``; escaping the newline
+    left ``com\nmit``, which no detector matches, and the command reached the shell with no gate
+    consulted -- measured, it lands an unreviewed commit. Applies inside double quotes, and
+    **not** inside single quotes, exactly as bash does.
 
-    **A backslash before a newline is a line continuation: both characters disappear**, and
-    that is a bypass too, not a nicety. Bash splices the line, so::
+    **Used for detection only, never for validation** -- ``tokenize`` reads the raw string,
+    because that is where the deny-list lives. Over-detecting is the safe direction.
 
-        git com\
-        mit -m x
-
-    runs ``git commit``. Emitting the newline -- escaping it, the way every other character is
-    escaped -- left ``com\nmit`` in the detection form, which no detector matches, and the
-    command reached the shell with no gate consulted: measured, it lands an unreviewed commit.
-    The same splice hid ``git re\<newline>set --hard`` from the reset guard and
-    ``arl.sh fin\<newline>ish`` from the Rule 4 denial. It applies inside double quotes for
-    the same reason bash applies it there, and **not** inside single quotes, where bash keeps
-    both characters literally.
-
-    **Used for detection only, never for validation.** ``tokenize`` still reads the raw
-    string, because that is where the deny-list lives. Over-detecting is the safe direction:
-    a false positive routes the command into the commit gate, which either proves it is one
-    of the three accepted shapes or denies it.
-
-    **What this still does not see: substitution.** ``$(echo git) commit`` and ``$'g\x69t'``
-    produce a command name no textual pass can predict, and denying every command containing
-    ``$`` would deny the builds and tests the loop exists to run. Such a commit is not
-    approved -- it simply never reaches the gate -- and it is caught at turn end, where the
-    phase has not advanced and the Stop gate blocks on the outstanding phase before the
-    cumulative review runs.
-
-    **The vendored parser does not close this, and no parser can.** bashlex reports a
-    command whose *name is a substitution node*; what the node evaluates to is decided when
-    it runs. What closes it is :func:`unresolved_expansion` refusing such a name outright
-    while the gate is enforcing, and -- on the commit path specifically -- the deny-list
-    refusing ``$`` and backticks anywhere at all.
+    What this cannot see is substitution: ``$(echo git) commit`` produces a name no textual pass
+    can predict, and no parser closes it either -- bashlex reports a name node whose value is
+    decided when it runs. What closes it is :func:`unresolved_expansion` refusing such a name, and
+    the deny-list refusing ``$`` and backticks on the commit path.
     """
     out: list[str] = []
     quote = ""
@@ -757,33 +689,26 @@ def is_escape(command: str) -> bool:
 
 
 def is_set_phases(command: str, entrypoint: str) -> bool:
-    """Is this command **exactly** ``<entrypoint> set-phases …`` and nothing else?
+    r"""Is this command **exactly** ``<entrypoint> set-phases …`` and nothing else?
 
-    ``set-phases`` is the single command permitted while the phase list is still unfrozen --
-    a state in which nothing may change the repository -- so an ``allow`` here runs a program
-    at a moment when everything else is denied. Two things therefore have to hold, and the
-    shell checked neither.
+    ``set-phases`` is the one command permitted while the phase list is unfrozen -- a state in
+    which nothing may change the repository -- so an ``allow`` here runs a program at a moment
+    when everything else is denied. Two things must hold, and a substring match checked neither.
 
-    **It must be the whole command.** The shell used
-    ``grep 'arl\\(\\.sh\\)\\?[[:space:]]\\+set-phases'``, a substring match, so
-    ``git add -A && git commit -m x && .../arl.sh set-phases --phase x`` was *allowed*: the
-    commit ran before phases were ever frozen, with no snapshot and no review. The command is
-    tokenized instead -- with the real tokenizer, which refuses ``$``, backticks, ``;``,
-    ``|``, redirection, subshells, globs and a bare ``&`` outright -- and must be a single
-    segment.
+    **It must be the whole command.** ``grep 'arl\.sh[[:space:]]\+set-phases'`` *allowed*
+    ``git add -A && git commit -m x && .../arl.sh set-phases --phase x``: the commit ran before
+    phases were frozen, with no snapshot and no review. The command is tokenized instead, with the
+    real tokenizer, and must be a single segment.
 
-    **It must be this gate's own script**, matched as the exact path the caller passes in,
-    not by basename. A basename test trusts any executable called ``arl``, and the
-    repository under review can ship one: ``./arl set-phases --phase x`` would then be
-    allowed to run arbitrary code at the one moment nothing else may run at all. ``arm``
-    prints this exact path for the model to copy, so nothing legitimate is lost.
+    **It must be this gate's own script**, matched as the exact path the caller passes in, never
+    by basename -- the repository under review can ship an executable called ``arl``. ``arm``
+    prints the exact path for the model to copy.
 
-    The arguments after ``set-phases`` are deliberately not constrained. They are read by
-    :mod:`arl.commands.phases`, which can freeze a phase list and nothing else -- there is
-    no argument to that command that touches the repository under review.
+    The arguments after ``set-phases`` are deliberately unconstrained: :mod:`arl.commands.phases`
+    can freeze a phase list and nothing else.
 
-    A ``False`` here says nothing about *why*; :func:`set_phases_refusal` is what turns a
-    refused attempt into a message, and the two must stay in step.
+    A ``False`` says nothing about *why*; :func:`set_phases_refusal` turns a refusal into a
+    message, and the two must stay in step.
     """
     try:
         tokens = tokenize(command)
@@ -884,44 +809,30 @@ _EXEC_WRAPPERS: Final = frozenset({"sh", "bash", "zsh", "env", "xargs", "eval", 
 def unresolved_expansion(command: str) -> str:
     """Name the expansion that makes this command's **name** unknowable, or return "".
 
-    Detection reads text, and ``$(printf git) commit -m x`` contains no word this or any
-    other textual pass can resolve to ``git``. It runs ``git commit`` all the same. A real
-    parser does not fix that by itself: bashlex reports a command whose *name is a
-    substitution node*, and the only sound answer to that is still refusal. This function is
-    what makes the refusal, on every Bash call, before anything is classified.
+    ``$(printf git) commit -m x`` contains no word any textual pass can resolve to ``git`` and
+    runs ``git commit`` all the same; bashlex only reports that the name *is* a substitution node,
+    so the sound answer is refusal. This makes it, on every Bash call, before anything is
+    classified.
 
-    **Its guarantee is about a command name, and nothing wider.** An expansion in an
-    *argument* was never part of it: ``echo "exit=$?"`` runs ``echo``, which is exactly what
-    it says. Refusing those cost a real loop a scratchpad file and a second Bash call roughly
-    six times in one session -- once forcing a ``$`` to be written ``chr(36)`` in Python
-    source, an obfuscation that made the script less readable and nothing safer. This function
-    already says as much about the wider hole it cannot close: ``eval``, ``xargs``, ``env``
-    and a shell function all reach ``git`` with a literal command name, and what catches those
-    is ``confirm-commit`` noticing afterwards that HEAD moved to a tree no review approved.
+    **Its guarantee is about a command name and nothing wider.** An expansion in an *argument* was
+    never part of it -- ``echo "exit=$?"`` runs ``echo`` -- and refusing those cost a real loop a
+    scratchpad file and a second Bash call roughly six times in one session. The wider hole it
+    cannot close (``eval``, ``xargs``, ``env``, a shell function) is caught by ``confirm-commit``
+    noticing afterwards that HEAD moved to a tree no review approved.
 
     Four steps, in order:
 
-    1. **A textual scan, heredoc-aware.** ``$`` and backticks outside single quotes are
-       located exactly as before, with one addition: a heredoc opened with a *quoted*
-       delimiter (``<<'EOF'``, ``<<"EOF"``, ``<<-'EOF'``) has a body bash expands **nothing**
-       in, so that body is skipped whole. Finding nothing returns ``""`` with no parse, which
+    1. **A textual scan, heredoc-aware.** A heredoc opened with a *quoted* delimiter expands
+       nothing, so its body is skipped whole. Finding nothing returns ``""`` with no parse, which
        is every ordinary command -- the ~55 ms bashlex import stays off the hot path.
-    2. **An unquoted heredoc body is refused outright.** ``<<EOF`` *is* expanded by bash, and
-       bashlex hides that body in a ``heredoc`` node rather than in a word, so step 3 would
-       clear it while bash cheerfully ran the substitution inside it. Quote the delimiter and
-       the body is data again.
-    3. **Parse, then refuse only a name.** Only a command that today is denied outright gets
-       this far, so no call that currently succeeds starts paying for the parser. Every
-       ``command`` node in the tree is walked -- a pipeline and a ``;`` list both hold several
-       -- and its name is its first ``word`` part, ``assignment`` prefixes skipped and
-       ``redirect`` parts ignored. A name word carrying any non-``tilde`` part is refused, by
-       :func:`_reject_unreadable_word`'s own rule applied to the name alone. A parse failure
-       or a :class:`CommandShapeTimeout` denies with the message the textual scan already had.
-    4. **The wrapper guard**, ``_EXEC_WRAPPERS`` -- see there for why it is a speed bump
-       rather than a boundary.
+    2. **An unquoted heredoc body is refused outright.** Bash expands it, and bashlex files it
+       under a ``heredoc`` node where step 3 would never see it.
+    3. **Parse, then refuse only a name.** Every ``command`` node's name is its first ``word``
+       part, assignment prefixes skipped and redirects ignored; a name carrying any non-``tilde``
+       part is refused. A parse failure or :class:`CommandShapeTimeout` denies.
+    4. **The wrapper guard**, ``_EXEC_WRAPPERS`` -- a speed bump, not a boundary.
 
-    A ``$`` inside single quotes is literal to bash and is left alone at every step, so
-    ordinary ``grep '$foo'`` still works.
+    A ``$`` inside single quotes is literal to bash and is left alone at every step.
     """
     found = _scan_expansion(command)
     if found is None:
@@ -1032,43 +943,28 @@ def _expansion_at(command: str, index: int) -> str:
 
 
 def _scan_expansion(command: str) -> tuple[int, bool] | None:  # noqa: PLR0912, PLR0915 - see `_deny_shell_grammar`: one flat scanner, one branch per character class
-    """``(index of the first unresolved expansion, is it in an expanded heredoc body)``, or
-    ``None`` when the text holds none.
+    r"""``(index of the first unresolved expansion, is it in an expanded heredoc body)``, or ``None``.
 
-    The same quote-and-escape tracking :func:`unresolved_expansion` has always done, plus line
-    continuations, comments, arithmetic and heredocs. A heredoc body is not shell text -- bash
-    reads it as data -- and whether it is *expanded* data is decided by one thing: whether any
-    part of the delimiter was quoted.
+    **The invariant this function must not break: never skip text bash executes.** The only thing
+    it skips is a heredoc body, so every rule exists to stop a ``<<`` being read as a heredoc
+    where bash does not, or as one ending later than bash ends it. Each was a live bypass, each
+    verified by running the payload under real bash:
 
-    **The invariant this function must not break: never skip text bash executes.** The only
-    thing it ever skips is a heredoc body, so every rule below exists to stop a ``<<`` being
-    read as one where bash does not read it as one, or as one that ends later than bash ends it.
-    Each was a live bypass, each verified by running the payload under real bash:
-
-    - **A line continuation carries the logical line on.** ``\\`` + newline is removed by bash
-      before anything else is parsed, so the next character is *not* at the start of a line and
-      no heredoc body starts there. Treating it as an ordinary escape set ``started``, which
-      turned the ``#`` after it into an ordinary word instead of a comment -- and then
-      ``\\``-newline-``# <<':'`` opened a heredoc out of commented text and swallowed the
-      command on the next line.
-    - **A comment is skipped, so a ``<<`` inside one cannot open a heredoc.** ``# <<':'``
-      queued a delimiter of ``:`` and read the substitution on the next line as body, while
-      bash discarded the comment and ran it. ``#`` opens a comment only where a word is not
-      already open, which is bash's own rule and the one ``_deny_shell_grammar`` implements;
-      ``echo a#b`` has no comment in it.
-    - **``<<`` inside ``(( ))`` is a left shift, not a redirect.** ``((1 << 'true'))`` queued a
-      delimiter of ``true`` and skipped to the next line saying so -- and bash, whose
-      arithmetic merely fails there, went on to execute what had been skipped. Heredocs are
-      not recognised while an arithmetic command is open. ``$((`` needs no such rule: the ``$``
-      is flagged before the ``((`` is ever reached.
-    - **A heredoc body is skipped only once its delimiter is fully known.** See
-      :func:`_heredoc_delimiter`, which answers ``None`` -- no heredoc, keep scanning as shell
-      text -- for anything it cannot resolve exactly.
+    - **A line continuation carries the logical line on**, so the next character is not at the
+      start of a line and no body starts there. Read as an ordinary escape, ``\<newline># <<':'``
+      opened a heredoc out of commented text and swallowed the next command.
+    - **A comment is skipped**, so ``# <<':'`` cannot queue a delimiter and read the next line as
+      body while bash discards the comment and runs it. ``#`` opens a comment only where a word is
+      not already open, which is bash's own rule.
+    - **``<<`` inside ``(( ))`` is a left shift.** ``((1 << 'true'))`` queued a delimiter and
+      skipped the next line, which bash went on to execute. ``$((`` needs no rule: the ``$`` is
+      flagged first.
+    - **A body is skipped only once its delimiter is fully known** -- see
+      :func:`_heredoc_delimiter`.
 
     Delimiters are queued rather than consumed on sight, because bash queues them too:
-    ``cmd <<'A' <<'B'`` takes A's body first and then B's, both starting on the line after the
-    ``<<``. Consuming the first one where it appears would skip past the second's ``<<`` and
-    read its body as shell text.
+    ``cmd <<'A' <<'B'`` takes A's body then B's, and consuming the first where it appears would
+    read B's body as shell text.
     """
     quote = ""
     pending: list[tuple[str, bool, bool]] = []
@@ -1145,29 +1041,24 @@ def _scan_expansion(command: str) -> tuple[int, bool] | None:  # noqa: PLR0912, 
 
 
 def _heredoc_delimiter(command: str, index: int) -> tuple[str, bool, bool, int] | None:
-    """``(delimiter, strips leading tabs, expands its body, index after the delimiter)`` for
-    the ``<<`` at ``index``, or ``None`` when the delimiter cannot be resolved exactly.
+    r"""``(delimiter, strips leading tabs, expands its body, index after the delimiter)`` for the
+    ``<<`` at ``index``, or ``None`` when the delimiter cannot be resolved exactly.
 
-    The delimiter is a whole word, read with bash's quote removal rather than by looking at
-    its first character: ``<<E'OF'`` delimits on ``EOF``, not on ``E'OF'``. Getting that wrong
-    is not cosmetic -- a delimiter this function resolves *later* than bash does would make
-    :func:`_scan_expansion` swallow the lines between the two terminators, which bash executes.
+    The delimiter is a whole word read with bash's quote removal, not by its first character:
+    ``<<E'OF'`` delimits on ``EOF``. Resolving it *later* than bash does would make
+    :func:`_scan_expansion` swallow lines bash executes.
 
-    Quoting **any** part of the word turns expansion off for the whole body, which is why
-    ``quoted`` accumulates across the word instead of being decided by the first character.
-    ``<<-`` strips leading tabs from the body *and* from the terminator line, so that flag
-    travels with the delimiter.
+    Quoting **any** part of the word turns expansion off for the whole body, so ``quoted``
+    accumulates across the word. ``<<-`` strips leading tabs from the body and the terminator, so
+    that flag travels with the delimiter.
 
-    A ``\\``-newline inside the word is a **line continuation**, not an escape: bash removes
-    both characters and the word carries on, so ``<<E\\``-newline-``OF`` delimits on ``EOF``
-    and is not quoted by it. Reading it as an escape produced a delimiter with a newline in
-    it -- something no line can ever equal -- so the terminator was never found and every
-    line to the end of the text was skipped as body, bash executing all of it.
+    A ``\``-newline inside the word is a **line continuation**: ``<<E\<newline>OF`` delimits on
+    ``EOF`` and is not quoted by it. Read as an escape it produced a delimiter containing a
+    newline -- which no line can equal -- so every remaining line was skipped as body while bash
+    executed all of it.
 
-    ``None`` -- meaning "this is not a heredoc, keep scanning as shell text" -- for an empty
-    word, an unterminated quote, and a word containing ``$`` or a backtick. That last one is
-    the fail-closed direction: the scan cannot prove where such a delimiter ends, and refusing
-    to skip means the body is read as shell text and any expansion in it is flagged.
+    ``None`` -- not a heredoc, keep scanning as shell text -- for an empty word, an unterminated
+    quote, and a word containing ``$`` or a backtick. That last is the fail-closed direction.
     """
     index += 2
     strip_tabs = command[index : index + 1] == "-"

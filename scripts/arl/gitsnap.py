@@ -1,27 +1,19 @@
 """Snapshotting the working state into an immutable tree id.
 
-Ports ``scripts/lib/gitsnap.sh``. A snapshot is committed + staged + unstaged + non-ignored
-untracked content, captured through a **throwaway index**: ``GIT_INDEX_FILE`` points at a
-temporary *copy* of the repository's index, so ``add -A``/``write-tree`` never touch the real
-one (Rule 3 -- nothing the gate does is visible inside the repository under review).
+A snapshot is committed + staged + unstaged + non-ignored untracked content, captured through
+a **throwaway index**: ``GIT_INDEX_FILE`` points at a temporary *copy* of the repository's
+index, so ``add -A``/``write-tree`` never touch the real one (Rule 3).
 
-A copy, rather than a fresh index seeded from ``HEAD``, because the tree this produces is the
-tree ``git add -A && git commit`` is about to produce, and those two are not the same thing
-whenever the real index holds an entry ``add -A`` would not create: a ``git add -f`` of a
-gitignored path is the ordinary way to get one. Seeding from ``HEAD`` left that entry out of
-the reviewed tree while the commit still carried it, so the commit's tree could not match the
-approved tree and every such phase ended in ``RECONCILE`` -- the gate accusing the model of
-committing something other than what it reviewed, when what it reviewed was simply short a
-file. See :func:`_seed`.
+A copy rather than a fresh index seeded from ``HEAD``, because the tree this produces is the
+tree ``git add -A && git commit`` is about to produce, and those differ whenever the real index
+holds an entry ``add -A`` would not create -- a ``git add -f`` of a gitignored path is the
+ordinary way to get one. Seeding from ``HEAD`` left that entry out of the reviewed tree while
+the commit carried it, so every such phase ended in ``RECONCILE``. See :func:`_seed`.
 
-Only the index is redirected. ``git add -A`` still writes the blobs it hashes into
-``.git/objects``, exactly as the shell did; that is unavoidable for ``write-tree`` and is
-invisible to ``git status``.
-
-The temporary index lands wherever ``tempfile`` puts it (``TMPDIR``), which is the shell's
-behaviour too. It is not placed inside the repository, and it is removed on every path out,
-including the ``index.lock`` git leaves behind when it is interrupted -- the shell leaked
-that one.
+Only the index is redirected: ``git add -A`` still writes the blobs it hashes into
+``.git/objects``, which is unavoidable for ``write-tree`` and invisible to ``git status``. The
+temporary index lands in ``TMPDIR`` and is removed on every path out, including the
+``index.lock`` git leaves behind when interrupted.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -155,22 +147,16 @@ class Snapshot:
 def git_run(repo: str, args: Sequence[str], *, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
     """Run ``git -C <repo> …``, capturing bytes.
 
-    Bytes rather than text because these commands report *paths*, and a path is not
-    required to be valid UTF-8; decoding is done per call site, with ``surrogateescape``.
+    Bytes rather than text because these commands report *paths*, which are not required to be
+    valid UTF-8; decoding is per call site, with ``surrogateescape``. An interpreter-level failure
+    -- git missing entirely -- is reported as a non-zero result rather than raised, since every
+    caller already treats "no output" as failure.
 
-    An interpreter-level failure -- git missing entirely -- is reported as a non-zero
-    result rather than raised, because that is what the shell's ``|| true`` produced and
-    every caller here already treats "no output" as failure.
-
-    **Bounded by :data:`GIT_TIMEOUT_SEC`.** A git command in the gate is metadata: a
-    ``rev-parse``, a ``log``, a ``--name-only``. None of them has a legitimate reason to take
-    minutes, and some of them run *inside* a lease -- ``reviewer._claim_active_review``'s
-    active-review slot is honoured for a computed window, and an unbounded step inside that
-    window lets the lease expire while the call is still legitimately running, a second review
-    reclaim the slot, and the two race to a verdict. An expiry is reported as status ``124``,
-    the same status :func:`arl.reviewer.run_bounded` reports it as, and reaches callers
-    through the non-zero path they already handle -- which for every one of them means
-    denying, never approving (Rule 1).
+    **Bounded by :data:`GIT_TIMEOUT_SEC`.** A git command in the gate is metadata and has no
+    legitimate reason to take minutes, and some run *inside* the active-review lease, where an
+    unbounded step lets the lease expire while the call is still legitimately running. An expiry is
+    reported as status ``124``, which reaches callers through the non-zero path they already
+    handle -- for every one of them, denying (Rule 1).
     """
     try:
         return subprocess.run(
@@ -231,23 +217,18 @@ EXCLUDE_ABSENT: Final = "absent"
 def exclude_digest(repo: str) -> str:
     """Digest of this worktree's ``info/exclude``, :data:`EXCLUDE_ABSENT`, or ``""``.
 
-    ``.git/info/exclude`` is an ignore file that lives **outside** the worktree, so nothing
-    ever reviews it and no commit ever carries it -- and every snapshot this module takes
-    obeys it, because :func:`snapshot` stages with ``git add -A``. Anything listed there is
-    therefore invisible to the dirty check, to the turn-end unreviewed-work sweep and to every
-    review tree: writing one line into it makes a file that is really sitting in the worktree
-    read as a clean worktree. Measured -- a staged ``backdoor.py`` went from ``?? backdoor.py``
-    to ``clean = True`` with the snapshot tree falling back to the baseline.
+    ``.git/info/exclude`` lives **outside** the worktree, so nothing reviews it and no commit
+    carries it -- yet every snapshot obeys it, because :func:`snapshot` stages with ``git add -A``.
+    Anything listed there is invisible to the dirty check, the turn-end sweep and every review
+    tree. Measured: a staged ``backdoor.py`` went from ``?? backdoor.py`` to ``clean = True`` with
+    the snapshot tree falling back to the baseline.
 
-    The answer is *not* to look through the file. Legitimately ignored paths (``node_modules``,
-    build output) are exactly what it and ``.gitignore`` exist for, and sweeping them into a
-    review would make every turn end unusable. What is worth knowing is narrower: whether the
-    file **changed while an activation was live**. ``.gitignore`` needs no such treatment --
-    it is inside the repository, so a change to it is itself reviewed.
+    The answer is *not* to look through the file -- legitimately ignored paths are what it exists
+    for. What is worth knowing is narrower: whether it **changed while an activation was live**.
+    ``.gitignore`` needs no such treatment, being inside the repository and itself reviewed.
 
-    ``""`` on any failure, and callers must treat it as "no comparison possible" rather than
-    as a change: git being unrunnable is already denied by Rule 0 elsewhere, and turning an
-    unreadable file into a reported edit would fire on every sandbox that hides ``.git``.
+    ``""`` on any failure, which callers must treat as "no comparison possible" rather than as a
+    change. See ``docs/design/resume-and-retirement.md``.
     """
     path = exclude_path(repo)
     if path is None:
@@ -479,21 +460,19 @@ def _index_path(repo: str) -> str:
 def _seed(repo: str, index: str, env: Mapping[str, str]) -> None:
     """Fill the throwaway index with the state ``git add -A`` will be applied to.
 
-    A byte copy of the real index, which is what the commit will build from. Copied rather
-    than reconstructed: an index carries entries no tree-level reconstruction reproduces --
-    a force-added gitignored path, an unmerged entry mid-merge -- and the ones it misses are
-    exactly the ones that would make the reviewed tree differ from the committed tree.
+    A byte copy of the real index, which is what the commit will build from. Copied rather than
+    reconstructed: an index carries entries no tree-level reconstruction reproduces -- a
+    force-added gitignored path, an unmerged entry mid-merge -- and those are exactly the ones that
+    would make the reviewed tree differ from the committed tree.
 
-    A split index (``core.splitIndex``) copies safely: the shared half is named inside the
-    file and resolved against ``$GIT_DIR``, not against the index's own path. The subsequent
-    ``add -A`` is run with ``core.splitIndex=false`` so that writing the *copy* back cannot
-    deposit a new ``sharedindex.*`` file in the repository.
+    A split index copies safely, since the shared half is resolved against ``$GIT_DIR``; the
+    subsequent ``add -A`` runs with ``core.splitIndex=false`` so writing the copy back cannot
+    deposit a new ``sharedindex.*`` in the repository.
 
-    Falls back to ``HEAD`` (or an empty index) only when there is no index file at all -- a
-    freshly ``git init``-ed repository nothing has ever staged in. A failure to *read* an
-    index that exists raises instead: silently reviewing a tree seeded from ``HEAD`` is how
-    the entries described above go missing, and a snapshot that is not the working state is
-    never the safe fallback (Rule 1).
+    Falls back to ``HEAD``, or to an empty index when ``HEAD`` is unborn, only when there is no
+    index file at all -- a freshly ``git init``-ed repository nothing has ever staged in. A
+    failure to *read* an index that exists raises instead: a snapshot that is not the working
+    state is never the safe fallback (Rule 1).
     """
     real = _index_path(repo)
     if os.path.exists(real):

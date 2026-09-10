@@ -314,21 +314,18 @@ def intent_read(session: str) -> IntentMarker | None:
 def pointer_write(session: str, worktree: str) -> None:
     """Record which worktree a session armed, acknowledging the intent that asked for it.
 
-    Written atomically for the same reason ``state.json`` is: the shell redirected straight
-    onto the destination, so an interrupted write left an empty pointer -- which Rule 0
-    then reads as "arming never executed", denying every subsequent tool call.
+    Written atomically for the same reason ``state.json`` is: an interrupted redirect left an
+    empty pointer, which Rule 0 reads as "arming never executed".
 
-    **The pointer is the acknowledgement, and it is published first.** The intent marker
-    outranks the pointer (``hooks.pending_intent`` runs before ``pointer_read``), so the two
-    have to be bound rather than ordered: the pointer carries the marker's token on its second
-    line, and a marker whose token the pointer already carries is *answered*, whatever else
-    is on disk. That closes both crash windows at once. Die after this write: the marker is
-    left behind, but acknowledged -- inert, cleaned up by the next ``pending_intent``. Die
-    before it: no pointer, marker still pending, the next mutation records ``ARM_FAILED``.
-    Unlinking first would have opened a window with *nothing* on disk -- no marker, no
-    pointer, no ``latest`` -- in which a saved ``ACTIVE`` activation went ungated.
+    **The pointer is the acknowledgement, and it is published first.** The intent marker outranks
+    the pointer, so the two are bound rather than ordered: the pointer carries the marker's token
+    on its second line, and a marker whose token the pointer already carries is *answered*. That
+    closes both crash windows. Die after this write and the marker is inert litter; die before it
+    and the next mutation records ``ARM_FAILED``. Unlinking first would open a window with nothing
+    on disk at all -- no marker, no pointer, no ``latest`` -- in which a saved ``ACTIVE``
+    activation went ungated.
 
-    The unlink afterwards is best-effort cleanup, nothing more.
+    The unlink afterwards is best-effort cleanup. See ``docs/design/rule-0-intent.md``.
     """
     root = paths.state_root()
     marker = intent_read(session)
@@ -425,15 +422,11 @@ def _usable_version(document: Mapping[str, Any]) -> bool:
 def _is_future_version(document: Mapping[str, Any]) -> bool:
     """Whether ``version`` is a real, positive integer this build merely does not go up to.
 
-    Deliberately **not** the negation of :func:`_usable_version`: that also covers ``0``,
-    negative integers, and every malformed non-integer value (``null``, a boolean, a float,
-    a string) -- none of which any build of this gate has ever written or ever will, so
-    there is nothing plausibly "newer" about them. Only an integer greater than
-    :data:`STATE_VERSION` is the shape an actual future build's document would have.
-    :meth:`State.load` uses exactly this to decide whether a document is worth preserving
-    untouched (see :attr:`State.version_conflict`) or is ordinary corrupt state -- conflating
-    the two would let a single stray ``null`` permanently refuse every escalation and every
-    re-arm over what is, in truth, no different from unparseable JSON.
+    Deliberately **not** the negation of :func:`_usable_version`, which also covers ``0``,
+    negatives and every malformed value -- none of which any build has written, so there is
+    nothing plausibly "newer" about them. :meth:`State.load` uses this to decide whether a
+    document is worth preserving untouched or is ordinary corrupt state; conflating the two would
+    let one stray ``null`` permanently refuse every escalation and re-arm.
     """
     version = _document_version(document)
     return version is not None and version > STATE_VERSION
@@ -511,46 +504,31 @@ class State:
     def _migrate(self) -> None:
         """Upgrade a document written by an older build, lock already held.
 
-        Applied as ordered arms so a version-1 (or unversioned) document reaches the current
-        version in a single pass:
+        Ordered arms, so a version-1 (or unversioned) document reaches the current version in one
+        pass:
 
-        * **1 -> 2** synthesizes ``plan_revisions`` revision 0 from ``plan.frozen.md`` as
-          found *now* -- no earlier hash was ever recorded to check it against -- and
-          defaults the resume / config-overlay fields. Later code indexes ``plan_revisions``'
-          last entry, and an empty list turns that into an ``IndexError`` raised from inside
-          a hook, which the fail-closed guard in ``hookio.Hook.run`` converts into a denial
-          that says nothing useful. A missing, unreadable or symlinked ``plan.frozen.md``
-          fails closed as ``ARM_FAILED`` -- inventing a plan is worse than refusing.
-        * **2 -> 3** adds ``round_history``, the three convergence counters, and
-          ``clarify_seq``. No evidence recovery is needed: every one of those fields degrades
-          correctly through the typed accessors (``get_int`` answers ``0``,
-          ``get_array_of_dicts`` answers ``[]``), so a plain ``setdefault`` from
-          :func:`new_state_document` is the whole arm.
-        * **4 -> 5** adds the end-state record, and is the one arm that is *not* an
-          unconditional ``setdefault``: ``ended_capture``'s absence is a load-bearing signal,
-          not a default, so the arm resolves what it means from the stored status while that
-          question still has an answer. See :meth:`_migrate_4_to_5`.
-        * **3 -> 4** adds ``guide_path`` and ``guide_revisions``, and is a plain ``setdefault``
-          for the same reason -- with one property that matters more than it degrading safely:
-          an empty ``guide_revisions`` is the *correct* answer for every document written
-          before the review guide existed, because none of those activations had one. There is
-          nothing to recover here, and inventing a revision 0 (the way the 1 -> 2 arm has to
-          for the plan) would attach a guide to an activation that never ran under one.
+        * **1 -> 2** synthesizes ``plan_revisions`` revision 0 from ``plan.frozen.md`` as found *now*
+          -- no earlier hash was ever recorded -- and defaults the resume/overlay fields. Later code
+          indexes the last entry, and an empty list turns that into an ``IndexError`` inside a hook.
+          A missing, unreadable or symlinked plan fails closed as ``ARM_FAILED``.
+        * **2 -> 3** adds ``round_history``, the convergence counters and ``clarify_seq``: a plain
+          ``setdefault``, since each degrades correctly through the typed accessors.
+        * **3 -> 4** adds ``guide_path``/``guide_revisions``, also a ``setdefault`` -- and an empty
+          ``guide_revisions`` is the *correct* answer for a document written before the guide
+          existed, so inventing a revision 0 would attach a guide to an activation that never ran
+          under one.
+        * **4 -> 5** adds the end-state record and is the one arm that is not a ``setdefault``:
+          ``ended_capture``'s absence is a load-bearing signal, not a default. See
+          :meth:`_migrate_4_to_5`.
 
-        Most other fields this build added degrade correctly on their own too; the explicit
-        arms exist for the ones that do not, and to make each upgrade a single recorded step
-        rather than an accident of accessor defaults.
+        Must not call back into :meth:`transaction` or :meth:`_escalate`: both take the activation
+        lock, and ``flock`` does not nest across two descriptors on the same file, so a second
+        acquisition would block forever. Failure is written straight into ``self.data`` and saved, and
+        a :class:`StateLoadError` raised.
 
-        Must not call back into :meth:`transaction` or :meth:`_escalate` on any path: both
-        take the activation lock, and ``flock`` does not nest across two descriptors opened
-        by the same process on the same file -- a second acquisition here would block
-        forever on the first. Failure is instead written straight into ``self.data`` and
-        saved directly, and a :class:`StateLoadError` raised so the caller's own mutation is
-        abandoned exactly as it would be for any other unusable document.
-
-        ``version`` is re-validated here even though :meth:`load` already refused anything
-        it could not trust -- belt and braces, in case a future caller ever reaches this
-        method with data that did not come through ``load``.
+        ``version`` is re-validated here even though :meth:`load` already refused what it could not
+        trust, in case a future caller reaches this method with data that did not come through
+        ``load``. See ``docs/design/state-fields.md``.
         """
         version = _document_version(self.data)
         if version is None or not (1 <= version <= STATE_VERSION):
@@ -636,34 +614,22 @@ class State:
     def _migrate_4_to_5(self, defaults: dict[str, Any]) -> None:
         """The 4 -> 5 arm: resolve what an absent ``ended_capture`` means, while it still can be.
 
-        The other arms default a field because its absence carries no information. This one is
-        the opposite: ``ended_capture``'s absence is what the two reporting channels read as
-        "this activation ended before the record existed, so there is nothing to report". That
-        answer is only correct for a document that *had already ended* when this build first
-        touched it. For one still live, absence would go on meaning silence forever -- and the
-        documented Rule 4 bypass, writing ``status`` straight into ``state.json``, would inherit
-        that silence, because a hand-edited status leaves no evidence behind by construction.
+        The other arms default a field because its absence carries no information. Here absence is
+        what the two reporting channels read as "this ended before the record existed, so there is
+        nothing to report" -- correct only for a document that *had already ended*. For a live one,
+        absence would mean silence forever, and the documented Rule 4 bypass (writing ``status``
+        straight into ``state.json``) would inherit it.
 
-        So the arm backfills **only when the stored status is not one a terminal transition
-        writes**:
+        So the arm backfills only when the stored status is not one a terminal transition writes.
+        Already terminal: the fields stay **absent** and both channels stay silent, because inventing
+        evidence is worse than refusing. Still live (or ``ARM_FAILED``/``NEEDS_HUMAN``, which no
+        writer records evidence for): it gets the current schema's empty record, so a later
+        hand-edited status is a document that has the field and never filled it, which
+        ``commands.hooks.end_state`` reports as tampering.
 
-        * already terminal -- it genuinely ended before the record existed. Nothing is
-          recoverable and inventing evidence is worse than refusing, exactly as the 3 -> 4 arm
-          declines to synthesize a guide revision 0. The fields stay **absent**, and both
-          channels stay silent.
-        * still live (or ``ARM_FAILED`` / ``NEEDS_HUMAN``, which no writer records evidence
-          for) -- it will reach its terminal transition under *this* build, which records
-          properly. Giving it the current schema's empty record now means a later hand-edited
-          status is a document that has the field and never filled it, which
-          ``commands.hooks.end_state`` reports as tampering rather than passing over.
-
-        **What this does not close**, and the honest bound on it: a legacy activation that is
-        live when the build is upgraded and whose status is edited *before* any write path takes
-        a transaction is still absent-and-terminal, hence silent. Migration runs under the lock
-        in :meth:`transaction`, so it needs a writer to have run at all -- in a loop that is
-        actually being worked in that is the next confirmed commit, blocked turn end or defer,
-        but it is not a guarantee. Reading the stored status is the earliest moment the question
-        has an answer at all; there is no earlier one to move it to.
+        **What this does not close**: a legacy activation that is live at upgrade and whose status is
+        edited before any write path takes a transaction is still absent-and-terminal, hence silent.
+        Reading the stored status is the earliest moment the question has an answer at all.
         """
         if self.data.get("status") not in ENDED_EVIDENCE_STATUSES:
             for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
@@ -675,34 +641,23 @@ class State:
         """Hold the activation lock across load -> mutate -> save.
 
         Without the lock a ``PostToolUse`` hook overlapping a user-run ``defer`` is a
-        read-modify-write race: atomic rename keeps the file well-formed, but the loser's
-        update is simply gone.
+        read-modify-write race: the atomic rename keeps the file well-formed, but the loser's update
+        is simply gone.
 
-        **A failed load raises rather than yielding.** State that is missing or unparseable
-        must not be mutated: the gate cannot tell what has been reviewed, so writing a
-        document on top of it would manufacture an activation nobody armed -- a caller
-        setting ``status="ACTIVE"`` would turn unreadable state into a running loop. That is
-        precisely the failure-into-approval Rule 1 forbids.
+        **A failed load raises rather than yielding.** Mutating missing or unparseable state would
+        manufacture an activation nobody armed -- a caller setting ``status="ACTIVE"`` turns
+        unreadable state into a running loop, the failure-into-approval Rule 1 forbids.
 
-        ``create=True`` is the deliberate exception, and it is only for transitions that
-        can never grant anything: arming, and the two escalations. Both write a document
-        whose effect is to deny.
+        ``create=True`` is the deliberate exception, only for transitions that can never grant
+        anything: arming and the two escalations, all of which write a document whose effect is to
+        deny. **It does not cover a version conflict**: ``self.new()`` is a fresh document, and
+        overwriting a document this build can read but refuses to interpret destroys what a newer
+        build recorded. So this still raises, the escalations raise too, and that propagates to the
+        fail-closed guard in ``hookio.Hook.run``.
 
-        **``create=True`` does not cover a version conflict.** ``self.new()`` is a *fresh*
-        document -- the right answer when there was truly nothing to preserve, but wrong
-        for a document this build can read fine yet refuses to interpret: it is real, and
-        overwriting it with a blank one destroys whatever a newer build recorded, in the
-        one case the version check exists to say "refuse" about, not "start over". So this
-        still raises even when ``create`` is set; the two escalations that rely on
-        ``create=True`` (``needs_human``, ``arm_failed``) then raise too, and that
-        propagates to the fail-closed guard in ``hookio.Hook.run`` -- which denies or blocks
-        without ever calling :meth:`save`, exactly what "refuse" means here.
-
-        **The save happens only if the block completes**, so raising out of it abandons the
-        mutation with the previous document intact. That is the supported way to decline:
-        any decision a caller makes about *whether* to write must be taken inside the block,
-        against the document reloaded here, because anything it read before queueing for the
-        lock may have been overwritten while it waited.
+        **The save happens only if the block completes**, so raising out of it abandons the mutation.
+        That is the supported way to decline: any decision about *whether* to write must be taken
+        inside the block, against the document reloaded here.
         """
         with locked(self.lock_file, root=paths.state_root()):
             if not self.load():
@@ -798,34 +753,24 @@ class State:
         return len(self.get_array("phases"))
 
     def phases_match_frozen(self) -> bool:
-        """True when this document's ``phases`` still equals the frozen evidence on disk.
+        r"""True when this document's ``phases`` still equals the frozen evidence on disk.
 
-        ``phases.frozen`` is written once by ``set-phases`` (and rewritten wholesale by a
-        granted replan) and is the copy handed to every review as evidence. ``phases`` in the
-        document is the working copy every other check reads. They are written together and
-        must agree; where they do not, the document has been edited by something that was not
-        ``set-phases``, and no count derived from it means anything.
+        ``phases.frozen`` is written once by ``set-phases`` and handed to every review as evidence;
+        ``phases`` in the document is the working copy every other check reads. Where they disagree,
+        something that was not ``set-phases`` edited the document and no count derived from it means
+        anything.
 
-        This exists because ``phase == phase_count() + 1`` -- "every phase was committed" --
-        is only as trustworthy as ``phases`` itself, and AGENTS.md is explicit that
-        ``state.json`` is not a trust boundary. Truncating ``phases`` from two entries to one
-        after the first phase lands satisfies that equality with the second phase never
-        implemented; comparing against the frozen file is what catches it.
+        This exists because ``phase == phase_count() + 1`` is only as trustworthy as ``phases``
+        itself: truncating ``phases`` from two entries to one after the first phase lands satisfies
+        that equality with the second phase never implemented.
 
-        Compared as the **exact bytes** ``set-phases`` writes, rather than by splitting the file
-        back into lines: ``_validate`` rejects only empty and whitespace-only phase
-        descriptions, so a description legitimately containing a newline is accepted and frozen,
-        and parsing lines back out would never reconstruct it. That activation could complete
-        every phase and still be refused here, permanently.
+        Compared as the **exact bytes** ``set-phases`` writes rather than by splitting the file into
+        lines, because a description legitimately containing a newline is accepted and frozen, and
+        parsing lines back would never reconstruct it -- that activation would be refused here
+        permanently. Read with :meth:`Path.read_bytes` for the same reason at one remove: text mode's
+        universal-newline translation turns a frozen ``\r\n`` into ``\n`` and fails the comparison.
 
-        Read with :meth:`Path.read_bytes`, not :meth:`Path.read_text`, for the same reason at
-        one remove: text mode applies universal-newline translation on the way in, turning a
-        frozen ``\\r\\n`` or ``\\r`` into ``\\n`` and failing the comparison against a
-        description that legitimately contains one. Bytes are what was written (``0600``, UTF-8,
-        ``errors="strict"`` -- matching the ``encode`` below), so bytes are what is compared.
-
-        Fails closed on an unreadable file: a phase list that cannot be checked is not one to
-        disarm on.
+        Fails closed on an unreadable file.
         """
         try:
             frozen = (self.act_dir / "phases.frozen").read_bytes()
@@ -844,16 +789,13 @@ class State:
     def pause_target_display(self) -> str:
         """``stop_after_phase`` as a human reads it -- including whether it is already spent.
 
-        The Stop gate's pause check is ``phase <= target``, and ``phase`` only ever
-        increases, so once the phase pointer has moved past the target that comparison is
-        false *forever*: the target can never fire again, and every subsequent turn end takes
-        the pause branch instead. Rendering a spent target identically to a pending one
-        ("pause target: 3 of 9" while the phase line above says 4) reads as "the loop will
-        stop at 3", which is the one thing it can no longer do.
+        The Stop gate's check is ``phase <= target`` and ``phase`` only increases, so once the pointer
+        moves past the target it can never fire again. Rendering a spent target identically to a
+        pending one ("pause target: 3 of 9" under a phase line saying 4) reads as "the loop will stop
+        at 3", the one thing it can no longer do.
 
-        Naming the flag here rather than only in the Stop gate's own message is deliberate:
-        ``status`` and the resume banner are what a human reads a *day* later, in a session
-        that no longer holds the message ``pause`` printed when they set it.
+        Naming the flag here rather than only in the Stop gate's message is deliberate: ``status`` and
+        the resume banner are what a human reads a day later.
         """
         target = self.get_int("stop_after_phase")
         if not target:
@@ -873,18 +815,15 @@ class State:
     # -- escalation ------------------------------------------------------
 
     def _escalate(self, status: str, reason: str) -> None:
-        """Record a terminal, denying status under the lock.
+        """Record a terminal, denying status under the lock, applied to a *freshly reloaded* document.
 
-        Taken under the lock and applied to a *freshly reloaded* document. Mutating a stale
-        in-memory copy and saving it lets a concurrent ``defer`` or post-hook save land
-        afterwards and overwrite the escalation, turning it back into ordinary operation --
-        the one direction that must never happen.
+        Mutating a stale in-memory copy lets a concurrent ``defer`` or post-hook save land afterwards
+        and overwrite the escalation, turning it back into ordinary operation.
 
-        ``create=True`` because an escalation must not be dropped just because state is
-        missing or unreadable; both statuses deny, so materialising them is always safe.
-
-        Callers holding other unsaved mutations must save them first: the reload is what
-        makes the escalation win, and it necessarily discards anything only held in memory.
+        ``create=True`` because an escalation must not be dropped just because state is missing; both
+        statuses deny, so materialising them is always safe. Callers holding other unsaved mutations
+        must save them first -- the reload is what makes the escalation win, and it discards anything
+        held only in memory.
         """
         with self.transaction(create=True):
             self.update(status=status, reason=reason)

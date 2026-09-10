@@ -1,119 +1,58 @@
 """Detecting oscillation across ``round_history`` -- pure functions, no I/O.
 
-Phase 4 of the convergence plan. A phase can flip a design point across rounds without ever
-saying so: round 1 blocks on missing warn-before, round 2 blocks on missing warn-after
-instead (round 1's point silently dropped), round 3 blocks on "needs both" (round 1's point
-back). Nothing in the ordinary evidence -- the diff, the prompt, the reviewer's own memory
-of the session -- says "this is a reversal", so the gate has no way to tell a genuinely new
-finding from a rehash of one already seen. This module answers that question from
-``round_history`` alone.
+A phase can flip a design point across rounds without ever saying so: round 1 blocks on
+missing warn-before, round 2 on missing warn-after instead, round 3 on "needs both". Nothing
+in the ordinary evidence says "this is a reversal", so the gate cannot tell a genuinely new
+finding from a rehash. This module answers that from ``round_history`` alone.
 
-A finding's **anchor** is what it is *about*, stable across rounds even as its wording and
-line numbers change: the ``file`` field of its ``FINDING`` line with any trailing ``:line``
-suffix stripped, paired with its ``severity``. Two things count as oscillation:
+A finding's **anchor** is what it is *about*: its ``file`` value with any trailing ``:line``
+stripped, paired with its ``severity``. Three questions are asked over anchors:
 
-- the anchor is raised, absent for at least one later round, then raised again
-  (:func:`reversals`' ``reappeared``);
-- the anchor's file is named by a *valid retirement* (below) in two or more distinct rounds
-  (``supersedes_rounds``) -- this is what catches the warn-before/warn-after/both case above,
-  where the anchor never actually disappears (a warning is raised every round), so
-  ``reappeared`` alone would miss it, but the reviewer's own ``SUPERSEDES`` lines say it
-  changed its mind twice.
+- :func:`reversals` -- raised, absent for a later round, raised again (``reappeared``); or the
+  anchor's file named by a *valid retirement* in two or more distinct rounds
+  (``supersedes_rounds``), which catches the warn-before/warn-after case where the anchor never
+  actually disappears;
+- :func:`persisting` -- the same anchor raised in every one of the last ``stall_rounds``
+  consecutive rounds.
 
-Both questions are asked about the findings a round **still stands behind**: a retired one
-(below) is not raised for either. The two signals are complementary, and it matters that they
-stay that way, because between them a reviewer has no way to be a moving target without
-saying so. Retract a finding properly and re-raise something else in that file, and it is not
-a reappearance -- but every retraction feeds ``supersedes_rounds``, and reversing the same
-file in two separate rounds escalates on its own. Drop a finding *silently* and raise it again
-later, and ``reappeared`` catches it -- which is the case ``prompts/reviewer-phase.md``
-already calls a contract violation ("a reversal with no ``SUPERSEDES`` line"). Retiring is
-therefore never free, and neither signal can be dodged by leaning on the other.
+**Both ask only about findings a round still stands behind**, and the two signals are
+complementary, which a change must keep: retract properly and it is not a reappearance, but
+every retraction feeds ``supersedes_rounds``; drop a finding silently and re-raise it and
+``reappeared`` catches it. Retiring is never free, so neither can be dodged by leaning on the
+other. An anchor no round stands behind is dropped entirely -- nothing blocks on it, so there
+is no disagreement to escalate.
 
-An anchor that no round still stands behind is dropped from the computation entirely, however
-many times it was reversed: nothing is blocking on it, so there is nothing for a human to
-break a deadlock over.
+**Only a finding that can block raises an anchor**: ``actionable=yes`` and at or above the
+caller's ``block_severity``. Three rounds of ``severity=info actionable=no`` is a reviewer
+repeating a remark, and escalating it spends a human interrupt on a phase that was never
+blocked -- a live run did exactly that. ``late_block_severity`` deliberately does not enter:
+the late-round rule only ever applies to a finding that is *new*.
 
-**Only a finding that can block raises an anchor at all.** Both signals exist to answer "is
-this loop stuck", and a loop can only be stuck on something that stops a commit: a finding is
-an anchor here exactly when it is ``actionable=yes`` **and** ranks at or above the caller's
-``block_severity`` -- the same test ``reviewer._interpret`` applies when it fills
-``review.findings``. Three rounds of ``severity=info actionable=no`` is a reviewer repeating a
-remark, not a standing disagreement, and escalating it to ``NEEDS_HUMAN`` spends a human
-interrupt on a phase that was never blocked (a live run did exactly that: a repeated
-non-actionable scope note, with the reviewer itself saying the extra work was necessary).
-``late_block_severity`` deliberately does not enter: the late-round rule only ever applies to a
-finding that is *new* this round, and neither signal here is about a new finding.
+The filter is applied where anchors and the reversal count are collected, never inside
+:func:`_parsed_findings`: position in that list is the identity a retirement consumes, so
+dropping entries there would change which ``SUPERSEDES`` lines validate. Retirement *identity*
+therefore covers every finding while both *signals* count only blocking ones.
 
-The filter is applied where **anchors and the reversal count** are collected, never inside
-:func:`_parsed_findings`. Position in that list is the identity a retirement consumes
-(:func:`_retirements` matches a ``SUPERSEDES file=`` against it and treats two matches as
-ambiguous), so dropping entries there would silently change which ``SUPERSEDES`` lines
-validate -- a non-blocking finding must still be retirable, and consuming it must still stop a
-later claim from retiring it twice. But the ``supersedes_rounds`` count is a signal rather than
-an identity, and it is keyed on the line-stripped anchor file: counting a non-blocking
-retirement there would let two retracted remarks at ``a.py:20`` and ``a.py:30`` escalate a
-blocking ``a.py`` anchor nobody reversed. So retirement *identity* covers every finding while
-both *signals* count only blocking ones.
+**A ``SUPERSEDES`` line retires one specific earlier finding, and counting lines is not
+counting reversals.** ``SUPERSEDES round=N file=F`` in round *r* retires the ``FINDING`` of
+round *N* whose ``file=`` is **exactly** ``F``. Five things make it retire nothing, each a real
+false positive: ``N`` naming no earlier round; ``F`` matching no finding (``file=-`` included);
+``F`` matching two or more, so which was reversed is unknowable; the finding already retired,
+since retirement is **consumptive** and ``prior-rounds.txt`` keeps showing a reversal already
+made; and the round numbering not being provably the one the reviewer was shown -- see
+:func:`_ordered_rounds`.
 
-**A ``SUPERSEDES`` line retires one specific earlier finding, and counting lines is not the
-same as counting reversals.** ``SUPERSEDES round=N file=F`` in round *r* retires the
-``FINDING`` of round *N* -- the ordinal among this label's rounds, exactly as
-``reviewer._prior_rounds_section`` numbers them for the reviewer -- whose ``file=`` value is
-**exactly** ``F``, byte for byte, ``:line`` suffix included. Five things make it retire
-nothing at all, and every one of them was a real false positive:
-
-- ``N`` naming no earlier round of this label (``N >= r``, or ``N < 1``): a round can reverse
-  neither itself nor the future;
-- ``F`` matching no ``FINDING`` of round ``N`` -- including ``file=-``, which names no path
-  and so retires nothing;
-- ``F`` matching *two or more* findings of round ``N``: which one was reversed is unknowable,
-  so neither is treated as reversed;
-- the matched finding having been retired already. Retirement is **consumptive**: the earliest
-  round whose ``SUPERSEDES`` matches a finding owns it, and a later line repeating the same
-  reversal is not a second reversal. Retired evidence stays visible in ``prior-rounds.txt``,
-  so a reviewer restating a reversal it already made must not read as one more flip-flop;
-- the round numbering not being provably the one the reviewer was shown. ``N`` is an ordinal
-  over this label's rounds *in stored order*, which is how ``prior-rounds.txt`` numbers them;
-  if the stored history was not written the way an append-only gate writes one (an entry
-  dropped for a tampered ``seq``, or a ``seq`` that repeats or goes backwards), no
-  ``SUPERSEDES`` in it is interpreted at all. Renumbering underneath a claim does not fail in
-  one direction -- it can silence a live finding *and* validate a claim that was never true --
-  and the second of those manufactures an escalation. See :func:`_ordered_rounds`.
-
-The line-stripped anchor is right for "is this the same *subject*"; it is wrong for "which
-finding did this line reverse", where two findings in one file are two different positions.
-That is why retirement matches on the exact ``file=`` value and oscillation counts on the
-anchor.
-
-Neither signal changes a verdict on its own -- see ``reviewer.py``'s docstring for why a
-reversal still blocks exactly as its ``FINDING`` lines say. This module only says "here is
-where the history disagrees with itself"; :mod:`arl.reviewer` and :mod:`arl.report` decide
-what to show a reader.
-
-Phase 5 adds a second, related question, answered by :func:`persisting`: not "did this anchor
-come back after being absent", but "has it simply never gone away" -- the same finding, raised
-in every one of the last ``stall_rounds`` consecutive rounds, with nothing about the diff
-changing between them. A retired finding is **not** raised for this purpose either: it is
-dropped from the round that raised it before anchors are computed, so a reviewer that retracts
-a finding and raises a genuinely different one at the same file is converging, not stuck. That and :func:`reversals` together are what ``reviewer._stall_review``
-asks before invoking the reviewer at all: either signal, and a phase escalates to
-``NEEDS_HUMAN`` instead of spending one more round on a disagreement that is not converging.
-See that function's docstring for why the check has to run inside the same lock that reserves
-the next round, not before it.
-
-``round_history`` is read out of ``state.json``, which ``AGENTS.md`` is explicit is not a
-trust boundary. Every value taken out of an entry here is treated that way: a non-string, a
-value carrying an embedded ``\n`` (more than one ``_records`` record smuggled into one
-stored line), or a line that does not fully match the expected grammar is silently excluded
-from the computation rather than raising -- the worst a tampered history can do is hide a
-real oscillation, never fabricate one out of smuggled text (this module does no rendering of
-that text either; see :func:`render`, which only ever echoes a file path and an integer
-count it computed itself). An invented ``SUPERSEDES`` line is the same class: it can retire a
-finding that was never really reversed, and so hide a stall, but it can never manufacture
-one -- which is exactly why the round numbering has to be provable before any ``SUPERSEDES``
-is read at all, since a renumbering *could* have manufactured one -- and a hidden stall only means the loop keeps reviewing, since an escalation is not an
-approval and failing to escalate cannot become one.
+Neither signal changes a verdict on its own. ``round_history`` is not a trust boundary, and
+the guarantee here is narrow: a **malformed** field -- a non-string, a value carrying an
+embedded newline, a line that does not fully re-validate against the grammar -- is silently
+excluded rather than raising, so smuggled text can never reach a reader, and an invented
+``SUPERSEDES`` can only ever retire a finding that was never reversed, which hides a stall
+rather than inventing one. That is also why the round numbering must be *provable* before any
+``SUPERSEDES`` is read: a renumbering could manufacture a retirement. **A well-formed edit is
+not covered.** Anything that can write ``round_history`` can write entries that spell out a
+genuine A / absent / A history and force a ``NEEDS_HUMAN`` -- an escalation, never an
+approval, which is the direction this module is allowed to be wrong in. See
+``docs/design/state-fields.md``.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -223,20 +162,17 @@ class _Parsed:
 
 
 def _parsed_findings(entry: Mapping[str, object], *, block_severity: str) -> list[_Parsed]:
-    """Every ``FINDING`` line of one round that is a single line fully matching
-    ``_FINDING_RE``, in stored order -- a tampered or malformed entry is silently excluded,
-    never a crash and never smuggled text (see the module docstring).
+    """Every ``FINDING`` line of one round that is a single line fully matching ``_FINDING_RE``, in
+    stored order -- a tampered or malformed entry is silently excluded.
 
-    Position in this list is the identity a retirement consumes, so the order and the
-    exclusions have to be the same for every caller: both :func:`reversals` and
-    :func:`persisting` index :func:`_retirements`' answer by it. That is why a non-blocking
-    finding is kept here with ``blocking=False`` rather than dropped -- excluding it would
-    renumber the positions a ``SUPERSEDES`` line resolves against.
+    Position in this list is the identity a retirement consumes, so the order and the exclusions
+    must be the same for every caller. That is why a non-blocking finding is kept with
+    ``blocking=False`` rather than dropped: excluding it would renumber the positions a
+    ``SUPERSEDES`` line resolves against.
 
-    ``block_severity`` is ranked with ``config.threshold_rank`` and the finding's own label
-    with ``config.severity_rank``, exactly as ``reviewer._interpret`` ranks them: an
-    unrecognised *finding* severity must rank highest so it still blocks, while an
-    unrecognised *threshold* must rank lowest so a typo makes the gate stricter, not looser.
+    ``block_severity`` is ranked exactly as ``reviewer._interpret`` ranks it: an unrecognised
+    *finding* severity ranks highest so it still blocks, an unrecognised *threshold* ranks lowest
+    so a typo makes the gate stricter.
     """
     threshold = threshold_rank(block_severity)
     stored = entry.get("findings")
@@ -291,34 +227,23 @@ def _entry_seq(entry: Mapping[str, object]) -> int | None:
 
 
 def _ordered_rounds(history: Sequence[Mapping[str, object]], label: str) -> tuple[list[tuple[int, Mapping[str, object]]], bool]:
-    """``([(seq, entry), ...], numbering_is_trustworthy)`` for every round of ``label``, in
-    **stored order**.
+    """``([(seq, entry), ...], numbering_is_trustworthy)`` for every round of ``label``, in **stored
+    order**.
 
-    The shared front half of :func:`reversals` and :func:`persisting`, and it has to stay
-    shared: a retirement is addressed by *round ordinal*, so the two functions must agree
-    exactly on which entries are rounds and in what order. Entries for another label are
-    dropped, and so are entries with no genuine int ``seq`` -- the same "state is not a trust
-    boundary" treatment the rest of this module gives every stored field.
+    The shared front half of :func:`reversals` and :func:`persisting`, and it must stay shared: a
+    retirement is addressed by round ordinal, so the two must agree on which entries are rounds and
+    in what order.
 
-    **Stored order, deliberately not ``seq`` order.** ``round=N`` in a ``SUPERSEDES`` line
-    means the ordinal the reviewer was shown, and what it was shown is
-    ``reviewer._prior_rounds_section``: the same label-and-generation-filtered list, in stored
-    order, enumerated from 1. Re-deriving an order from ``seq`` -- an untrusted integer --
-    does not recover a truer chronology; it hands a doctored history a lever to renumber the
-    rounds *underneath* claims that were written against the numbering on screen. That is not
-    theoretical: with stored order ``A, B, C`` and seqs ``2, 1, 3``, sorting renumbers ``A``
-    to round 2, which can validate a self-referential claim in ``A`` and a mismatched one in
-    ``C``, manufacturing two retirements -- and a ``NEEDS_HUMAN`` -- out of a history that
-    truthfully has none. Stored order is the append order of an append-only list and is what
-    the reviewer actually saw, so it is both the more trustworthy order and the only one the
-    ordinal contract is defined against.
+    **Stored order, deliberately not ``seq`` order.** ``round=N`` means the ordinal the reviewer
+    was shown, which is ``reviewer._prior_rounds_section``'s stored-order enumeration. Re-deriving
+    an order from ``seq`` -- an untrusted integer -- hands a doctored history a lever to renumber
+    rounds underneath claims written against the numbering on screen: with stored order ``A, B,
+    C`` and seqs ``2, 1, 3``, sorting renumbers ``A`` to round 2 and can manufacture two
+    retirements, and a ``NEEDS_HUMAN``, out of a history that truthfully has none.
 
-    The second element is whether the ordinals here can be **proved** to equal the ones on
-    screen: ``True`` only when nothing was dropped and every ``seq`` strictly increases. A
-    dropped round shifts every later ordinal; a duplicate or backwards ``seq`` means the
-    document was not written by an append-only gate at all, so no numbering it carries can be
-    relied on. :func:`_retirements` refuses to interpret a single ``SUPERSEDES`` line when it
-    is ``False`` -- see there for why that is the safe direction.
+    The second element is whether the ordinals can be **proved** equal to the ones on screen:
+    ``True`` only when nothing was dropped and every ``seq`` strictly increases.
+    :func:`_retirements` interprets no ``SUPERSEDES`` line when it is ``False``.
     """
     rounds: list[tuple[int, Mapping[str, object]]] = []
     trustworthy = True
@@ -344,40 +269,26 @@ def _retirements(
 ) -> tuple[set[tuple[int, int]], dict[str, set[int]]]:
     """Which findings later rounds retired, and which rounds did the retiring.
 
-    Answers ``(retired, rounds_by_file)``: ``retired`` holds ``(round index, position in that
-    round's :func:`_parsed_findings` list)`` for every finding a valid ``SUPERSEDES`` claimed,
-    and ``rounds_by_file`` maps a retired finding's **anchor** file to the **index** of every
-    round that validly retired a **blocking** finding there -- ``len`` of that set is
-    :attr:`OscillationPoint.supersedes_rounds`.
+    ``retired`` holds ``(round index, position in that round's :func:`_parsed_findings` list)`` for
+    every finding a valid ``SUPERSEDES`` claimed; ``rounds_by_file`` maps a retired finding's
+    **anchor** file to the index of every round that validly retired a **blocking** finding there.
 
-    **The two answers are filtered differently, and have to be.** ``retired`` covers every
-    finding a valid claim named, blocking or not: retirement is consumptive and its identity is
-    a position in :func:`_parsed_findings`' list, so narrowing it would renumber the positions
-    later claims resolve against and would let a retired non-blocking finding be retired a
-    second time. ``rounds_by_file`` is a *signal*, not an identity, and it is keyed on the
-    line-stripped **anchor** file -- so retiring the non-blocking ``a.py:20`` in one round and
-    the non-blocking ``a.py:30`` in another would otherwise put two rounds under ``a.py`` and
-    hand ``supersedes_rounds >= 2`` to an unrelated blocking ``a.py`` anchor that no one ever
-    reversed. That is the same false escalation the blocking rule exists to stop, arriving
-    through the other signal, so only a blocking finding's retirement is counted here.
+    **The two are filtered differently, and have to be.** ``retired`` covers every finding a valid
+    claim named, because retirement is consumptive and its identity is a position in that list.
+    ``rounds_by_file`` is a signal keyed on the line-stripped anchor, so retiring the non-blocking
+    ``a.py:20`` in one round and ``a.py:30`` in another would otherwise hand
+    ``supersedes_rounds >= 2`` to an unrelated blocking ``a.py`` anchor nobody reversed.
 
-    The module docstring is the specification for "valid"; this is where it is enforced.
-    ``rounds`` is walked in stored order and each round's ``supersedes`` list in stored order,
-    which is what makes retirement consumptive in a defined way: the earliest claim wins, and
-    every later claim on the same finding is inert.
+    Rounds and their ``supersedes`` lists are walked in stored order, which makes retirement
+    consumptive in a defined way: the earliest claim wins.
 
-    ``round=N`` is an **ordinal** (1-based) among ``rounds``, which -- given
-    ``trustworthy`` -- is exactly how ``reviewer._prior_rounds_section`` numbers the rounds it
-    shows the reviewer. ``trustworthy=False`` says the two numberings cannot be proved equal
-    (see :func:`_ordered_rounds`), and then **nothing is retired at all**. Interpreting a
-    ``SUPERSEDES`` against a numbering the reviewer never saw does not fail safe in one
-    direction: it can silence a finding that was never retracted *and* validate a claim that
-    was never true, and the second manufactures a ``supersedes_rounds`` of 2 -- an escalation
-    invented out of a history that has none. Refusing outright keeps the module's guarantee
-    intact: a doctored history can hide a stall, never fabricate one.
+    ``trustworthy=False`` retires **nothing at all**. Interpreting a ``SUPERSEDES`` against a
+    numbering the reviewer never saw does not fail safe in one direction -- it can silence a
+    finding never retracted *and* validate a claim never true, and the second invents an
+    escalation.
 
-    Rounds are identified by index rather than ``seq``, so two rounds sharing a ``seq`` are
-    still two retiring rounds; correctness here does not rest on ``seq`` being unique.
+    Rounds are identified by index rather than ``seq``, so correctness does not rest on ``seq``
+    being unique.
     """
     retired: set[tuple[int, int]] = set()
     rounds_by_file: dict[str, set[int]] = {}
@@ -443,47 +354,29 @@ class OscillationPoint:
 
 
 def reversals(history: Sequence[Mapping[str, object]], label: str, *, block_severity: str) -> list[OscillationPoint]:
-    """Anchors that reversed across ``history``: reappeared after disappearing, or were
-    named by two or more ``SUPERSEDES`` lines.
+    """Anchors that reversed across ``history``: reappeared after disappearing, or were named by two
+    or more ``SUPERSEDES`` lines.
 
-    ``history`` should already be narrowed to one ``activation_generation`` by the caller --
-    an anchor "reappearing" across a `resume --replan` boundary is a new phase, not a
-    reversal of the old one. This function narrows to ``label`` itself as a second, cheap
-    filter: an entry for another label is silently excluded rather than raising, the same
-    "state is not a trust boundary" treatment the rest of this module gives every stored
-    field.
+    ``history`` should already be narrowed to one ``activation_generation`` -- an anchor
+    reappearing across a ``resume --replan`` boundary is a new phase, not a reversal. Rounds are
+    read in **stored order** (see :func:`_ordered_rounds`); returned points are ordered by the
+    ``seq`` of the anchor's first appearance, so the output is deterministic.
 
-    Rounds are read in **stored order**, not re-sorted by ``seq`` -- see
-    :func:`_ordered_rounds` for why re-deriving an order from an untrusted integer is a lever
-    rather than a defence. Returned points are ordered by the ``seq`` of the anchor's first
-    appearance, so the output itself is deterministic whatever the input held.
+    **Presence is computed over live findings; ``seqs`` is not.** An anchor whose round-1 finding
+    was explicitly retracted and which turns up in round 4 as a different defect at a different
+    line is one finding fixed and another found -- flagging it escalated a converging phase
+    (measured: ``services.go:180`` retracted in round 2, ``services.go:226`` raised in round 4).
+    ``seqs`` stays unfiltered because it is the evidence line a human reads.
 
-    **Presence is computed over live findings; ``seqs`` is not.** An anchor whose round-1
-    finding the reviewer explicitly retracted, and which turns up again in round 4 as a
-    different defect at a different line, is not "raised, dropped, raised again" -- it is one
-    finding fixed and another found, and flagging it escalated a converging phase (runhold
-    phase 6, `services.go:180` retracted in round 2, `services.go:226` raised in round 4).
-    ``seqs`` deliberately stays unfiltered: it is the evidence line a human reads, and "raised
-    in rounds 1, 2, 3" is the true answer to *that* question even when two of those three were
-    later retracted.
+    A consequence worth naming: an anchor every round has retracted never enters ``presence``, so
+    it cannot be reported however high ``supersedes_rounds`` climbs. Intended -- nothing is
+    blocking on it.
 
-    A consequence worth naming: an anchor every round has retracted never enters ``presence``,
-    so it cannot be reported however high ``supersedes_rounds`` climbs. That is intended -- the
-    reviewer no longer stands behind any finding there, so there is no disagreement left to
-    escalate.
+    **``block_severity`` narrows both signals and neither narrowing touches retirement identity.**
 
-    **``block_severity`` narrows both signals, and neither narrowing touches retirement
-    identity.** Only a blocking finding (``actionable=yes``, at or above the threshold) enters
-    ``raised`` or ``live``, so a non-blocking remark can neither reappear nor hold an anchor
-    open; and only a blocking finding's retirement raises ``supersedes_rounds``, so flip-flops
-    confined to non-blocking remarks cannot escalate an unrelated blocking anchor that happens
-    to share their file. What a ``SUPERSEDES`` line *retires* is unchanged -- see
-    :func:`_retirements`.
-
-    Note, deliberately not fixed: the anchor is ``(file, severity)``, so a blocking finding
-    whose label wanders ``medium`` -> ``high`` between rounds still reads as two anchors and
-    escapes both signals. Dropping severity from the anchor would widen the documented
-    ``services.go:180`` vs ``:226`` false positive, so it stays.
+    Deliberately not fixed: the anchor is ``(file, severity)``, so a finding whose label wanders
+    ``medium`` -> ``high`` reads as two anchors and escapes both signals. Dropping severity would
+    widen the ``services.go`` false positive above.
     """
     rounds, trustworthy = _ordered_rounds(history, label)
     parsed = [_parsed_findings(entry, block_severity=block_severity) for _seq, entry in rounds]

@@ -1,34 +1,24 @@
 """``resume`` -- continue an armed activation in a new session, or adjust it in this one.
 
-A second arming path (docs/design/resume-and-retirement.md calls it exactly that), used instead of ``arm`` when a plan
-already has a frozen baseline and approvals that must not be lost: ``arm`` always starts a
-fresh activation, wiping ``phases``, ``approved_trees`` and the baseline tree, which is right
-for a new plan and wrong for coming back to an old one tomorrow.
+A second arming path, used instead of ``arm`` when a plan already has a frozen baseline and
+approvals that must not be lost: ``arm`` always starts fresh, wiping ``phases``,
+``approved_trees`` and the baseline tree.
 
 Two shapes, decided purely by whether ``--session`` names the worktree's most recent
-activation:
+activation. **Cross-session** retires the predecessor into a blocking ``RESUMED`` status
+*before* publishing the successor, and materialises the successor from a snapshot taken at
+that moment -- never by re-reading the predecessor afterwards, which reads back the retirement
+note. **Same-session** has nothing to retire and mutates the live document in place.
 
-- **Cross-session** (the ordinary case: a new Claude Code session picks the plan back up).
-  The predecessor is retired into a blocking ``RESUMED`` status *before* the successor is
-  published, and the successor is materialised from a snapshot taken at that exact moment --
-  never by re-reading the predecessor afterwards, which would read back the retirement note
-  it just wrote over whatever was there before. See ``_resume_cross_session``.
-- **Same-session** (re-running ``resume`` to change ``--until``, the model, or the plan
-  without a new session). There is nothing to retire; the live document is mutated in place.
-  See ``_resume_same_session``.
+Both share one property Rule 0 established for ``arm``: a same-session failure must leave the
+live activation untouched, while a cross-session failure always persists *something* under the
+new session id, because the resume skill has already registered hooks there and a missing
+pointer reads as "arming never ran". See ``_fail``.
 
-Both paths share one property Rule 0 already established for ``arm``: a same-session failure
-must leave the live activation untouched (a typo in ``--model`` must not stamp ``ARM_FAILED``
-over a perfectly good ``ACTIVE`` document and take the whole run down), while a cross-session
-failure always persists *something* under the new session id, because the resume skill has
-already registered the hooks there and a missing pointer reads as "arming never ran". See
-``_fail``.
-
-**No automatic rollback.** Once the predecessor is retired, a later failure in this same
-call does not un-retire it. The predecessor stays ``RESUMED`` (denying), and the successor is
-left ``ARM_FAILED`` (also denying) -- both directions deny, which is the fail-closed order,
-and the recovery is the same one every other wedge in this gate names:
-``/adversarial-review-loop:implement <plan.md>``.
+**No automatic rollback.** A failure after retirement leaves the predecessor ``RESUMED`` and
+the successor ``ARM_FAILED`` -- both deny, which is the fail-closed order -- and the recovery
+is ``/adversarial-review-loop:implement <plan.md>``. See
+``docs/design/resume-and-retirement.md``.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -128,20 +118,12 @@ class _ResumeFailure(Exception):
 class _EvidenceCorrupted(_ResumeFailure):
     """A plan revision's recorded evidence could not be verified as itself.
 
-    Distinct from an ordinary ``_ResumeFailure``: every other same-session or pre-retirement
-    failure means only "this resume request was rejected", and Rule 0's "a same-session
-    failure writes nothing" is safe for those, because nothing about the request being bad
-    implies anything is wrong with the activation itself -- a typo in ``--model`` leaves a
-    perfectly good ``ACTIVE`` document exactly as it was. This one is the opposite: it means
-    the activation's own frozen evidence -- what every review to date, and every review from
-    now on, was and will be run against -- has been deleted, replaced, or no longer matches
-    what was recorded. Writing nothing here would leave a corrupted activation reporting
-    ``ACTIVE`` until the *next* commit's review happens to reach ``reviewer.build_bundle``,
-    which verifies the active revision too and would itself escalate to ``NEEDS_HUMAN`` -- but
-    only once a phase is actually reviewed, which can be minutes or phases away. So ``run``
-    escalates the live activation to ``NEEDS_HUMAN`` immediately, whenever this is raised and
-    retirement has not already happened (see ``retired``), rather than leaving the corruption
-    to be discovered by whichever review happens to run next.
+    Distinct from an ordinary ``_ResumeFailure``, which means only "this request was rejected" --
+    safe to write nothing for, since a typo in ``--model`` says nothing about the activation. This
+    one means the activation's own frozen evidence has been deleted, replaced, or no longer
+    matches. Writing nothing would leave a corrupted activation reporting ``ACTIVE`` until the
+    next review happens to reach ``reviewer.build_bundle``, which can be phases away, so ``run``
+    escalates it to ``NEEDS_HUMAN`` immediately whenever retirement has not already happened.
     """
 
 
@@ -324,16 +306,14 @@ def _stored_overrides(document: object) -> dict[str, str]:
 def _merged_overrides(stored: dict[str, str], flags: _Flags) -> dict[str, str]:
     """The activation overlay this resume would leave behind: what is stored, plus what was typed.
 
-    Only the keys actually given: an activation keeps the harness, model and variant it was
-    armed with unless this call names another. The harness this returns is therefore the
-    *requested* one; ``_resume`` overwrites it with the one ``_check_reviewer`` really probed,
-    for the reason ``arm._arm`` documents at length.
+    Only the keys actually given. The harness returned is the *requested* one; ``_resume``
+    overwrites it with the one ``_check_reviewer`` really probed -- see
+    ``docs/design/config-overlay.md``.
 
-    ``review_guide`` is in here so ``guide.resolve`` sees a ``--guide`` the same way ``arm``
-    does -- through the ordinary config chain, where ``ARL_REVIEW_GUIDE`` still outranks it --
-    and so the overlay keeps naming the guide this activation actually runs under. It has no
-    effect on any later round: the guide is read exactly once per ``--guide``, and every
-    review afterwards reads only the frozen copy.
+    ``review_guide`` is here so ``guide.resolve`` sees a ``--guide`` the way ``arm`` does, through
+    the ordinary config chain, and so the overlay keeps naming the guide this activation runs
+    under. It affects no later round: the guide is read once per ``--guide``, and every review
+    afterwards reads only the frozen copy.
     """
     merged = dict(stored)
     for key, value in (("harness", flags.harness), ("model", flags.model), ("variant", flags.variant), ("review_guide", flags.guide)):
@@ -345,22 +325,17 @@ def _merged_overrides(stored: dict[str, str], flags: _Flags) -> dict[str, str]:
 def _refuse_if_the_overlay_moved(current: object, decision: _Decision) -> None:
     """Refuse when the stored overlay changed after this resume probed against it.
 
-    A compare-and-swap, and the only thing that keeps ``_check_reviewer`` meaningful under
-    concurrency. Two same-session resumes each probe their *own* pre-lock merge and then both
-    write: one switching the harness, one setting a model. Whatever combining rule the writes
-    follow, the pair that ends up stored is one neither call ever validated -- a model only the
-    old harness reports, now paired with the new one, so every later review fails for an
-    operational reason. Composing them under the lock does not fix that; it *is* that.
+    A compare-and-swap, and the only thing keeping ``_check_reviewer`` meaningful under
+    concurrency: two same-session resumes each probe their own pre-lock merge, and whatever
+    combining rule the writes follow, the stored pair is one neither call validated -- a model
+    only the old harness reports, now paired with the new one.
 
-    So the second writer is refused instead, and says so: the overlay it validated against is
-    no longer the one on disk, and the fix is to run the command again, which re-probes the
-    combination and either passes or reports exactly why not. Raised as
-    ``commands.Refused`` from inside the caller's transaction, so nothing is written and the
-    live activation is left exactly as it was -- the same contract every other pre-write
-    refusal here has.
+    The second writer is refused and says so; re-running the command re-probes the combination.
+    Raised as ``commands.Refused`` from inside the caller's transaction, so nothing is written.
 
-    Two identical resumes do not trip this: what is compared is the overlay's *value*, so a
-    call that writes back what was already there leaves the next one's base unchanged.
+    Two identical resumes do not trip this: the overlay's *value* is compared, so a call writing
+    back what was already there leaves the next one's base unchanged. See
+    ``docs/design/config-overlay.md``.
     """
     if _stored_overrides(current) != decision.stored_overrides:
         raise commands.Refused(
@@ -378,16 +353,13 @@ def _refuse_if_the_overlay_moved(current: object, decision: _Decision) -> None:
 def _revisions_with_backfill(act_dir: Path, existing: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """``arl.planrev.revisions_with_backfill``, translated into this module's failure type.
 
-    Every legacy (pre-resume) document gets a real revision 0 the first time it is loaded,
-    through ``State._migrate``. A document ``arm`` wrote *after* that but before ``arm`` itself
-    records revision 0 has none either -- ``planrev`` treats both the same way migration does:
-    honest that the hash only attests to the file as found right now, not as it was when the
-    activation was armed. Once any resume has touched a document, its ``plan_revisions`` is
-    never empty again.
+    Every legacy document gets a real revision 0 the first time it is loaded, and a document
+    ``arm`` wrote before ``arm`` itself recorded one is treated the same way -- honest that the
+    hash attests to the file as found now, not as it was at arming. Once any resume has touched a
+    document its ``plan_revisions`` is never empty again.
 
-    ``planrev.EvidenceCorrupted`` is caught and re-raised as :class:`_EvidenceCorrupted` here,
-    which is what makes it a ``_ResumeFailure`` -- carrying the ``retired`` flag ``run`` needs
-    to decide what, if anything, may still be written (see the module docstring).
+    ``planrev.EvidenceCorrupted`` is re-raised as :class:`_EvidenceCorrupted`, carrying the
+    ``retired`` flag ``run`` needs to decide what may still be written.
     """
     try:
         return planrev.revisions_with_backfill(act_dir, existing)
@@ -458,22 +430,18 @@ def _apply_revision(*, act_dir: Path, existing: list[dict[str, Any]], change: _R
 def _verified_guide_revisions(state: State) -> list[dict[str, Any]]:
     """Every recorded guide revision, re-verified against its hash. May be empty.
 
-    Verified on **every** resume, not only one carrying ``--guide``: the frozen guide is
-    evidence in exactly the sense the frozen plan is -- what every review to date was run
-    against -- so a resume is the right place to catch it having been replaced, rather than
-    leaving it for whichever commit's review reaches ``reviewer.build_bundle`` next.
+    Verified on **every** resume, not only one carrying ``--guide``: the frozen guide is evidence
+    in the sense the frozen plan is, so a resume is the right place to catch it having been
+    replaced rather than leaving it for whichever review runs next. A failure is re-raised as
+    :class:`_EvidenceCorrupted`.
 
-    An empty list is the ordinary "this activation has no guide" answer and never an error;
-    there is no revision-0 backfill (``arl.guide.verified_active``), because backfilling would
-    invent a guide for an activation that never ran under one. A failure is re-raised as
-    :class:`_EvidenceCorrupted`, so it escalates the live activation the same way corrupted
-    plan evidence does.
+    An empty list is the ordinary "no guide" answer, never an error, and there is no revision-0
+    backfill -- that would invent a guide for an activation that never ran under one.
 
-    The **raw** recorded value is validated, never ``get_array_of_dicts``'s normalised view:
-    that one answers ``[]`` for a non-list and drops non-object members, and ``[]`` is exactly
-    how "no guide" is encoded -- so a malformed field would resume cleanly, get written back
-    normalised (destroying the record), and leave every later review running without the guide
-    it is supposed to run under. See :func:`arl.guide.validated_revisions`.
+    The **raw** recorded value is validated, never ``get_array_of_dicts``'s normalised view: that
+    answers ``[]`` for a non-list and drops non-object members, and ``[]`` is how "no guide" is
+    encoded, so a malformed field would resume cleanly, be written back normalised, and leave
+    every later review running without its guide.
     """
     try:
         revisions = guide.validated_revisions(state.data.get("guide_revisions"))
@@ -486,19 +454,16 @@ def _verified_guide_revisions(state: State) -> list[dict[str, Any]]:
 def _decide_guide(state: State, *, source: str | None) -> _GuideChange | None:
     """Whether a new guide revision is called for. Never writes anything.
 
-    ``source`` is ``None`` unless ``--guide`` was given, and only that flag can change the
-    guide: a repo config edited mid-activation to name another one is exactly what freezing
-    the guide at arm exists to defeat.
+    ``source`` is ``None`` unless ``--guide`` was given, and only that flag can change the guide:
+    a repo config edited mid-activation to name another one is what freezing the guide at arm
+    exists to defeat.
 
-    Every refusal ``arl.guide`` knows -- unreadable, empty, oversized, carrying a contract
-    marker -- applies here too, and fails the resume rather than the next review, because a
-    guide the gate will not accept must be reported while the user is watching. That is also
-    why a guide cannot be *dropped* mid-activation: there is no value for ``--guide`` that
-    means "none", so removing bad guidance means abandoning the activation and re-arming.
+    Every refusal ``arl.guide`` knows applies here and fails the resume rather than the next
+    review, because a guide the gate will not accept must be reported while the user is watching.
+    That is also why a guide cannot be *dropped* mid-activation: there is no ``--guide`` value
+    meaning "none", so removing bad guidance means re-arming.
 
-    A guide whose bytes *and* path both match the active revision decides nothing: a resume
-    that renames its argument at the same content still records a revision, because the path
-    is what every disclosure names, but re-running the same command twice does not.
+    A guide whose bytes *and* path both match the active revision decides nothing.
     """
     revisions = _verified_guide_revisions(state)
     if source is None:
@@ -678,18 +643,16 @@ def run(argv: list[str]) -> int:
 def _ack_intent(session: str) -> None:
     """Answer the session's intent marker: the arming command it asked for is now *running*.
 
-    Rule 0's marker guards exactly one thing -- an expansion that never started. Once this
-    command is executing it can observe and record its own failures, so the marker's job is
-    done, and leaving it unanswered is not conservative: a *successful* same-session resume
-    writes no new pointer, the marker would outlive it, and the very next mutation would
-    overwrite the live activation with ``ARM_FAILED`` (measured against a real 44-phase run,
-    2026-08-30 -- see ``tests/STEP0.md``). The ack is the pointer republished with the
-    marker's token (``pointer_write`` reads it itself), which is durable, atomic, and exactly
-    the ack every other arming path already produces.
+    Rule 0's marker guards exactly one thing -- an expansion that never started -- and once this
+    command is executing it can record its own failures. Leaving it unanswered is not
+    conservative: a *successful* same-session resume writes no new pointer, so the marker would
+    outlive it and the next mutation would overwrite the live activation with ``ARM_FAILED``
+    (measured against a real 44-phase run, 2026-08-30 -- see ``tests/STEP0.md``). The ack is the
+    pointer republished with the marker's token, which is durable, atomic, and what every other
+    arming path already produces.
 
-    Only when this session already *has* a pointer: a first arm keeps its marker until its
-    own success or failure record writes one, so a hard crash mid-arm still reads as "arming
-    never ran" rather than as an unarmed worktree.
+    Only when this session already has a pointer: a first arm keeps its marker until its own
+    success or failure record writes one.
     """
     existing = pointer_read(session)
     if existing:
@@ -855,20 +818,14 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
 def _apply_guide_revision(state: State, *, decision: _Decision) -> _GuideChange | None:
     """Decide and freeze a guide revision against the document the caller just reloaded.
 
-    Decided again here rather than trusting ``decision.guide``, for exactly the reason
-    :func:`_apply_revision_and_replan` documents for the plan: two concurrent resumes can both
-    decide "changed" outside the lock, and the second one -- reloading a document that already
-    carries the first one's revision -- must see it and record nothing, instead of appending a
-    duplicate that inflates every disclosure with a change that happened once.
+    Decided again here rather than trusting ``decision.guide``, for the reason
+    :func:`_apply_revision_and_replan` documents for the plan. Also what re-verifies the existing
+    revisions inside the transaction, so a guide tampered with after ``_resume``'s own check
+    cannot be appended to.
 
-    Also what re-verifies the existing revisions inside the transaction, so a guide that was
-    tampered with after ``_resume``'s own check cannot be appended to.
-
-    Called on every same-session resume, guide or no guide: with no ``--guide`` it verifies and
-    returns ``None``. What is written back is what ``_decide_guide`` just *validated* -- never
-    a normalised view of a malformed field, which is the one way a resume could quietly erase
-    the record of a guide (see :func:`_verified_guide_revisions`) -- and never a backfill, so
-    "no guide" stays "no guide".
+    Called on every same-session resume: with no ``--guide`` it verifies and returns ``None``.
+    What is written back is what ``_decide_guide`` validated -- never a normalised view of a
+    malformed field, and never a backfill.
     """
     change = _decide_guide(state, source=decision.guide_source)
     revisions = _verified_guide_revisions(state)
@@ -882,27 +839,17 @@ def _apply_guide_revision(state: State, *, decision: _Decision) -> _GuideChange 
 def _apply_revision_and_replan(state: State, *, repo: str, flags: _Flags, decision: _Decision) -> tuple[_RevisionChange | None, str]:
     """Decide and publish a plan revision, and/or a granted replan token, same-session.
 
-    **The revision is decided again here**, against the document this transaction just
-    reloaded -- ``decision.revision``, decided in ``_resume`` before the lock was taken, is
-    deliberately not trusted for the write. Two concurrent same-session resumes can both call
-    ``_decide_revision`` outside the lock, both see the same predecessor (say revision 0) and
-    both decide "changed": if the first one's write is trusted, the second -- now holding the
-    lock and reloading a document that already carries the first's revision 1 -- would append
-    a second, duplicate revision recording the identical change again, inflating
-    ``plan_revisions``, the bundle attachments and the reviewer's disclosure with a change
-    that never happened a second time. Recomputing here, against the reloaded document,
-    answers "changed" correctly for whichever of the two calls runs second: by the time it
-    looks, the active revision already reflects the first call's write.
+    **The revision is decided again here**, against the document this transaction just reloaded:
+    ``decision.revision`` was decided before the lock, and two concurrent resumes can both see the
+    same predecessor and both decide "changed", so trusting it appends a duplicate revision
+    recording the identical change twice -- inflating ``plan_revisions``, the bundle attachments
+    and the reviewer's disclosure.
 
-    Raises ``commands.Refused``, or lets ``_decide_revision``'s own ``_ResumeFailure`` (or its
-    ``_EvidenceCorrupted`` subclass) propagate directly -- both are still raised from *inside*
-    the caller's transaction, so a refusal aborts the whole resume and nothing is written, and
-    ``run``'s existing handling of ``_EvidenceCorrupted`` still applies unchanged. Split out
-    only to keep ``_resume_same_session``'s branch count readable.
+    Raises ``commands.Refused``, or lets ``_decide_revision``'s ``_ResumeFailure`` propagate --
+    both from inside the caller's transaction, so a refusal aborts the resume and writes nothing.
 
-    Returns the (re-)decided revision and its warning, so the caller reports what actually
-    happened -- which may differ from what ``_resume`` decided before the lock -- rather than
-    a decision this call may have just superseded.
+    Returns the re-decided revision and its warning, so the caller reports what actually happened
+    rather than a decision this call may have superseded.
     """
     revision, revision_warning = _decide_revision(state, explicit_plan=flags.plan)
     if (revision is not None or decision.replan) and not gitsnap.worktree_clean(repo):

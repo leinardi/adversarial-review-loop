@@ -1,36 +1,25 @@
 """Recording ``COMPLETE``, and refusing to when the approval no longer applies.
 
 Shared by every place an activation can disarm: ``finish`` and the Stop gate's ``_final``,
-which both call a model for minutes and then write the one status that disarms the loop, and
-the Stop gate's ``_complete_without_review``, which writes it with no call at all when
-``final_review`` is disabled. All three need the same guard against what can happen to the
-activation in the window before that write -- and duplicating it, or a fourth site writing
-``status`` directly, is how the guard drifts until only some of them have it.
+which both call a model for minutes before writing the one status that disarms the loop, and
+``_complete_without_review``, which writes it with no call at all when ``final_review`` is off.
+Duplicating the guard, or a fourth site writing ``status`` directly, is how it drifts until
+only some of them have it.
 
-The guard exists because a final review is slow, and three things can happen while it runs,
-each of which turns "approved" into a lie:
-
-- the worktree changes, so the tree that was reviewed is no longer the tree on disk;
-- the loop transitions -- escalates, enters reconcile, is stopped, goes stale -- and
-  completing would overwrite somebody else's decision with an approval;
-- the activation is re-armed, so the approval belongs to a plan that is no longer active.
+Three things can happen while a final review runs, each of which turns "approved" into a lie:
+the worktree changes; the loop transitions (escalates, reconciles, is stopped, goes stale) and
+completing overwrites somebody else's decision; or the activation is re-armed, so the approval
+belongs to a plan that is no longer active.
 
 A fourth, narrower pair applies only to ``_complete_without_review``, via ``commit``'s
-``refuse_if_review_now_required``: ``finish`` can be invoked concurrently and ask, explicitly,
-for the cumulative review this completion is about to skip, or ``final_review`` itself can be
-turned on while the skip is in flight. Neither is part of the general fingerprint --
-``_final`` legitimately completes a review that started *because* ``finish_requested`` flipped
-true underneath it (a concurrent ``finish`` landing during the Stop gate's own unreviewed-work
-sweep), so ``finish_requested`` cannot be compared for equality across every caller alike; only
-the no-review path needs it re-checked at write time. Config, unlike ``finish_requested``, *is*
-reloaded fresh as part of the general fingerprint every caller shares -- see ``commit``'s
-docstring for why the effective-status half of the fingerprint needs that regardless of which
-caller it is.
+``refuse_if_review_now_required``: a concurrent ``finish`` asking for the review this
+completion is about to skip, or ``final_review`` being turned on mid-skip. Neither is part of
+the general fingerprint, because ``_final`` legitimately completes a review that started
+*because* ``finish_requested`` flipped underneath it.
 
-Usage is two calls around the review: :func:`start` **before** it, so the fingerprint is of
-the activation the review is about, and :meth:`Completion.commit` after it. Refusal is
-reported as ``commands.Refused``, which abandons the transaction with the previous document
-intact: the mode stays armed, which is the safe direction.
+Usage is two calls around the review: :func:`start` before, :meth:`Completion.commit` after.
+Refusal is ``commands.Refused``, which abandons the transaction with the previous document
+intact -- the mode stays armed, the safe direction.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -95,22 +84,18 @@ def _reviewer() -> Any:
 def fingerprint(state: State, config: Config) -> Fingerprint:
     """Everything that must be **unchanged** for a finished review to still mean anything.
 
-    Deliberately an equality check rather than a list of statuses that may not be overwritten.
-    A deny-list has to enumerate every denying state, and it silently fails open the day one
-    is added or renamed: ``RECONCILE`` was missing from exactly such a list, so an approving
-    review overwrote "a commit diverged from the reviewed tree" with ``COMPLETE``.
+    Deliberately an equality check rather than a list of statuses that may not be overwritten: a
+    deny-list fails open the day one is added or renamed, and ``RECONCILE`` was missing from
+    exactly such a list, so an approving review overwrote "a commit diverged from the reviewed
+    tree" with ``COMPLETE``.
 
-    So instead: whatever the activation was when the review started, it must still be that
-    when the review lands. Both statuses are captured because they answer different questions
-    -- the stored one changes when something transitions the loop, the effective one also
-    changes when the TTL expires underneath a long review, and a stale baseline is exactly
-    what must not be signed off.
+    Both statuses are captured because they answer different questions -- the stored one changes
+    when something transitions the loop, the effective one also changes when the TTL expires
+    underneath a long review.
 
-    ``armed_at``, ``baseline_tree`` and ``session_id`` identify *which* activation this is:
-    ``arm`` writes a fresh document, so a re-arm mid-review changes them. ``activation_generation``
-    catches what identity does not: a same-session ``resume`` leaves all three unchanged but
-    swaps the active plan revision or the model override underneath a review already in
-    flight, and every resume -- same-session included -- increments it for exactly this.
+    ``armed_at``, ``baseline_tree`` and ``session_id`` identify *which* activation this is.
+    ``activation_generation`` catches what identity does not: a same-session ``resume`` leaves all
+    three unchanged while swapping the plan revision or model override under a review in flight.
     """
     return (
         state.get("armed_at"),
@@ -246,35 +231,25 @@ def _unanchored_gap(repo: str, first: str) -> Gap:
 def phase_progress_gap(state: State, repo: str) -> Gap:  # noqa: PLR0911 - one return per distinct thing that can be missing, which is the point
     """Every frozen phase has a recorded commit behind it that git still vouches for.
 
-    The check that ends the regress. ``phase == phase_count() + 1`` says only that an integer
-    was incremented, and ``State.phases_match_frozen`` says only that the *list* was not
-    truncated -- neither says the phases were **done**. Corrupting ``phase`` alone satisfies
-    both, and on the no-review path there is no reviewer left to notice.
+    The check that ends the regress. ``phase == phase_count() + 1`` says only that an integer was
+    incremented and ``State.phases_match_frozen`` only that the list was not truncated -- neither
+    says the phases were **done**, and on the no-review path there is no reviewer left to notice.
 
-    So the proof is moved out of ``state.json`` entirely: ``posttool`` records the commit SHA it
-    verified for each phase (parent, tree and clean worktree all already proved there), and this
-    re-checks every one of them against git history. Git objects are content-addressed and the
-    ancestry check runs against the real repository, so forging this requires producing actual
-    commits reachable from ``HEAD`` -- which is the work the gate exists to make someone do.
-    Editing the document cannot manufacture it.
+    So the proof is moved out of ``state.json``: ``posttool`` records the commit SHA it verified per
+    phase, and this re-checks every one against git history. Git objects are content-addressed, so
+    forging it requires producing actual commits reachable from ``HEAD``.
 
     Requires exactly one entry per frozen phase, numbered ``1..total`` with no gaps or repeats,
-    naming ``total`` **distinct canonical object IDs** that form an ancestry chain from a
-    non-empty ``activation_commit`` (exclusive) through each phase in order, **each one moving
-    the tree**, and ending *at* ``HEAD`` rather than merely below it. Fails closed on every
-    malformed shape, and on the one legitimate shape it cannot verify -- see the comment on
-    ``activation_commit`` below.
+    naming ``total`` **distinct canonical object IDs** forming an ancestry chain from a non-empty
+    ``activation_commit`` through each phase in order, **each moving the tree**, and ending *at*
+    ``HEAD``. Fails closed on every malformed shape.
 
-    An activation armed before ``phase_commits`` existed has none recorded, so this refuses and
-    the no-review path escalates rather than disarming on evidence that was never collected.
-    That is the fail-closed direction, and it applies only to an activation carried across this
-    change mid-flight -- ``final_review``'s skip path is new, so no completed activation ever
-    depended on it before.
+    An activation armed before ``phase_commits`` existed has none recorded, so this refuses and the
+    no-review path escalates rather than disarming on evidence never collected.
 
-    Returns **which** of those it was, because the caller has to say. Every one of them used to
-    surface as the same "unexpected state (status=…, phase=…, total=…)" escalation, naming three
-    values that are correct in the commonest failure -- an activation armed on an empty
-    repository, whose ``UNANCHORED`` gap is the one shape here that means nothing is wrong.
+    Returns **which** gap it was, because the caller has to say: every one used to surface as the
+    same "unexpected state" escalation, whose commonest cause -- an activation armed on an empty
+    repository -- is the one shape here that means nothing is wrong.
     """
     total = len(state.get_array("phases"))
     if total <= 0:
@@ -353,102 +328,50 @@ class Completion:
     def commit(self, *, reviewed: str, reason: str, refuse_if_review_now_required: bool = False, review: Review | None = None) -> None:
         """Record ``COMPLETE``, but only if nothing invalidated the completion while it was pending.
 
-        ``reviewed`` names the tree being completed, whatever put it there -- an approving
-        final cumulative review, or nothing at all when ``final_review`` is disabled and every
-        phase having gone through the per-commit gate or the unreviewed-work sweep is being
-        trusted alone. ``final_done_tree`` records that tree either way; it does not
-        distinguish which.
+        ``reviewed`` names the tree being completed, whatever put it there -- an approving final review,
+        or nothing at all when ``final_review`` is off and every phase having passed the per-commit gate
+        is being trusted alone. ``final_done_tree`` records that tree either way.
 
-        The fingerprint itself is computed against config reloaded fresh here, not
-        ``self.config`` (whatever was in effect when this turn's hook process started):
-        ``fingerprint``'s effective-status half depends on ``ttl_hours``, and a concurrent
-        ``arl config ttl_hours ...`` shrinking it during the (possibly minutes-long) review
-        must be enough to catch a baseline gone stale in the meantime, not only elapsed
-        wall-clock time measured against a threshold that is itself out of date. This reload
-        happens **before** the git snapshot calls below, deliberately: it is part of deciding
-        whether to proceed with them at all, not a check to delay until afterward.
+        The fingerprint is computed against config reloaded **fresh** here, not ``self.config``:
+        ``fingerprint``'s effective-status half depends on ``ttl_hours``, so a concurrent
+        ``arl config ttl_hours ...`` shrinking it during a minutes-long review must be enough to catch a
+        baseline gone stale. The reload happens before the git calls below, because it is part of
+        deciding whether to proceed with them.
 
-        ``refuse_if_review_now_required`` is for the no-review caller specifically, and
-        re-checks three more things -- last, immediately before the write, for the same reason
-        the worktree is re-checked last rather than up front: to leave as little as
-        structurally possible between "still say skip" and the write making that irreversible:
+        ``refuse_if_review_now_required`` is for the no-review caller and re-checks three things last,
+        immediately before the write, to leave as little as structurally possible between "still say
+        skip" and the write making that irreversible:
 
-        - The stored ``status`` is ``ACTIVE``, ``phases`` is non-empty, and ``phase`` is
-          exactly one past the last phase -- the only shape "every phase was committed"
-          can take. None of these three are part of ``fingerprint`` (it tracks activation
-          *identity* and *status transitions*, not phase progress), so a tampered or
-          concurrently rewritten ``phase``/``phases`` would not move it at all; the caller
-          already checked this shape once, unlocked, before ever deciding to skip the
-          review, and this is the same check repeated against the document the write will
-          actually use, not the one that decision was made against.
-        - ``finish_requested`` must still be the literal ``False`` the schema writes.
-          Anything else -- ``True``, because a concurrent ``finish`` asked for the review this
-          completion is about to skip, or a value that is not a well-formed flag at all --
-          is refused rather than trusted, so a malformed or tampered document cannot read as
-          silent permission to skip the one thing standing between it and disarming the loop.
-          This one is checked exactly as atomically as the fingerprint above: same document,
-          same lock, no writer of it that does not also take this lock.
-        - ``final_review`` itself, against a **second, later** ``config_module.load`` -- not
-          the one the fingerprint used above, and not reused for it: if the user turned it back
-          on while this completion was queued, the request to require a review again must land
-          as close to the write as this function can place the check, exactly like the
-          worktree re-check just above it, not be satisfied by a value already stale by the
-          time the two git subprocess calls below have run.
+        - stored ``status`` ``ACTIVE``, ``phases`` non-empty, ``phase`` exactly one past the last --
+          the only shape "every phase was committed" can take. None of the three are part of
+          ``fingerprint``, which tracks identity and status transitions, not phase progress.
+        - ``finish_requested`` still the literal ``False`` the schema writes: anything else, a
+          malformed value included, is refused rather than read as silent permission to skip.
+        - ``final_review`` against a **second, later** ``config_module.load``, so a user turning it
+          back on lands as close to the write as this function can place the check.
 
         ``_final`` never passes it -- a review it already ran satisfies whatever asking for one
-        demanded, regardless of when the request landed, and it has no "skip" to re-validate.
+        demanded.
 
-        ``review`` is the approving **final** review this completion rests on, and the two
-        callers that have one must pass it. It gets the question the fingerprint structurally
-        cannot answer: ``fingerprint`` covers activation identity and status transitions, not
-        review history, so a *second* final review of the same activation recording
-        ``CHANGES_REQUIRED`` -- or merely still running -- moves nothing it compares. Without
-        this check the first review's ``APPROVED`` is written straight over the newer,
-        blocking one, and because the write is ``COMPLETE`` the mistake is **permanent**: that
-        status disarms the gate, so there is no later round to correct it. That makes it
-        strictly worse here than on the per-commit path, where a wrong approval costs one
-        commit and the loop keeps enforcing. ``reviewer.approval_is_current`` is the same check
-        ``pretool``'s approval and the Stop sweep's already ask, against the ``final`` label.
-        ``_complete_without_review`` passes nothing, correctly: it rests on no verdict at all,
-        and ``refuse_if_review_now_required`` is what guards *that* path instead.
+        ``review`` is the approving **final** review this completion rests on, and answers the question
+        the fingerprint structurally cannot: a *second* final review recording ``CHANGES_REQUIRED``, or
+        merely still running, moves nothing ``fingerprint`` compares, so the first review's ``APPROVED``
+        would be written over the newer blocking one -- and because the write is ``COMPLETE`` the
+        mistake is **permanent**, with no later round to correct it.
 
-        **Every check runs with the activation lock held**, and the lock is not released
-        until ``COMPLETE`` is on disk. Verifying the worktree before taking the lock leaves a
-        window in which the tree is checked, the process then waits for the lock, and the
-        content changes while it waits -- the verification would be of a tree that no longer
-        exists by the time the approval is written.
+        **Every check runs with the activation lock held**, and the lock is not released until
+        ``COMPLETE`` is on disk: verifying the worktree before taking the lock leaves a window in which
+        the content changes while this process waits.
 
-        **Residual windows remain, and none of them can be closed here.** Between
-        ``gitsnap.snapshot`` returning and ``os.replace`` publishing the document -- a few
-        milliseconds -- a file watcher, an editor writing back a buffer or an MCP server
-        dropping a state directory can change the worktree. That content is then outside the
-        reviewed set while the report says the activation was reviewed. The lock does not help:
-        it is this gate's own lock, and nothing that writes to a worktree honours it. Shrinking
-        the window further only moves it, and re-checking *after* publishing would have a
-        window of its own plus a new failure mode when the rollback fails.
+        **Residual windows remain and none can be closed here.** Between ``gitsnap.snapshot`` returning
+        and ``os.replace`` publishing -- a few milliseconds -- a file watcher or an editor can change
+        the worktree; the lock is this gate's own and nothing that writes a worktree honours it.
+        Likewise nothing that writes config takes this lock, so a config change landing in either
+        instant is not caught. The two reloads are deliberately not unified: doing so would widen the
+        ``final_review`` window back out across two git subprocess calls.
 
-        Both config reloads have the identical shape, for the identical structural reason:
-        ``config_module.load`` reads the repo and user config files, and nothing that writes
-        them takes this activation's lock -- doing so would mean coordinating an arbitrary
-        number of config writers against a lock scoped to one session's activation, which the
-        config layer has no notion of. So a `config ttl_hours ...` landing in the instant
-        between the fingerprint's reload and this function returning, or a `config final_review
-        true` landing in the instant between *its own* later reload and ``state.update`` below
-        reaching disk, is not caught, for the same reason the worktree's last millisecond is
-        not: each check has been moved as late as it structurally can be, and there is no lock
-        either side takes. That is also why the two reloads are not unified into one taken
-        early and reused: doing so would widen the ``final_review`` window back out to span two
-        git subprocess calls' worth of avoidable exposure, trading a narrow, already-accepted
-        sliver for a needlessly wider one.
-
-        What bounds the consequence, for every window above, is that ``COMPLETE`` is by design
-        the moment enforcement ends -- content, or a config change, appearing a millisecond
-        before it is ungated for the same reason either appearing a millisecond after is. The
-        claim to keep accurate is therefore which *tree* is being completed and that a review
-        was not skipped except by a value that read as permission at the last possible instant
-        this function checked it, and every caller states the former; the latter is this
-        docstring. docs/design/environment-hazards.md already names the worktree
-        hazard: gitignore such paths before arming.
+        What bounds the consequence is that ``COMPLETE`` is by design the moment enforcement ends.
+        See docs/design/environment-hazards.md.
         """
         state, repo = self.state, self.repo
         with state.transaction():

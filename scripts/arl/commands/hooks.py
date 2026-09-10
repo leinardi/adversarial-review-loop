@@ -117,16 +117,14 @@ class Activation:
     """Everything that must be unchanged for a decision taken earlier to still apply.
 
     Both hooks that write a decision -- ``pretool`` approving a commit, ``confirm-commit``
-    advancing a phase -- do slow work first: a review that takes minutes, or a handful of git
-    processes. Taking the activation lock and *reloading* is not enough on its own, because
-    the reloaded document is then written to regardless of what it says. What that allows is
-    the one direction Rule 1 forbids: an escalation, a reconcile, an expiry or a user's
-    ``stop`` recorded while the slow work ran, and then quietly replaced by an approval.
+    advancing a phase -- do slow work first. Taking the lock and *reloading* is not enough on its
+    own, because the reloaded document is then written to regardless of what it says: an
+    escalation, a reconcile, an expiry or a user's ``stop`` recorded while the slow work ran would
+    be quietly replaced by an approval.
 
-    So each of those callers captures this before, compares it inside the transaction, and
-    refuses on any difference. Deliberately an equality check over everything rather than a
-    list of statuses that may not be overwritten -- a deny-list of statuses fails open the
-    day one is added, which is how ``RECONCILE`` was missed once already.
+    Deliberately an equality check over everything rather than a list of statuses that may not be
+    overwritten -- a deny-list fails open the day one is added, which is how ``RECONCILE`` was
+    missed once already.
     """
 
     armed_at: str
@@ -226,21 +224,19 @@ def _end_capture(capture: str, *, head: str = "", tree: str = "") -> dict[str, o
 def ended_evidence(repo: str) -> dict[str, object]:
     """What the gate can see about ``repo`` right now, as fields to fold into a terminal write.
 
-    Returns a mapping rather than writing anything, so each caller folds it into the **same**
-    ``state.update`` as its own terminal status write: one code path, and the evidence can
-    never be recorded without the transition or the transition without the evidence. Callers
-    must not substitute a tree they already hold -- deriving the tree from the captured commit
-    (``<head>^{tree}``) instead of reading ``HEAD`` twice is what keeps the pair self-coherent.
+    Returns a mapping rather than writing, so each caller folds it into the **same**
+    ``state.update`` as its own terminal status write: the evidence can never be recorded without
+    the transition or the transition without the evidence. Callers must not substitute a tree they
+    already hold -- deriving it from the captured commit is what keeps the pair self-coherent.
 
-    **Nothing here may fail the transition.** Every :class:`gitsnap.GitUnavailable` is caught
-    and recorded as an *outcome*; a raise inside the caller's ``state.transaction()`` would
-    abandon a completion over a reporting field. ``rev_parse_checked`` is the right reader
-    precisely because it distinguishes "resolves to nothing" from "git could not answer",
-    which is the distinction ``ended_capture`` exists to keep.
+    **Nothing here may fail the transition.** Every :class:`gitsnap.GitUnavailable` is caught and
+    recorded as an *outcome*; a raise inside the caller's transaction would abandon a completion
+    over a reporting field. ``rev_parse_checked`` is the right reader because it distinguishes
+    "resolves to nothing" from "git could not answer".
 
-    **The capture is not atomic with git.** The activation lock does not lock the repository,
-    so a commit landing between this call and the transaction's save is not covered. The
-    window is the tail of one transaction; it is real, and ``docs/security.md`` says so.
+    **The capture is not atomic with git**: the activation lock does not lock the repository, so a
+    commit landing between this call and the transaction's save is not covered. See
+    ``docs/design/end-state-record.md``.
     """
     from arl import gitsnap  # noqa: PLC0415 - not on the read-only hot path
 
@@ -276,25 +272,20 @@ class EndState:
 def end_state(state: State) -> EndState:
     """Read and validate the ``ended_*`` record. Never raises, never touches git.
 
-    Validation reads the **raw** document rather than the coercing accessors: ``get_int``
-    maps every malformed value to ``0`` and ``int(True) == 1`` slips straight through it,
-    either of which would make corruption indistinguishable from a legacy absence.
+    Validation reads the **raw** document rather than the coercing accessors: ``get_int`` maps
+    every malformed value to ``0`` and ``int(True) == 1`` slips through, either of which makes
+    corruption indistinguishable from a legacy absence.
 
-    **An absent ``ended_capture`` and a present, empty one are not the same thing**, and
-    collapsing them is a suppression, not a tidy-up. Absent means the document predates the
-    record and there is nothing to report. Present-and-empty means the schema has the field
-    and no terminal transition filled it -- ordinary on a live activation, and impossible on
-    one whose stored status a terminal transition writes, since all three of those writes fold
-    :func:`ended_evidence` into the same ``state.update``. The documented Rule 4 bypass is
-    editing ``status`` straight into ``state.json`` (docs/design/end-state-record.md), which
-    produces precisely that second shape, so it is reported as tampering.
+    **An absent ``ended_capture`` and a present, empty one are not the same thing.** Absent means
+    the document predates the record. Present-and-empty means the schema has the field and no
+    terminal transition filled it -- impossible for a status a terminal transition writes, since
+    all three fold :func:`ended_evidence` into the same update -- so it is the documented Rule 4
+    state edit and is reported as tampering.
 
-    ``looks_like_object_id`` and **not** ``gitsnap.checked_tree``: ``checked_tree`` resolves
-    against the repository as it is *now*, and a genuinely recorded tree legitimately stops
-    resolving after a rewrite, reset or gc -- that would turn a true report into silence, the
-    one direction Rule 1 forbids. The shape check suffices because the value never reaches
-    argv: it is compared with ``State.tree_approved`` (set membership on strings) and
-    interpolated into a message.
+    ``looks_like_object_id`` and **not** ``gitsnap.checked_tree``: a genuinely recorded tree
+    legitimately stops resolving after a rewrite, reset or gc, and letting that turn a true report
+    into silence is the one direction Rule 1 forbids. The shape check suffices because the value
+    never reaches argv.
     """
 
     raw_capture = state.data.get("ended_capture", _ABSENT)
