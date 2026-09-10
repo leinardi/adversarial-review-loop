@@ -1672,7 +1672,7 @@ def test_stopping_a_retired_activation_does_not_call_the_worktree_ungated(
 
     assert proc.returncode == 0, proc.stdout
     assert S2 in proc.stdout
-    assert "A Claude session still *bound* to any retired activation" in proc.stdout
+    assert "a session still *bound* to any retired activation" in proc.stdout
     assert f"({S1})" in proc.stdout, "and the chain it names has to include this one"
     # And the one document AGENTS.md forbids mutating at all is untouched.
     assert (state_dir(env, git_repo, S1) / "state.json").read_bytes() == before

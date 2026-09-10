@@ -584,13 +584,12 @@ _ALREADY_ENDED_STATUSES: Final = _ENFORCEMENT_OVER_STATUSES | {"RESUMED"}
 ALREADY_ENDED = """\
 adversarial-review-loop: this worktree's activation already ended ({status}), so nothing was changed.
 
-Commits and file changes are not gated. The record of how the mode ended -- which the
-reporting channels read instead of current HEAD -- is kept exactly as it was written.
+Commits and file changes are not gated. The end-of-mode record is kept as written.
+
+Re-arm with /adversarial-review-loop:implement <plan.md>.
 
 State and reports are at:
   {act_dir}
-
-Re-arm at any time with /adversarial-review-loop:implement <plan.md>.
 """
 
 #: ``RESUMED``'s own message, because the one above would be a false claim here. A retired
@@ -617,19 +616,17 @@ Re-arm at any time with /adversarial-review-loop:implement <plan.md>.
 #: not just the one this command resolved -- an A-into-B-into-C history leaves sessions bound to
 #: A *and* to B denying, and naming only A would describe B's session as free.
 _BOUND_SESSION_CAVEAT = """\
-One exception is worth knowing about. A Claude session still *bound* to any retired activation
-in this worktree's chain ({retired}) keeps being denied, and its turn-end and post-commit
-reports keep reading that retired document rather than {successor}'s -- the gate resolves a
-bound session's own state before it ever looks at the worktree pointer. Every other session,
-including any new one, passes. If the session you are in is a denied one, re-arm with
-/adversarial-review-loop:implement <plan.md> or start a fresh session."""
+One exception: a session still *bound* to any retired activation in this worktree's chain
+({retired}) keeps being denied, and its reports keep reading that retired document rather than
+{successor}'s. Every other session, including a new one, passes. If this session is a denied
+one, re-arm with /adversarial-review-loop:implement <plan.md> or start a fresh session."""
 
 _RETIRED_STOPPED = """\
 adversarial-review-loop: STOPPED for this worktree -- through {successor}, which a resume had already handed it to.
 
-The activation this session resolved ({resolved}) was retired by that resume and must never be
-rewritten, so it was left exactly as it was. The resume died before it could repoint this
-worktree at {successor}; that pointer is now published, and {successor} itself is DISARMED.
+The activation this session resolved ({resolved}) was retired by that resume and was left as it
+was. The resume died before repointing this worktree at {successor}; that pointer is now
+published, and {successor} itself is DISARMED.
 
 Commits and file changes are no longer gated. {caveat}
 
@@ -643,9 +640,8 @@ State and reports are at:
 _RETIRED_SUCCESSOR_ENDED = """\
 adversarial-review-loop: this worktree's activation was retired by a resume ({successor} took over), and {successor} was no longer live ({status}).
 
-Neither document was changed. The resume died before it could repoint this worktree at
-{successor}; that pointer is now published, so commits and file changes are no longer gated.
-{caveat}
+Neither document was changed. The pointer the dead resume left behind now names {successor}, so
+commits and file changes are no longer gated. {caveat}
 
 State and reports are at:
   {act_dir}
@@ -659,10 +655,9 @@ State and reports are at:
 _RETIRED_POINTER_MOVED = """\
 adversarial-review-loop: this worktree's activation pointer moved while /stop was working, so nothing was changed.
 
-This command resolved the retired activation {resolved} and was finishing the pointer a dead
-resume left behind. Something else published a different activation in the meantime -- an
-/adversarial-review-loop:implement, or another resume -- and overwriting that could hide a live
-activation behind a stopped one.
+Something else published an activation while this command was finishing the pointer a dead
+resume left behind on {resolved}. Overwriting it could hide a live activation behind a stopped
+one.
 
 Run /adversarial-review-loop:stop again to act on whatever is armed now.
 
@@ -678,14 +673,12 @@ State and reports are at:
 _RETIRED_UNPUBLISHED = """\
 adversarial-review-loop: this worktree's activation was retired by a resume that never finished, so nothing was changed.
 
-The resume wrote this activation off in favour of {successor}, then died before publishing
-it -- {successor} has no state at all. Both sides deny by design: a retired activation cannot
-be stopped and must not be rewritten, and a session with no document can prove nothing about
-this armed worktree and therefore denies too (Rule 0). **/stop cannot free this worktree**,
-and running it again prints this same message.
+The resume wrote this activation off in favour of {successor}, then died before publishing it --
+{successor} has no state at all, so both sides deny. **/stop cannot free this worktree**, and
+running it again prints this same message.
 
-Re-arm from scratch with /adversarial-review-loop:implement <plan.md>. Nothing is lost --
-the retired activation's reports stay where they are.
+Re-arm from scratch with /adversarial-review-loop:implement <plan.md>. Nothing is lost -- the
+retired activation's reports stay where they are.
 
 State and reports are at:
   {act_dir}
@@ -698,10 +691,9 @@ State and reports are at:
 _RETIRED_UNLINKED = """\
 adversarial-review-loop: this worktree's activation names {successor} as its successor, but {successor} does not name it back.
 
-Nothing was changed. A retirement writes both halves of that link at once, so a chain that is
-only half there was not written by this gate -- state.json has been edited, or corrupted.
-Acting on it would mean stopping whatever session that field happens to name, so /stop refuses
-rather than guess.
+Nothing was changed. A retirement writes both halves of that link at once, so state.json has
+been edited or corrupted, and /stop refuses rather than stop whatever that field happens to
+name.
 
 Re-arm from scratch with /adversarial-review-loop:implement <plan.md>.
 
@@ -715,9 +707,9 @@ State and reports are at:
 _RETIRED_CONTENDED = """\
 adversarial-review-loop: this worktree is being resumed right now, so /stop had nothing stable to act on.
 
-Nothing was changed. Each time this command read the successor it had already been retired
-into another one. Wait for the resume in flight to finish, then run
-/adversarial-review-loop:stop again.
+Nothing was changed: each time this command read the successor it had already been retired into
+another one. Wait for the resume in flight to finish, then run /adversarial-review-loop:stop
+again.
 
 State and reports are at:
   {act_dir}

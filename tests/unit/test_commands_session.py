@@ -622,7 +622,7 @@ def test_deactivate_says_plainly_that_it_cannot_free_an_unpublished_retirement(g
     assert "retired by a resume that never finished" in proc.stdout
     assert "cannot free this worktree" in proc.stdout
     # Rule 0: a session with no document denies; it does not "gate nothing".
-    assert "can prove nothing about" in proc.stdout
+    assert "both sides deny" in proc.stdout
     assert pointer.read_text() == "s1\n"
     assert read_state(env, git_repo, "s1")["status"] == "RESUMED"
 

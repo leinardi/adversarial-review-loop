@@ -62,9 +62,8 @@ Arming never ran, so nothing was frozen, nothing is being reviewed, and this
 mutation is denied.
 
 /adversarial-review-loop:implement or :resume was submitted in this session, but
-the arm command itself never executed. The usual causes are a sandbox that
-refused to run it, an unreadable or non-executable scripts/arl.sh, or a
-missing interpreter.
+the arm command itself never executed -- a sandbox that refused to run it, an
+unreadable or non-executable scripts/arl.sh, or a missing interpreter.
 
 Tell the user. They can look at the error the slash command printed, fix the
 cause and run /adversarial-review-loop:implement <plan.md> again, or leave the
@@ -119,7 +118,7 @@ without another review and continue, or leave the mode with /adversarial-review-
 STALE: Final = """\
 This activation is older than ttl_hours ({ttl_hours}) and is presumed abandoned. It blocks rather than silently disarming.
 
-Continue it with /adversarial-review-loop:resume, which keeps the baseline and every approval and re-verifies the worktree before picking back up — that is usually the right recovery. Re-arm with /adversarial-review-loop:implement <plan.md> only to start over from scratch, or leave the mode with /adversarial-review-loop:stop.
+Continue it with /adversarial-review-loop:resume, which keeps the baseline and every approval and re-verifies the worktree before picking back up. /adversarial-review-loop:implement <plan.md> starts over from scratch; /adversarial-review-loop:stop leaves the mode.
 """
 
 RESUMED: Final = """\
@@ -163,15 +162,14 @@ allowed; that one command is the only Bash this gate accepts until it has run.
 SET_PHASES_REFUSED: Final = """\
 That is the right command, but this spelling of it was refused: {error}
 
-The phase descriptions are ordinary text and the tokenizer reads them as shell words, so a
-description cannot contain a backtick or a "$" -- both are command substitution to the shell,
-and neither is worth risking at the one moment nothing else may run. Rewrite them as plain
-prose, drop any code formatting, and run it again:
+The descriptions are read as shell words, so one cannot contain a backtick or a "$" -- both
+are command substitution. Rewrite them as plain prose, drop any code formatting, and run it
+again:
 
     {plugin_root}/scripts/arl.sh set-phases --phase "…" --phase "…"
 
-The wording of a phase is yours to choose; only the characters are constrained. Nothing else
-about the activation has changed, and no attempt has been counted against you.
+The wording is yours to choose; only the characters are constrained. Nothing else about the
+activation has changed, and no attempt has been counted against you.
 """
 
 SET_PHASES_ALLOWED: Final = "adversarial-review-loop: set-phases is the one command allowed before the phase list is frozen."
@@ -193,8 +191,7 @@ with a blank line:
 
   git add -A && git commit -m "subject" -m "first para" -m "second para"
 
-A real newline inside one -m, and -F/--file, are both refused. Repeated -m is
-the way to write a body here, not a workaround.
+A real newline inside one -m, and -F/--file, are both refused.
 
 Run builds, tests, formatters and `git rm` as their own separate Bash calls
 first; the next snapshot picks their result up. Then commit with one of the
@@ -234,9 +231,8 @@ This tool would write inside the review loop's own state directory:
 
   {path}
 
-That directory ({root}) holds the frozen plan, the record of what has been reviewed, and the
-status this gate enforces. Nothing in the repository under review has any reason to edit it,
-and editing it is how the mode gets switched off without anyone deciding to.
+That directory ({root}) holds the frozen plan and the record of what has been reviewed.
+Editing it is how the mode gets switched off without anyone deciding to.
 
 If you believe the loop should end, say so and let the user run /adversarial-review-loop:stop.
 """
@@ -244,8 +240,8 @@ If you believe the loop should end, say so and let the user run /adversarial-rev
 EXPANSION_DENIED: Final = """\
 This command contains {expansion}, so the gate cannot tell what program it will run.
 
-That is not a guess it may make: a command name produced by an expansion can be `git`, and a
-commit created that way would never reach the review gate at all.
+An expanded command name can be `git`, and a commit created that way would never reach the
+review gate at all.
 
 Only the **command name** is refused. An expansion in an argument is fine -- `echo "exit=$?"`
 runs `echo` -- and so is anything inside the body of a heredoc whose delimiter is quoted
@@ -405,9 +401,8 @@ RESET_UNREADABLE: Final = """\
 This reset was not accepted: {error}
 
 Outside a reconcile the only reset this gate can reason about is `git reset --soft <target>`,
-and it must not move HEAD off a commit that was reviewed. A reset it cannot read is denied
-rather than passed through: every commit in this history is a tree that was actually
-reviewed, and rewinding one breaks that guarantee.
+and it must not move HEAD off a commit that was reviewed: every commit in this history is a
+tree a review approved, and rewinding one breaks that guarantee.
 
 If you meant to unstage something, there is no need — the review snapshot is taken through a
 throwaway index and never reads the real one.

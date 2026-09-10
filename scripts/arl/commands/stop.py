@@ -125,7 +125,7 @@ adversarial-review-loop: the activation state for this session could not be read
 
 This is an enforcement failure, not a review finding: the session pointer says this worktree was armed, but its state.json is missing or unreadable. It has escalated to NEEDS_HUMAN, so every mutation stays denied.
 
-Tell the user. They can re-arm with /adversarial-review-loop:implement <plan.md>, or leave the mode with /adversarial-review-loop:stop.
+Tell the user. They can re-arm with /adversarial-review-loop:implement <plan.md> or leave the mode with /adversarial-review-loop:stop.
 """
 
 STILL_NEEDS_HUMAN: Final = (
@@ -144,22 +144,32 @@ Tell the user. They can re-run /adversarial-review-loop:implement <plan.md> or /
 
 #: Addressed to the **user**, not to Claude: this one goes out as a ``systemMessage`` rather
 #: than as a block reason, because Claude has nothing to do about it.
+#: The recovery both expiry messages end on. One text, because they describe one situation from
+#: two moments, and a reader who sees them in either order has to be told the same thing.
+_STALE_RECOVERY: Final = (
+    "Continue with /adversarial-review-loop:resume, which refreshes the activation and keeps the baseline and every "
+    "approval. /adversarial-review-loop:implement <plan.md> starts over from scratch; "
+    "/adversarial-review-loop:stop leaves the mode."
+)
+
 STALE: Final = (
     "adversarial-review-loop: this activation is past ttl_hours ({ttl_hours}), so it is STALE and blocks rather than "
     "silently disarming: every mutation is denied, and nothing in this turn was reviewed -- this is NOT an approval. "
-    "Continue with /adversarial-review-loop:resume, which refreshes the activation and keeps the baseline and every "
-    "approval -- that is usually the right recovery. Re-arm with /adversarial-review-loop:implement <plan.md> only to "
-    "start over from scratch, or leave the mode with /adversarial-review-loop:stop."
-)
+) + _STALE_RECOVERY
 
 #: The same recovery, for a turn that was still ``ACTIVE`` when it started. ``reason`` carries
 #: whatever this turn had already found -- often a real review's findings -- because unlike the
 #: constant above, this one cannot claim nothing was reviewed.
-STALE_MIDTURN: Final = """\
-{reason}
-
-adversarial-review-loop: the activation passed ttl_hours ({ttl_hours}) while this turn was running, so it is now STALE: every mutation is denied and nothing above was approved. The turn ends rather than being sent back, and it was not counted against max_stop_blocks -- only you can clear a STALE activation. Continue with /adversarial-review-loop:resume, which refreshes the activation and keeps the baseline and every approval -- that is usually the right recovery. Re-arm with /adversarial-review-loop:implement <plan.md> only to start over from scratch, or leave the mode with /adversarial-review-loop:stop.
-"""
+STALE_MIDTURN: Final = (
+    (
+        "{reason}\n\n"
+        "adversarial-review-loop: the activation passed ttl_hours ({ttl_hours}) while this turn was running, so it is now "
+        "STALE: every mutation is denied and nothing above was approved. The turn ends rather than being sent back, and it "
+        "was not counted against max_stop_blocks -- only you can clear a STALE activation. "
+    )
+    + _STALE_RECOVERY
+    + "\n"
+)
 
 #: What an escalation refused by an expiry says before :data:`STALE_MIDTURN`. The escalation
 #: genuinely did not stick, so this says so rather than implying the loop is now NEEDS_HUMAN --
@@ -213,7 +223,7 @@ adversarial-review-loop: the mode is {status}, and when it ended ({at}) HEAD was
 
 Work was committed in this worktree without passing the review gate. If you did not stop the mode yourself, it was ended from inside a Bash command — the gate cannot tell those apart, so it reports rather than acts.
 
-This describes the state recorded at the moment enforcement stopped, and nothing after it: commits made since then are ungated by design and are not what this reports.
+Commits made after the mode ended are ungated by design and are not what this reports.
 
 Review commit {head} yourself, or re-arm with /adversarial-review-loop:implement <plan.md>.
 """
@@ -290,15 +300,14 @@ adversarial-review-loop: the worktree is not clean, so the last of the work is n
 EXCLUDE_MOVED: Final = """\
 adversarial-review-loop: {path} changed while this activation was live, so the worktree cannot be shown to be clean.
 
-That file decides what `git add -A` ignores, and every tree this gate reviews is built with \
-`git add -A`. It is outside the repository, so no commit carries it and no review has seen \
-this change -- which means anything newly listed in it is in the worktree but invisible to the \
+That file decides what `git add -A` ignores and lives outside the repository, so no review \
+has seen this change: anything newly listed in it is in the worktree but invisible to the \
 unreviewed-work sweep, and "clean" can no longer be proven.
 
 Restore it to what it was when the activation was armed and end the turn again. If the change \
-was deliberate and should stand, the user can end the mode with /adversarial-review-loop:stop, \
-or re-arm with /adversarial-review-loop:implement <plan.md> to take the new contents as the \
-baseline. This is not a finding about the code.
+should stand, the user can end the mode with /adversarial-review-loop:stop, or re-arm with \
+/adversarial-review-loop:implement <plan.md> to take the new contents as the baseline. This is \
+not a finding about the code.
 """
 
 #: The baseline is present but empty, which no ``arm`` writes -- it refuses rather than record
@@ -308,9 +317,9 @@ EXCLUDE_TAMPERED: Final = """\
 adversarial-review-loop: this activation's {path} baseline is empty, which no arming writes, so the check that file guards cannot run.
 
 `arm` refuses rather than record a baseline it could not establish, so an empty one means \
-state.json was edited or written by another tool. Nothing here observed a change to the file \
-itself -- what is missing is anything to compare it against, and that file decides what \
-`git add -A` ignores, so "the worktree is clean" cannot be proven without it.
+state.json was edited. Nothing here observed a change to the file itself; what is missing is \
+anything to compare it against, and that file decides what `git add -A` ignores, so "the \
+worktree is clean" cannot be proven without it.
 
 Tell the user. Re-arm with /adversarial-review-loop:implement <plan.md> to take a fresh \
 baseline, or leave the mode with /adversarial-review-loop:stop. This is not a finding about \
@@ -325,10 +334,9 @@ the code.
 EXCLUDE_UNREADABLE: Final = """\
 adversarial-review-loop: {path} could not be read, so the worktree cannot be shown to be clean.
 
-That file decides what `git add -A` ignores, and every tree this gate reviews is built with \
-`git add -A`, so without reading it there is no way to tell whether anything is being hidden \
-from the unreviewed-work sweep. git answered for the snapshot a moment ago, so this is not a \
-repository the gate cannot see -- something about this one file or this one call failed.
+That file decides what `git add -A` ignores, so without reading it there is no way to tell \
+whether anything is being hidden from the unreviewed-work sweep. git answered for the snapshot \
+a moment ago, so this is one file or one call failing, not a repository the gate cannot see.
 
 This is not a finding about the code, and it is not a claim that anything was hidden. Retry \
 the turn; if it persists, tell the user -- they can leave the mode with \
@@ -343,10 +351,9 @@ activation is still ARMED. Next up, phase {phase} of {total}:
 
     {description}
 
-The target stays set, and it has now been passed -- so every turn end pauses here until you \
-name a new one. Continue with /adversarial-review-loop:resume --until 0 to run to the end of \
-the plan, or --until M to stop again at phase M. Or finish the whole plan now with \
-/adversarial-review-loop:finish.
+The target has been passed, so every turn end pauses here until you name a new one. Continue \
+with /adversarial-review-loop:resume --until 0 to run to the end of the plan, or --until M to \
+stop again at phase M. Or finish the whole plan now with /adversarial-review-loop:finish.
 """
 
 COMPLETE: Final = """\
@@ -356,7 +363,7 @@ Full report: {report}
 """
 
 COMPLETE_UNREVIEWED: Final = """\
-adversarial-review-loop: COMPLETE. Every one of the {total} phases landed through the per-commit gate, and git still vouches for the commit each one produced: {total} distinct commits, in phase order, each moving the tree. That is not the same as a model having read every line -- an already-approved or ignore_globs-matched tree passes the gate without a call. A commit made outside the gate does not become a phase; it enters RECONCILE, and end-state work the unreviewed-work sweep caught was reviewed on its own terms, not as a phase. What did not run is the final cumulative review across the whole activation (final_review is disabled). The mode has disarmed itself; further commits are ungated.
+adversarial-review-loop: COMPLETE. Every one of the {total} phases landed through the per-commit gate, and git still vouches for the commit each one produced: {total} distinct commits, in phase order, each moving the tree. That is not the same as a model having read every line -- an already-approved or ignore_globs-matched tree passes the gate without a call. What did not run is the final cumulative review across the whole activation (final_review is disabled). The mode has disarmed itself; further commits are ungated.
 
 This activation is now closed, so it cannot be reviewed cumulatively after the fact -- there is no remedy for this run. Set final_review=true (`config final_review true`, or ARL_FINAL_REVIEW=true for one run) before the next /adversarial-review-loop:implement to get one.
 """
@@ -375,11 +382,11 @@ SKIP_PATH_UNPROVEN: Final = (
 UNANCHORED_COMPLETION: Final = """\
 adversarial-review-loop: all {total} phases are committed and every one of them passed the per-commit gate, but this activation cannot complete itself.
 
-It was armed on a repository with no commits, so it has no activation commit for the phase chain to be anchored to, and the no-review completion path will not disarm on a chain it cannot check against git history. Nothing is wrong with the work or with the state; this activation simply cannot use that path.
+It was armed on a repository with no commits, so it has no activation commit to anchor the phase chain to, and the no-review completion path will not disarm on a chain it cannot check against git history. Nothing is wrong with the work or with the state.
 
 Two ways to end it, both of which work right now:
 
-- /adversarial-review-loop:finish — runs the cumulative review across the whole activation and completes the mode if it approves. This is the one that ends with a review.
+- /adversarial-review-loop:finish — runs the cumulative review across the whole activation and completes the mode if it approves.
 - /adversarial-review-loop:stop — leaves the mode without that review. The per-phase reviews already happened and their commits stand.
 
 The mode stays armed until you pick one: commits here are still gated, and nothing was approved or disarmed by this message. Tell the user; do not pick for them.

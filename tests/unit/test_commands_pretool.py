@@ -441,7 +441,7 @@ def test_an_expired_activation_blocks_rather_than_disarming(git_repo: Path, tmp_
     # the baseline and every approval; re-arming is the destructive one, and both are named so
     # the model does not pick the second by default.
     assert "/adversarial-review-loop:resume" in reason
-    assert "Re-arm with /adversarial-review-loop:implement" in reason
+    assert "/adversarial-review-loop:implement <plan.md> starts over" in reason
 
 
 def test_nothing_may_change_before_the_phase_list_is_frozen(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
