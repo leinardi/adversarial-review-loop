@@ -223,6 +223,17 @@ def new_state_document() -> dict[str, Any]:
         #: so a post-resume clarify cannot overwrite a question file copied forward from the
         #: predecessor's ``context/``.
         "clarify_seq": 0,
+        #: One entry per clarification whose reviewer retracted a finding of the round it
+        #: answered: ``{seq, label, phase, generation, round_seq, at, supersedes: [line, ...]}``.
+        #: Evidence, not a counter -- like ``round_history`` it is carried across a resume, never
+        #: reset. Appended only by ``commands.clarify``, only with grammar-validated
+        #: ``SUPERSEDES`` lines that each name exactly one finding of the round ``round_seq``
+        #: names, and only under the fingerprint guard. It touches no verdict, no
+        #: ``round_history`` entry and neither stall signal: its one reader,
+        #: ``reviewer._prior_rounds_section``, shows the retraction to the next round and
+        #: re-validates every field first. Degrades safely like ``active_review`` (a legacy
+        #: document simply has none), so it needs no migration arm of its own.
+        "clarify_history": [],
         #: One entry per ``accept``: ``{"at", "phase", "tree", "base", "reason", "reviews",
         #: "report"}``. Never trimmed -- it is the audit trail for every phase a human approved
         #: without an approving review.

@@ -817,3 +817,37 @@ def test_retiring_blocking_findings_in_two_rounds_still_escalates() -> None:
     assert [point.anchor for point in points] == [Anchor(file="a.py", severity="medium")]
     assert points[0].supersedes_rounds == 2
     assert points[0].reappeared is False, "the blocking anchor was live in every round; only the SUPERSEDES count flags it"
+
+
+# --------------------------------------------------------------------------
+# ordinal_of: the round number a clarify's retraction is checked against
+# --------------------------------------------------------------------------
+
+
+def test_ordinal_of_is_the_stored_order_position_within_the_label() -> None:
+    history = [entry(4), entry(7, label="phase2"), entry(9)]
+    assert oscillation.ordinal_of(history, "phase1", 4) == 1
+    assert oscillation.ordinal_of(history, "phase1", 9) == 2
+    assert oscillation.ordinal_of(history, "phase2", 7) == 1
+    assert oscillation.ordinal_of(history, "phase1", 7) is None, "another label's seq names no round of this one"
+
+
+def test_ordinal_of_proves_nothing_once_a_seq_was_dropped() -> None:
+    history = [entry(1), {**entry(2), "seq": "2"}, entry(3)]
+    assert oscillation.ordinal_of(history, "phase1", 1) is None
+    assert oscillation.ordinal_of(history, "phase1", 3) is None
+
+
+def test_ordinal_of_proves_nothing_over_non_increasing_seqs() -> None:
+    history = [entry(2), entry(1), entry(3)]
+    assert [oscillation.ordinal_of(history, "phase1", seq) for seq in (1, 2, 3)] == [None, None, None]
+
+
+def test_ordinal_of_proves_nothing_for_a_duplicated_seq() -> None:
+    history = [entry(1), entry(2), entry(2)]
+    assert oscillation.ordinal_of(history, "phase1", 2) is None
+    assert oscillation.ordinal_of(history, "phase1", 1) is None
+
+
+def test_ordinal_of_does_not_read_a_bool_as_a_seq() -> None:
+    assert oscillation.ordinal_of([entry(1)], "phase1", True) is None

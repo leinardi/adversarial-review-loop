@@ -441,8 +441,11 @@ passed a gate.
 Before accepting, though: when a finding is just *unclear*, or two rounds seem to contradict
 each other, Claude can run `arl.sh clarify --question "…"` to get one prose answer about the
 review that already ran, with no new commit attempt and no new round. It is not a slash
-command (Claude invokes it directly), it changes nothing, and it is capped at
-`max_clarifications` per run. A genuine standing disagreement still ends at `accept`.
+command (Claude invokes it directly), it changes no verdict, and it is capped at
+`max_clarifications` per run. When the answer shows a finding was simply wrong, the reviewer can
+retract it there: the retraction is recorded and the next round is shown it under that round's
+record, so no code change is needed for that finding alone — though the next round still judges
+its own diff. A genuine standing disagreement still ends at `accept`.
 
 ### Transient failures are counted and paced separately
 

@@ -152,10 +152,14 @@ def test_resume_carries_round_history_but_resets_the_convergence_counters(git_re
     history = [
         {"seq": 1, "label": "phase1", "phase": 1, "verdict": "CHANGES_REQUIRED", "findings": ["FINDING severity=high actionable=yes file=a | x"]}
     ]
+    clarify_history = [
+        {"seq": 1, "label": "phase1", "phase": 1, "generation": 0, "round_seq": 1, "at": 0, "supersedes": ["SUPERSEDES round=1 file=a | x"]}
+    ]
     predecessor_path = state_dir(env, git_repo, S1) / "state.json"
     document = json.loads(predecessor_path.read_text())
     document.update(
         round_history=history,
+        clarify_history=clarify_history,
         transient_failures=3,
         retry_not_before=9999999999,
         clarifications=2,
@@ -170,6 +174,7 @@ def test_resume_carries_round_history_but_resets_the_convergence_counters(git_re
 
     after = read_state(env, git_repo, S2)
     assert after["round_history"] == history, "evidence is carried into the successor untouched"
+    assert after["clarify_history"] == clarify_history, "so is a clarify's retraction"
     assert after["transient_failures"] == 0
     assert after["retry_not_before"] == 0
     assert after["clarifications"] == 0
@@ -417,10 +422,14 @@ def test_same_session_resume_resets_the_convergence_counters_but_keeps_round_his
     env = armed(clean_env)
     active(git_repo, tmp_path, env)
     history = [{"seq": 1, "label": "phase1", "phase": 1, "verdict": "CHANGES_REQUIRED"}]
+    clarify_history = [
+        {"seq": 1, "label": "phase1", "phase": 1, "generation": 0, "round_seq": 1, "at": 0, "supersedes": ["SUPERSEDES round=1 file=a | x"]}
+    ]
     path = state_dir(env, git_repo, S1) / "state.json"
     document = json.loads(path.read_text())
     document.update(
         round_history=history,
+        clarify_history=clarify_history,
         transient_failures=4,
         retry_not_before=9999999999,
         clarifications=2,
@@ -441,6 +450,7 @@ def test_same_session_resume_resets_the_convergence_counters_but_keeps_round_his
     assert after["stop_marker"] == ""
     assert after["defer_pending"] is False
     assert after["round_history"] == history
+    assert after["clarify_history"] == clarify_history
 
 
 def test_same_session_resume_refuses_a_pending_approval(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

@@ -26,7 +26,9 @@ bundle rather than at whatever the continuity pointer happens to name.
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
+from typing import Any
 
 from conftest import run_bootstrap
 from test_commands_arm import armed_env, read_state, state_dir
@@ -235,6 +237,7 @@ def test_clarify_discards_a_reply_when_the_activation_moves_during_the_run(git_r
     assert "discarded" in out
     # The allowance is still spent -- the counter bump landed before the invocation.
     assert read_state(env, git_repo, SESSION)["clarifications"] == 1
+    assert read_state(env, git_repo, SESSION)["clarify_history"] == []
 
 
 def test_clarify_discards_a_reply_when_a_newer_round_completes_during_the_run(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -248,6 +251,7 @@ def test_clarify_discards_a_reply_when_a_newer_round_completes_during_the_run(gi
     assert code == 1
     assert "no longer the latest" in out
     assert read_state(env, git_repo, SESSION)["clarifications"] == 1
+    assert read_state(env, git_repo, SESSION)["clarify_history"] == []
 
 
 def test_clarify_is_refused_past_max_clarifications(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -262,3 +266,180 @@ def test_clarify_is_refused_past_max_clarifications(git_repo: Path, tmp_path: Pa
     assert "already used" in out
     assert "accept" in out
     assert read_state(env, git_repo, SESSION)["clarifications"] == 1
+
+
+# --------------------------------------------------------------------------
+# A clarify may retract a finding of the round it answers
+# --------------------------------------------------------------------------
+
+_RETRACTION = "SUPERSEDES round=1 file=a.txt:1 | the premise was wrong"
+
+
+def _retract(repo: Path, clean_env: dict[str, str], mode: str = "clarify-retract", **env: str) -> tuple[int, str]:
+    return clarify(repo, armed_env(clean_env, ARL_FAKE_MODE=mode, **env), "--question", "the lint output shows finding 1's premise is wrong")
+
+
+def _clarify_history(env: dict[str, str], repo: Path) -> list[Any]:
+    history = read_state(env, repo, SESSION)["clarify_history"]
+    assert isinstance(history, list)
+    return history
+
+
+def _one_denied_round(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> dict[str, str]:
+    env = armed_env(clean_env, ARL_FAKE_MODE="changes")
+    active(git_repo, tmp_path, env, "phase one", "phase two")
+    _round(git_repo, env, "v1\n")
+    return env
+
+
+def test_a_retraction_is_recorded_and_nothing_the_gate_reads_moves(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = _one_denied_round(git_repo, tmp_path, clean_env)
+    before = read_state(env, git_repo, SESSION)
+
+    code, out = _retract(git_repo, clean_env)
+    assert code == 0, out
+    after = read_state(env, git_repo, SESSION)
+
+    for key in (*_FINGERPRINT, "reviewer_session", "active_review", "review_attempts", "failures"):
+        assert after.get(key) == before.get(key), key
+    assert after["clarifications"] == 1
+    history = after["clarify_history"]
+    assert isinstance(history, list)
+    assert len(history) == 1
+    record = dict(history[0])
+    assert isinstance(record.pop("at"), int)
+    assert record == {
+        "seq": 1,
+        "label": "phase1",
+        "phase": 1,
+        "generation": before["activation_generation"],
+        "round_seq": 1,
+        "supersedes": [_RETRACTION],
+    }
+    assert "You are right, the premise was wrong." in out
+    assert "recorded 1 retraction(s)" in out
+    assert "next review of phase 1" in out
+    assert "round 1's record" in out
+    assert "<<<ARL-FINDINGS>>>" not in out, "the block is the gate's to record, not prose to print"
+
+
+def test_the_next_round_is_shown_the_retraction_under_the_round_it_retracts(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The live-run regression: round 2 re-raised a finding round 1's reviewer had conceded,
+    because nothing of the exchange reached it. Fails on the old code, which recorded nothing."""
+    env = _one_denied_round(git_repo, tmp_path, clean_env)
+    assert _retract(git_repo, clean_env)[0] == 0
+    _round(git_repo, env, "v2\n")
+
+    act_dir = state_dir(env, git_repo, SESSION)
+    text = (act_dir / "context" / "002-prior-rounds.txt").read_text()
+    round_one = text.index("### round 1")
+    lead_in = text.index("Retracted by this round's reviewer when asked about it:\n", round_one)
+    assert text.index(_RETRACTION, lead_in) == lead_in + len("Retracted by this round's reviewer when asked about it:\n")
+    assert not any("the premise was wrong" in path.read_text(errors="replace") for path in (act_dir / "bundles").rglob("*") if path.is_file()), (
+        "a retraction is model-authored text and stays out of bundles/"
+    )
+
+
+def test_a_malformed_retraction_block_records_nothing_but_prints_the_prose(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = _one_denied_round(git_repo, tmp_path, clean_env)
+
+    code, out = _retract(git_repo, clean_env, "clarify-retract-malformed")
+    assert code == 0, out
+    assert "On reflection, there is a different problem." in out
+    assert "did not validate" in out
+    assert "nothing was recorded" in out
+    after = read_state(env, git_repo, SESSION)
+    assert after["clarify_history"] == []
+    assert after["clarifications"] == 1
+
+
+def test_retractions_naming_no_finding_of_the_round_are_dropped(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = _one_denied_round(git_repo, tmp_path, clean_env)
+
+    code, out = _retract(git_repo, clean_env, "clarify-retract-unmatched")
+    assert code == 0, out
+    assert "2 retraction line(s) named no finding of round 1" in out
+    assert read_state(env, git_repo, SESSION)["clarify_history"] == []
+
+
+def test_a_retraction_naming_the_wrong_round_is_dropped(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = _one_denied_round(git_repo, tmp_path, clean_env)
+
+    code, out = _retract(git_repo, clean_env, ARL_FAKE_ROUND="2")
+    assert code == 0, out
+    assert "named no finding of round 1" in out
+    assert read_state(env, git_repo, SESSION)["clarify_history"] == []
+
+
+def test_a_finding_is_retracted_at_most_once(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = _one_denied_round(git_repo, tmp_path, clean_env)
+
+    code, out = _retract(git_repo, clean_env, ARL_FAKE_REPEAT="1")
+    assert code == 0, out
+    assert "recorded 1 retraction(s)" in out
+    assert "1 line(s) named no finding of round 1 or repeated one already recorded" in out
+    assert _clarify_history(env, git_repo)[0]["supersedes"] == [_RETRACTION]
+
+    code, out = _retract(git_repo, clean_env)
+    assert code == 0, out
+    assert "repeated one already recorded; nothing was recorded" in out
+    assert len(_clarify_history(env, git_repo)) == 1
+
+
+def test_retractions_past_the_evidence_caps_are_not_trimmed_but_dropped_whole(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = _one_denied_round(git_repo, tmp_path, clean_env)
+
+    code, out = _retract(git_repo, clean_env, ARL_MAX_FINDINGS_BYTES="10")
+    assert code == 0, out
+    assert "exceed max_findings / max_findings_bytes" in out
+    assert read_state(env, git_repo, SESSION)["clarify_history"] == []
+
+
+def test_a_review_in_flight_refuses_a_clarify_before_anything_is_spent(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = _one_denied_round(git_repo, tmp_path, clean_env)
+    generation = read_state(env, git_repo, SESSION)["activation_generation"]
+    patch_state(env, git_repo, active_review={"phase1": {"generation": generation, "claimed_at": int(time.time()), "claim_id": "live"}})
+
+    code, out = _retract(git_repo, clean_env)
+    assert code == 1
+    assert "running right now" in out
+    after = read_state(env, git_repo, SESSION)
+    assert after["clarifications"] == 0
+    assert after["clarify_history"] == []
+
+
+def test_an_expired_review_lease_refuses_nothing(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A run whose lease lapsed cannot publish, so a clarify is not racing anything that can land."""
+    env = _one_denied_round(git_repo, tmp_path, clean_env)
+    generation = read_state(env, git_repo, SESSION)["activation_generation"]
+    patch_state(env, git_repo, active_review={"phase1": {"generation": generation, "claimed_at": int(time.time()) - 100_000, "claim_id": "dead"}})
+
+    code, out = _retract(git_repo, clean_env)
+    assert code == 0, out
+    assert len(_clarify_history(env, git_repo)) == 1
+
+
+def test_a_review_started_during_the_clarify_withholds_the_retraction(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """That review's ``prior-rounds.txt`` is already written, so a retraction recorded now would
+    be shown to nobody -- and no ``hooks.Activation`` field moved to say so."""
+    env = _one_denied_round(git_repo, tmp_path, clean_env)
+
+    code, out = _retract(git_repo, clean_env, "clarify-claim")
+    assert code == 0, out
+    assert "You are right, the premise was wrong." in out
+    assert "started while the reviewer answered" in out
+    assert read_state(env, git_repo, SESSION)["clarify_history"] == []
+
+
+def test_a_duplicated_round_seq_records_no_retraction(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = _one_denied_round(git_repo, tmp_path, clean_env)
+    _round(git_repo, env, "v2\n")
+    history = read_state(env, git_repo, SESSION)["round_history"]
+    assert isinstance(history, list)
+    history[0]["seq"] = 2
+    patch_state(env, git_repo, round_history=history)
+
+    code, out = _retract(git_repo, clean_env, ARL_FAKE_ROUND="2")
+    assert code == 0, out
+    assert "could not be verified" in out
+    assert read_state(env, git_repo, SESSION)["clarify_history"] == []

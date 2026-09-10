@@ -48,6 +48,6 @@ Identical to `/adversarial-review-loop:implement`, spelled out here because a re
 - A multi-paragraph commit message is repeated `-m`, one per paragraph (`-m "subject" -m "body"`) — git joins them with a blank line. A real newline inside one `-m`, and `-F`/`--file`, are both refused; repeated `-m` is the way to write a body here, not a workaround.
 - Every phase leaves a clean worktree, and you cannot end the mode yourself.
 
-When a blocking finding is ambiguous or contradicts an earlier round, ask `${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh clarify --question "…"` instead of guessing — one prose question against the review that just ran, no new round, and the denial names how many questions are left.
+When a blocking finding is ambiguous or contradicts an earlier round, ask `${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh clarify --question "…"` instead of guessing — one prose question against the review that just ran, no new round, and the denial names how many questions are left. If the answer shows the finding was simply wrong, the reviewer can retract it there, and the next round is shown the retraction — so no code change is needed for that finding alone.
 
 Check state at any time with `/adversarial-review-loop:status`, and print any stored review in full with `/adversarial-review-loop:report [n]`.
