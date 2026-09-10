@@ -304,6 +304,19 @@ The reviewer hit a transient failure (a timeout, a rate/usage limit, or contenti
 Retry in {remaining}s.
 """
 
+#: How long a contention denial paces before the next attempt. Flat, not the transient
+#: counter's doubling: nothing is being counted, so there is no exponent to raise, and the
+#: wait a caller actually owes is named in the message itself -- the holder's remaining lease.
+_CONTENDED_BACKOFF_SEC: Final = 30
+
+CONTENDED_REVIEW: Final = """\
+The review of this phase could not start because another one holds the slot, so nothing was invoked. This is NOT an approval, and it was NOT counted against the review budget -- no provider call was made.
+
+{error}
+
+The next attempt will wait at least {backoff}s.
+"""
+
 TRANSIENT_FAILURES_EXHAUSTED: Final = """\
 The reviewer hit {failures} transient failures since the last approval (limit {limit}), so this escalated to NEEDS_HUMAN. A failed review is never an approval.
 
@@ -946,12 +959,30 @@ def _review_failed(hook: Hook, *, state: State, config: Config, expected: hooks.
     the ordinary ``failures``/``max_failures`` budget with no pacing, because retrying sooner
     cannot fix a missing binary or a bad ``--model``.
 
+    ``review.contended`` narrows that further: the slot was held, so **nothing was invoked**. It
+    is paced but not counted, and never escalates. Every other transient failure spends a real
+    provider call to earn its place in ``max_transient_failures``; this one spends none, and the
+    holder may already be dead -- nothing releases the claim of a hook that was ``SIGKILL``-ed, so
+    counting it lets one interrupted turn escalate an activation to ``NEEDS_HUMAN`` on a wall
+    clock. See :attr:`arl.reviewer.Review.contended`.
+
     The transient counter's mutation is guarded by the same ``expected`` fingerprint ``approve()``
     uses: a busy-slot refusal is decided quickly but counted much later relative to a genuinely
     concurrent winning review, which may by then have approved the tree (``approve()`` writes
     ``pending_approved_tree``, one of ``hooks.Activation``'s own fields). A mismatch denies this
     attempt without touching the counter. See ``docs/design/state-fields.md``.
     """
+    if review.contended:
+        try:
+            with state.transaction():
+                current = hooks.activation(state, config)
+                if current != expected:
+                    raise commands.Refused(ACTIVATION_MOVED.format(change=hooks.describe_move(expected, current), now=current.summary))
+                state.update(retry_not_before=now() + _CONTENDED_BACKOFF_SEC)
+        except commands.Refused as exc:
+            hooks.deny(hook, str(exc))
+        hooks.deny(hook, CONTENDED_REVIEW.format(error=review.error, backoff=_CONTENDED_BACKOFF_SEC))
+
     if review.kind == "transient":
         try:
             with state.transaction():

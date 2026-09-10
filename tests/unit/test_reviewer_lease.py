@@ -167,10 +167,16 @@ def test_a_second_overlapping_execute_is_refused_without_invoking_and_a_retry_af
 
     assert review.verdict == "OP_FAILURE"
     assert "already in progress" in review.error
-    # Phase 6: contention is not a "the reviewer is broken" failure -- it paces with backoff
-    # against `max_transient_failures` rather than spending the ordinary budget on a rival
-    # invocation that will most likely have released the slot by the next attempt.
+    # Contention is not a "the reviewer is broken" failure -- it paces with backoff rather than
+    # spending the ordinary budget on a rival invocation that will most likely have released the
+    # slot by the next attempt, and `contended` keeps it out of the transient budget too: no
+    # provider call was made, and the holder may be a hook that was killed mid-review.
     assert review.kind == "transient"
+    assert review.contended is True
+    assert "/adversarial-review-loop:resume" in review.error, "the way out is named, not just the wait"
+    remaining = reviewer._claim_remaining_sec(activation.data["active_review"][target.label], reviewer._active_review_reclaim_after(config))
+    assert f"another {remaining}s" in review.error, "the number named is the one being enforced"
+    assert remaining > 0
     assert activation.get_int("report_seq") == 0, "the refused attempt reserved nothing"
 
     reviewer._release_active_review(activation, claim_id=held, expected=expected, config=config)

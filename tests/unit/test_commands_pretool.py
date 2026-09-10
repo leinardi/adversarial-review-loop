@@ -1115,6 +1115,70 @@ def test_a_backoff_in_effect_denies_without_invoking_the_reviewer(git_repo: Path
     assert read_state(env, git_repo, SESSION)["report_seq"] == before
 
 
+def _held_slot(env: dict[str, str], repo: Path, *, label: str = "phase1", lease_sec: int = 1920) -> None:
+    """Plant a live active-review claim, as a hook that was killed mid-review leaves behind."""
+    patch_state(
+        env,
+        repo,
+        active_review={label: {"generation": 0, "claimed_at": int(time.time()), "claim_id": "deadbeefdeadbeef", "lease_sec": lease_sec}},
+    )
+
+
+def test_a_held_review_slot_denies_without_spending_the_transient_budget(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Contention is paced but never counted, and never escalates.
+
+    Nothing was invoked -- the slot is checked before the reviewer is reached -- so there is no
+    provider call to charge to ``max_transient_failures``. It matters because the holder may not
+    exist: nothing releases the claim of a hook that was killed mid-review, so counting would let
+    one interrupted turn walk an activation to NEEDS_HUMAN on a wall clock. ``ARL_MAX_TRANSIENT_FAILURES=1``
+    here so a counted failure would escalate on the second attempt, and the assertion is that it
+    does not.
+    """
+    env = armed_env(clean_env, ARL_MAX_TRANSIENT_FAILURES="1")
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    command = 'git add -A && git commit -m "x"'
+    _held_slot(env, git_repo)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "already in progress" in reason
+    assert "NOT counted against the review budget" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert document["transient_failures"] == 0, "no provider call was made, so none may be charged"
+    assert document["failures"] == 0
+    assert int(document["retry_not_before"]) > 0, "still paced -- a tight retry loop against a live holder helps nobody"  # type: ignore[call-overload]
+
+    patch_state(env, git_repo, retry_not_before=0)
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "escalated to NEEDS_HUMAN" not in reason
+    assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
+
+
+def test_a_held_review_slot_names_its_expiry_and_the_way_out(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """ "Wait for it to finish" is unactionable when the holder is dead.
+
+    The claim outlives the process that took it, for up to the whole lease, so the denial states
+    how long is left and that a resume clears it now -- a resume bumps ``activation_generation``,
+    which the claim is keyed on. Without both, a reader reaches for the activation's ``lock``
+    file, which is the state mutex and holds none of this.
+    """
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    (git_repo / "new.txt").write_text("work\n")
+    _held_slot(env, git_repo, lease_sec=900)
+
+    verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
+
+    assert verdict == "deny"
+    assert "lasts another 9" in reason, "the remaining lease, not a bare 'wait and try again'"
+    assert "/adversarial-review-loop:resume" in reason
+    assert "lock" not in reason, "the state mutex is not what holds this, and naming it invites deleting it"
+
+
 def test_exhausting_the_transient_budget_escalates_to_needs_human(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed_env(clean_env, ARL_FAKE_MODE="rate-limited", ARL_MAX_TRANSIENT_FAILURES="1")
     active(git_repo, tmp_path, env)

@@ -623,6 +623,17 @@ class Review:
     #: class, and treating it as one would spend the same budget on a missing ``opencode``
     #: binary as on a genuine rate limit. ``""`` for every other verdict.
     kind: str = ""
+    #: ``kind == "transient"`` and **no reviewer was invoked**: the active-review slot for this
+    #: label was already held. Paced like any transient failure, but deliberately not *counted*
+    #: against ``max_transient_failures``. That budget bounds waiting on a provider, and every
+    #: other transient failure spends a real call to earn its place in it; contention spends
+    #: none, because :func:`_reserve_round` returns before anything is invoked. Counting it
+    #: hands one crashed hook the power to escalate an activation it is not part of -- a claim
+    #: outlives the process that took it (nothing releases a ``SIGKILL``-ed hook's claim), so a
+    #: lease's worth of retries against a dead owner would reach ``NEEDS_HUMAN`` on a wall
+    #: clock nothing in the repository can affect. Denying is still the answer; escalating is
+    #: not. See ``docs/design/state-fields.md``.
+    contended: bool = False
     #: Blocking ``FINDING`` lines, newline-terminated.
     findings: str = ""
     #: ``FINDING`` lines that are actionable and at or above ``block_severity`` but did
@@ -2780,11 +2791,24 @@ def _claim_is_live(pointer: dict[str, Any], reclaim_after: int) -> bool:
     claim_id = pointer.get("claim_id")
     if not (claimed_at and claim_id):
         return False
+    return _claim_remaining_sec(pointer, reclaim_after) > 0
+
+
+def _claim_remaining_sec(pointer: dict[str, Any], reclaim_after: int) -> int:
+    """Seconds ``pointer``'s claim is still honoured for, or ``0`` once it is not.
+
+    The window rule lives here rather than in :func:`_claim_is_live` because the denial text has
+    to state the same number the check acts on: a message that names a different window from the
+    one being enforced is worse than one that names none.
+    """
+    claimed_at = pointer.get("claimed_at")
+    if not (claimed_at and pointer.get("claim_id")):
+        return 0
     stored = pointer.get("lease_sec")
     # A tampered or absent lease falls back rather than being trusted: `state.json` is not a
     # trust boundary, and an enormous `lease_sec` would otherwise pin a label forever.
     window = int(stored) if isinstance(stored, int) and not isinstance(stored, bool) and 0 < stored <= _MAX_LEASE_SEC else reclaim_after
-    return (now() - _as_int(claimed_at)) <= window
+    return max(window - (now() - _as_int(claimed_at)), 0)
 
 
 def _unique_title(state: State, target: Target, label: str) -> str:
@@ -4047,17 +4071,29 @@ def _override_if_concurrently_stalled(rr: _ReviewRun, review: Review) -> None:
 #: What a busy active-review slot denies with -- an operational failure, not evidence of
 #: anything wrong with the code. It reaches the caller through the same fallback path an
 #: unrecognised verdict or a raw ``OP_FAILURE`` already does (``pretool._review_failed``,
-#: ``stop.SWEEP_FAILED``), so no new branch is needed in either -- just like phase 5's
-#: ``NEEDS_HUMAN`` short-circuit needed none. Counting against ``max_failures`` for this is a
-#: known, accepted rough edge until phase 6 gives transient conditions their own budget.
-_ACTIVE_REVIEW_BUSY: Final = "another review of {label} is already in progress; wait for it to finish and try again"
+#: ``stop.SWEEP_FAILED``), so no new branch is needed in either.
+#:
+#: **It names the remaining lease and the way out**, because the holder may not exist. Nothing
+#: releases the claim of a hook that was ``SIGKILL``-ed mid-review -- an interrupted turn is
+#: enough -- and the claim then stands for the rest of its lease, up to 32 minutes under the
+#: default ``timeout_sec``. "Wait for it to finish" is advice with no end in sight there, and a
+#: reader with only that much to go on reaches for the activation's ``lock`` file, which is the
+#: state mutex and holds none of this. What actually clears it is a new generation, which
+#: ``resume`` and ``accept`` both write.
+_ACTIVE_REVIEW_BUSY: Final = (
+    "another review of {label} is already in progress; its claim on the slot lasts another {remaining}s. "
+    "Nothing was invoked and nothing was counted against the review budget. If the turn that started that "
+    "review was interrupted, the claim outlives it: ask the user to run /adversarial-review-loop:resume, "
+    "which clears it immediately (the claim is keyed on the activation generation, and a resume bumps it)."
+)
 
 #: The same condition arrived at from the other side: this review held the slot, took longer
 #: over its bundle than the lease allows, and another review has since taken it. Reported
 #: rather than fought over -- see `_renew_active_review`.
 _ACTIVE_REVIEW_LOST: Final = (
     "this review of {label} took longer to build its evidence than its active-review claim lasts, "
-    "and another review has since taken the slot; nothing was invoked. Try again once that one finishes."
+    "and another review has since taken the slot; nothing was invoked and nothing was counted against "
+    "the review budget. Try again once that one finishes."
 )
 
 
@@ -4112,14 +4148,17 @@ def _reserve_round(state: State, target: Target, config: Config) -> tuple[Review
             return stall, 0, ""
         claim_id = _claim_active_review(state, target, config)
         if claim_id is None:
-            # Phase 6: contention alone should not spend the ordinary `failures` budget --
-            # the other holder finishing (or its claim expiring) is what a retry needs, not
-            # a different reviewer command or model. Classified "transient" so it paces with
-            # backoff against `max_transient_failures` instead, per AGENTS.md's own note that
-            # counting a busy slot against `max_failures` was "a known rough edge, left for
-            # phase 6's transient-failure budget to do better by".
-            busy = Review(verdict="OP_FAILURE", error=_ACTIVE_REVIEW_BUSY.format(label=target.label))
+            # Contention spends neither budget: not `failures`, because a different reviewer
+            # command or model is not what a retry needs, and not `max_transient_failures`,
+            # because no call was made to earn a place in it (`contended`). It still paces
+            # like a transient failure -- retrying in a tight loop against a live holder is
+            # the thing the backoff is for.
+            claims = state.data.get("active_review")
+            held = claims.get(target.label) if isinstance(claims, dict) else None
+            remaining = _claim_remaining_sec(held, _active_review_reclaim_after(config)) if isinstance(held, dict) else 0
+            busy = Review(verdict="OP_FAILURE", error=_ACTIVE_REVIEW_BUSY.format(label=target.label, remaining=remaining))
             busy.kind = "transient"
+            busy.contended = True
             return busy, 0, ""
         seq = state.get_int("report_seq") + 1
         # Recorded in the same locked step as the reservation itself, for *every* attempt --
@@ -4229,7 +4268,7 @@ def execute(target: Target, *, state: State, config: Config, warnings: str = "")
         # `_release_active_review` exists to refuse. So only the first half of
         # `_release_reservations` runs here.
         _release_if_claimed(state, ref, expected=expected, config=config, round_number=None)
-        return Review(verdict="OP_FAILURE", kind="transient", error=_ACTIVE_REVIEW_LOST.format(label=target.label))
+        return Review(verdict="OP_FAILURE", kind="transient", contended=True, error=_ACTIVE_REVIEW_LOST.format(label=target.label))
 
 
 def _invoke_and_publish(rr: _ReviewRun, ref: SessionRef, *, claim_id: str, expected: hooks.Activation, seq: int) -> Review:
