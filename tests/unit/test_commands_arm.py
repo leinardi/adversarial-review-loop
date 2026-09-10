@@ -33,7 +33,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_REVIEWER, git, run_bootstrap
+from conftest import FAKE_REVIEWER, git, run_bootstrap, unborn_repo
 
 from arl import gitsnap, harness, paths
 from arl.atomic import locked as _real_locked
@@ -228,17 +228,6 @@ def test_the_arm_summary_says_whether_a_final_review_will_run(
 
     assert proc.returncode == 0, proc.stderr
     assert f"- final cumulative review at the end: {expected}" in proc.stdout
-
-
-def unborn_repo(tmp_path: Path) -> Path:
-    """A repository with no commits at all -- what ``arm`` sees as an unborn HEAD."""
-    repo = tmp_path / "unborn"
-    repo.mkdir()
-    git(repo, "init", "-q", "-b", "main")
-    git(repo, "config", "user.email", "selftest@example.invalid")
-    git(repo, "config", "user.name", "arl selftest")
-    git(repo, "config", "commit.gpgsign", "false")
-    return repo
 
 
 def test_arming_an_empty_repository_says_it_cannot_complete_itself(tmp_path: Path, clean_env: dict[str, str]) -> None:

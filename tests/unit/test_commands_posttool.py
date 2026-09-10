@@ -33,9 +33,9 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import BOOTSTRAP, git, hook_json, run_bootstrap, run_hook
+from conftest import BOOTSTRAP, git, hook_json, run_bootstrap, run_hook, unborn_repo
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
-from test_commands_pretool import SESSION, active, active_until, patch_state, payload, pretool, unborn_active, unborn_repo
+from test_commands_pretool import SESSION, active, active_until, patch_state, payload, pretool, unborn_active
 
 COMMIT = 'git add -A && git commit -m "phase"'
 

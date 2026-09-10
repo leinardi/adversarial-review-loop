@@ -179,7 +179,7 @@ Each line is a claim the code must keep true. `→ name` names its long form, [`
 | `skills/*/SKILL.md` | the nine slash commands; none registers a hook — `hooks/hooks.json` does, at plugin load |
 | `docs/design/` | the argument behind every line of the invariant index above — one note per topic |
 | `tests/selftest.sh` | the **shim** suite, and only that: interpreter probe, shim contract, watchdog layers, socket stdin, the hot path's process budget, one bootstrap smoke walk. Everything the gate *decides* is `tests/unit/`. Bash, because it runs outside the Python whose launch it tests |
-| `tests/unit/` | pytest unit tests for the Python modules |
+| `tests/unit/` | pytest unit tests for the Python modules. Shared fixtures and helpers are in `conftest.py`; the reviewer suite is `test_reviewer_<subsystem>.py` over the helpers in `reviewer_common.py`. A helper used by one other file is imported from the module that owns it (`test_commands_arm`, `test_commands_pretool`), which mypy allows only for a name that module actually defines |
 | `tests/STEP0.md` | runbook for the assumptions only a live session can settle |
 | `tests/step0-fixture.sh` | builds the throwaway repo that runbook needs |
 

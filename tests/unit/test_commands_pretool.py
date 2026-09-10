@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_REVIEWER, decision, git, run_bootstrap, run_hook
+from conftest import FAKE_REVIEWER, decision, git, run_bootstrap, run_hook, set_phases, unborn_repo
 from test_commands_arm import armed_env, plan_file, read_state, state_dir
 
 from arl import config, paths
@@ -68,14 +68,6 @@ def pretool(repo: Path, env: dict[str, str], **kwargs: object) -> tuple[str, str
 def arm(repo: Path, tmp_path: Path, env: dict[str, str]) -> None:
     proc = run_bootstrap(["arm", "--session", SESSION, "--plan", str(plan_file(tmp_path))], cwd=repo, env=env)
     assert proc.returncode == 0, proc.stdout
-
-
-def set_phases(repo: Path, env: dict[str, str], *phases: str) -> None:
-    argv = ["set-phases"]
-    for phase in phases:
-        argv += ["--phase", phase]
-    proc = run_bootstrap(argv, cwd=repo, env=env)
-    assert proc.returncode == 0, proc.stderr
 
 
 def active(repo: Path, tmp_path: Path, env: dict[str, str], *phases: str) -> None:
@@ -884,7 +876,7 @@ def test_an_unchanged_tree_needs_no_review(git_repo: Path, tmp_path: Path, clean
 def test_the_findings_cap_escalates_through_the_hook_and_keeps_the_report(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """A reviewer past ``max_findings`` escalates rather than being trimmed to fit.
 
-    ``test_reviewer.test_the_findings_cap_escalates_instead_of_trimming`` proves ``parse``
+    ``test_reviewer_parse.test_the_findings_cap_escalates_instead_of_trimming`` proves ``parse``
     returns ``NEEDS_HUMAN`` and keeps every line; this proves the hook acts on that -- denies,
     writes the escalation to ``state.json``, and still stores the full report. A cap that
     silently dropped the surplus would be a review whose findings the user can never see, and
@@ -1298,22 +1290,6 @@ def test_a_bounded_reset_is_permitted_during_a_reconcile(git_repo: Path, tmp_pat
 
     assert verdict == "allow"
     assert "bounded recovery reset" in reason
-
-
-def unborn_repo(tmp_path: Path) -> Path:
-    """A repository with no commits at all -- what ``arm`` sees as an unborn HEAD.
-
-    ``git_repo`` is seeded, so the root-commit reconcile cannot be reached by patching a
-    field: that only produces a document making a claim git would refuse. This is the real
-    thing. Mirrors ``test_commands_stop.unborn_repo``.
-    """
-    repo = tmp_path / "unborn"
-    repo.mkdir()
-    git(repo, "init", "-q", "-b", "main")
-    git(repo, "config", "user.email", "selftest@example.invalid")
-    git(repo, "config", "user.name", "arl selftest")
-    git(repo, "config", "commit.gpgsign", "false")
-    return repo
 
 
 def unborn_active(repo: Path, tmp_path: Path, env: dict[str, str]) -> None:

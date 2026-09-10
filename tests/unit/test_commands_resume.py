@@ -32,7 +32,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import git, run_bootstrap, run_hook
+from conftest import git, run_bootstrap, run_hook, set_phases
 from test_commands_arm import (
     _path_without_a_watchdog,
     _path_without_opencode,
@@ -69,14 +69,6 @@ def arm(repo: Path, tmp_path: Path, env: dict[str, str], session: str = S1, extr
     proc = run_bootstrap(["arm", "--session", session, "--args", f"{plan} {extra_args}".strip()], cwd=repo, env=env)
     assert proc.returncode == 0, proc.stdout
     return plan
-
-
-def set_phases(repo: Path, env: dict[str, str], *phases: str) -> None:
-    argv = ["set-phases"]
-    for phase in phases:
-        argv += ["--phase", phase]
-    proc = run_bootstrap(argv, cwd=repo, env=env)
-    assert proc.returncode == 0, proc.stderr
 
 
 def active(repo: Path, tmp_path: Path, env: dict[str, str], *phases: str, extra_args: str = "") -> Path:

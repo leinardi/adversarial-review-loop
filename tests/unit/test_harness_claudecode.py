@@ -33,9 +33,9 @@ import uuid
 from pathlib import Path
 
 import pytest
+from conftest import config_with
 
 from arl import harness, reviewer
-from arl.config import DEFAULTS, Config
 from arl.harness import claudecode
 
 #: A result event the CLI would emit for a run that went well. Built by the helper below so
@@ -53,10 +53,6 @@ _PROMPT_ONLY = b"only the prompt\n"
 _COLD_PROSE = b"model-authored prose\n"
 #: A fence an attachment's own content could carry, if the fence were predictable.
 _PLANTED_NONCE = b"deadbeefdeadbeef"
-
-
-def config_with(**overrides: object) -> Config:
-    return Config({**DEFAULTS, **overrides})
 
 
 def result_events(**overrides: object) -> bytes:

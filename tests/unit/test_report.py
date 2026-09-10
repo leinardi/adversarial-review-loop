@@ -31,11 +31,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import git
+from conftest import config_with, git
 
-from arl import config as arl_config
 from arl import harness, report, state
-from arl.config import Config
 from arl.reviewer import Review, Target
 from arl.util import TRUNCATION_MARKER
 
@@ -65,10 +63,6 @@ def act_dir(report_env: dict[str, str]) -> Path:
 
 def a_target(scope: str = "phase", phase: int = 1, base: str = "b", head: str = "h") -> Target:
     return Target(repo="/wt", base=base, head=head, scope=scope, phase=phase)
-
-
-def config_with(**overrides: object) -> Config:
-    return Config({**arl_config.DEFAULTS, **overrides})
 
 
 def a_review(**overrides: object) -> Review:
