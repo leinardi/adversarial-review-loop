@@ -48,7 +48,7 @@ repos:
         exclude: ^scripts/arl/_vendor/
         stages: [manual]
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.5
+    rev: v0.16.6
     hooks:
       - id: ruff-check
         args: ["--fix"]
