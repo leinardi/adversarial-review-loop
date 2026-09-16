@@ -2,6 +2,7 @@
 name: status
 description: Show the review loop state for this worktree — status, phase, baseline, approvals, failure counters and stored reports.
 user-invocable: true
+allowed-tools: "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh status)"
 ---
 
 # Review loop status

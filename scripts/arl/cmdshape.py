@@ -607,7 +607,7 @@ def _mentions(command: str, sub: str) -> bool:
     return False
 
 
-_ESCAPE_RE: Final = re.compile(rf"arl(\.sh)?{_SPACE}+(finish|deactivate|resume|config|accept|pause)({_SPACE}|$)", re.MULTILINE)
+_ESCAPE_RE: Final = re.compile(rf"arl(\.sh)?{_SPACE}+(arm|finish|deactivate|resume|config|accept|pause)({_SPACE}|$)", re.MULTILINE)
 
 
 def detection_form(command: str) -> str:

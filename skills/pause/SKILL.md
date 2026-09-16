@@ -4,6 +4,7 @@ description: Move the review loop's pause target. With no argument the phase in 
 argument-hint: "[N | 0 | all]"
 disable-model-invocation: true
 user-invocable: true
+allowed-tools: "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh pause:*)"
 ---
 
 # Pause at the end of a phase

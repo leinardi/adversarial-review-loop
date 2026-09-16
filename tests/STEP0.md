@@ -48,6 +48,7 @@ This is **item 2, and it is load-bearing.** It is the one result that can invali
 
 **Settled 2026-08-19: it passes.** The expansion ran, `${CLAUDE_PLUGIN_ROOT}` resolved, and `${CLAUDE_SESSION_ID}` interpolated to a real session id. The evidence came from a *failure* of the arm command rather than a success: the error quoted the fully-substituted command back, which is itself proof the expansion happened. The architecture holds; re-check only if the harness changes.
 
+- **`[run this first, exactly as written, and use its output: …]` appears instead (item 2b)** → expansion works, but the permission check for the command answered `ask`. Since Claude Code 2.1.272 such a block is handed to the model instead of run, and the gate then denies the model's own `arm` as a Rule 4 escape, so arming fails closed with "arming never ran". This is the fallback behaving as designed, not a new failure mode. The skill's `allowed-tools` rule did not match: check the installed cache has the frontmatter (see "The install cache" in `AGENTS.md`), and check for a user `permissions.deny`/`ask` rule matching `arl.sh`. Reproduce with the Bash sandbox **off** (`.claude/settings.local.json`: `{"sandbox": {"enabled": false}}`). With the sandbox on, sandbox auto-allow hides the problem.
 - **Literal `` !`…` `` text appears instead** → expansion does not run in skill bodies. Stop the runbook and see "If A1 fails" below.
 - **Nothing appears and Claude immediately can't do anything** → same conclusion. Arming did not run, but the `UserPromptSubmit` hook recorded that it was asked for, so the dispatcher denies everything. That is the fail-closed design behaving correctly, not a bug.
 
@@ -241,6 +242,7 @@ Run the OpenCode side at least once too (`ARL_HARNESS=opencode`), since a defaul
 | Item | Check | Result |
 | --- | --- | --- |
 | 2 | `` !`…` `` expansion runs in a skill body | **pass** (2026-08-19) |
+| 2b | each skill's `allowed-tools` rule lets its block run, not be handed off (CC ≥ 2.1.272) | **pass**, all 9 skills on 2.1.273 (2026-09-16) |
 | 1 | all four hook events register | **pass** (2026-08-20) |
 | 5 | `${CLAUDE_PLUGIN_ROOT}` resolves in a hook | **pass** (2026-08-19) |
 | 7 | a hook reads a plan outside the repo | **pass** (2026-08-19) |
@@ -259,6 +261,18 @@ Run the OpenCode side at least once too (`ARL_HARNESS=opencode`), since a defaul
 | 18 | the file tools are confined to cwd + `--add-dir` in `-p` mode | **pass** (2026-08-29) |
 | 19 | a stdin payload at `chunk_diff_bytes` (400KB) and above arrives intact | **open** (byte-perfect to 170KB) |
 | 20 | no review session appears in the reviewed repository's own `/resume` picker | **open** |
+
+### Permission handoff, 2026-09-16 (item 2b)
+
+**The incident.** `/adversarial-review-loop:implement` from the 2.1.0 marketplace install never armed in a real repository on Claude Code 2.1.273. The transcript showed the skill body carrying `[run this first, exactly as written, and use its output:]` above the arm command, not the banner. The model ran `arm` itself, the gate refused it, and after four no-progress Stop blocks the activation was `NEEDS_HUMAN`. `:status` showed the same substitution. The same skills had expanded on 2.1.260.
+
+**The cause, read out of the binary.** Prompt-shell expansion runs the Bash permission check for each block. On `ask` (or an async-agent deny), 2.1.272+ replaces the block with that instruction and records `skill_inline_command_handoff`. The string is absent from 2.1.270. The repository's `.claude/settings.local.json` had the sandbox off, so nothing auto-allowed `arl.sh`. In a scratch repository with the sandbox on, the unmodified skill ran normally. A headless `claude -p` never hands off at all, so **this check needs an interactive session**.
+
+**The fix, measured.** Tested interactively in a scratch repository with the sandbox off, auto mode, and `--plugin-dir`. A copy of the tree with `allowed-tools` stripped handed off `status` and `implement`. The tree with the rules ran the block at expansion for every skill: `implement my plan.md --until 1`, `resume --until 2`, `accept some reason; with "quotes" && $(id)`, `config model x`, `pause 1`, `finish`, `stop`, `report 1`, `status`. So `Bash(<root>/scripts/arl.sh <sub>:*)` matches the here-document form, and `${CLAUDE_PLUGIN_ROOT}` resolves inside `allowed-tools`.
+
+**What it also found.** `report` still handed off with its rule in place, because its body passed `"$1"`. Claude Code will not pre-allow a command carrying a shell expansion. `$1` was also wrong on its own terms: positional substitution is 0-based (item 3), so `/report 2` never reached the CLI. `report` now takes `--args-stdin` like the other argument skills, and passed on the re-run.
+
+**What the measurement could not show.** Driven from `expect`, Claude Code's first shell spawn blocks at "Spawn-env probe" until interrupted, so each block was observed *starting* ("Shell command interrupted for pattern …"), not completing. That is enough for the question asked, which is whether the permission check allowed the command. **The end to end result came from a real terminal on the same day.** In the repository that failed, with the sandbox still off, the marketplace install disabled and the tree loaded through `--plugin-dir`, `/adversarial-review-loop:implement <plan>` showed the `ARMED` banner in the skill expansion, served from the working tree's `skills/implement`. Pre-phase Bash calls were denied, a multi-line `set-phases` was refused with its reason, the one-line retry froze 8 phases, and phase 1 edits went through. The same limit kept this run from observing a model-issued `arl.sh arm` being denied live. `arm` joined `cmdshape._ESCAPE_RE` in the same change, and `test_claude_may_not_re_arm_the_activation_itself` covers that denial in `ACTIVE` and `ARMED`.
 
 ### Isolation, 2026-08-20
 

@@ -475,8 +475,11 @@ def test_the_update_ref_detector(command: str, expected: bool) -> None:
         ("arl.sh pause", True),
         ("arl.sh pause 3", True),
         ("/x/y/arl.sh resume --until 2", True),
+        ("arl.sh arm --session x --args-stdin", True),
+        ("/x/y/arl.sh arm", True),
         ("arl.sh status", False),
         pytest.param("arl.sh finishing", False, id="lookalike-suffix-not-an-escape"),
+        pytest.param("arl.sh armory", False, id="lookalike-arm-suffix-not-an-escape"),
         pytest.param("finish", False, id="bare-word-without-the-entrypoint-is-not-an-escape"),
         ("", False),
     ],
@@ -688,7 +691,7 @@ def test_a_disguised_reset_is_detected(command: str) -> None:
 
 @pytest.mark.parametrize(
     "command",
-    [r"a\rl.sh finish", "/p/'a'rl.sh deactivate", r"arl\.sh finish", r"a\rl.sh resume", r"a\rl.sh config", r"a\rl.sh pause"],
+    [r"a\rl.sh finish", "/p/'a'rl.sh deactivate", r"arl\.sh finish", r"a\rl.sh resume", r"a\rl.sh config", r"a\rl.sh pause", r"a\rl.sh arm"],
 )
 def test_a_disguised_escape_is_detected(command: str) -> None:
     assert cmdshape.is_escape(command)

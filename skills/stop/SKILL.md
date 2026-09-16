@@ -3,6 +3,7 @@ name: stop
 description: Leave the review loop for this worktree. Commits and file changes stop being gated. Nothing is reverted.
 disable-model-invocation: true
 user-invocable: true
+allowed-tools: "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh deactivate:*)"
 ---
 
 # Stop the review loop

@@ -71,6 +71,10 @@ A blanket `"denyWrite": ["~/"]` covers both, and **`allowWrite` does not re-open
 
 `excludedCommands` does not help here: the loop's git runs inside the gate process, not as a `git …` command the sandbox can pattern-match. If you would rather not loosen anything, run the loop in a session with the sandbox off — it is a per-session setting under `/sandbox`.
 
+### If a command says "run this first" instead of running
+
+On Claude Code 2.1.272 and later, a slash command's shell step runs only if Claude Code's permission check allows it. Otherwise Claude Code hands the command to Claude as `[run this first, exactly as written, and use its output: …]`. For `/adversarial-review-loop:implement` that ends in "arming never ran", because the gate will not let Claude arm the loop itself. Each skill ships its own `allowed-tools` rule for exactly the `arl.sh` subcommand it runs, so this only happens with an install older than that fix, or when your own `permissions.deny` or `permissions.ask` rule matches `arl.sh`. Update the plugin, or remove the rule. If a session is already stuck in `NEEDS_HUMAN` from a failed arm, leave the mode from a terminal outside Claude Code, in the repository: `<plugin-root>/scripts/arl.sh deactivate --session <session-id>`. The handed-off command shows both values.
+
 ## 🚀 Quick start
 
 1. Write a plan as a Markdown file — whatever describes the work; there is no required format.
@@ -174,6 +178,8 @@ make check                   # pre-commit (shellcheck, yamllint, markdownlint, �
 `tests/selftest.sh` is a separate, much smaller suite in bash, for the one layer pytest structurally cannot reach because it runs *inside* the Python being launched: the interpreter probe, the shim contract, the watchdog layers, socket stdin, and the hot path's process budget.
 
 Running the tests needs `jq`, and comparing the chunker against the real GNU `split` needs GNU coreutils (`gsplit`); both are **development-only** — the gate itself uses neither, and those comparisons skip cleanly where coreutils is absent, as on a stock Mac.
+
+With the plugin enabled, its hooks run in every session, armed or not, and they deny any Claude Bash command that names a user-only subcommand (`arl.sh arm`, `finish`, `deactivate`, `resume`, `config`, `accept`, `pause`). When developing this repository, set `"enabledPlugins": {"adversarial-review-loop@adversarial-review-loop": false}` in its `.claude/settings.local.json`, and load the working tree with `claude --plugin-dir .` only when you mean to use the loop.
 
 [`AGENTS.md`](AGENTS.md) is the contract any change to this project has to honour — the five non-negotiable rules, the invariants, and the hazards that silently reopen a closed hole if reverted. Before the first real run, work through [`tests/STEP0.md`](tests/STEP0.md): the harness assumptions that only a live Claude Code session can settle.
 

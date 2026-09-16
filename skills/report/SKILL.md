@@ -3,11 +3,16 @@ name: report
 description: Print a stored review report in full, including every finding and the raw reviewer output.
 argument-hint: "[report-number]"
 user-invocable: true
+allowed-tools: "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh report:*)"
 ---
 
 # Stored review report
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh report "$1"`
+```!
+${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh report --args-stdin <<'ARL-ARGUMENTS-EOF'
+$ARGUMENTS
+ARL-ARGUMENTS-EOF
+```
 
 The report above is printed in full — nothing is truncated here, unlike the summary attached to a denial.
 

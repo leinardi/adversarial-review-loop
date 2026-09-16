@@ -3,6 +3,7 @@ name: finish
 description: Run the final cumulative adversarial review now — regardless of final_review, even with phases outstanding — and complete the activation if it passes.
 disable-model-invocation: true
 user-invocable: true
+allowed-tools: "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh finish)"
 ---
 
 # Final cumulative review

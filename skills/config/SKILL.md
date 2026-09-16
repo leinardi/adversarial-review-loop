@@ -4,6 +4,7 @@ description: Read or write the adversarial-review-loop configuration — every k
 argument-hint: "[<key> <value> [--repo] [--force] | <key> --unset [--repo]]"
 disable-model-invocation: true
 user-invocable: true
+allowed-tools: "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh config:*)"
 ---
 
 # adversarial-review-loop configuration

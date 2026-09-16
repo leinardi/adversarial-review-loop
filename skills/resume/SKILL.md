@@ -4,6 +4,7 @@ description: Continue an already-armed adversarial-review-loop plan in a new ses
 argument-hint: "[--until N] [--plan <path>] [--guide <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]"
 disable-model-invocation: true
 user-invocable: true
+allowed-tools: "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh resume:*)"
 ---
 
 # Resume the review loop
