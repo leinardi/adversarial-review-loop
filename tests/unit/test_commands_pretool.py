@@ -640,6 +640,66 @@ def test_claude_may_not_re_arm_the_activation_itself(git_repo: Path, tmp_path: P
     assert read_state(env, git_repo, SESSION) == before
 
 
+#: One per granting skill whose command still does something where the gate is not enforcing.
+_ESCAPES_WHERE_NOTHING_IS_GATED: list[str] = [
+    f"{ENTRYPOINT} config model x --repo",
+    f"{ENTRYPOINT} accept --reason x",
+    f"{ENTRYPOINT} resume --until 2",
+    _MODEL_REARM,
+]
+
+
+@pytest.mark.parametrize("command", _ESCAPES_WHERE_NOTHING_IS_GATED)
+def test_an_escape_is_denied_in_a_session_that_never_armed(git_repo: Path, clean_env: dict[str, str], command: str) -> None:
+    """No pointer is the pass-through for every unarmed session -- but not for a user-only command.
+
+    A user's /config grants ``arl.sh config:*`` for the rest of the turn, so Claude's own retry
+    is auto-allowed by Claude Code; this denial is the only thing between it and the config.
+    """
+    verdict, reason = pretool(git_repo, armed(clean_env), command=command)
+
+    assert verdict == "deny"
+    assert "user-only commands" in reason
+
+
+@pytest.mark.parametrize("command", _ESCAPES_WHERE_NOTHING_IS_GATED)
+def test_an_escape_is_denied_outside_the_armed_worktree(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
+    """Another repository passes -- judged by the payload's cwd, which a ``cd`` in the command ignores."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    verdict, reason = pretool(elsewhere, env, command=f"cd {git_repo} && {command}")
+
+    assert verdict == "deny"
+    assert "user-only commands" in reason
+
+
+@pytest.mark.parametrize("status", ["COMPLETE", "DISARMED"])
+@pytest.mark.parametrize("command", _ESCAPES_WHERE_NOTHING_IS_GATED)
+def test_an_escape_is_denied_after_the_activation_ended(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str, command: str) -> None:
+    """An ended activation stops gating mutations; it must not start letting Claude resume or re-arm it."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    patch_state(env, git_repo, status=status)
+    before = read_state(env, git_repo, SESSION)
+
+    verdict, reason = pretool(git_repo, env, command=command)
+
+    assert verdict == "deny"
+    assert "user-only commands" in reason
+    assert read_state(env, git_repo, SESSION) == before
+
+
+def test_an_ordinary_bash_call_in_an_unarmed_session_still_passes_silently(git_repo: Path, clean_env: dict[str, str]) -> None:
+    """The hoisted check must not cost an unarmed session anything but a regex: no output, no state."""
+    proc = run_hook("pretool", payload(git_repo, command="git status && arl.sh status"), cwd=git_repo, env=clean_env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+
+
 def test_the_escape_denial_outranks_a_commit_in_the_same_command(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed_env(clean_env)
     active(git_repo, tmp_path, env)

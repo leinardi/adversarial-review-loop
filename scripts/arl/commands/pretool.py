@@ -501,6 +501,18 @@ def _pretool(hook: Hook) -> None:
             hooks.record_unstarted_arm(payload.session_id, cwd)
             hooks.deny(hook, UNSTARTED_ARM)
 
+        # The escapes are user-only in *every* state, so this is checked before any path that
+        # passes: no pointer, another repository, COMPLETE/DISARMED. A skill's `allowed-tools`
+        # grant outlives its block for the rest of the turn, so Claude's own retry of
+        # `arl.sh config …` after a user's /config would otherwise be auto-allowed wherever the
+        # gate is not enforcing -- and the repository check trusts the payload's cwd, not a
+        # `cd` inside the command. Rule 4; see docs/design/deny-list-and-parser.md.
+        if tool == "Bash":
+            from arl import cmdshape  # noqa: PLC0415 - not on the read-only hot path
+
+            if cmdshape.is_escape(payload.command):
+                hooks.deny(hook, ESCAPE_DENIED)
+
         # No pointer for this session -> it never bound to an activation. Fail closed (Rule 0).
         worktree = pointer_read(payload.session_id)
         if not worktree:
@@ -671,10 +683,6 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
     status = state.effective_status(config)
 
     _gate_terminal_status(hook, state=state, config=config, status=status)
-
-    # The escapes are user-only; Claude's route is Bash, and it is denied (Rule 4).
-    if tool == "Bash" and cmdshape.is_escape(command):
-        hooks.deny(hook, ESCAPE_DENIED)
 
     if status == "ARMED":
         # Verified *before* `set-phases` is even considered for an allow -- see

@@ -179,6 +179,8 @@ make check                   # pre-commit (shellcheck, yamllint, markdownlint, �
 
 Running the tests needs `jq`, and comparing the chunker against the real GNU `split` needs GNU coreutils (`gsplit`); both are **development-only** — the gate itself uses neither, and those comparisons skip cleanly where coreutils is absent, as on a stock Mac.
 
+With the plugin enabled, its hooks run in every session, armed or not, and they deny any Claude Bash command that names a user-only subcommand (`arl.sh arm`, `finish`, `deactivate`, `resume`, `config`, `accept`, `pause`). When developing this repository, set `"enabledPlugins": {"adversarial-review-loop@adversarial-review-loop": false}` in its `.claude/settings.local.json`, and load the working tree with `claude --plugin-dir .` only when you mean to use the loop.
+
 [`AGENTS.md`](AGENTS.md) is the contract any change to this project has to honour — the five non-negotiable rules, the invariants, and the hazards that silently reopen a closed hole if reverted. Before the first real run, work through [`tests/STEP0.md`](tests/STEP0.md): the harness assumptions that only a live Claude Code session can settle.
 
 ## 📄 Licence
