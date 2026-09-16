@@ -4,6 +4,7 @@ description: Manually approve the current working tree for this phase, overridin
 argument-hint: "[reason]"
 disable-model-invocation: true
 user-invocable: true
+allowed-tools: "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh accept:*)"
 ---
 
 # Manually accept the current tree

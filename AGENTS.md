@@ -250,4 +250,6 @@ A local marketplace install **copies** the plugin to `~/.claude/plugins/cache/<m
 
 Some behaviour cannot be tested from a shell — skill-hook registration, `` !`…` `` expansion inside a skill body, `${CLAUDE_SESSION_ID}` equality with the hooks' `session_id`, the Stop-hook block cap. These live in `tests/STEP0.md` with an expected result and a fallback each. **Do not claim shell tests cover them**, and do not change the arming path or the skill frontmatter without re-running the relevant STEP0 item.
 
-Verified against Claude Code 2.1.235 and `opencode 1.18.18`.
+**Every `!` block needs a matching `allowed-tools` rule, scoped to its one `arl.sh` subcommand.** Since Claude Code 2.1.272 a block whose permission check answers `ask` is handed to the model instead of run, and a model-run `arm` is a Rule 4 escape, so `implement` fails closed. `tests/unit/test_skill_arguments.py` pins the table. Any new subcommand that a skill runs for the user also belongs in `cmdshape._ESCAPE_RE`. → [`argument-channel.md`](docs/design/argument-channel.md)
+
+Verified against Claude Code 2.1.273 (skill expansion and `allowed-tools`, STEP0 item 2b) and 2.1.235 (the rest), and `opencode 1.18.18`.

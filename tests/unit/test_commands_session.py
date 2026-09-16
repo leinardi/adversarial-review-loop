@@ -312,6 +312,10 @@ def test_report_prints_the_newest_or_the_numbered_one(git_repo: Path, tmp_path: 
     nonsense = run_bootstrap(["report", "not-a-number"], cwd=git_repo, env=env)
     assert nonsense.stdout.startswith("No such report. Available:\n")
 
+    # The skill's spelling: the number arrives on stdin, with the here-document's newline.
+    assert run_bootstrap(["report", "--args-stdin"], cwd=git_repo, env=env, stdin=b"1\n").stdout == "first report\n"
+    assert run_bootstrap(["report", "--args-stdin"], cwd=git_repo, env=env, stdin=b"\n").stdout == "second report\n"
+
 
 # --------------------------------------------------------------------------
 # finish

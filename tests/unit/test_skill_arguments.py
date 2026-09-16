@@ -64,6 +64,7 @@ _ARGUMENT_SKILLS: Final = {
     "config": "--args-stdin",
     "implement": "--args-stdin",
     "pause": "--args-stdin",
+    "report": "--args-stdin",
     "resume": "--args-stdin",
 }
 
@@ -282,3 +283,93 @@ def test_the_real_cli_survives_the_here_document(tmp_path: Path) -> None:
 
     assert "adversarial-review-loop" in proc.stdout
     assert not (tmp_path / "pwned").exists(), "a command substitution inside the reason ran"
+
+
+# -- the permission rule that lets the block run at all ---------------------
+
+#: Every skill that runs a shell block, and the one ``allowed-tools`` rule it must declare.
+#:
+#: Since Claude Code 2.1.272 a ``!`` command whose permission check answers ``ask`` is no longer
+#: run at expansion: the block is replaced by ``[run this first, exactly as written ...]`` and
+#: handed to the model. For ``arm`` that is fatal -- the model's own ``arl.sh arm`` is a Rule 4
+#: escape, so the gate denies it and the activation fails closed with "arming never ran". It
+#: happens whenever nothing else auto-allows the command, e.g. with the Bash sandbox off. The
+#: skill's own rule is what makes the check answer ``allow``.
+#:
+#: Each rule is scoped to its skill's one subcommand. The grant lasts for the rest of the turn,
+#: and while the gate still denies the model every user-only subcommand (``cmdshape.is_escape``),
+#: a rule wider than the block needs is permission nobody asked for.
+_ALLOWED_TOOLS: Final = {
+    "accept": "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh accept:*)",
+    "config": "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh config:*)",
+    "finish": "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh finish)",
+    "implement": "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh arm:*)",
+    "pause": "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh pause:*)",
+    "report": "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh report:*)",
+    "resume": "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh resume:*)",
+    "status": "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh status)",
+    "stop": "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh deactivate:*)",
+}
+
+_RULE: Final = re.compile(r"Bash\((?P<command>[^()]+?)(?P<prefix>:\*)?\)")
+
+
+def _frontmatter(skill: str) -> dict[str, str]:
+    """The ``---`` header as ``key -> raw value``, refusing anything this test cannot read exactly.
+
+    Deliberately strict rather than a YAML parser: one ``key: value`` per line, no duplicate
+    key, and a quoted value must be a complete double-quoted scalar. A header this rejects is a
+    header whose meaning to Claude Code nobody here has checked.
+    """
+    lines = _body(skill).split("\n")
+    assert lines[0] == "---", f"{skill}: SKILL.md must open with a frontmatter fence"
+    end = lines.index("---", 1)
+    fields: dict[str, str] = {}
+    for line in lines[1:end]:
+        key, sep, value = line.partition(": ")
+        assert sep and re.fullmatch(r"[a-z][a-z-]*", key), f"{skill}: unreadable frontmatter line {line!r}"
+        assert key not in fields, f"{skill}: duplicate frontmatter key {key!r}"
+        if value.startswith('"'):
+            assert re.fullmatch(r'"[^"\\]*"', value), f"{skill}: {key} is not one plain double-quoted string"
+            value = value[1:-1]
+        fields[key] = value
+    return fields
+
+
+def _shell_blocks(skill: str) -> list[str]:
+    body = _body(skill)
+    return [m.group(1).strip() for m in _FENCED.finditer(body)] + [m.group(1).strip() for m in _INLINE.finditer(body)]
+
+
+def test_every_shell_running_skill_has_a_rule() -> None:
+    """A new skill that runs a block and declares no rule is the regression this table exists for."""
+    running = {path.parent.name for path in (PLUGIN_ROOT / "skills").glob("*/SKILL.md") if _shell_blocks(path.parent.name)}
+
+    assert running == set(_ALLOWED_TOOLS)
+
+
+@pytest.mark.parametrize("skill", sorted(_ALLOWED_TOOLS))
+def test_a_skill_declares_exactly_its_own_rule(skill: str) -> None:
+    fields = _frontmatter(skill)
+
+    assert fields.get("allowed-tools") == _ALLOWED_TOOLS[skill]
+
+
+@pytest.mark.parametrize("skill", sorted(_ALLOWED_TOOLS))
+def test_the_rule_covers_the_command_the_block_runs(skill: str) -> None:
+    """The rule and the body are two spellings of one command; this keeps them from drifting.
+
+    An exact rule must equal the block. A prefix rule must match it at a word boundary --
+    ``arl.sh arm:*`` covers ``arl.sh arm --session …``, and would not cover ``arl.sh armory``.
+    What this cannot prove is Claude Code's own matcher, heredoc included: that is
+    tests/STEP0.md, item 2b.
+    """
+    match = _RULE.fullmatch(_ALLOWED_TOOLS[skill])
+    assert match, f"{skill}: not a single Bash(...) rule"
+    (block,) = _shell_blocks(skill)
+    first_line = block.split("\n", 1)[0]
+
+    if match.group("prefix"):
+        assert first_line == match.group("command") or first_line.startswith(match.group("command") + " ")
+    else:
+        assert block == match.group("command")

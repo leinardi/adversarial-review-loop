@@ -42,7 +42,7 @@ from arl.config import Config
 from arl.errors import UnsafePathError
 from arl.gitsnap import SnapshotError
 from arl.state import ENDED_EVIDENCE_STATUSES, State, pointer_read
-from arl.util import format_at, log, now
+from arl.util import format_at, log, now, stdin_argument
 
 __all__ = ["deactivate", "defer", "finish", "reorient", "report_cmd", "status"]
 
@@ -390,12 +390,22 @@ reports:
 
 
 def report_cmd(argv: list[str]) -> int:
-    """Print one stored report in full: the ``n``-th, or the newest when ``n`` is omitted."""
+    """Print one stored report in full: the ``n``-th, or the newest when ``n`` is omitted.
+
+    ``--args-stdin`` is what the skill body spells: the slash command's argument string, read
+    from a quoted here-document (see :func:`arl.util.stdin_argument`). The body used to pass
+    ``"$1"``, which Claude Code's 0-based positional substitution left verbatim for a single
+    argument, so ``/report 2`` printed the newest report. Worse, the ``$1`` made the command
+    one no permission rule can pre-allow, so Claude Code handed the block to the model rather
+    than run it.
+    """
     activation = commands.resolve_local_activation()
     if activation is None:
         sys.stdout.write(NOT_ARMED)
         return 0
 
+    if argv[:1] == ["--args-stdin"]:
+        argv = stdin_argument().split() + argv[1:]
     raw = argv[0] if argv else ""
     which: int | None = None
     if raw:

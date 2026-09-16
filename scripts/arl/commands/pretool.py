@@ -128,10 +128,10 @@ Continue in {successor}, or re-arm this worktree from scratch with /adversarial-
 """
 
 ESCAPE_DENIED: Final = """\
-arl finish, deactivate, resume, config, accept and pause are user-only commands. You may not run them yourself.
+arl arm, finish, deactivate, resume, config, accept and pause are user-only commands. You may not run them yourself.
 
-If you believe one of them should run, say so and let the user run /adversarial-review-loop:finish, \
-/adversarial-review-loop:stop, /adversarial-review-loop:resume, /adversarial-review-loop:config, \
+If you believe one of them should run, say so and let the user run /adversarial-review-loop:implement, \
+/adversarial-review-loop:finish, /adversarial-review-loop:stop, /adversarial-review-loop:resume, /adversarial-review-loop:config, \
 /adversarial-review-loop:accept or /adversarial-review-loop:pause.
 """
 

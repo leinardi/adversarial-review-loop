@@ -71,6 +71,10 @@ A blanket `"denyWrite": ["~/"]` covers both, and **`allowWrite` does not re-open
 
 `excludedCommands` does not help here: the loop's git runs inside the gate process, not as a `git …` command the sandbox can pattern-match. If you would rather not loosen anything, run the loop in a session with the sandbox off — it is a per-session setting under `/sandbox`.
 
+### If a command says "run this first" instead of running
+
+On Claude Code 2.1.272 and later, a slash command's shell step runs only if Claude Code's permission check allows it. Otherwise Claude Code hands the command to Claude as `[run this first, exactly as written, and use its output: …]`. For `/adversarial-review-loop:implement` that ends in "arming never ran", because the gate will not let Claude arm the loop itself. Each skill ships its own `allowed-tools` rule for exactly the `arl.sh` subcommand it runs, so this only happens with an install older than that fix, or when your own `permissions.deny` or `permissions.ask` rule matches `arl.sh`. Update the plugin, or remove the rule. If a session is already stuck in `NEEDS_HUMAN` from a failed arm, leave the mode from a terminal outside Claude Code, in the repository: `<plugin-root>/scripts/arl.sh deactivate --session <session-id>`. The handed-off command shows both values.
+
 ## 🚀 Quick start
 
 1. Write a plan as a Markdown file — whatever describes the work; there is no required format.

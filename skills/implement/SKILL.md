@@ -4,6 +4,7 @@ description: Implement an agreed plan with an enforced adversarial review loop. 
 argument-hint: "<path-to-plan.md> [--allow-dirty] [--until N] [--harness H] [--model X] [--variant V] [--guide <path>]"
 disable-model-invocation: true
 user-invocable: true
+allowed-tools: "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/arl.sh arm:*)"
 ---
 
 # Implement with an enforced review loop

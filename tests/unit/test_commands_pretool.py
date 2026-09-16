@@ -605,6 +605,7 @@ def test_a_non_object_plan_revisions_entry_escalates_rather_than_crashing(git_re
         "arl.sh accept --reason x",
         "arl.sh pause",
         "arl.sh pause 2",
+        "arl.sh arm --plan plan.md",
     ],
 )
 def test_claude_may_not_end_the_loop_itself(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], command: str) -> None:
@@ -615,6 +616,28 @@ def test_claude_may_not_end_the_loop_itself(git_repo: Path, tmp_path: Path, clea
 
     assert verdict == "deny"
     assert "user-only commands" in reason
+
+
+#: Exactly what the ``implement`` skill body runs, heredoc and all. The skill's ``allowed-tools``
+#: grants this prefix for the rest of the turn, so the gate -- not the permission rule -- is
+#: what keeps Claude from re-arming an activation it is being reviewed under.
+_MODEL_REARM: str = f"{ENTRYPOINT} arm --session {SESSION} --args-stdin <<'ARL-ARGUMENTS-EOF'\nplan.md\nARL-ARGUMENTS-EOF"
+
+
+@pytest.mark.parametrize("frozen", [True, False], ids=["active", "armed"])
+def test_claude_may_not_re_arm_the_activation_itself(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], frozen: bool) -> None:
+    env = armed(clean_env)
+    if frozen:
+        active(git_repo, tmp_path, env)
+    else:
+        arm(git_repo, tmp_path, env)
+    before = read_state(env, git_repo, SESSION)
+
+    verdict, reason = pretool(git_repo, env, command=_MODEL_REARM)
+
+    assert verdict == "deny"
+    assert "user-only commands" in reason
+    assert read_state(env, git_repo, SESSION) == before
 
 
 def test_the_escape_denial_outranks_a_commit_in_the_same_command(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
