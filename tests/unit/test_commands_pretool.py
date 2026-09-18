@@ -453,6 +453,10 @@ def test_nothing_may_change_before_the_phase_list_is_frozen(git_repo: Path, tmp_
 
     assert verdict == "deny"
     assert "phase list has not been frozen yet" in reason
+    # The command template is printed here, so the rules for spelling it belong here too: this
+    # denial is the model's second chance to read them before it writes any description.
+    assert "on a single line" in reason
+    assert "no backticks" in reason
 
 
 def test_the_not_frozen_denial_names_the_read_tool_for_the_frozen_plan(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -514,8 +518,34 @@ def test_a_refused_set_phases_attempt_is_told_what_about_it_was_refused(git_repo
 
     assert verdict == "deny"
     assert "this spelling of it was refused" in reason
-    assert "backtick" in reason
+    # The tokenizer's own reason, not merely the word "backtick" -- that appears in the general
+    # constraints block for every refusal, so matching it alone would pass whatever the cause was.
+    assert "the command contains a backtick" in reason
     assert "phase list has not been frozen yet" not in reason
+
+
+def test_a_refused_set_phases_attempt_is_not_told_a_cause_the_tokenizer_did_not_report(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str]
+) -> None:
+    """The denial may quote the refusal, and may state the rules, but must not diagnose.
+
+    A fixed paragraph used to follow the quoted error explaining the refusal as a backtick or a
+    ``$``. A command refused for spanning multiple lines -- as a long phase list wrapped across
+    lines is -- was therefore told to remove characters it did not contain, and the freeze took
+    another round. The general rules still appear, labelled as general; the cause comes only
+    from the tokenizer.
+    """
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command=f"{ENTRYPOINT} set-phases --phase 'one' \\\n  --phase 'two'")
+
+    assert verdict == "deny"
+    assert "the command spans multiple lines" in reason
+    # The two sentences the fixed diagnosis was made of. `$` itself is not a valid negative:
+    # the constraints block names it deliberately, as a rule rather than as this refusal's cause.
+    assert "both are command substitution" not in reason
+    assert "The descriptions are read as shell words" not in reason
 
 
 def test_a_command_that_was_never_set_phases_still_gets_the_ordinary_denial(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

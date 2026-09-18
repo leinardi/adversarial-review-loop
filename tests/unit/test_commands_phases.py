@@ -57,6 +57,10 @@ def test_replan_pending_denies_everything_but_set_phases(git_repo: Path, tmp_pat
     verdict, reason = pretool(git_repo, env, tool="Edit")
     assert verdict == "deny"
     assert "permission to redefine the remaining phases" in reason
+    # Same rules as the first freeze: a replan writes descriptions too, and this denial is
+    # where the model reads how the command must be spelled before it writes them.
+    assert "on a single line" in reason
+    assert "no backticks" in reason
 
     verdict, reason = pretool(git_repo, env, command='git add -A && git commit -m "x"')
     assert verdict == "deny"

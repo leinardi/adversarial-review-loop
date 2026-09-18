@@ -135,6 +135,11 @@ def test_arm_freezes_the_plan_and_records_the_activation(git_repo: Path, tmp_pat
     assert proc.returncode == 0, proc.stderr
     assert "**adversarial-review-loop is ARMED for this worktree.**" in proc.stdout
     assert "Phases are not set yet" in proc.stdout
+    # The banner is where the phase split is decided, so it is where the rules for spelling
+    # `set-phases` have to be -- not only in the denial a first attempt earns. See
+    # `test_phase_guidance`.
+    assert "single line" in proc.stdout
+    assert "no backticks" in proc.stdout
 
     document = read_state(env, git_repo, "s1")
     head_tree = git(git_repo, "rev-parse", "HEAD^{tree}")

@@ -191,7 +191,8 @@ Read works on any path and Bash does not, until set-phases has run:
 Then run exactly:
 
     {plugin_root}/scripts/arl.sh set-phases --phase "…" --phase "…"
-"""
+
+{constraints}"""
 
 RECONCILE: Final = """\
 adversarial-review-loop: a commit diverged from the reviewed tree and the reconcile is unfinished.
@@ -757,7 +758,15 @@ def _by_status(gate: _Gate) -> None:
         hook.stop_ok(STALE.format(ttl_hours=config.as_int("ttl_hours")))
     if status == "ARMED":
         plan_file = _named_plan_file(gate)
-        _block_counted(gate, NOT_FROZEN.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file).rstrip("\n"))
+        _block_counted(
+            gate,
+            NOT_FROZEN.format(
+                act_dir=state.act_dir,
+                plugin_root=commands.plugin_root(),
+                plan_file=plan_file,
+                constraints=hooks.PHASE_CONSTRAINTS,
+            ).rstrip("\n"),
+        )
     if status == "RECONCILE":
         _block_counted(gate, RECONCILE.format(reason=state.get("reason"), recovery=hooks.reconcile_recovery(state)).rstrip("\n"))
 

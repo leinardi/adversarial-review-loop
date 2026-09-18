@@ -34,7 +34,16 @@ The block above is the output of arming, which ran **before you had a turn**. It
 
    Phrase each phase description as what it delivers, faithfully to the plan. A description must carry **every clause** of the plan section it covers, trailing qualifier clauses included — an "Integration: …" or "…, keeping X unchanged" tail is scope, not decoration, and a description that drops it is the scope the phase will not deliver. Descriptions are frozen: you implement against the description, not the plan, so a clause missing there is lost until a reviewer notices its absence rounds later. The reviewer is given both the plan and your phase descriptions, and is explicitly asked to flag a description that misrepresents the plan — dropping a clause included.
 
+   Fidelity here is about scope, not about characters: a description is plain prose, so name a file or a symbol in words rather than reproducing the plan's code formatting. Dropping the backticks around an identifier drops nothing the reviewer weighs — see the spelling rules in step 3.
+
 3. **Freeze the phases** by running exactly the `set-phases` command printed above, one `--phase "…"` per phase, in plan order. Until you do, every file mutation is denied — that is expected, not a malfunction.
+
+   **How the command must be spelled.** It is the one command allowed while the phase list is unfrozen, so the gate reads it as shell words and refuses three things anywhere in it:
+   - a line break or a backslash continuation — put the whole command on a single line, however many phases there are and however long that single line gets,
+   - a backtick,
+   - a `$`.
+
+   Both characters are command substitution to the shell. Quoted `;`, `|` and `*`, and escaped quotes inside a description, are fine. If the command is refused, the denial names which of the three it was; fix that one thing and re-run with the same real phases.
 
    **Never probe this command with placeholder or shortened phases to check the syntax works.** The freeze is one-shot: the first successful `set-phases` call locks in whatever list it was given, and a second call is refused outright ("the phase list is already frozen"). If a real call errors, fix the invocation and re-run it with the real phases — don't substitute a throwaway list to test the mechanics first. If a placeholder list does get frozen by mistake and no phase has been committed yet, recover with `resume --session <id> --replan` followed by the real `set-phases` call — see docs/design/state-fields.md.
 

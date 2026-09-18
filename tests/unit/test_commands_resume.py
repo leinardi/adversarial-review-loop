@@ -183,6 +183,23 @@ def test_resume_carries_round_history_but_resets_the_convergence_counters(git_re
     assert after["defer_pending"] is False
 
 
+def test_a_resume_before_the_freeze_states_how_set_phases_must_be_spelled(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The banner that asks for the freeze is the banner that must state its rules.
+
+    A session resumed while still ``ARMED`` splits the plan from this banner, and may never have
+    read ``skills/implement/SKILL.md`` -- so deferring to it leaves nothing said. See
+    ``test_phase_guidance``.
+    """
+    env = armed(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    code, banner = resume(git_repo, env)
+
+    assert code == 0, banner
+    assert "Phases are not frozen yet" in banner
+    assert hooks.PHASE_CONSTRAINTS in banner
+
+
 def test_the_stored_reports_are_copied_and_the_sequence_keeps_counting(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     """Reports are evidence, so they are carried forward -- and ``report_seq`` counts on.
 

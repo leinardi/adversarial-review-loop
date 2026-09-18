@@ -43,6 +43,7 @@ from arl.util import log, now
 
 __all__ = [
     "DENY_PREAMBLE",
+    "PHASE_CONSTRAINTS",
     "READONLY_TOOLS",
     "UNBOUND_PASS_STATUSES",
     "UNSTARTED_ARM_REASON",
@@ -92,6 +93,29 @@ READONLY_TOOLS: Final = frozenset(
 )
 
 DENY_PREAMBLE: Final = "adversarial-review-loop is enforcing an external review gate in this worktree.\n\n"
+
+#: How `set-phases` has to be spelled, stated wherever the command template is printed rather
+#: than only after a refusal. `set-phases` is the one command allowed while the phase list is
+#: unfrozen, so the gate reads it with the commit tokenizer, which refuses `$`, a backtick and a
+#: newline anywhere in the command (`cmdshape._deny_shell_grammar`). Those are exactly the
+#: characters prose about code reaches for, and until this block existed nothing said so until
+#: the freeze had already been refused once -- measured as two or more attempts to freeze a
+#: phase list that was correct on the first try.
+#:
+#: Three rules and no more: a quoted `;`, `|` or `*` inside a description is accepted, and so is
+#: an escaped quote, so naming them here would refuse in the prompt what the tokenizer allows.
+#:
+#: Rules only, in the plugin's own words -- nothing here is derived from the repository or the
+#: plan, so every banner and denial can splice it without widening what repository-controlled
+#: text can write into them.
+PHASE_CONSTRAINTS: Final = """\
+How this one command must be spelled (the gate reads it as shell words):
+- the whole command on a single line — no line breaks, no backslash continuations,
+  however many phases there are
+- plain prose inside each `--phase "…"`: no backticks, no `$`, no code formatting.
+  Name a file or a symbol in words instead — that drops no scope
+- the wording itself is yours; only these characters are constrained
+"""
 
 UNSTARTED_ARM_REASON: Final = (
     "arming never executed: enforcement was requested (/adversarial-review-loop:implement or :resume), "
