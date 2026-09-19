@@ -455,6 +455,26 @@ def test_nothing_may_change_before_the_phase_list_is_frozen(git_repo: Path, tmp_
     assert "phase list has not been frozen yet" in reason
 
 
+def test_the_not_frozen_denial_names_the_read_tool_for_the_frozen_plan(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The plan this denial sends Claude to read is in the activation directory, outside the
+    repository -- and the denial it just answered was about Bash.
+
+    Saying only "read the frozen plan (<path>)" next to "reading *the repository* with Read,
+    Grep and Glob is allowed" reads as "that path is not covered", and the observed result is a
+    `cat` that this same gate denies again. `hooks.READONLY_TOOLS` is keyed on the tool name and
+    never on the path, so Read reaches it; the message has to say so.
+    """
+    env = armed_env(clean_env)
+    arm(git_repo, tmp_path, env)
+
+    verdict, reason = pretool(git_repo, env, command="cat /some/path/plan.frozen.md")
+
+    assert verdict == "deny"
+    assert "with the Read tool" in reason
+    assert "not `cat`" in reason
+    assert "outside the repository" in reason
+
+
 def test_set_phases_is_the_one_command_allowed_while_armed(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
     env = armed(clean_env)
     arm(git_repo, tmp_path, env)

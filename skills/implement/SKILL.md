@@ -23,7 +23,7 @@ The block above is the output of arming, which ran **before you had a turn**. It
 
 ## Your job, in order
 
-1. **Read the frozen plan** at the path named above (`plan.frozen.md`). Read it in full. That copy, not the original, is what the reviewer is given as evidence.
+1. **Read the frozen plan** at the path named above (`plan.frozen.md`). Read it in full, **with the Read tool** — it lives outside the repository, and every Bash call including `cat` is denied until `set-phases` has run. That copy, not the original, is what the reviewer is given as evidence.
 
    The banner's `review guide:` line says whether this repository also supplied guidance for the reviewer (`--guide <path>`, or `review_guide` in config). When it names one, that file's content was frozen alongside the plan and is spliced into every review's instructions as an extension of what to look for — worth reading, because it tells you what this repository's reviews will weigh. It is guidance to the reviewer, not to you: implement against the plan.
 
