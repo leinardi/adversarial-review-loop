@@ -373,8 +373,8 @@ Two shapes:
   materialised — see the retire-first ordering and why it has no rollback in
   [`docs/design/resume-and-retirement.md`](design/resume-and-retirement.md).
   Exactly one activation may ever be live per worktree.
-- **Same-session** (re-running `resume` to change `--until`, the model, or the plan):
-  the live document is mutated in place; nothing is retired.
+- **Same-session** (re-running `resume` to change the model, the plan, or the pause
+  target): the live document is mutated in place; nothing is retired.
 
 `commands/pausecmd.py` is the narrow case pulled out of that second shape: moving only
 `stop_after_phase`, under one transaction, with no revision detection, no cleanliness

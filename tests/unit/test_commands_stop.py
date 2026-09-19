@@ -770,10 +770,10 @@ def test_stop_pauses_at_the_target_without_the_final_review(git_repo: Path, tmp_
     assert "Next up, phase 3 of 3" in message
     assert "NOT an approval of the whole plan" in message
     # The target stays set and is now spent, so this branch is what every later turn end
-    # takes. Naming `--until 0` is the difference between "the loop stopped" and "the loop
-    # will keep stopping until you say otherwise".
-    assert "every turn end pauses here until you name a new one" in message
-    assert "resume --until 0" in message
+    # takes. Naming the command that clears it is the difference between "the loop stopped"
+    # and "the loop will keep stopping until you say otherwise".
+    assert "every turn end pauses here until the next resume clears it" in message
+    assert "/adversarial-review-loop:resume, which runs to the end of the plan" in message
     assert "--until M" in message
     assert "/adversarial-review-loop:finish" in message
 

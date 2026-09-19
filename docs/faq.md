@@ -134,8 +134,9 @@ stop and hand it back to you rather than keep implementing.
 
 Yes. `--until N` on `implement` or `resume` stops the loop asking for more once phase `N` is
 committed — the turn ends with a "paused, not an approval of the whole plan" message. Carry
-on later with `/adversarial-review-loop:resume --until 0`, which clears the target. The
-target is soft: it changes what the Stop gate insists on, not what the commit gate enforces
+on later with `/adversarial-review-loop:resume`, which clears the target: a bare resume runs
+to the end of the plan, and keeping a target across one is what takes a flag. The target is
+soft: it changes what the Stop gate insists on, not what the commit gate enforces
 ([edge-cases.md](edge-cases.md#pausing-is-a-soft-target-not-a-fence)).
 
 ### How do I stop partway through a plan?
@@ -165,9 +166,9 @@ Telling Claude "pause after this phase" in prose does **not** work, and never di
 target is user-only, Claude has no route to it, and the Stop gate will send it straight back
 into the next phase. The command is that route.
 
-To start again afterwards, clear the target: `/adversarial-review-loop:resume --until 0`. A
-reached target stays set, so a bare `resume` continues the activation but still ends every
-turn paused ([edge-cases.md](edge-cases.md#pausing-is-a-soft-target-not-a-fence)).
+To start again afterwards, run `/adversarial-review-loop:resume`. A reached target stays set
+until then — every turn end pauses while it stands — and clearing it is exactly what a bare
+resume does ([edge-cases.md](edge-cases.md#pausing-is-a-soft-target-not-a-fence)).
 
 ### Can I change the plan partway through?
 

@@ -645,15 +645,82 @@ def test_the_unapproved_head_warning_names_the_sweep_when_no_phase_is_left(git_r
 # --------------------------------------------------------------------------
 
 
-def test_until_carries_forward_when_not_given(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+def test_a_bare_resume_clears_a_spent_pause_target_without_a_note(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The case the default exists for: the target has been reached, so every turn end pauses,
+    and the command the user reaches for to carry on is a bare ``resume``.
+
+    It is cleared quietly: that is what a bare resume is *for*, and a note on every one of them
+    trains the reader past the line that does matter (the pending-target one below).
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env, extra_args="--until 1")
+    commit_phase(git_repo, env)
+    assert read_state(env, git_repo, S1)["phase"] == 2
+
+    code, banner = resume(git_repo, env)
+
+    assert code == 0, banner
+    assert read_state(env, git_repo, S2)["stop_after_phase"] == 0
+    assert "- pause target: none" in banner
+    assert "has been cleared" not in banner
+
+
+def test_a_bare_resume_clears_a_pending_pause_target_and_says_so(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """A target that could still have fired is dropped too -- one rule, no state-dependent
+    default -- but silently dropping a fence the user set is what the note prevents."""
     env = armed(clean_env)
     active(git_repo, tmp_path, env, extra_args="--until 2")
     assert read_state(env, git_repo, S1)["stop_after_phase"] == 2
 
-    code, _ = resume(git_repo, env)
+    code, banner = resume(git_repo, env)
 
-    assert code == 0
+    assert code == 0, banner
+    assert read_state(env, git_repo, S2)["stop_after_phase"] == 0
+    assert "the pause target (phase 2) had not been reached yet and has been cleared" in banner
+
+
+def test_a_bare_same_session_resume_clears_the_target_in_place(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The in-place path agrees with the cross-session one, and the banner says so."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env, extra_args="--until 2")
+
+    code, banner = resume_argv(git_repo, env, S1, [])
+
+    assert code == 0, banner
+    assert read_state(env, git_repo, S1)["stop_after_phase"] == 0
+    assert "the pause target (phase 2) had not been reached yet and has been cleared" in banner
+
+
+def test_a_resume_run_only_to_change_the_model_clears_the_target_too(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The default is the *absence of ``--until``*, not the absence of flags.
+
+    This is the case the rule is easiest to get wrong from the user's side: a resume run for an
+    unrelated reason drops the target, so it has to say so rather than leave the loop looking
+    paused for a reason nobody typed.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env, extra_args="--until 2 --model vendor/original")
+    assert read_state(env, git_repo, S1)["stop_after_phase"] == 2
+
+    code, banner = resume_argv(git_repo, env, S1, ["--model", "vendor/replacement"])
+
+    assert code == 0, banner
+    after = read_state(env, git_repo, S1)
+    assert after["overrides"] == {"harness": "claude-code", "model": "vendor/replacement"}
+    assert after["stop_after_phase"] == 0
+    assert "the pause target (phase 2) had not been reached yet and has been cleared" in banner
+
+
+def test_until_still_sets_a_target_across_a_resume(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Keeping a target is what now takes the flag."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env, extra_args="--until 2")
+
+    code, banner = resume_argv(git_repo, env, S2, ["--until", "2"])
+
+    assert code == 0, banner
     assert read_state(env, git_repo, S2)["stop_after_phase"] == 2
+    assert "has been cleared" not in banner
 
 
 def test_until_beyond_the_phase_count_is_clamped_with_a_warning(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
@@ -940,6 +1007,121 @@ def test_publication_time_dirty_recheck_applies_even_without_a_plan_revision(
     document = read_state(env, git_repo, S2)
     assert document["status"] == "ARM_FAILED"
     assert "dirty" in str(document["reason"])
+
+
+def _in_process(monkeypatch: pytest.MonkeyPatch, env: dict[str, str], repo: Path) -> None:
+    """Run the next ``resume_module.run`` in this process, so a monkeypatch takes effect.
+
+    ``os.environ`` is overlaid rather than replaced, so any ``ARL_*``/``XDG_*`` the host happens
+    to carry has to be cleared first (mirrors ``test_commands_arm``'s racing-arm test).
+    """
+    for key in list(os.environ):
+        if key.startswith(("ARL_", "XDG_")):
+            monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.chdir(repo)
+
+
+def _racing_worktree_clean(monkeypatch: pytest.MonkeyPatch, repo: Path, env: dict[str, str], *pause_args: str) -> None:
+    """Have ``pause`` land between ``resume``'s pre-lock reads and the lock it then takes.
+
+    ``gitsnap.worktree_clean`` is called from ``_resume``, before either path's transaction
+    opens and after the predecessor's document has been read -- so a ``pause`` run from here is
+    exactly the write a decision made from that pre-lock read would miss.
+    """
+    real = gitsnap.worktree_clean
+    calls = {"n": 0}
+
+    def racing(target: str) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            proc = run_bootstrap(["pause", *pause_args], cwd=repo, env=env)
+            assert proc.returncode == 0, proc.stdout
+        return real(target)
+
+    monkeypatch.setattr(gitsnap, "worktree_clean", racing)
+
+
+def test_a_pause_that_lands_while_resume_queues_for_the_lock_is_seen_cross_session(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The pause target is decided under the lock, against the document the transaction reloaded.
+
+    Deciding it from ``_resume``'s pre-lock read instead would clear this target -- the resume
+    still wins the race, and should -- while reporting nothing, because that read saw no target
+    to report clearing.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    assert read_state(env, git_repo, S1)["stop_after_phase"] == 0
+    _racing_worktree_clean(monkeypatch, git_repo, env, "3")
+    _in_process(monkeypatch, env, git_repo)
+
+    rc = resume_module.run(["--session", S2])
+
+    assert rc == 0
+    assert read_state(env, git_repo, S2)["stop_after_phase"] == 0
+    assert "the pause target (phase 3) had not been reached yet and has been cleared" in capsys.readouterr().out
+
+
+def test_a_pause_that_clears_the_target_while_resume_queues_is_seen_cross_session(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The mirror: the target the pre-lock read saw is gone by the time the lock is taken, so
+    there is nothing to report clearing and the note must not appear."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env, extra_args="--until 2")
+    _racing_worktree_clean(monkeypatch, git_repo, env, "0")
+    _in_process(monkeypatch, env, git_repo)
+
+    rc = resume_module.run(["--session", S2])
+
+    assert rc == 0
+    assert read_state(env, git_repo, S2)["stop_after_phase"] == 0
+    assert "has been cleared" not in capsys.readouterr().out
+
+
+def test_a_pause_that_lands_while_a_same_session_resume_queues_is_seen(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The in-place path decides under its own transaction, for the same reason."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    _racing_worktree_clean(monkeypatch, git_repo, env, "3")
+    _in_process(monkeypatch, env, git_repo)
+
+    rc = resume_module.run(["--session", S1])
+
+    assert rc == 0
+    assert read_state(env, git_repo, S1)["stop_after_phase"] == 0
+    assert "the pause target (phase 3) had not been reached yet and has been cleared" in capsys.readouterr().out
+
+
+def test_the_until_clamp_is_measured_against_the_reloaded_phase_count(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other input to the decision moves too: clamping ``--until 99`` against a phase count
+    read before the lock would write a target past the end of the list it is checked against."""
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env, "one", "two", "three")
+    real = gitsnap.worktree_clean
+    calls = {"n": 0}
+
+    def shrinking(target: str) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            patch_state(env, git_repo, phases=["only one"])
+        return real(target)
+
+    monkeypatch.setattr(gitsnap, "worktree_clean", shrinking)
+    _in_process(monkeypatch, env, git_repo)
+
+    rc = resume_module.run(["--session", S2, "--until", "99"])
+
+    assert rc == 0
+    assert read_state(env, git_repo, S2)["stop_after_phase"] == 1
+    assert "clamped to 1" in capsys.readouterr().out
 
 
 def test_an_unrecognised_stored_status_refuses_rather_than_being_treated_as_resumable(

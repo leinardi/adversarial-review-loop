@@ -83,14 +83,14 @@ On Claude Code 2.1.272 and later, a slash command's shell step runs only if Clau
 4. Claude implements phase 1 and runs `git add -A && git commit -m "…"`. That commit is intercepted, reviewed, and either allowed through or denied with the findings inline. Repeat until the phase passes, then on to phase 2.
 5. `/adversarial-review-loop:status` at any time; `/adversarial-review-loop:report [n]` for a review in full.
 
-Pause after phase 5 with `--until 5`, or mid-run with `/adversarial-review-loop:pause`. Pick a plan back up in a new session with `/adversarial-review-loop:resume` — never a second `implement`, which re-baselines and throws away every approval.
+Pause after phase 5 with `--until 5`, or mid-run with `/adversarial-review-loop:pause`. Pick a plan back up in a new session with `/adversarial-review-loop:resume`, which runs to the end of the plan unless you pass `--until N` again — never a second `implement`, which re-baselines and throws away every approval.
 
 ## 💻 Commands
 
 | Command | Who | What it does |
 | --- | --- | --- |
 | `/adversarial-review-loop:implement <plan.md> [--allow-dirty] [--until N] [--harness H] [--model X] [--variant V] [--guide <path>]` | you | Arms the loop for this worktree and starts the phased implementation |
-| `/adversarial-review-loop:resume [--until N] [--plan <path>] [--guide <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]` | you | Continues an armed activation — in a new session, or adjusts it in this one — without losing the baseline or any approval |
+| `/adversarial-review-loop:resume [--until N] [--plan <path>] [--guide <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]` | you | Continues an armed activation — in a new session, or adjusts it in this one — without losing the baseline or any approval. Clears the pause target unless `--until N` names a new one |
 | `/adversarial-review-loop:status` | anyone | Current state: phase, baseline, approvals, counters, stored reports |
 | `/adversarial-review-loop:report [n]` | anyone | Prints a stored review in full, untruncated |
 | `/adversarial-review-loop:pause [N \| 0 \| all]` | you | Moves the pause target without a re-arm: with no argument, the loop finishes and commits the phase it is on and then stops instead of continuing |
@@ -138,7 +138,7 @@ Each question links to its full answer.
 - **[How do I start?](docs/faq.md#how-do-i-start-using-the-plugin)** Install, write a plan `.md`, run `/adversarial-review-loop:implement plan.md`.
 - **[How do I stop partway through?](docs/faq.md#how-do-i-stop-partway-through-a-plan)** <kbd>Esc</kbd> stops the turn at once, mid-phase. To stop at a *clean* boundary instead — current phase finished, reviewed and committed — press <kbd>Esc</kbd>, run `/adversarial-review-loop:pause`, then `continue`.
 - **[I quit / rebooted / `/clear`ed mid-phase — how do I pick it back up?](docs/faq.md#picking-up-where-you-left-off)** Same session id (`claude --resume`, or `/resume` back to it): just `continue`. New session: `/adversarial-review-loop:resume --allow-dirty`. `/adversarial-review-loop:status` tells you which you're in.
-- **[Can I implement only part of a plan?](docs/faq.md#can-i-implement-only-part-of-a-plan)** `--until N` on `implement` or `resume`; carry on later with `resume --until 0`.
+- **[Can I implement only part of a plan?](docs/faq.md#can-i-implement-only-part-of-a-plan)** `--until N` on `implement` or `resume`; carry on later with a bare `resume`, which clears the target.
 - **[How do I customise what the reviewer looks for?](docs/faq.md#how-do-i-customise-what-the-reviewer-looks-for)** `review_guide` — a Markdown file added to the reviewer's prompt. It cannot change the contract or what blocks.
 - **[The reviewer keeps finding new things and the phase never converges.](docs/faq.md#the-reviewer-keeps-finding-new-things-and-the-phase-never-converges-what-now)** `/adversarial-review-loop:accept [reason]` approves the current tree without another review, and records that it did.
 

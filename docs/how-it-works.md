@@ -116,6 +116,7 @@ $ /adversarial-review-loop:implement plan.md --until 5     # stop after phase 5
   … phases 1–5 land …
 $ /clear
 $ /adversarial-review-loop:resume --until 10               # fresh context, same activation
+                                                           # (bare resume would run to the end)
 ```
 
 `resume` re-arms the hooks, re-prints the plan path and names the next phase, and every
@@ -144,7 +145,8 @@ half-finished work for it to fold into a review. That is what makes it the right
 turning the machine off, and before upgrading the plugin itself: the upgrade lands between
 phases, on a clean tree, rather than mid-phase. Reinstall the plugin and start a fresh
 session afterwards (a running Claude Code holds the old skill bodies cached), then
-`/adversarial-review-loop:resume --until 0` to carry on with every approval intact.
+`/adversarial-review-loop:resume` to carry on with every approval intact — it clears the
+pause target, so the loop runs to the end of the plan unless you pass `--until N` again.
 
 ## Why bother with all this?
 

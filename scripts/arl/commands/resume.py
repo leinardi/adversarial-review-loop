@@ -213,10 +213,16 @@ class _Decision:
     #: revision under the lock and must replace *only* this part of the banner, not every
     #: other warning ``_resume`` already collected (an ``--until`` clamp note, notably).
     revision_warning: str
+    #: Before the lock: ``--until`` as typed, resolved to an integer (``0`` for "no target"),
+    #: which is syntax and nothing else. Replaced under the lock with the value
+    #: :func:`_decide_until` actually wrote, against the document the transaction reloaded --
+    #: exactly as :attr:`revision` is, and for the same reason.
     until: int
+    #: ``--until`` was given at all. When it was not, the resume clears the stored target --
+    #: a bare ``resume`` means ``--until 0``.
     until_given: bool
-    #: Warnings unrelated to the revision decision (currently: an ``--until`` clamp note).
-    #: Combined with ``revision_warning`` by ``_banner``.
+    #: Warnings unrelated to the revision decision. Combined with ``revision_warning`` by
+    #: ``_banner``; the ``--until`` note is appended to it under the lock.
     warnings: str
     allow_dirty: bool
     #: ``--replan`` was given: permission to redefine phases from the current one onward,
@@ -576,9 +582,11 @@ def _build_successor_document(
         # Carried forward unchanged when this resume decided no new guide -- the successor
         # reviews under exactly the guide its predecessor did.
         guide_revisions=guide_revisions,
+        # Written on every resume, not only when `--until` was given: a bare resume clears the
+        # target. `decision.until` is `_decide_until`'s value by the time this runs, decided
+        # under `_retire`'s lock, never the flag as typed.
+        stop_after_phase=decision.until,
     )
-    if decision.until_given:
-        data["stop_after_phase"] = decision.until
     if decision.revision is not None:
         data["plan_path"] = decision.revision.source_path
     if decision.guide is not None:
@@ -782,15 +790,11 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
             f"them into the next phase's review:\n{gitsnap.dirty_summary(repo)}"
         )
 
-    until = prev_state.get_int("stop_after_phase")
-    until_given = bool(flags.until)
-    warnings = ""
-    if until_given:
-        until = arm.resolve_until(flags.until)
-        total = prev_state.phase_count()
-        if total and until > total:
-            warnings += f"\nNote: --until {until} is beyond the {total} frozen phases; clamped to {total}.\n"
-            until = total
+    # Syntax only, and deliberately nothing else: a malformed `--until` must be refused here,
+    # before anything is locked or retired, but *what to write* depends on the stored target and
+    # the frozen phase count, and both can move while this call queues for the lock. That
+    # decision is `_decide_until`'s, under the lock, on both paths.
+    until_requested = arm.resolve_until(flags.until)
 
     # The unapproved-HEAD warning is deliberately *not* computed here: for a cross-session
     # resume this runs before retirement, and the predecessor stays live through the whole
@@ -804,9 +808,9 @@ def _resume(*, identity: _Identity, prev_state: State, flags: _Flags) -> str:
         guide_source=guide_source,
         guide=guide_change,
         revision_warning=revision_warning,
-        until=until,
-        until_given=until_given,
-        warnings=warnings,
+        until=until_requested,
+        until_given=bool(flags.until),
+        warnings="",
         allow_dirty=allow_dirty,
         replan=flags.replan,
     )
@@ -875,11 +879,47 @@ def _apply_revision_and_replan(state: State, *, repo: str, flags: _Flags, decisi
     return revision, revision_warning
 
 
+def _decide_until(state: State, *, decision: _Decision) -> tuple[int, str]:
+    """Decide the pause target to write, against the document the caller just reloaded.
+
+    **A bare resume clears the target.** ``stop_after_phase`` is an absolute phase number that is
+    never consumed, and the Stop gate's check is ``phase <= target`` with ``phase`` only ever
+    increasing -- so a target that has been reached can never fire again, and every later turn end
+    takes the pause branch. Inheriting it across a resume made the most-run command a no-op for
+    exactly the person who ran it to carry on. Keeping a target across a resume is now the thing
+    that takes a flag: ``--until N``.
+
+    **Decided here rather than in ``_resume``** for the reason :func:`_apply_revision_and_replan`
+    documents at length: both inputs -- the stored target and the frozen phase count -- can move
+    between the pre-lock read and the write. A concurrent ``pause`` (which takes this same
+    transaction) would otherwise be cleared without the note that says so, and a concurrent
+    ``set-phases`` would have the clamp below measured against a phase count that no longer holds.
+
+    Returns the value to write and the note for the banner, if any.
+    """
+    if decision.until_given:
+        until, total = decision.until, state.phase_count()
+        if total and until > total:
+            return total, f"\nNote: --until {until} is beyond the {total} frozen phases; clamped to {total}.\n"
+        return until, ""
+    previous = state.get_int("stop_after_phase")
+    # Only a target that could still have fired is worth a note. Clearing a spent one is the
+    # ordinary case -- it is what a bare resume is *for* -- and saying so every time would train
+    # the reader to skip the line that matters.
+    if previous and state.get_int("phase") <= previous:
+        return 0, (
+            f"\nNote: the pause target (phase {previous}) had not been reached yet and has been cleared; "
+            "a bare resume runs to the end of the plan. Pass --until N to keep a target.\n"
+        )
+    return 0, ""
+
+
 def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, decision: _Decision) -> str:
     repo = identity.repo
     head_warning = ""
     revision: _RevisionChange | None = None
     revision_warning = ""
+    until_warning = ""
     guide_change: _GuideChange | None = None
     try:
         with state.transaction():
@@ -920,9 +960,12 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
                 )
             revision, revision_warning = _apply_revision_and_replan(state, repo=repo, flags=flags, decision=decision)
             guide_change = _apply_guide_revision(state, decision=decision)
-            if decision.until_given:
-                state.update(stop_after_phase=decision.until)
-            state.update(overrides=decision.overrides, activation_generation=state.get_int("activation_generation") + 1)
+            until, until_warning = _decide_until(state, decision=decision)
+            state.update(
+                stop_after_phase=until,
+                overrides=decision.overrides,
+                activation_generation=state.get_int("activation_generation") + 1,
+            )
             # Convergence counters are per-run, exactly as in `_build_successor_document`: a
             # resume is a fresh start, so an inherited retry backoff (`retry_not_before` is a
             # future timestamp) or an exhausted clarification budget must not carry over.
@@ -976,10 +1019,21 @@ def _resume_same_session(*, state: State, identity: _Identity, flags: _Flags, de
 
     # The revision reported here is the one just (re-)decided inside the lock, not the one
     # `_resume` decided before it -- see `_apply_revision_and_replan`'s docstring for why the
-    # two can legitimately differ under a concurrent same-session resume. `decision.warnings`
-    # (the --until clamp note, if any) is carried through untouched -- only the revision part
-    # is replaced, and `head_warning` is appended to the "other" bucket, same as cross-session.
-    fresh = replace(decision, revision=revision, guide=guide_change, revision_warning=revision_warning, warnings=decision.warnings + head_warning)
+    # two can legitimately differ under a concurrent same-session resume. The `--until` note is
+    # from the same place and for the same reason; both it and `head_warning` are appended to
+    # the "other" bucket, leaving `revision_warning` its own, as cross-session does.
+    fresh = replace(
+        decision,
+        revision=revision,
+        guide=guide_change,
+        revision_warning=revision_warning,
+        # Replaced here for the same reason the cross-session path replaces it: past the
+        # transaction, `until` is what was written, never what was typed. Nothing reads it after
+        # this today -- `_banner` renders the target from state -- and the point is that the two
+        # paths cannot disagree the day something does.
+        until=until,
+        warnings=decision.warnings + until_warning + head_warning,
+    )
     return _banner(state=state, identity=identity, decision=fresh)
 
 
@@ -992,9 +1046,12 @@ def _resume_cross_session(*, prev_state: State, identity: _Identity, flags: _Fla
     fresh_revision_warning = ""
     #: Recomputed inside `_retire`'s transaction too, and for the same reason.
     fresh_guide: _GuideChange | None = None
+    #: Decided inside `_retire`'s transaction as well -- see `_decide_until`.
+    fresh_until = 0
+    fresh_until_warning = ""
 
     def _retire() -> None:
-        nonlocal snapshot, fresh_revision, fresh_revision_warning, fresh_guide
+        nonlocal snapshot, fresh_revision, fresh_revision_warning, fresh_guide, fresh_until, fresh_until_warning
         _refuse_unless_resumable(prev_state)
         # Before the retirement write below, so a refusal here leaves the predecessor live and
         # `retired=False` correct: a same-session resume against this *same* predecessor can
@@ -1016,6 +1073,11 @@ def _resume_cross_session(*, prev_state: State, identity: _Identity, flags: _Fla
         # copy is written later, into the successor's own directory -- nothing about the
         # predecessor's activation directory changes on this path.
         fresh_guide = _decide_guide(prev_state, source=decision.guide_source)
+        # Decided here for the same reason, and before the snapshot below, which is what the
+        # successor's `stop_after_phase` is written over: a `pause` that took this lock first is
+        # in the document this transaction reloaded, so clearing its target says so in the
+        # banner rather than silently.
+        fresh_until, fresh_until_warning = _decide_until(prev_state, decision=decision)
         # Enforced here, before retirement, not only in `_publish_successor`'s later recheck:
         # the pre-lock check in `_resume` ran against the *old* decision (no revision, say,
         # with `allow_dirty` in play), so it can pass while this fresh one needs a clean
@@ -1080,8 +1142,16 @@ def _resume_cross_session(*, prev_state: State, identity: _Identity, flags: _Fla
     # `_EvidenceCorrupted` applies to the still-live predecessor unchanged.
 
     # `decision.revision`, decided before the lock, is not used again from here on -- only the
-    # fresh one `_retire` just decided against the document it actually reloaded.
-    decision = replace(decision, revision=fresh_revision, guide=fresh_guide, revision_warning=fresh_revision_warning)
+    # fresh one `_retire` just decided against the document it actually reloaded. `until` is
+    # replaced for the same reason: from here on it is what was decided, not what was typed.
+    decision = replace(
+        decision,
+        revision=fresh_revision,
+        guide=fresh_guide,
+        revision_warning=fresh_revision_warning,
+        until=fresh_until,
+        warnings=decision.warnings + fresh_until_warning,
+    )
 
     # The predecessor is retired from here on: any further failure records ARM_FAILED on the
     # successor rather than trying to undo the retirement (module docstring, "No automatic

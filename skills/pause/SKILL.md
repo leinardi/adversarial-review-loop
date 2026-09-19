@@ -44,7 +44,7 @@ Match the block to one of these, in order — the first that applies wins.
 
 Once a commit is verified the gate tells you what to do next, and **that message decides, not this file** — it knows which phase just landed and where the target is; a pause may have been set on the phase you were already finishing, so the very next commit can be the one that reaches it.
 
-- **It says the pause target was reached** → end your turn. That is the signal to stop, and it is not an approval of the whole plan; the Stop gate ends the turn with a `paused` message. Tell the user which phase was committed, which is next, and that continuing is theirs to start with `/adversarial-review-loop:resume --until 0` (or `--until M` for a further target).
+- **It says the pause target was reached** → end your turn. That is the signal to stop, and it is not an approval of the whole plan; the Stop gate ends the turn with a `paused` message. Tell the user which phase was committed, which is next, and that continuing is theirs to start with `/adversarial-review-loop:resume`, which clears the target (or `--until M` for a further one).
 - **It tells you to continue straight into the next phase** → do that, without ending your turn. The target is further ahead than the phase that just landed.
 - **It says every phase is committed** → end your turn; the activation completes as usual, with no pause involved.
 
