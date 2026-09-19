@@ -149,7 +149,8 @@ gate accepts until it has run. Then run exactly:
     {plugin_root}/scripts/arl.sh set-phases --phase "…" --phase "…"
 
 one --phase per phase, in order.
-"""
+
+{constraints}"""
 
 REPLAN_PENDING: Final = """\
 A resume granted permission to redefine the remaining phases, but that has not happened yet,
@@ -167,19 +168,25 @@ until it has run. Then run exactly:
 
 replacing only the phases from the current one onward -- phases already committed are
 immutable and are kept automatically.
-"""
 
+{constraints}"""
+
+#: The error the tokenizer raised is the *only* claim this makes about why, and that is the
+#: point: it used to be followed by a fixed paragraph explaining the refusal as a backtick or a
+#: `$`, which a command refused for spanning multiple lines was told to act on -- sending the
+#: model after characters its command did not contain. The general rules come from
+#: `hooks.PHASE_CONSTRAINTS`, labelled as general; `{error}` alone says which one was broken.
+#: Deliberately not a per-error remedy table: that would be a second copy of
+#: `cmdshape._deny_shell_grammar` to drift out of step with it.
 SET_PHASES_REFUSED: Final = """\
 That is the right command, but this spelling of it was refused: {error}
 
-The descriptions are read as shell words, so one cannot contain a backtick or a "$" -- both
-are command substitution. Rewrite them as plain prose, drop any code formatting, and run it
-again:
+Fix that one thing and run it again:
 
     {plugin_root}/scripts/arl.sh set-phases --phase "…" --phase "…"
 
-The wording is yours to choose; only the characters are constrained. Nothing else about the
-activation has changed, and no attempt has been counted against you.
+{constraints}
+Nothing else about the activation has changed, and no attempt has been counted against you.
 """
 
 SET_PHASES_ALLOWED: Final = "adversarial-review-loop: set-phases is the one command allowed before the phase list is frozen."
@@ -623,7 +630,10 @@ def _deny_set_phases_shape(hook: Hook, *, tool: str, command: str) -> None:
 
     refusal = cmdshape.set_phases_refusal(command, commands.entrypoint())
     if refusal:
-        hooks.deny(hook, SET_PHASES_REFUSED.format(error=refusal, plugin_root=commands.plugin_root()))
+        hooks.deny(
+            hook,
+            SET_PHASES_REFUSED.format(error=refusal, plugin_root=commands.plugin_root(), constraints=hooks.PHASE_CONSTRAINTS),
+        )
 
 
 def _verified_plan_file(hook: Hook, *, state: State, config: Config) -> str:
@@ -707,7 +717,15 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
         if tool == "Bash" and cmdshape.is_set_phases(command, commands.entrypoint()):
             hook.allow(SET_PHASES_ALLOWED)
         _deny_set_phases_shape(hook, tool=tool, command=command)
-        hooks.deny(hook, PHASES_NOT_FROZEN.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file))
+        hooks.deny(
+            hook,
+            PHASES_NOT_FROZEN.format(
+                act_dir=state.act_dir,
+                plugin_root=commands.plugin_root(),
+                plan_file=plan_file,
+                constraints=hooks.PHASE_CONSTRAINTS,
+            ),
+        )
 
     if status == "ACTIVE" and state.get("replan_pending") == "true":
         # Same fence as ARMED, and for the same reason: a phase list that can be rewritten
@@ -718,7 +736,15 @@ def _gate(hook: Hook, payload: HookInput, *, state: State, config: Config, repo:
         if tool == "Bash" and cmdshape.is_set_phases(command, commands.entrypoint()):
             hook.allow(SET_PHASES_ALLOWED_REPLAN)
         _deny_set_phases_shape(hook, tool=tool, command=command)
-        hooks.deny(hook, REPLAN_PENDING.format(act_dir=state.act_dir, plugin_root=commands.plugin_root(), plan_file=plan_file))
+        hooks.deny(
+            hook,
+            REPLAN_PENDING.format(
+                act_dir=state.act_dir,
+                plugin_root=commands.plugin_root(),
+                plan_file=plan_file,
+                constraints=hooks.PHASE_CONSTRAINTS,
+            ),
+        )
 
     if tool != "Bash":
         _guard_state_root(hook, payload)

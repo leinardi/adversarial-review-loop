@@ -162,16 +162,26 @@ progress. Both are benign; neither can turn into an approval.
 The `set-phases` command is the one thing allowed to run while the phase list is unfrozen,
 so the gate reads it with the same tokenizer it applies to a commit — and that tokenizer
 refuses a backtick or a `$` anywhere in the command, quoted or not, because both are command
-substitution to the shell and this is the one moment when nothing else may run at all.
+substitution to the shell and this is the one moment when nothing else may run at all. It
+also refuses a newline, so the whole command has to be one line however many phases it
+carries.
 
 A phase description is prose, and prose about code reaches for exactly those characters:
 ``add `greet.py` `` or `return f"hello {name}"` are the natural way to write a phase. The
-refusal is deliberate and stays, but it now **names the character**, so the freeze can be
-retried with the formatting dropped:
+refusal is deliberate and stays, so the constraint is stated **before** the descriptions are
+written — spliced into the arm banner, both resume banners, and the "phases are not frozen"
+denials from `hooks.PHASE_CONSTRAINTS` — rather than only after a freeze has already been
+refused once:
 
 ```text
 ...arl.sh set-phases --phase "add greet.py" --phase "cover greet with a test"
 ```
+
+When a freeze is refused anyway, the denial quotes the tokenizer's own reason and nothing
+else. It used to follow that reason with a fixed paragraph explaining the refusal as a
+backtick or a `$`, which a command refused for spanning multiple lines was told to act on —
+a remedy for characters its command did not contain. The general rules still appear, labelled
+as general; which one was broken is left to the quoted error.
 
 Quotes inside a description are fine — `--phase "make it return \"hello\""` is one shell
 word and always was one to bash. The deny scan used to read the `\"` as closing the quote

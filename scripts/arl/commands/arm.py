@@ -42,6 +42,7 @@ from typing import Final
 from arl import commands, gitsnap, guide, harness, paths, planrev, reviewer_probe
 from arl import config as config_module
 from arl.atomic import ensure_private_dir, locked, write_private_atomic
+from arl.commands import hooks
 from arl.config import Config
 from arl.state import State, pointer_read, pointer_write
 from arl.util import now, stdin_argument
@@ -613,6 +614,7 @@ Do this first, and nothing else:
 
        {commands.plugin_root()}/scripts/arl.sh set-phases --phase "…" --phase "…"
 
+{hooks.PHASE_CONSTRAINTS}
 After that the loop is: implement phase N -> `git add -A && git commit -m "…"`.
 The commit is intercepted, the working tree goes to the reviewer named above, and the
 commit only proceeds when the review passes. Findings come back as a denial with
