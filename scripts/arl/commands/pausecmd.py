@@ -250,7 +250,7 @@ def _what_happens_next(*, phase: int, target: int, total: int, unresolved: bool)
             "activation as usual; there is no pause to resume from. To stop earlier, pause on an earlier phase.\n"
         )
     lead = "Once that is resolved, the loop" if unresolved else "The loop"
-    resume = "\nContinue later with /adversarial-review-loop:resume --until 0 (or --until M for a further target).\n"
+    resume = "\nContinue later with /adversarial-review-loop:resume, which clears the target (or --until M for a further one).\n"
     if target == phase:
         return (
             f"{lead} finishes the phase it is on (phase {phase} of {total}), commits it as usual, and then ends the "

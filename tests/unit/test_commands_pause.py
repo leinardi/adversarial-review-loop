@@ -117,7 +117,7 @@ def test_a_target_on_the_last_phase_says_it_changes_nothing(git_repo: Path, tmp_
     assert code == 0, out
     assert "the last one, so this changes nothing on its own" in out
     assert "no pause to resume from" in out
-    assert "resume --until 0" not in out
+    assert "Continue later with /adversarial-review-loop:resume" not in out
     assert read_state(env, git_repo, SESSION)["stop_after_phase"] == 2
 
 
@@ -129,7 +129,7 @@ def test_an_ordinary_pause_offers_the_resume_that_undoes_it(git_repo: Path, tmp_
     code, out, _ = pause(git_repo, env)
 
     assert code == 0, out
-    assert "resume --until 0" in out
+    assert "Continue later with /adversarial-review-loop:resume, which clears the target" in out
     assert "no pause to resume from" not in out
 
 

@@ -125,17 +125,23 @@ $ continue
 
 With no argument it targets the phase in flight; `N` targets phase `N` (clamped to the last
 phase); `0` or `all` clears the target. Continue whenever you like with
-`/adversarial-review-loop:resume --until 0`.
+`/adversarial-review-loop:resume`.
 
-**A target that has been reached stays set, and that is not a one-off.** The Stop gate's
-check is `phase <= target`, and `phase` only ever increases, so once the phase pointer moves
-past the target it can never fire again — every later turn end takes the pause branch
-instead. A bare `resume` therefore continues the activation but keeps stopping at each turn
-end; clearing the target with `--until 0` (or naming a further one with `--until M`) is what
-restarts the loop. That stickiness is deliberate: the target is a user-only control
-precisely so Claude cannot move it, and a `resume` that quietly cleared it would make the
-most-run command discard the fence. Since it is easy to misread, both `status` and the resume
-banner mark a spent target as `already reached` rather than showing it like a pending one.
+**A target that has been reached stays set until the next `resume`.** The Stop gate's check
+is `phase <= target`, and `phase` only ever increases, so once the phase pointer moves past
+the target it can never fire again — every later turn end takes the pause branch instead.
+Since that is easy to misread, both `status` and the resume banner mark a spent target as
+`already reached` rather than showing it like a pending one.
+
+**A resume clears the target unless `--until N` names one.** It applies to a target still
+ahead as much as to a spent one: one rule, not a default that depends on the state it is
+read from. The alternative — inheriting it — made `resume` a no-op for exactly the person
+who ran it to carry on, since the target that is spent is the one they are trying to get
+past, and every later turn end kept pausing. The user-only property the target exists for
+is untouched by this: `resume` is `disable-model-invocation: true` and its Bash route is
+denied to Claude, so moving the target still takes a person typing the command. Clearing a
+target that had *not* been reached yet is the one case worth a word, so the banner says so
+in a `Note:` — dropping a fence the user set should never be silent.
 
 Telling Claude "pause after this phase" in plain prose does **not** work: the target is
 user-only, Claude has no route to it, and the Stop gate will keep sending it back into the

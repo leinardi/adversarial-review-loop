@@ -351,9 +351,10 @@ activation is still ARMED. Next up, phase {phase} of {total}:
 
     {description}
 
-The target has been passed, so every turn end pauses here until you name a new one. Continue \
-with /adversarial-review-loop:resume --until 0 to run to the end of the plan, or --until M to \
-stop again at phase M. Or finish the whole plan now with /adversarial-review-loop:finish.
+The target has been passed, so every turn end pauses here until the next resume clears it. \
+Continue with /adversarial-review-loop:resume, which runs to the end of the plan, or \
+--until M to stop again at phase M. Or finish the whole plan now with \
+/adversarial-review-loop:finish.
 """
 
 COMPLETE: Final = """\

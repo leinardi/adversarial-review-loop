@@ -813,7 +813,7 @@ class State:
             return "none"
         shown = f"{target} of {self.phase_count()}"
         if self.get_int("phase") > target:
-            return f"{shown} (already reached -- pass --until 0 to clear it, or --until M for a further target)"
+            return f"{shown} (already reached -- the next resume clears it, or --until M sets a further target)"
         return shown
 
     def tree_approved(self, tree: str) -> bool:

@@ -689,7 +689,7 @@ def test_pause_target_display_once_the_target_is_spent(state_env: dict[str, str]
 
     A spent target reads exactly like a pending one without this, while meaning the
     opposite: not "the loop will stop at 2" but "the loop has stopped at 2 and will keep
-    stopping until you pass --until".
+    stopping until the next resume clears the target".
     """
     st = state.State(WORKTREE, SESSION)
     st.new()
@@ -699,7 +699,7 @@ def test_pause_target_display_once_the_target_is_spent(state_env: dict[str, str]
 
     assert shown.startswith("2 of 3 ")
     assert "already reached" in shown
-    assert "--until 0" in shown
+    assert "the next resume clears it" in shown
 
 
 def test_escalation_persists_immediately(state_env: dict[str, str]) -> None:

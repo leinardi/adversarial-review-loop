@@ -1,6 +1,6 @@
 ---
 name: resume
-description: Continue an already-armed adversarial-review-loop plan in a new session (or adjust the pause target, model, or plan in this one), without losing the original baseline or any approvals already recorded.
+description: Continue an already-armed adversarial-review-loop plan in a new session (or adjust the model or plan in this one), without losing the original baseline or any approvals already recorded. Runs to the end of the plan unless --until N sets a pause target.
 argument-hint: "[--until N] [--plan <path>] [--guide <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]"
 disable-model-invocation: true
 user-invocable: true
@@ -37,7 +37,7 @@ The gate's hooks are registered by the plugin itself, in every Claude Code sessi
    ```
 
    The commit is intercepted and reviewed exactly as under `/adversarial-review-loop:implement`.
-7. **If a pause target is set** (the banner names it), stop and report to the user once you reach it — do not continue past it on your own.
+7. **If a pause target is set** (the banner names it — only `--until N` sets one, since a resume otherwise runs to the end of the plan), stop and report to the user once you reach it — do not continue past it on your own.
 8. **When all phases are committed, end your turn.** The Stop gate sweeps anything unreviewed and then completes the activation. If `final_review` is enabled — by default it is not — it first runs a cumulative review over the whole activation, from the *original* baseline to `HEAD`.
 
 ## Rules while the mode is active
