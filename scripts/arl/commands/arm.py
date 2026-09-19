@@ -605,7 +605,8 @@ def _armed_message(request: _Request, frozen: _Frozen) -> str:
 
 Do this first, and nothing else:
 
-1. Read the frozen plan.
+1. Read the frozen plan, with the Read tool rather than `cat` -- it sits outside
+   the repository, and Bash is denied here until step 3 has run.
 2. Split it into the smallest sensible sequence of phases, each of which ends in
    one commit.
 3. Run exactly this, one `--phase` per phase, in order:

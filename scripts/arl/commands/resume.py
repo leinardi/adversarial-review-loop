@@ -1324,13 +1324,14 @@ def _banner(*, state: State, identity: _Identity, decision: _Decision) -> str:
 
     if state.get("status") == "ARMED":
         next_steps = (
-            "Phases are not frozen yet. Read the frozen plan named above and run:\n\n"
+            "Phases are not frozen yet. Read the frozen plan named above -- with the Read tool, not `cat`: it is\n"
+            "outside the repository, and Bash is denied until the command below has run. Then run:\n\n"
             f'    {commands.plugin_root()}/scripts/arl.sh set-phases --phase "…" --phase "…"\n'
         )
     elif state.get("replan_pending") == "true":
         next_steps = (
             f"--replan was granted: redefine phases {phase}..{total or '?'} only (phase {phase - 1} and earlier are "
-            "immutable and stay as they are). Read the frozen plan named above and run:\n\n"
+            "immutable and stay as they are). Read the frozen plan named above -- with the Read tool, not `cat` -- and run:\n\n"
             f'    {commands.plugin_root()}/scripts/arl.sh set-phases --phase "…" --phase "…"\n\n'
             f"one --phase per phase, from {phase} onward. Every other mutation is denied until that command has run."
         )

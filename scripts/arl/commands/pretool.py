@@ -138,25 +138,35 @@ If you believe one of them should run, say so and let the user run /adversarial-
 PHASES_NOT_FROZEN: Final = """\
 The phase list has not been frozen yet, so nothing may be changed.
 
-Read the frozen plan ({act_dir}/{plan_file}), then run exactly:
+Read the frozen plan with the Read tool -- not `cat` or any other Bash:
+
+    {act_dir}/{plan_file}
+
+It sits outside the repository, which does not matter: Read, Grep and Glob are
+allowed here on any path, and that one set-phases command is the only Bash this
+gate accepts until it has run. Then run exactly:
 
     {plugin_root}/scripts/arl.sh set-phases --phase "…" --phase "…"
 
-one --phase per phase, in order. Reading the repository with Read, Grep and Glob
-is allowed; that one command is the only Bash this gate accepts until it has run.
+one --phase per phase, in order.
 """
 
 REPLAN_PENDING: Final = """\
 A resume granted permission to redefine the remaining phases, but that has not happened yet,
 so nothing may be changed.
 
-Read the current frozen plan ({act_dir}/{plan_file}), then run exactly:
+Read the current frozen plan with the Read tool -- not `cat` or any other Bash:
+
+    {act_dir}/{plan_file}
+
+It sits outside the repository, which does not matter: Read, Grep and Glob are allowed
+here on any path, and that one set-phases command is the only Bash this gate accepts
+until it has run. Then run exactly:
 
     {plugin_root}/scripts/arl.sh set-phases --phase "…" --phase "…"
 
 replacing only the phases from the current one onward -- phases already committed are
-immutable and are kept automatically. Reading the repository with Read, Grep and Glob is
-allowed; that one command is the only Bash this gate accepts until it has run.
+immutable and are kept automatically.
 """
 
 SET_PHASES_REFUSED: Final = """\

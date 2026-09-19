@@ -183,7 +183,12 @@ STALE_ESCALATION: Final = (
 NOT_FROZEN: Final = """\
 adversarial-review-loop: the phase list has not been frozen, so no work can start and no review has run.
 
-Read the frozen plan ({act_dir}/{plan_file}) and run exactly:
+Read the frozen plan with the Read tool, not `cat` -- it is outside the repository, but
+Read works on any path and Bash does not, until set-phases has run:
+
+    {act_dir}/{plan_file}
+
+Then run exactly:
 
     {plugin_root}/scripts/arl.sh set-phases --phase "…" --phase "…"
 """
