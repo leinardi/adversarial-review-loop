@@ -27,6 +27,26 @@ jobs:
       - name: Run self-tests
         run: make test
 
+  test-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          brew install jq
+          python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Run self-tests
+        run: make test
+
   actionlint:
     # Reports inline PR review comments over a diff range; a manual dispatch has
     # neither a pull request to comment on nor a base ref to diff against.
