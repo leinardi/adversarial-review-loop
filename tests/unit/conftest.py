@@ -46,6 +46,10 @@ FAKE_REVIEWER = PLUGIN_ROOT / "tests" / "fixtures" / "fake-reviewer.sh"
 #: shell in ``bash_glob_many``; a pair nobody pre-declared still forks its own.
 _BASH_GLOB_MEMO: dict[tuple[str, str], bool] = {}
 
+# Range ordering must not inherit the runner's locale, while LC_CTYPE must remain UTF-8 so
+# `?` and plain bracket members continue to treat a non-ASCII code point as one character.
+_BASH_GLOB_ENV = {key: value for key, value in os.environ.items() if key != "LC_ALL"} | {"LC_COLLATE": "C"}
+
 
 def bash_glob_many(pairs: Iterable[tuple[str, str]]) -> None:
     """Resolve every pair in one bash and memoise the verdicts.
@@ -57,7 +61,7 @@ def bash_glob_many(pairs: Iterable[tuple[str, str]]) -> None:
     if not wanted:
         return
     payload = b"".join(f"{path}\0{glob}\0".encode() for path, glob in wanted)
-    proc = subprocess.run([str(BASH_GLOB), "--batch"], input=payload, capture_output=True, check=True)
+    proc = subprocess.run([str(BASH_GLOB), "--batch"], input=payload, capture_output=True, check=True, env=_BASH_GLOB_ENV)
     verdicts = proc.stdout.decode().split("\n")[:-1]
     assert len(verdicts) == len(wanted), f"bash answered {len(verdicts)} of {len(wanted)} pairs"
     for pair, verdict in zip(wanted, verdicts, strict=True):
@@ -75,7 +79,7 @@ def bash_glob(path: str, glob: str) -> bool:
     cached = _BASH_GLOB_MEMO.get((path, glob))
     if cached is not None:
         return cached
-    matched = subprocess.run([str(BASH_GLOB), path, glob], capture_output=True, check=False).returncode == 0
+    matched = subprocess.run([str(BASH_GLOB), path, glob], capture_output=True, check=False, env=_BASH_GLOB_ENV).returncode == 0
     _BASH_GLOB_MEMO[path, glob] = matched
     return matched
 

@@ -34,10 +34,11 @@ Two constructs are **deliberately not reproduced, and never match**:
   library from the active locale, and no Python predicate reproduces those tables. Measured
   under ``it_IT.UTF-8``: bash says U+0661, the Arabic-Indic digit one, is ``[[:alpha:]]``
   and not ``[[:punct:]]``, where Python's ``str`` predicates say the opposite of both; U+0085 is
-  ``[[:space:]]`` to Python and not to bash. So a class or range decides only **ASCII**
-  characters, where every locale agrees with POSIX and the test suite checks all 127 against
-  bash. A non-ASCII character reaching a class or range -- or a range with a non-ASCII
-  endpoint, whose ordering is collation and not code points -- makes the pattern unmatchable.
+  ``[[:space:]]`` to Python and not to bash. Classes therefore use the fixed POSIX ASCII
+  sets, and ASCII ranges use code-point order -- the platform-independent answer bash gives
+  under C collation. The test suite checks all 127 ASCII characters against that oracle. A
+  non-ASCII character reaching a class or range -- or a range with a non-ASCII endpoint,
+  whose ordering is collation and not code points -- makes the pattern unmatchable.
 
 Both refusals point the same way, and that is the property to preserve: **a pattern whose
 meaning cannot be reproduced matches nothing**, so it can only cause a review that bash
@@ -83,8 +84,8 @@ _Item = tuple[int, object]
 #: POSIX character classes, spelled out over ASCII.
 #:
 #: Written as explicit sets rather than as ``str.isalpha`` and friends because only ASCII
-#: ever reaches them -- anything else is refused above -- and over ASCII every locale agrees
-#: with POSIX, which makes these exact rather than approximate. Python's own predicates are
+#: ever reaches them -- anything else is refused above -- and these are the fixed POSIX ASCII
+#: definitions, which makes them exact rather than approximate. Python's own predicates are
 #: *not* the same answer: ``"\x1c".isspace()`` is true and ``isspace(0x1c)`` is false in C,
 #: and each class here is checked against bash for all 127 characters.
 _ALPHA: Final = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"

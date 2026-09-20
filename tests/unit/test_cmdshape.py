@@ -190,13 +190,12 @@ def test_the_split_into_tokens(command: str, expected: list[str]) -> None:
 
 
 def test_a_trailing_backslash_is_refused_rather_than_guessed_at() -> None:
-    """Two implementations, two readings of ``git commit -m x\\`` -- so it is denied.
+    """Shell versions and bashlex disagree on ``git commit -m x\\`` -- so it is denied.
 
-    A real bash keeps the backslash and runs the commit with the message ``x\\``. bashlex
-    calls it an unexpected EOF. A command whose words are in dispute is exactly what this
-    gate must not wave through: the reviewed message and the committed message would differ.
+    Modern bash keeps the backslash, while macOS's bash 3.2 drops it; bashlex calls it an
+    unexpected EOF. A command whose words are in dispute is exactly what this gate must not
+    wave through: the reviewed message and the committed message could differ.
     """
-    assert _bash_words("x\\") == ["x\\"]
     with pytest.raises(CommandShapeError, match="not valid shell syntax"):
         cmdshape.tokenize("git commit -m x\\")
 
