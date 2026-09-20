@@ -2,8 +2,8 @@
 
 ``ignore_globs`` decides whether a review is skipped, so a matcher that is merely
 "close enough" to ``[[ $p == $g ]]`` is a way for code to reach a commit unreviewed. Every
-case below is checked against bash itself; the hand-written expectations exist so that a
-disagreement points at which of the two is wrong.
+stable case below is checked against bash itself under C collation; the hand-written
+expectations own the two semantics where bash 3.2 and modern bash disagree.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -122,11 +122,23 @@ STATED = [
     ("docs/nested/guide.md", "docs/*", True),
 ]
 
+# macOS ships bash 3.2, whose pattern semantics differ from modern bash for these pairs.
+# Fixed expectations above keep plugin behavior platform-independent; modern bash remains
+# the differential oracle whenever the host provides it.
+_BASH_32_DIFFERENCES = {("a\\", "a\\"), ("x", "[^[:bogus:]]")}
+
+
+def _assert_bash_agrees(path: str, glob: str, expected: bool) -> None:
+    actual = bash_glob(path, glob)
+    if actual is not expected and (path, glob) in _BASH_32_DIFFERENCES:
+        pytest.skip("host bash uses its legacy pattern semantics for this pair")
+    assert actual is expected, "bash disagrees with the expectation itself"
+
 
 @pytest.mark.parametrize(("path", "glob", "expected"), STATED)
 def test_stated_cases(path: str, glob: str, expected: bool) -> None:
     assert globmatch.matches(path, glob) is expected
-    assert bash_glob(path, glob) is expected, "bash disagrees with the expectation itself"
+    _assert_bash_agrees(path, glob, expected)
 
 
 # A cross product, to catch the cases nobody thought to state.
@@ -187,7 +199,8 @@ GLOBS = [
 
 @pytest.mark.parametrize(("path", "glob"), list(itertools.product(PATHS, GLOBS)))
 def test_every_pair_agrees_with_bash(path: str, glob: str) -> None:
-    assert globmatch.matches(path, glob) is bash_glob(path, glob)
+    expected = globmatch.matches(path, glob)
+    _assert_bash_agrees(path, glob, expected)
 
 
 # -- the invariant that matters --------------------------------------------
@@ -236,7 +249,7 @@ def test_a_review_is_never_skipped_where_bash_would_review(path: str, glob: str)
     are handled deliberately.
     """
     if globmatch.matches(path, glob):
-        assert bash_glob(path, glob), f"{glob!r} matches {path!r} here but not in bash: a review would be skipped"
+        _assert_bash_agrees(path, glob, True)
 
 
 # -- extended globs: honoured by bash unconditionally, refused here --------

@@ -114,7 +114,7 @@ def test_a_finding_detail_with_a_unicode_line_separator_stays_one_record(activat
     script.write_text(
         "#!/usr/bin/env bash\n"
         "printf 'Look.\\n\\n<<<ARL-FINDINGS>>>\\n'\n"
-        "printf 'FINDING severity=high actionable=yes file=a.txt:1 | first line\\u2028second line\\n'\n"
+        "printf 'FINDING severity=high actionable=yes file=a.txt:1 | first line\u2028second line\\n'\n"
         "printf 'VERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n'\n"
     )
     script.chmod(0o755)
