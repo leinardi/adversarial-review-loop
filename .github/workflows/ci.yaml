@@ -11,6 +11,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -29,6 +30,7 @@ jobs:
 
   test-macos:
     runs-on: macos-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -39,10 +41,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install test dependencies
+      # Most tests invoke the hook shim. Stock macOS has no timeout(1), so without
+      # coreutils each invocation starts the slower Perl watchdog instead.
+      - name: Install macOS test tools
         run: |
-          brew install jq
-          python -m pip install --disable-pip-version-check -r requirements-dev.txt
+          command -v jq >/dev/null || brew install jq
+          brew install coreutils
+          command -v gtimeout
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
 
       - name: Run self-tests
         run: make test
