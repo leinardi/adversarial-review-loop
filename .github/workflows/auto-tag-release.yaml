@@ -16,7 +16,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 2
 
@@ -39,23 +39,64 @@ jobs:
             echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
           fi
 
+      # Each stage checks what an earlier attempt left behind and does only what is missing, so
+      # re-running a failed run finishes the release: a tag pushed by a run that then failed to
+      # create the release no longer blocks it.
       - name: Tag and release
         if: steps.detect.outputs.bumped == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.detect.outputs.version }}
-          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           # The `<plugin-name>--v<version>` shape is what Claude Code's plugin dependency
           # resolver looks for, and is what `claude plugin tag` produces. See .cz.toml.
-          TAG="adversarial-review-loop--v$VERSION"
-          if gh api "repos/$REPOSITORY/git/refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "$TAG already exists - skipping (safe re-run)."
+          PREFIX="adversarial-review-loop--v"
+          TAG="$PREFIX$VERSION"
+
+          # 1. The tag: create it, or check that an existing one marks this commit. Tags are
+          # immutable, so a tag on another commit is a stop, not something to move.
+          REMOTE=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")
+          if [ -z "$REMOTE" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "adversarial-review-loop $VERSION"
+            git push origin "refs/tags/$TAG"
+            # The API can lag a moment behind a tag push, and `gh release create` then refuses the
+            # tag as unpushed (opencode-swap's 0.4.3 release failed on exactly that). Wait until
+            # the API serves it.
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+              if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+                break
+              fi
+              sleep 3
+            done
+          else
+            # An annotated tag lists the commit it marks as `<tag>^{}`; a lightweight one only
+            # has the plain ref, which is the commit itself.
+            TAGGED=$(printf '%s\n' "$REMOTE" | awk -v peeled="refs/tags/$TAG^{}" '$2 == peeled { print $1 }')
+            if [ -z "$TAGGED" ]; then
+              TAGGED=$(printf '%s\n' "$REMOTE" | awk '{ print $1; exit }')
+            fi
+            if [ "$TAGGED" != "$GITHUB_SHA" ]; then
+              echo "$TAG already exists on $TAGGED, not on this commit ($GITHUB_SHA)." >&2
+              exit 1
+            fi
+            echo "$TAG already marks this commit."
+          fi
+
+          # 2. The release. A bump to a version lower than the highest release (a fix for an
+          # older line) must not take GitHub's Latest badge from it.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "The $TAG release already exists."
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "adversarial-review-loop $VERSION"
-          git push origin "$TAG"
-          gh release create "$TAG" --title "v$VERSION" --generate-notes
+          HIGHEST=$(git ls-remote --tags --refs origin "refs/tags/$PREFIX*" \
+            | sed -n "s|^[0-9a-f]*[[:space:]]*refs/tags/$PREFIX||p" \
+            | grep -E '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+            | sort -V | tail -n 1)
+          LATEST=false
+          if [ "$HIGHEST" = "$VERSION" ]; then
+            LATEST=true
+          fi
+          gh release create "$TAG" --verify-tag --title "v$VERSION" --generate-notes --latest="$LATEST"

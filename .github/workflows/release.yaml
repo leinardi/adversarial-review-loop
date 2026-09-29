@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# Two releases at once would race for the same bump branch and version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   bump:
     runs-on: ubuntu-latest
@@ -20,14 +25,23 @@ jobs:
       # for why it is still there even though it currently duplicates a run.
       actions: write
     steps:
-      - uses: actions/checkout@v7
+      # The bump branch is cut from the dispatched ref; from any other branch it would release
+      # commits that are not on main. A failing step, not a job-level `if`, so a wrong dispatch
+      # shows up red instead of as a skipped, green run.
+      - name: Refuse to release from a branch other than main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "Dispatch the release from main, not $GITHUB_REF." >&2
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # commitizen's scm version provider reads the current version from the highest
           # matching git tag, so the tags have to be fetched, not just the history.
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -42,8 +56,8 @@ jobs:
           set -euo pipefail
           if [ -n "$RAW" ]; then
             VERSION="${RAW#v}"
-            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "Version must look like X.Y.Z (got '$RAW')" >&2
+            if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "Version must look like X.Y.Z, without leading zeros (got '$RAW')" >&2
               exit 1
             fi
           else
@@ -71,7 +85,17 @@ jobs:
                 ;;
             esac
           fi
-          echo "Releasing $VERSION"
+          # An explicit version skips commitizen's own check, so compare it here: a version at or
+          # below the latest release would tag a release older than the one users already have.
+          # The derived one is always higher. commitizen reads the current version from the
+          # highest release tag (.cz.toml), and reports 0.0.0 when there is none.
+          CURRENT=$(cz version --project)
+          HIGHEST=$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -n 1)
+          if [ "$VERSION" = "$CURRENT" ] || [ "$HIGHEST" != "$VERSION" ]; then
+            echo "$VERSION is not higher than the latest release, $CURRENT." >&2
+            exit 1
+          fi
+          echo "Releasing $VERSION (latest release: $CURRENT)"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Bump the version in plugin.json
@@ -135,10 +159,10 @@ jobs:
       # stop a GITHUB_TOKEN-authored pull request from firing `pull_request`, which would
       # leave the release PR with no CI at all - that is what this dispatch is insurance
       # against. Measured on PR #5 (run 33443605671) it fired anyway, with all eight
-      # contexts, so this produces a second run that executes only `test` (every other job
-      # in ci.yaml is gated on the event being a pull_request). Keep it until the automatic
-      # run has proven reliable across a few releases, then drop it and `actions: write`
-      # with it.
+      # contexts, so this produces a second run that executes only `test`, `test-macos` and
+      # `conventional-commits` (every other job in ci.yaml is gated on the event being a
+      # pull_request). Keep it until the automatic run has proven reliable across a few
+      # releases, then drop it and `actions: write` with it.
       - name: Trigger CI checks on the bump branch
         env:
           GH_TOKEN: ${{ github.token }}
