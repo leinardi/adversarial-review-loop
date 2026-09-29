@@ -232,7 +232,18 @@ A new reviewer CLI is a new module under `scripts/arl/harness/` plus one line in
 
 ### Commits
 
-Conventional Commits with a mandatory scope (`conventional-pre-commit --force-scope`), e.g. `fix(cmdshape): reject git commit --only`.
+All commits MUST be Conventional Commits 1.0.0 **with a scope**: `<type>(<scope>)[!]: <description>`, optional blank-line body and footers. Enforced by the `conventional-pre-commit` `commit-msg` hook (`--force-scope`) and by the `conventional-commits` CI job. Types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`, `style`, `revert`. Breaking changes use `!` before `:` or a `BREAKING CHANGE:` footer. Release notes are not built from these messages: `gh release create --generate-notes` lists the merged pull requests by title. Example: `fix(cmdshape): reject git commit --only`.
+
+A release with no explicit version is derived by commitizen (`cz bump --get-next`, configured in `.cz.toml`) from the commits since the last release tag, so a wrong type ships a wrong version:
+
+| Release | Commit | Example |
+| --- | --- | --- |
+| major | any type with `!` before the colon, or a `BREAKING CHANGE:` footer | `feat(config)!: rename the block_severity key` |
+| minor | `feat` | `feat(harness): add a reviewer harness` |
+| patch | `fix`, `perf`, `refactor` | `fix(cmdshape): reject git commit --only` |
+| none | everything else: `build`, `chore`, `ci`, `docs`, `style`, `test`, `revert` | `docs(design): explain the watchdog layers` |
+
+The highest bump among the commits wins; with only "none" commits since the last tag, a release with no version fails with "nothing to bump". commitizen counts `perf` and `refactor` as a patch, so either one is enough to make a release on its own. A `revert` of a shipped `feat` or `fix` bumps nothing; type it `fix` when the revert should ship. PRs land as merge commits, so every commit counts, not just the PR title. See [`docs/release.md`](docs/release.md).
 
 ### The install cache, and what it means for iterating
 
