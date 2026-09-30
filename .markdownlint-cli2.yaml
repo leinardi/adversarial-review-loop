@@ -9,6 +9,7 @@ config:
   no-inline-html: false
   ul-indent:
     indent: 4
+
   no-duplicate-heading:
     siblings_only: true
 
@@ -28,15 +29,6 @@ fix: true
 
 # Ignore files referenced by .gitignore (only valid at root)
 gitignore: true
-
-# Ignore third-party skills tracked in skills-lock.json.
-ignores:
-  - .agents/skills/create-adaptable-composable/**
-  - .agents/skills/fallow/**
-  - .agents/skills/vue-best-practices/**
-  - .agents/skills/vue-debug-guides/**
-  - .agents/skills/vue-router-best-practices/**
-  - .agents/skills/vue-testing-best-practices/**
 
 # Disable banner message on stdout (only valid at root)
 # noBanner: true

@@ -223,6 +223,14 @@ Check whenever affected direct or indirect:
   for `posttool-failure`. Hung bashlex parse must still deny before host hook
   timeout, via both in-process `signal.setitimer` deadline and shim's outer
   `timeout`.
+- **Release and CI stay reconcilable and pinned.** `docs/release.md` = contract.
+  `auto-tag-release.yaml` must finish on re-run: create tag only if missing,
+  fail (never move) if tag marks other commit, create release only if missing,
+  `--latest` only for highest version. Explicit release version must exceed
+  latest tag. Workflows `contents: read` at top, extra permission per job with
+  reason. Every action pinned to full SHA + `# vX.Y.Z`; workflow inputs reach
+  shell via `env:`, never `${{ }}` inside `run:`. `conventional-commits` job
+  must keep running on `workflow_dispatch` (bump PR depend on it).
 
 ## 4. Adversarial passes
 
