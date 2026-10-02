@@ -531,7 +531,7 @@ class Unbound:
     status: str
 
 
-def unbound_activation(cwd: str) -> Unbound | None:
+def unbound_activation(cwd: str, *, repo: str = "") -> Unbound | None:
     """The live activation guarding ``cwd``'s repository, for a session with no pointer (**Rule 0**).
 
     The hooks register at plugin load, so a hook entrypoint runs in *every* session -- the
@@ -550,11 +550,16 @@ def unbound_activation(cwd: str) -> Unbound | None:
     ``None`` means "nothing to enforce". Anything else is a reason to deny, and nothing is
     written: the activation belongs to another session, and its document is not this
     session's to touch.
+
+    ``repo`` is ``cwd``'s repository when the caller already resolved it the same way
+    (``resolve_repo``), so a bound session outside its own worktree pays one ``git rev-parse``
+    rather than two. Empty means "resolve it here".
     """
-    try:
-        repo = paths.repo_root_or_raise(cwd)
-    except RepoResolutionError as exc:
-        return Unbound(repo=cwd, session="", status=f"unresolvable ({exc})")
+    if not repo:
+        try:
+            repo = paths.repo_root_or_raise(cwd)
+        except RepoResolutionError as exc:
+            return Unbound(repo=cwd, session="", status=f"unresolvable ({exc})")
     if not repo:
         return None
     session = commands.latest_session(repo)
