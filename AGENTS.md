@@ -48,6 +48,7 @@ Read the note before changing the paths in its row — the index below states ea
 | `commands/pretool.py` `_review_failed`, `_check_retry_backoff`; `commands/posttool.py` `_advance` | [`state-fields.md`](docs/design/state-fields.md) |
 | `commands/resume.py` `_refuse_if_the_overlay_moved`, `commands/arm.py` overlay writes | [`config-overlay.md`](docs/design/config-overlay.md) |
 | `commands/arm.py` `exclude_digest` capture, `gitsnap.exclude_digest` | [`resume-and-retirement.md`](docs/design/resume-and-retirement.md) |
+| `hooks/register.js`, `hooks/hooks.json` `modules`, `commands/session.py` `status --json` (`_status_document`, `_ended_alert`) | [`mod.md`](docs/design/mod.md) |
 
 ## Invariant index
 
@@ -133,6 +134,13 @@ Each line is a claim the code must keep true. `→ name` names its long form, [`
 - `late_block_severity` narrows *what blocks*: **every doubt disables the scope, none narrows it**, and deferred means "did not block this approval" — the next review of the same phase finds the path in `prior_files` and blocks. Anything replacing a `Review` after `parse` must carry the deferred lines with it. → `config-keys-rationale`
 - `max_session_rounds` only ever removes context, and `round` is read through `_pointer_round` in **both** readers because it is arithmetic on both sides of the cap. → `config-keys-rationale`
 
+### The display module
+
+- **The module never decides.** `hooks/register.js` hooks exactly `session.start`, `turn.start`, `turn.complete`, `tool.call` (`Bash`) and `ui.render` (`AbovePrompt`), passes every event on unchanged and answers none; never `tool.check`, `classic.*`, `command.*`, `prompt.*` or `.catch`. A module that fails is skipped and the call proceeds, which is exactly why it can be a display and never the gate. → `mod`
+- Its only process is the shim with `status --json --session`, and it draws only checked enums and integers. No `$.fs`, `$.store`, `$.state`, `$.env`, `$.http`, `$.model`, and no toast. → `mod`
+- `status --json` is **bound to the session it is given** (never `latest`), **reads only** (never `hooks.pending_intent`), and reports every failure as `binding: unknown`, never `unarmed`. Every alert is computed in Python; `_ended_alert` mirrors `stop._ended`. → `mod`
+- Stated width: a display for an honest agent. A hostile module earlier in the chain can falsify or suppress it. → `mod`
+
 ### The invocation path
 
 - **Never `python3 -m arl`, never a relative path.** `-m` puts the reviewed repository's `cwd` at `sys.path[0]`. The only sanctioned invocation is `python3 -I "$PLUGIN_ROOT/scripts/arl-bootstrap.py"`. → `interpreter-and-watchdog`
@@ -180,9 +188,13 @@ Each line is a claim the code must keep true. `→ name` names its long form, [`
 | `scripts/arl/guide.py` | the repo-supplied review guide: resolution, the arm-time refusals, freezing, re-verification, and composing it into a prompt |
 | `prompts/*.md` | the reviewer prompts — Claude writes none of this. The phase and final ones carry one `<!-- ARL:PROJECT-GUIDANCE -->` line, which `guide.compose` replaces with the frozen guide (or strips); nothing else is composed |
 | `skills/*/SKILL.md` | the nine slash commands; none registers a hook — `hooks/hooks.json` does, at plugin load |
+| `hooks/register.js` | the display module: the state band above the prompt and the alert lines. Decides nothing; `hooks/hooks.json` names it under `modules` |
+| `tsconfig.json` | extends the engine's generated `.claude-plugin/types/tsconfig.json` (loading the module writes this file when absent, and leaves an existing one alone) and turns on `checkJs` for `register.js` |
+| `eslint.config.cjs`, `scripts/typecheck-mod.sh` | the display module's lint and type check, run by the `eslint` and `typecheck-mod` pre-commit hooks |
 | `docs/design/` | the argument behind every line of the invariant index above — one note per topic |
 | `tests/selftest.sh` | the **shim** suite, and only that: interpreter probe, shim contract, watchdog layers, socket stdin, the hot path's process budget, one bootstrap smoke walk. Everything the gate *decides* is `tests/unit/`. Bash, because it runs outside the Python whose launch it tests |
 | `tests/unit/` | pytest unit tests for the Python modules. Shared fixtures and helpers are in `conftest.py`; the reviewer suite is `test_reviewer_<subsystem>.py` over the helpers in `reviewer_common.py`. A helper used by one other file is imported from the module that owns it (`test_commands_arm`, `test_commands_pretool`), which mypy allows only for a name that module actually defines |
+| `tests/mod/` | the display module's behavioural tests, run by `make test-mod` (`claude plugin test`); the static contract is `tests/unit/test_mod_contract.py` |
 | `tests/STEP0.md` | runbook for the assumptions only a live session can settle |
 | `tests/step0-fixture.sh` | builds the throwaway repo that runbook needs |
 
@@ -194,7 +206,8 @@ make test                    # full suite; no model is called
 make test-unit               # the pytest half only
 make test-accept             # tests/selftest.sh only (the shim)
 make test-filter FILTER=watchdog # one selftest section
-make check                   # pre-commit: shellcheck, markdownlint, yamllint, actionlint, ruff, mypy
+make test-mod                # the display module under `claude plugin test`; needs the claude binary
+make check                   # pre-commit: shellcheck, markdownlint, yamllint, actionlint, ruff, mypy, eslint, tsc
 make sync-pins               # propagate requirements-dev.txt into .pre-commit-config.yaml
 make dry-run                 # print the exact reviewer command and prompt without invoking it
 ARL_HARNESS=opencode make dry-run   # the same, for the other harness
@@ -209,6 +222,8 @@ straight from a checkout with no install step.
 pytest is pinned in two places — `requirements-dev.txt` and the `additional_dependencies` of the mypy hooks in `.pre-commit-config.yaml`, which is what gives mypy pytest's `py.typed`. Dependabot bumps the first and never the second, so `tests/unit/test_pins.py` fails when they drift. `make sync-pins` propagates `requirements-dev.txt` into the hook config; run it on a Dependabot bump and commit the result alongside.
 
 `make test` must pass before any commit. A change to the gate needs a test that **fails on the old code** — a test that only asserts a helper's return value while the end-to-end bypass survives is not a regression test.
+
+The display module's two hooks need no install: `eslint` and `typecheck-mod` run from the node environment pre-commit builds out of their pinned dependencies, and there is no `package.json`. `typecheck-mod` reads the API types Claude Code writes into `.claude-plugin/types/` when it loads the plugin from this checkout, so in a fresh clone it fails until that has happened once (its message gives the command), and CI does not run it.
 
 `make check` runs fix-capable hooks (markdownlint, prettier, end-of-file-fixer). Check `git status --short` afterwards so a formatter's edits are not mistaken for reviewed input.
 

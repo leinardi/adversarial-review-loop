@@ -81,7 +81,7 @@ On Claude Code 2.1.272 and later, a slash command's shell step runs only if Clau
 2. Run `/adversarial-review-loop:implement plan.md`. Arming happens before Claude gets a turn: the baseline and the plan are frozen, and the reviewer is probed for reachability.
 3. Claude splits the plan into phases and freezes the list. Every mutation is denied until it does.
 4. Claude implements phase 1 and runs `git add -A && git commit -m "…"`. That commit is intercepted, reviewed, and either allowed through or denied with the findings inline. Repeat until the phase passes, then on to phase 2.
-5. `/adversarial-review-loop:status` at any time; `/adversarial-review-loop:report [n]` for a review in full.
+5. `/adversarial-review-loop:status` at any time; `/adversarial-review-loop:report [n]` for a review in full. While the loop is armed, a band above the prompt shows its status, phase, round and failures, and an alert (an unreviewed commit, `NEEDS_HUMAN`, a state that cannot be read) appears as a line in the transcript. The band is a display only: if it fails, the gate is unaffected.
 
 Pause after phase 5 with `--until 5`, or mid-run with `/adversarial-review-loop:pause`. Pick a plan back up in a new session with `/adversarial-review-loop:resume`, which runs to the end of the plan unless you pass `--until N` again — never a second `implement`, which re-baselines and throws away every approval.
 

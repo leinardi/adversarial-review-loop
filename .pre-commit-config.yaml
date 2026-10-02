@@ -110,6 +110,28 @@ repos:
         additional_dependencies: ["prettier@3.7.4"]
         files: \.(yml|yaml)$
         args: ["--write"]
+      # The display module and its tests are the only JavaScript here, and pre-commit is the
+      # only development toolchain: these two hooks run from the node environment pre-commit
+      # builds out of their pinned dependencies, with no package.json and no npm step. TypeScript
+      # stays below 6.1 because typescript-eslint supports nothing newer.
+      - id: eslint
+        name: eslint
+        entry: eslint --max-warnings 0 hooks tests/mod
+        language: node
+        additional_dependencies: ["eslint@10.11.0", "@eslint/js@10.0.1", "typescript-eslint@8.71.0", "typescript@6.0.3"]
+        pass_filenames: false
+        files: ^(hooks/.*\.js|tests/mod/.*\.ts|eslint\.config\.cjs)$
+      # Checks against the API types Claude Code lays in .claude-plugin/types/ when it loads the
+      # plugin. They are not committed, so where they are absent this fails and says how to get
+      # them, rather than passing on code it never read. CI never has them, which is why this hook
+      # is not in the CI job's list.
+      - id: typecheck-mod
+        name: tsc (display module)
+        entry: scripts/typecheck-mod.sh
+        language: node
+        additional_dependencies: ["typescript@6.0.3"]
+        pass_filenames: false
+        files: ^(hooks/.*\.js|tests/mod/.*\.ts|tsconfig\.json)$
   - repo: https://github.com/adrienverge/yamllint
     rev: v1.38.0
     hooks:

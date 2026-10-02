@@ -94,12 +94,24 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The action's default list plus eslint, which needs nothing pre-commit cannot install
+      # itself. typecheck-mod is deliberately absent: it reads the API types Claude Code
+      # generates when it loads the plugin, and no runner has them.
       - name: Run pre-commit hooks + reviewdog diff
         uses: leinardi/gha-pre-commit-reviewdog-actions/pre-commit-hooks@68bf8e338b79df404181ceef655ae02f1c8edb8a # v1.0.2
         with:
           from-ref: ${{ github.event.pull_request.base.sha }}
           to-ref: ${{ github.event.pull_request.head.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          hooks: |
+            check-merge-conflict
+            end-of-file-fixer
+            trailing-whitespace
+            check-yaml
+            check-json
+            check-toml
+            check-added-large-files
+            eslint
 
   markdownlint:
     # Reports inline PR review comments over a diff range; a manual dispatch has
