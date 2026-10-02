@@ -1926,6 +1926,11 @@ def test_a_turn_ending_on_unreviewed_work_tells_the_user(
     assert "no review ever approved" in message
     assert "without passing the review gate" in message
     assert head in message, "the report names the HEAD it recorded, not whatever HEAD is now"
+    # The commit above ran outside any tool call, which is also how a mod's `$.process.run`
+    # lands one (STEP0 item 23): the explanation must not send the user looking for a Bash
+    # command that never ran.
+    assert "a Bash command Claude ran" in message
+    assert "outside Claude's tool calls" in message
 
 
 @pytest.mark.parametrize("status", _ENDED_HOLDING_UNREVIEWED_WORK)

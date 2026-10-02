@@ -227,7 +227,7 @@ state.json was edited by something other than this gate, so what the gate could 
 UNREVIEWED_AT_EXIT: Final = """\
 adversarial-review-loop: the mode is {status}, and when it ended ({at}) HEAD was {head}, whose tree {head_tree} no review ever approved.
 
-Work was committed in this worktree without passing the review gate. If you did not stop the mode yourself, it was ended from inside a Bash command — the gate cannot tell those apart, so it reports rather than acts.
+Work was committed in this worktree without passing the review gate. If you did not stop the mode yourself, something else did: a Bash command Claude ran, or a mod or other process acting outside Claude's tool calls. The gate cannot tell any of those apart, so it reports rather than acts.
 
 Commits made after the mode ended are ungated by design and are not what this reports.
 
@@ -643,9 +643,10 @@ def _ended(gate: _Gate, status: str) -> NoReturn:
     instead of the model, so relaying it is not the model's decision.
 
     This is the only place a Rule 4 escape becomes visible. A Bash command that commits and then
-    runs ``arl.sh deactivate`` leaves exactly this shape, and the gate cannot tell it from a user
-    who stopped the mode with work outstanding -- so it reports rather than acts, because
-    reverting would take an exit away from the user.
+    runs ``arl.sh deactivate`` leaves exactly this shape, and so does a mod doing the same through
+    ``$.process.run``, which no ``PreToolUse`` or ``PostToolUse`` hook ever sees (``tests/STEP0.md``
+    item 23). The gate cannot tell either from a user who stopped the mode with work outstanding
+    -- so it reports rather than acts, because reverting would take an exit away from the user.
 
     **What changed is the question, not the choice.** Asking "is current HEAD approved?" is not a
     question about this gate: an ordinary commit made hours after a terminal transition was

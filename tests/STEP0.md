@@ -427,7 +427,7 @@ Item 23 used a session armed with its own id. On a prompt starting `arl-probe ro
 - **`confirm-commit`: silent.** No Bash call ran, so no `PostToolUse` fired.
 - **The Stop gate at the end of that turn: reported.** It emitted its ended-record `systemMessage`: `the mode is DISARMED, and when it ended (…) HEAD was 4623cc1…, whose tree ffd12d6… no review ever approved`. It reads `state.json`, not the tool call.
 - **`status` from a terminal:** `DISARMED`, `reason: stopped by the user`.
-- **Two inaccuracies, both in text and neither in a verdict.** The Stop message's own explanation says the mode "was ended from inside a Bash command", and `status`'s reason says "stopped by the user". Neither is what happened here.
+- **Two inaccuracies, both in text and neither in a verdict.** The Stop message's own explanation says the mode "was ended from inside a Bash command", and `status`'s reason says "stopped by the user". Neither is what happened here. The Stop message now names both routes, a Bash command or a process outside Claude's tool calls; `status`'s reason is left as is, since `deactivate` records it whoever runs it.
 - **`$.process.run` runs git "with repo hooks off"**, per the API docs, so the repository's own `pre-commit` and `commit-msg` hooks are skipped too.
 
 ### I4. Stray writes — item 24: measured

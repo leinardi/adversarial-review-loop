@@ -40,9 +40,21 @@ experiment, not theoretical:
   the same OS user and by the time it's asked about a command, that command is about to
   run.
 
-No file-based mechanism inside the plugin can close either of these: any token this plugin
-writes to disk, the model's own shell can write too. What *is* still enforceable in that
-scenario is reporting — a HEAD whose tree no review ever approved is surfaced through
+**A mod is a third way, on Claude Code 2.1.287 and later.** A JavaScript hooks module runs
+inside Claude Code rather than as a tool call, so it can commit and run `arl.sh deactivate`
+with no command for the gate to inspect. That case is measured. The docs say a mod can also
+overrule the gate's denial (a `tool.check` hook), or keep the gate's hooks from running at
+all, since modules sit above plugin command hooks in the hook chain; neither is measured. A
+mod is installed by you, or written by Claude into `~/.claude/dev-mods/` and loaded only if
+you answer "Enable hot reloading for this session". **Do not enable hot reloading of a
+Claude-written mod in a session with the loop armed**: that answer lasts for the whole
+session. The long form is in
+[`design/end-state-record.md`](design/end-state-record.md#mods-three-more-routes-none-of-them-a-tool-call).
+
+No file-based mechanism inside the plugin can close any of these: any token this plugin
+writes to disk, the model's own shell can write too, and a mod sits above the plugin's
+hooks. What *is* still enforceable in that scenario, short of a mod that suppresses the
+gate's hooks, is reporting — a HEAD whose tree no review ever approved is surfaced through
 `additionalContext` on the tool result and a `systemMessage` at the end of the turn, aimed
 at the human, not the model. Whether that message reliably reaches a human rather than only
 the model transcript is one of the open items in `tests/STEP0.md` — see
@@ -55,7 +67,8 @@ report from that record rather than from current HEAD. A commit made after the m
 therefore silent — it is ungated by design, and reporting it made the alarm fire on every
 turn end and every Bash call for the rest of the worktree's life, which is the same as it
 carrying no information. The wrapper escape above still reports, from evidence written at
-the moment it disarmed. See [edge-cases.md](edge-cases.md#after-the-mode-ends) for the exact
+the moment it disarmed, and so does a mod that commits and disarms through its own process.
+A mod that suppresses the gate's hooks silences that report too. See [edge-cases.md](edge-cases.md#after-the-mode-ends) for the exact
 detection rule, what it does not prove, and the capture/save race.
 
 The state-edit escape is reported too, one step removed: a terminal document that carries no
