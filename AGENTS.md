@@ -29,7 +29,7 @@ Everything else is detail. These are not negotiable, and a change that weakens o
 
 ## Load before changing
 
-Read the note before changing the paths in its row — the index below states each invariant, but not the evidence that a plausible-looking change would destroy. The `adversarial-review` skill carries the same table as mandatory reading before ranking findings.
+Read the note before changing the paths in its row — the index below states each invariant, but not the evidence that a plausible-looking change would destroy. The `adversarial-review` skill points at this table and makes its notes mandatory reading before ranking findings.
 
 | Touched | Must load |
 | --- | --- |
