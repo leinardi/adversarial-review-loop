@@ -4,7 +4,7 @@ The argument behind each line of the invariant index in [`AGENTS.md`](../../AGEN
 index line states what must stay true; the note here says why, what was measured, and which
 plausible-looking change reverts it. `AGENTS.md`'s "Load before changing" table maps a
 touched path to the notes that are mandatory reading before changing it, and the
-`adversarial-review` skill carries the same table for reviews.
+`adversarial-review` skill points reviews at that table.
 
 | Note | Covers |
 | --- | --- |
