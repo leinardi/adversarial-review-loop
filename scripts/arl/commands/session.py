@@ -30,16 +30,19 @@ same fields :func:`status` prints, and because, like everything else here, it de
 
 from __future__ import annotations
 
+import json
 import math
 import os
+import re
 import sys
 from typing import Any, Final, NamedTuple
 
 from arl import commands, gitsnap, guide, harness, hookio, oscillation, paths, planrev, report, reviewer
+from arl import config as config_module
 from arl.commands import completion, hooks
 from arl.commands.completion import Completion
 from arl.config import Config
-from arl.errors import UnsafePathError
+from arl.errors import RepoResolutionError, UnsafePathError
 from arl.gitsnap import SnapshotError
 from arl.state import ENDED_EVIDENCE_STATUSES, State, pointer_read
 from arl.util import format_at, log, now, stdin_argument
@@ -256,14 +259,233 @@ def _ended_display(state: State, effective: str) -> str:
     return f"{at} at {end.head}, tree {end.tree} ({verdict}); status {effective}"
 
 
+#: Every status a document may store, plus ``STALE``, which only the TTL produces. ``status``
+#: refuses to pass anything else on: ``state.json`` is not a trust boundary, and the JSON form
+#: is drawn in a terminal by the plugin's display module.
+_STATUS_NAMES: Final = frozenset({"ARMED", "ACTIVE", "RECONCILE", "NEEDS_HUMAN", "STALE", "ARM_FAILED", "COMPLETE", "DISARMED", "RESUMED"})
+
+#: What a session id must look like before ``status --json`` repeats one it read from disk.
+_PLAIN_ID: Final = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+STATE_UNKNOWN: Final = """\
+adversarial-review-loop: the state of this worktree could not be read, so this does NOT mean it is unarmed.
+cause:  {cause}
+detail: {detail}
+"""
+
+
+class _Unknown(Exception):
+    """The answer could not be established. ``cause`` is one of the ``binding: unknown`` causes."""
+
+    def __init__(self, cause: str, detail: str) -> None:
+        super().__init__(detail)
+        self.cause = cause
+        self.detail = detail
+
+
+def _load_failure(state: State) -> _Unknown:
+    """Why :meth:`State.load` returned False, which it does not say itself.
+
+    Read after the fact, so the file can have changed in between; the answer is then the newer
+    one, and every one of these is "unknown" anyway. Opening the file is the only probe: it
+    tells a missing document from an unreadable one and writes nothing.
+    """
+    if state.version_conflict:
+        return _Unknown("version_conflict", f"{state.state_file} declares version {state.version_conflict_value}, newer than this build reads")
+    try:
+        with state.state_file.open("rb"):
+            pass
+    except FileNotFoundError:
+        return _Unknown("document_missing", f"{state.state_file} does not exist")
+    except OSError as exc:
+        return _Unknown("document_unreadable", f"{state.state_file}: {exc.strerror or exc}")
+    return _Unknown("document_malformed", f"{state.state_file} is not a state document this build can read")
+
+
+def _loaded(repo: str, session: str) -> tuple[State, Config]:
+    """Load ``(repo, session)``'s document, or raise :class:`_Unknown` saying why it could not be."""
+    try:
+        state = State(repo, session)
+    except UnsafePathError as exc:
+        raise _Unknown("document_malformed", f"no activation can be named by session {session!r}: {exc}") from exc
+    if not state.load():
+        raise _load_failure(state)
+    if state.get("status") not in _STATUS_NAMES:
+        raise _Unknown("document_malformed", f"{state.state_file} stores a status this build does not know")
+    return state, config_module.load(repo, overrides=state.data.get("overrides"))
+
+
+def _text_activation() -> commands.Activation | None:
+    """:func:`commands.resolve_local_activation` for the text form, minus its one silence.
+
+    That resolver answers ``None`` for "nothing armed here" and for every way of failing to
+    find out, and ``status`` used to print both as "not armed". A worktree whose document is
+    truncated, or whose repository git cannot resolve, is exactly the one a human runs
+    ``status`` to look at, so those now raise :class:`_Unknown` and print their cause.
+    """
+    try:
+        cwd = os.getcwd()
+        repo = paths.repo_root_or_raise(cwd) or cwd
+    except (OSError, RepoResolutionError) as exc:
+        raise _Unknown("repo_unresolvable", str(exc)) from exc
+    session = commands.latest_session(repo)
+    if not session:
+        return None
+    state, config = _loaded(repo, session)
+    return commands.Activation(repo=repo, session=session, config=config, state=state)
+
+
+def _phase_history(state: State) -> list[dict[str, Any]]:
+    """The current phase's rounds at the current generation: the scope ``reviewer._stall_review`` reads."""
+    phase_label = f"phase{state.get_int('phase')}"
+    generation = state.get_int("activation_generation")
+    return [
+        entry for entry in state.get_array_of_dicts("round_history") if entry.get("label") == phase_label and entry.get("generation") == generation
+    ]
+
+
+def _ended_alert(state: State) -> str:
+    """The alert ``stop._ended`` would raise for this ended document, or ``""``. Makes no git call.
+
+    The same decision, in the same order, so the display and the Stop gate's ``systemMessage``
+    report the same activations. ``test_status_json_alerts_exactly_when_the_stop_gate_reports``
+    holds the two together.
+    """
+    end = hooks.end_state(state)
+    if end.malformed:
+        return "ended_record_malformed"
+    if not end.recorded:
+        return ""
+    if end.capture == "unreadable":
+        return "ended_unverifiable"
+    if end.capture == "unborn":
+        return "ended_unborn" if state.get("activation_commit") else ""
+    return "" if state.tree_approved(end.tree) else "unreviewed_at_exit"
+
+
+def _bound_document(repo: str, session: str) -> dict[str, object]:
+    """``binding: bound``: this session's own document, and nothing from any other.
+
+    Enums and integers only. A retired predecessor is shown its own ``RESUMED`` record, never
+    the successor's fields.
+    """
+    state, config = _loaded(repo, session)
+    effective = state.effective_status(config)
+    alerts = ["needs_human"] if effective == "NEEDS_HUMAN" else []
+    if state.get("status") in ENDED_EVIDENCE_STATUSES:
+        ended = _ended_alert(state)
+        if ended:
+            alerts.append(ended)
+    return {
+        "binding": "bound",
+        "session": session,
+        "status": effective,
+        "stored_status": state.get("status"),
+        "phase": state.get_int("phase"),
+        "phase_count": state.phase_count(),
+        "rounds_this_phase": len(_phase_history(state)),
+        "failures": state.get_int("failures"),
+        "max_failures": config.as_int("max_failures"),
+        "transient_failures": state.get_int("transient_failures"),
+        "max_transient_failures": config.as_int("max_transient_failures"),
+        "stop_blocks": state.get_int("stop_blocks"),
+        "max_stop_blocks": config.as_int("max_stop_blocks"),
+        "pause_target": state.get_int("stop_after_phase"),
+        "retry_backoff_sec": max(0, state.get_int("retry_not_before") - now()),
+        "alerts": alerts,
+    }
+
+
+def _status_document(session: str) -> dict[str, object]:
+    """What ``status --json --session <id>`` prints. **Reads only.**
+
+    Bound to the session it is given, with no fallback to the worktree's ``latest``: that
+    fallback is what showed a predecessor its successor's state. Built from readers that each
+    write nothing -- :func:`pointer_read`, :func:`hooks.resolve_repo`,
+    :func:`hooks.unbound_activation`, :meth:`State.load`, :func:`hooks.end_state`.
+
+    It deliberately does **not** call :func:`hooks.pending_intent`, which unlinks an answered
+    marker and publishes a pointer for a late one. An unanswered arming marker is therefore not
+    shown here; the gate's own denial reports it. Every failure to establish the answer is
+    ``binding: unknown`` with a ``cause``, never ``unarmed``.
+    """
+    try:
+        cwd = os.getcwd()
+        worktree = pointer_read(session)
+        if worktree and hooks.resolve_repo(cwd, worktree) == worktree:
+            return _bound_document(worktree, session)
+        unbound = hooks.unbound_activation(cwd)
+        if unbound is None:
+            return {"binding": "unarmed", "alerts": []}
+        if not unbound.session:
+            raise _Unknown("repo_unresolvable", unbound.status)
+        if unbound.status == "unreadable" or unbound.status not in _STATUS_NAMES or not _PLAIN_ID.fullmatch(unbound.session):
+            # Load it again only to name the cause: a document that does load but still fails
+            # these checks falls through to the generic one below.
+            _loaded(unbound.repo, unbound.session)
+            raise _Unknown("document_malformed", "the worktree's latest activation is not one this build can name")
+    except (OSError, RepoResolutionError):
+        return {"binding": "unknown", "cause": "repo_unresolvable", "alerts": ["state_unknown"]}
+    except _Unknown as exc:
+        return {"binding": "unknown", "cause": exc.cause, "alerts": ["state_unknown"]}
+    return {"binding": "unbound", "session": unbound.session, "status": unbound.status, "alerts": []}
+
+
+def _status_args(argv: list[str]) -> tuple[bool, str] | None:
+    """``(as_json, session)``, or ``None`` after saying on stderr why the arguments were refused."""
+    as_json, session = False, ""
+    rest = list(argv)
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--json":
+            as_json = True
+        elif arg == "--session" and rest:
+            session = rest.pop(0)
+        else:
+            log(f"status: unrecognised argument {arg!r}")
+            return None
+    if as_json and not session:
+        # The worktree's `latest` belongs to whichever session armed it last, so a display with
+        # no session of its own would draw someone else's activation as its own.
+        log("status --json needs --session <id>: the JSON form never falls back to the worktree's latest activation")
+        return None
+    if session and not as_json:
+        log("status --session is only accepted with --json")
+        return None
+    if session and not paths.is_safe_component(session):
+        log(f"status: {session!r} cannot name a session")
+        return None
+    return as_json, session
+
+
 def status(argv: list[str]) -> int:
-    """Print everything the gate is currently deciding on. Never changes anything."""
-    del argv
-    activation = commands.resolve_local_activation()
+    """Print everything the gate is currently deciding on. Never changes anything.
+
+    ``--json --session <id>`` is the machine-readable form the plugin's display reads: see
+    :func:`_status_document`. The text form keeps its fallback to the worktree's ``latest``,
+    since a human at a terminal has no session id to give it.
+    """
+    parsed = _status_args(argv)
+    if parsed is None:
+        return 2
+    as_json, session = parsed
+    if as_json:
+        sys.stdout.write(json.dumps(_status_document(session), sort_keys=True) + "\n")
+        return 0
+    try:
+        activation = _text_activation()
+    except _Unknown as exc:
+        sys.stdout.write(STATE_UNKNOWN.format(cause=exc.cause, detail=exc.detail))
+        return 0
     if activation is None:
         sys.stdout.write(NOT_ARMED)
         return 0
+    _print_status(activation)
+    return 0
 
+
+def _print_status(activation: commands.Activation) -> None:
+    """The text form, for a resolved activation."""
     state, config = activation.state, activation.config
     effective = state.effective_status(config)
     stored = state.get("status")
@@ -318,10 +540,7 @@ def status(argv: list[str]) -> int:
     # `reviewer._stall_review` reads -- this label, this generation -- so what a human sees
     # here is the same evidence the next commit attempt would escalate on.
     phase_label = f"phase{state.get_int('phase')}"
-    generation = state.get_int("activation_generation")
-    phase_history = [
-        entry for entry in state.get_array_of_dicts("round_history") if entry.get("label") == phase_label and entry.get("generation") == generation
-    ]
+    phase_history = _phase_history(state)
     stall_rounds = config.as_int("stall_rounds")
     persisting_points = (
         oscillation.persisting(phase_history, phase_label, stall_rounds, block_severity=config.as_str("block_severity")) if stall_rounds > 0 else []
@@ -381,7 +600,6 @@ reports:
 {reports}
 """
     )
-    return 0
 
 
 # --------------------------------------------------------------------------

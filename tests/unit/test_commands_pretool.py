@@ -131,6 +131,72 @@ def test_no_pointer_in_a_worktree_armed_by_another_session_denies(git_repo: Path
     assert not (state_dir(env, git_repo, "s2")).exists()
 
 
+def other_armed_repo(tmp_path: Path, env: dict[str, str], *, session: str = "s2") -> Path:
+    """A second repository, armed and frozen by ``session``."""
+    other = tmp_path / "other"
+    other.mkdir()
+    git(other, "init", "-q")
+    git(other, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "seed")
+    proc = run_bootstrap(["arm", "--session", session, "--plan", str(plan_file(tmp_path))], cwd=other, env=env)
+    assert proc.returncode == 0, proc.stdout
+    set_phases(other, env, "phase one")
+    return other
+
+
+@pytest.mark.parametrize(("tool", "command"), [("Write", ""), ("Bash", "git commit -qam work")], ids=["write", "commit"])
+def test_a_session_bound_elsewhere_is_unbound_in_another_armed_worktree(
+    git_repo: Path, tmp_path: Path, clean_env: dict[str, str], tool: str, command: str
+) -> None:
+    """Arming worktree A must not be a way to work in an armed worktree B ungated.
+
+    The pointer names A, so the gate used to read a call in B as "outside the armed worktree"
+    and pass it, without asking whether B was guarded by an activation of its own.
+    """
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    other = other_armed_repo(tmp_path, env)
+
+    verdict, reason = pretool(other, env, tool=tool, command=command)
+
+    assert verdict == "deny"
+    assert "activation s2, status ACTIVE" in reason
+    assert f"bound to the loop in another worktree ({git_repo})" in reason
+    assert "/adversarial-review-loop:resume" in reason
+    # Nothing was written to either activation.
+    assert read_state(env, other, "s2")["status"] == "ACTIVE"
+    assert read_state(env, git_repo, SESSION)["status"] == "ACTIVE"
+
+
+def test_a_session_bound_elsewhere_still_reads_another_armed_worktree(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    other = other_armed_repo(tmp_path, env)
+
+    proc = run_hook("pretool", payload(other, tool="Read"), cwd=other, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+
+
+@pytest.mark.parametrize("armed_there", [False, True], ids=["never-armed", "disarmed"])
+def test_a_session_bound_elsewhere_passes_an_unguarded_worktree(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], armed_there: bool) -> None:
+    env = armed(clean_env)
+    active(git_repo, tmp_path, env)
+    if armed_there:
+        other = other_armed_repo(tmp_path, env)
+        proc = run_bootstrap(["deactivate"], cwd=other, env=env)
+        assert proc.returncode == 0, proc.stdout
+    else:
+        other = tmp_path / "other"
+        other.mkdir()
+        git(other, "init", "-q")
+
+    proc = run_hook("pretool", payload(other, tool="Write"), cwd=other, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+
+
 @pytest.mark.parametrize("status", ["COMPLETE", "DISARMED"])
 def test_no_pointer_passes_once_the_other_activation_ended(git_repo: Path, tmp_path: Path, clean_env: dict[str, str], status: str) -> None:
     env = armed(clean_env)

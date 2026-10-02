@@ -188,6 +188,19 @@ def test_a_git_option_shaped_activation_commit_is_not_interpolated_into_git_log(
     assert not pwned.exists()
 
 
+def test_a_follow_up_after_the_last_phase_is_labelled_as_one(activation: state.State, git_repo: Path) -> None:
+    """A commit fixing the cumulative review's findings is reviewed at phase total+1. It used
+    to reach the reviewer as "phase 3 of 2" with an empty description: a phase the plan forgot."""
+    dest = activation.act_dir / "bundles" / "001"
+    reviewer.build_bundle(target_for(git_repo, phase=3), dest, state=activation, config=config_with())
+    text = (dest / "range.txt").read_text()
+
+    assert "phase: follow-up after all 2 phases\n" in text
+    assert "## Frozen phase description (follow-up)\n\nNone: every frozen phase is already committed." in text
+    assert "phase: 3 of 2" not in text
+    assert "(phase 3)" not in text
+
+
 def test_a_final_review_is_scoped_to_every_phase(activation: state.State, git_repo: Path) -> None:
     dest = activation.act_dir / "bundles" / "001"
     build_final(activation, git_repo, dest)

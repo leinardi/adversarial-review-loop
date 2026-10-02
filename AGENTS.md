@@ -21,11 +21,11 @@ It is a security-shaped component. The failure that matters is not a crash — i
 
 Everything else is detail. These are not negotiable, and a change that weakens one is a defect even if every test passes.
 
-0. **A gate that cannot prove it is running denies.** Hooks register at plugin load (`hooks/hooks.json`), never on skill invocation, so the dispatcher runs in every process the plugin is enabled in — a resumed session included. A hook call with no session pointer is a session that never *completed* `implement`/`resume`, and three things still deny there, in this order: an unanswered arming marker recorded by `commands/intent.py`; a repository that cannot be resolved (`paths.repo_root_or_raise` — git answering "not a repository" passes, git being unrunnable, a vanished `cwd` or a timeout denies); and a worktree whose `latest` activation is still live while this session is unbound. Everything else passes silently and writes nothing, except a Bash call naming a user-only `arl.sh` subcommand, which Rule 4 denies ahead of the pointer. **Absence of state is never an opt-out**; absence of *this session's* state in an armed worktree, or after an arming prompt, is a denial. → [`rule-0-intent.md`](docs/design/rule-0-intent.md)
+0. **A gate that cannot prove it is running denies.** Hooks register at plugin load (`hooks/hooks.json`), never on skill invocation, so the dispatcher runs in every process the plugin is enabled in — a resumed session included. A hook call with no session pointer is a session that never *completed* `implement`/`resume`, and three things still deny there, in this order: an unanswered arming marker recorded by `commands/intent.py`; a repository that cannot be resolved (`paths.repo_root_or_raise` — git answering "not a repository" passes, git being unrunnable, a vanished `cwd` or a timeout denies); and a worktree whose `latest` activation is still live while this session is unbound. A session whose pointer names *another* worktree is unbound here too and meets the same third check, or arming one worktree would be a way to work ungated in another armed one. Everything else passes silently and writes nothing, except a Bash call naming a user-only `arl.sh` subcommand, which Rule 4 denies ahead of the pointer. **Absence of state is never an opt-out**; absence of *this session's* state in an armed worktree, or after an arming prompt, is a denial. → [`rule-0-intent.md`](docs/design/rule-0-intent.md)
 1. **Nothing converts a failure into an approval.** Missing state, malformed JSON, a snapshot failure, a timeout, a non-zero reviewer exit, empty output, absent markers, an unknown verdict, an evidence ceiling — every one of them blocks or escalates. Operational uncertainty is never "no findings".
 2. **Hook stdout is protocol.** Hook entrypoints (`pretool`, `confirm-commit`, `posttool-failure`, `gate-stop`) emit valid Claude hook JSON or nothing. Diagnostics go to stderr only, through `arl.util.log`. A stray `print` in a module that runs under a hook corrupts the response — `report.store` is deliberately silent on stdout for this reason. An uncaught exception at the top level still emits that event's fallback JSON before exiting 0. → [`interpreter-and-watchdog.md`](docs/design/interpreter-and-watchdog.md)
 3. **Nothing is written inside the repository under review, with one explicit exception.** All state, frozen plans, bundles and reports live under `$XDG_STATE_HOME/adversarial-review-loop/`. The snapshot uses a throwaway `GIT_INDEX_FILE` and never touches the real index or worktree. `sys.pycache_prefix` keeps `__pycache__` out of both the plugin repo and the reviewed one. The exception is `config <key> <value> --repo`, which writes the repository's own `.adversarial-review-loop.json` — user-only, explicit, documented, and never reachable from a hook or from Claude. No code path that runs on a tool call ever writes inside the reviewed repository.
-4. **The user owns the exits.** `implement`, `finish`, `stop`, `resume`, `config`, `accept` and `pause` are `disable-model-invocation: true`, and Claude's own route to them — Bash — is denied in `commands/pretool.py` in every state, armed or not. `pause` is in that set because reachable by Claude it would be an unbounded, strictly better `defer`; `accept` because it grants rather than only ends, which is why it binds to one exact tree hash. **Rule 4 is not enforceable against a deliberately adversarial model** — a wrapper script and a hand-edited `state.json` both defeat it — so what is actually guaranteed is *reporting*, bounded to the activation's own lifetime by the `ended_*` record. → [`end-state-record.md`](docs/design/end-state-record.md)
+4. **The user owns the exits.** `implement`, `finish`, `stop`, `resume`, `config`, `accept` and `pause` are `disable-model-invocation: true`, and Claude's own route to them — Bash — is denied in `commands/pretool.py` in every state, armed or not. `pause` is in that set because reachable by Claude it would be an unbounded, strictly better `defer`; `accept` because it grants rather than only ends, which is why it binds to one exact tree hash. **Rule 4 is not enforceable against a deliberately adversarial model** — a wrapper script, a hand-edited `state.json` and a session-loaded mod all defeat it — so what is actually guaranteed is *reporting*, bounded to the activation's own lifetime by the `ended_*` record, and only while no mod suppresses the gate's hooks. → [`end-state-record.md`](docs/design/end-state-record.md)
 
 ## Load before changing
 
@@ -48,6 +48,7 @@ Read the note before changing the paths in its row — the index below states ea
 | `commands/pretool.py` `_review_failed`, `_check_retry_backoff`; `commands/posttool.py` `_advance` | [`state-fields.md`](docs/design/state-fields.md) |
 | `commands/resume.py` `_refuse_if_the_overlay_moved`, `commands/arm.py` overlay writes | [`config-overlay.md`](docs/design/config-overlay.md) |
 | `commands/arm.py` `exclude_digest` capture, `gitsnap.exclude_digest` | [`resume-and-retirement.md`](docs/design/resume-and-retirement.md) |
+| `hooks/register.js`, `hooks/hooks.json` `modules`, `commands/session.py` `status --json` (`_status_document`, `_ended_alert`) | [`mod.md`](docs/design/mod.md) |
 
 ## Invariant index
 
@@ -81,6 +82,7 @@ Each line is a claim the code must keep true. `→ name` names its long form, [`
 - `_ENDED` (`DISARMED`, `COMPLETE`, `RESUMED`) is **disjoint from `_RECONCILABLE`**, makes no git call, and reports from the recorded end state; `NEEDS_HUMAN` and `STALE` deliberately stay on the current-HEAD path. → `deny-list-and-parser`
 - Only a *recorded* tree absent from `approved_trees` may carry the categorical headline; malformed, unreadable and unborn captures go through `ENDED_UNCERTAIN_REPORT`. → `end-state-record`
 - `confirm-commit` reports an **unborn HEAD** when `activation_commit` is non-empty — the one HEAD move the tree comparison cannot make. → `environment-hazards`
+- **Nothing is committed after the last phase unless a cumulative review follows** (`hooks.plan_done`). The no-review completion needs the last phase's commit to be `HEAD`, so `pretool` denies such a commit and the Stop gate names leftover changes as outside the plan rather than sweeping them. Under `final_review` or `finish` a follow-up commit is allowed, and it moves neither `phase` nor `phase_commits`. → `environment-hazards`
 - The final cumulative review is **opt-in** (`final_review`, off by default). Never write "the cumulative review will catch it" without saying which configuration you mean. → `deny-list-and-parser`
 
 ### Resume and retirement
@@ -132,6 +134,13 @@ Each line is a claim the code must keep true. `→ name` names its long form, [`
 - `late_block_severity` narrows *what blocks*: **every doubt disables the scope, none narrows it**, and deferred means "did not block this approval" — the next review of the same phase finds the path in `prior_files` and blocks. Anything replacing a `Review` after `parse` must carry the deferred lines with it. → `config-keys-rationale`
 - `max_session_rounds` only ever removes context, and `round` is read through `_pointer_round` in **both** readers because it is arithmetic on both sides of the cap. → `config-keys-rationale`
 
+### The display module
+
+- **The module never decides.** `hooks/register.js` hooks exactly `session.start`, `turn.start`, `turn.complete`, `tool.call` (`Bash`) and `ui.render` (`AbovePrompt`), passes every event on unchanged and answers none; never `tool.check`, `classic.*`, `command.*`, `prompt.*` or `.catch`. A module that fails is skipped and the call proceeds, which is exactly why it can be a display and never the gate. → `mod`
+- Its only process is the shim with `status --json --session`, and it draws only checked enums and integers. No `$.fs`, `$.store`, `$.state`, `$.env`, `$.http`, `$.model`, and no toast. → `mod`
+- `status --json` is **bound to the session it is given** (never `latest`), **reads only** (never `hooks.pending_intent`), and reports every failure as `binding: unknown`, never `unarmed`. Every alert is computed in Python; `_ended_alert` mirrors `stop._ended`. → `mod`
+- Stated width: a display for an honest agent. A hostile module earlier in the chain can falsify or suppress it. → `mod`
+
 ### The invocation path
 
 - **Never `python3 -m arl`, never a relative path.** `-m` puts the reviewed repository's `cwd` at `sys.path[0]`. The only sanctioned invocation is `python3 -I "$PLUGIN_ROOT/scripts/arl-bootstrap.py"`. → `interpreter-and-watchdog`
@@ -179,9 +188,13 @@ Each line is a claim the code must keep true. `→ name` names its long form, [`
 | `scripts/arl/guide.py` | the repo-supplied review guide: resolution, the arm-time refusals, freezing, re-verification, and composing it into a prompt |
 | `prompts/*.md` | the reviewer prompts — Claude writes none of this. The phase and final ones carry one `<!-- ARL:PROJECT-GUIDANCE -->` line, which `guide.compose` replaces with the frozen guide (or strips); nothing else is composed |
 | `skills/*/SKILL.md` | the nine slash commands; none registers a hook — `hooks/hooks.json` does, at plugin load |
+| `hooks/register.js` | the display module: the state band above the prompt and the alert lines. Decides nothing; `hooks/hooks.json` names it under `modules` |
+| `tsconfig.json` | extends the engine's generated `.claude-plugin/types/tsconfig.json` (loading the module writes this file when absent, and leaves an existing one alone) and turns on `checkJs` for `register.js` |
+| `eslint.config.cjs`, `scripts/typecheck-mod.sh` | the display module's lint and type check, run by the `eslint` and `typecheck-mod` pre-commit hooks |
 | `docs/design/` | the argument behind every line of the invariant index above — one note per topic |
 | `tests/selftest.sh` | the **shim** suite, and only that: interpreter probe, shim contract, watchdog layers, socket stdin, the hot path's process budget, one bootstrap smoke walk. Everything the gate *decides* is `tests/unit/`. Bash, because it runs outside the Python whose launch it tests |
 | `tests/unit/` | pytest unit tests for the Python modules. Shared fixtures and helpers are in `conftest.py`; the reviewer suite is `test_reviewer_<subsystem>.py` over the helpers in `reviewer_common.py`. A helper used by one other file is imported from the module that owns it (`test_commands_arm`, `test_commands_pretool`), which mypy allows only for a name that module actually defines |
+| `tests/mod/` | the display module's behavioural tests, run by `make test-mod` (`claude plugin test`); the static contract is `tests/unit/test_mod_contract.py` |
 | `tests/STEP0.md` | runbook for the assumptions only a live session can settle |
 | `tests/step0-fixture.sh` | builds the throwaway repo that runbook needs |
 
@@ -193,7 +206,8 @@ make test                    # full suite; no model is called
 make test-unit               # the pytest half only
 make test-accept             # tests/selftest.sh only (the shim)
 make test-filter FILTER=watchdog # one selftest section
-make check                   # pre-commit: shellcheck, markdownlint, yamllint, actionlint, ruff, mypy
+make test-mod                # the display module under `claude plugin test`; needs the claude binary
+make check                   # pre-commit: shellcheck, markdownlint, yamllint, actionlint, ruff, mypy, eslint, tsc
 make sync-pins               # propagate requirements-dev.txt into .pre-commit-config.yaml
 make dry-run                 # print the exact reviewer command and prompt without invoking it
 ARL_HARNESS=opencode make dry-run   # the same, for the other harness
@@ -208,6 +222,8 @@ straight from a checkout with no install step.
 pytest is pinned in two places — `requirements-dev.txt` and the `additional_dependencies` of the mypy hooks in `.pre-commit-config.yaml`, which is what gives mypy pytest's `py.typed`. Dependabot bumps the first and never the second, so `tests/unit/test_pins.py` fails when they drift. `make sync-pins` propagates `requirements-dev.txt` into the hook config; run it on a Dependabot bump and commit the result alongside.
 
 `make test` must pass before any commit. A change to the gate needs a test that **fails on the old code** — a test that only asserts a helper's return value while the end-to-end bypass survives is not a regression test.
+
+The display module's two hooks need no install: `eslint` and `typecheck-mod` run from the node environment pre-commit builds out of their pinned dependencies, and there is no `package.json`. `typecheck-mod` reads the API types Claude Code writes into `.claude-plugin/types/` when it loads the plugin from this checkout, so in a fresh clone it fails until that has happened once (its message gives the command), and CI does not run it.
 
 `make check` runs fix-capable hooks (markdownlint, prettier, end-of-file-fixer). Check `git status --short` afterwards so a formatter's edits are not mistaken for reviewed input.
 
@@ -263,4 +279,4 @@ Some behaviour cannot be tested from a shell — skill-hook registration, `` !`�
 
 **Every `!` block needs a matching `allowed-tools` rule, scoped to its one `arl.sh` subcommand.** Since Claude Code 2.1.272 a block whose permission check answers `ask` is handed to the model instead of run, and a model-run `arm` is a Rule 4 escape, so `implement` fails closed. `tests/unit/test_skill_arguments.py` pins the table. Any new subcommand that a skill runs for the user also belongs in `cmdshape._ESCAPE_RE`. → [`argument-channel.md`](docs/design/argument-channel.md)
 
-Verified against Claude Code 2.1.273 (skill expansion and `allowed-tools`, STEP0 item 2b) and 2.1.235 (the rest), and `opencode 1.18.18`.
+Verified against Claude Code 2.1.287 (Mods, STEP0 items 21–25), 2.1.273 (skill expansion and `allowed-tools`, STEP0 item 2b) and 2.1.235 (the rest), and `opencode 1.18.18`. The plugin's minimum is 2.1.287.

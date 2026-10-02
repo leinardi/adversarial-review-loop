@@ -68,6 +68,14 @@ endif
 test-accept: ## Run the shim selftest: interpreter probe, shim contract, watchdog (no model is called)
 	@$(REPO_ROOT)/tests/selftest-parallel.sh
 
+.PHONY: test-mod
+# Needs the `claude` binary (2.1.287 or later), which is why it is not part of `make test`:
+# `tests/unit/test_mod_contract.py` is the half of the display module's checks that runs
+# without it.
+test-mod: ## Run the display module's tests (hooks/register.js) under `claude plugin test`
+	@command -v claude >/dev/null 2>&1 || { printf 'arl: test-mod needs the claude binary on PATH\n' >&2; exit 1; }
+	@claude plugin test $(REPO_ROOT)
+
 .PHONY: test-filter
 test-filter: ## Run only the shim selftest sections matching FILTER=<substring>, serially
 	@$(REPO_ROOT)/tests/selftest.sh "$(FILTER)"

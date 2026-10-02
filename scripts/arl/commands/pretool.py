@@ -92,6 +92,14 @@ Every mutation and commit here is denied until the loop is bound to this session
 Do not implement the plan in the meantime: enforcement was requested and is not bound to this session.
 """
 
+UNBOUND_ELSEWHERE: Final = """\
+This worktree is armed by adversarial-review-loop (activation {session}, status {status}), but this session is bound to the loop in another worktree ({bound}), not to this one.
+
+Every mutation and commit here is denied while that is so. Tell the user: /adversarial-review-loop:resume, run here, binds this session to this worktree instead; /adversarial-review-loop:stop leaves the mode.
+
+Do not implement the plan in the meantime: enforcement was requested here and is not bound to this session.
+"""
+
 MISSING_STATE: Final = """\
 The activation state for this session is missing, so the gate cannot tell what has been reviewed. Every mutation and commit is denied.
 
@@ -313,6 +321,13 @@ The review could not be completed ({failures} of {limit} operational failures si
 Raw output: {raw}
 
 Commit again to retry.
+"""
+
+#: A commit after the last phase, with no cumulative review to come. See ``hooks.plan_done``.
+PLAN_DONE: Final = """\
+All {total} phases of the plan are already committed and `final_review` is off, so this commit belongs to no phase. The activation completes only when the last phase's commit is HEAD, so committing more work now would stop it from completing.
+
+Do not commit it. Undo the change instead: revert the edits and delete any file the work generated (build output, caches), then end your turn. If the work is wanted, say so and let the user decide: /adversarial-review-loop:finish runs a cumulative review that covers it, and /adversarial-review-loop:resume with a revised plan gives it a phase.
 """
 
 RETRY_BACKOFF: Final = """\
@@ -541,9 +556,13 @@ def _pretool(hook: Hook) -> None:
         # armed worktree would otherwise read as another repository -- and pass a commit.
         hooks.deny(hook, UNRESOLVABLE.format(detail=exc))
     if repo != worktree:
-        # Work outside the armed worktree in the same session is untouched. `repo` is empty
-        # only when git answered "not a repository", which is proof enough.
-        hook.pass_()
+        # `repo` is empty only when git answered "not a repository", which is proof enough
+        # that nothing here is guarded.
+        if not repo:
+            hook.pass_()
+        # Otherwise this session is bound to another worktree, so here it is as unbound as a
+        # session with no pointer at all.
+        _unbound_here(hook, cwd=cwd, tool=tool, bound=worktree, repo=repo)
 
     # A read-only tool is permitted in *every* state -- each branch below would end up
     # passing for one. Answering here avoids loading the config and the state to reach a
@@ -579,15 +598,31 @@ def _no_pointer(hook: Hook, *, session: str, cwd: str, tool: str) -> NoReturn:
     if not session:
         # The gate cannot identify what it is protecting, so it denies rather than guessing.
         hooks.deny(hook, NO_SESSION)
-    # This one is *not* the hoist below -- it is reached before it, and it is what keeps an
-    # unbound session from paying a git process for every Read.
+    _unbound_here(hook, cwd=cwd, tool=tool, bound="", repo="")
+
+
+def _unbound_here(hook: Hook, *, cwd: str, tool: str, bound: str, repo: str) -> NoReturn:
+    """Rule 0's third check: is ``cwd``'s repository guarded by a live activation this session is not bound to?
+
+    Reached by a session with no pointer, and by one whose pointer names another worktree
+    (``bound``). Those are the same question: a session bound to worktree A is unbound in
+    worktree B, and B's live activation must deny it exactly as it denies a session that never
+    armed anything -- otherwise arming A was a way to work in an armed B ungated. ``bound`` is
+    empty for the no-pointer case. ``repo`` is the repository ``resolve_repo`` already found
+    for a bound session, handed on so the check costs no second ``git rev-parse``; empty, it is
+    resolved here.
+    """
+    # This one is *not* the hoist in `_gate` -- it is reached before it, and it is what keeps
+    # an unbound session from paying a git process for every Read.
     if hooks.tool_is_readonly(tool):
         hook.pass_()
-    unbound = hooks.unbound_activation(cwd)
+    unbound = hooks.unbound_activation(cwd, repo=repo)
     if unbound is None:
         hook.pass_()
     if not unbound.session:
         hooks.deny(hook, UNRESOLVABLE.format(detail=unbound.status))
+    if bound:
+        hooks.deny(hook, UNBOUND_ELSEWHERE.format(session=unbound.session, status=unbound.status, bound=bound))
     hooks.deny(hook, UNBOUND.format(session=unbound.session, status=unbound.status))
 
 
@@ -877,9 +912,9 @@ def _refuse_if_stale(state: State, config: Config, *, expected: hooks.Activation
         raise commands.Refused(REVIEW_SUPERSEDED.format(phase=phase))
 
 
-def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command: str) -> None:
-    """Decide on the Bash call that would create a commit, running the review if needed."""
-    from arl import gitsnap, report, reviewer  # noqa: PLC0415 - reached only by a commit
+def _refuse_before_any_shortcut(hook: Hook, *, state: State, config: Config, repo: str) -> None:
+    """The two denials no free shortcut may skip, because each is about HEAD rather than the tree."""
+    from arl import gitsnap  # noqa: PLC0415 - reached only by a commit, like `_gate_commit`'s own import
 
     # A commit resume --abandon-pending gave up on may still have landed, in the retired
     # session, after the marker was recorded. Nothing else in this activation ever sees that
@@ -890,6 +925,18 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
         hooks.deny(hook, ABANDONED_MARKER_UNVERIFIABLE.format(error=exc))
     if bad:
         hooks.deny(hook, RECONCILE_FROM_ABANDONED.format(bad=bad, recovery=hooks.reconcile_recovery(state)))
+
+    # Even an empty or already-approved commit moves HEAD past the last phase's commit, which
+    # is what the no-review completion refuses.
+    if hooks.plan_done(state, config):
+        hooks.deny(hook, PLAN_DONE.format(total=state.phase_count()))
+
+
+def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command: str) -> None:
+    """Decide on the Bash call that would create a commit, running the review if needed."""
+    from arl import gitsnap, report, reviewer  # noqa: PLC0415 - reached only by a commit
+
+    _refuse_before_any_shortcut(hook, state=state, config=config, repo=repo)
 
     snap = _prepare(hook, state=state, config=config, repo=repo, command=command)
     tree = snap.tree

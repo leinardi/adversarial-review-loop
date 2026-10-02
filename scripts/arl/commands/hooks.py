@@ -59,6 +59,7 @@ __all__ = [
     "escalate",
     "find_abandoned_marker_commit",
     "pending_intent",
+    "plan_done",
     "reconcile_recovery",
     "record_unstarted_arm",
     "resolve_abandoned_marker",
@@ -449,6 +450,21 @@ def reconcile_recovery(state: State) -> str:
     return f"git reset --soft {parent}" if parent else "git update-ref -d HEAD"
 
 
+def plan_done(state: State, config: Config) -> bool:
+    """Is every phase committed, with no cumulative review still to come?
+
+    Then the plan has nothing left for a commit to belong to. The no-review completion path
+    needs the last phase's commit to *be* ``HEAD`` (``completion.phase_progress_gap``), so a
+    commit landing after it -- approved as "phase total+1", a phase with no description --
+    turns a finished activation into a ``NEEDS_HUMAN`` one at the next turn end. Measured: a
+    stray ``__pycache__`` the sweep reviewed and the clean check then asked to be committed.
+    With ``final_review`` on, or ``finish`` requested, post-plan commits are how the
+    cumulative review's findings get fixed, so this is false there.
+    """
+    total = state.phase_count()
+    return total > 0 and state.get_int("phase") > total and not config.as_bool("final_review") and state.get("finish_requested") != "true"
+
+
 def resolve_abandoned_marker(state: State, *, repo: str) -> str:
     """Enter ``RECONCILE`` if a commit ``resume --abandon-pending`` gave up on landed anyway.
 
@@ -531,7 +547,7 @@ class Unbound:
     status: str
 
 
-def unbound_activation(cwd: str) -> Unbound | None:
+def unbound_activation(cwd: str, *, repo: str = "") -> Unbound | None:
     """The live activation guarding ``cwd``'s repository, for a session with no pointer (**Rule 0**).
 
     The hooks register at plugin load, so a hook entrypoint runs in *every* session -- the
@@ -550,11 +566,16 @@ def unbound_activation(cwd: str) -> Unbound | None:
     ``None`` means "nothing to enforce". Anything else is a reason to deny, and nothing is
     written: the activation belongs to another session, and its document is not this
     session's to touch.
+
+    ``repo`` is ``cwd``'s repository when the caller already resolved it the same way
+    (``resolve_repo``), so a bound session outside its own worktree pays one ``git rev-parse``
+    rather than two. Empty means "resolve it here".
     """
-    try:
-        repo = paths.repo_root_or_raise(cwd)
-    except RepoResolutionError as exc:
-        return Unbound(repo=cwd, session="", status=f"unresolvable ({exc})")
+    if not repo:
+        try:
+            repo = paths.repo_root_or_raise(cwd)
+        except RepoResolutionError as exc:
+            return Unbound(repo=cwd, session="", status=f"unresolvable ({exc})")
     if not repo:
         return None
     session = commands.latest_session(repo)

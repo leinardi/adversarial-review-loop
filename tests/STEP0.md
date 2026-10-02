@@ -261,6 +261,11 @@ Run the OpenCode side at least once too (`ARL_HARNESS=opencode`), since a defaul
 | 18 | the file tools are confined to cwd + `--add-dir` in `-p` mode | **pass** (2026-08-29) |
 | 19 | a stdin payload at `chunk_diff_bytes` (400KB) and above arrives intact | **open** (byte-perfect to 170KB) |
 | 20 | no review session appears in the reviewed repository's own `/resume` picker | **open** |
+| 21 | a broken hooks module leaves the plugin's command hooks gating | **pass**, unparseable and throwing (2026-10-02) |
+| 22 | `$.session.id()` equals the hooks' `session_id`, across `/clear` and `/resume` | **pass**; `/clear` mints a new id and fires no `session.start` (2026-10-02) |
+| 23 | what still reports a commit and `deactivate` a mod ran through `$.process.run` | the Stop gate and `status`; `confirm-commit` is silent (2026-10-02) |
+| 24 | which paths loading a hooks module writes into the plugin tree | `.claude-plugin/types/` (self-ignored) and a root `tsconfig.json` (2026-10-02) |
+| 25 | `$.ui.toast` and `$.ui.log` reach the user; `$.ui.log` does not reach the model | `$.ui.log` **pass**; `$.ui.toast` not seen (2026-10-02) |
 
 ### Permission handoff, 2026-09-16 (item 2b)
 
@@ -394,6 +399,48 @@ The runbook:
 **If step 4 comes back under a *different* id**, assumption 2 is wrong and the docs' "just continue" advice for the `/clear` → `/resume` round trip is wrong with it: that case collapses into the ordinary unbound one, and the FAQ table's second row becomes `/adversarial-review-loop:resume --allow-dirty`.
 
 **If step 5 shows no review at all**, stop and treat it as the phase-13 incident recurring — a commit landing with `last_approved_tree` unmoved and `rounds this phase: 0` is the signature.
+
+## Session I — Mods (items 21–25), measured 2026-10-02
+
+Claude Code 2.1.287 added Mods: a plugin's `hooks/hooks.json` may name a JavaScript hooks module (`"modules": ["./register.js"]`) whose handlers run **inside** Claude Code, beside the command hooks. The plan is to ship one as a display only: a band above the prompt showing the activation's state, and a transcript line when an alert appears. Nothing in the gate may come to depend on it. The docs say a module that throws, times out or answers the wrong shape is skipped and the call proceeds, which is why the gate stays on command hooks, and why item 21 had to hold.
+
+**How it was measured.** A clone of `main` (`e86592d`) was loaded with `--plugin-dir`, the marketplace install disabled through `--settings`, and its own `XDG_STATE_HOME`, so neither the real state root nor this checkout was involved. The clone's `hooks.json` gained the `modules` line, a `| tee -a` on the `pretool`, `confirm-commit` and `gate-stop` commands, and one extra `UserPromptSubmit` command hook appending the hook input's `session_id` to a file. A probe module appended `$.session.id()` to another file from `session.start` and `turn.start`. Every repository was a fresh `git init`, armed from a terminal with `arl.sh arm --session <uuid> --plan <plan>`. The headless runs used `claude -p --model haiku --setting-sources project,local --strict-mcp-config`. Without the last two flags a user `SessionStart` hook sent haiku chasing an MCP server until `--max-turns` ran out. A turn that ends that way (`error_max_turns`) fires no `Stop` hook, which voided the first attempt at item 23.
+
+### I1. Independence — item 21: pass
+
+In a worktree armed by another session, Claude was asked to create a file with the Write tool, which must be denied (Rule 0, unbound session).
+
+- **A module that does not parse.** The debug log has `[ERROR] hooks module adversarial-review-loop@inline failed to load: … register.js does not parse`. `pretool` still denied the write, and the file was not created.
+- **A module whose `session.start`, `turn.start`, `prompt.submit` and `tool.call` hooks all throw.** Each was logged as `hook skipped: threw Error: …`. The `tool.call` one ran on the very call being gated. `pretool` still denied it, and the file was not created.
+- **A control run** in an unarmed repository with a working module created the file, so the denials above were the gate's and not the prompt's.
+
+A module the engine refuses whole is the same case as the first one. The engine refuses at load a hook that is neither an inline function nor a function declared at the top of the file: `the hook "boom" is not a function declared at the top of this file`.
+
+### I2. Session identity — item 22: pass
+
+`$.session.id()` equalled the command hooks' `session_id` under `claude -p --session-id`, under `claude -p --resume`, in an interactive session, and in that session after `/clear`. **`/clear` starts a new session id**, which settles Session H's first assumption. **`session.start` does not fire after `/clear`; `turn.start` does.** So a module that wants the current session must read the id on each refresh, not cache it from `session.start`.
+
+### I3. A mod commits around the gate — item 23: measured
+
+Item 23 used a session armed with its own id. On a prompt starting `arl-probe route1`, a `prompt.submit` hook ran `$.process.run(['git', 'commit', '-qam', …])` and then the copy's `arl.sh deactivate --session <id>`, then passed the prompt on with `next(e)`. Both exited `0`. That is the wrapper-script escape with its one observable step, the Bash call, removed.
+
+- **`confirm-commit`: silent.** No Bash call ran, so no `PostToolUse` fired.
+- **The Stop gate at the end of that turn: reported.** It emitted its ended-record `systemMessage`: `the mode is DISARMED, and when it ended (…) HEAD was 4623cc1…, whose tree ffd12d6… no review ever approved`. It reads `state.json`, not the tool call.
+- **`status` from a terminal:** `DISARMED`, `reason: stopped by the user`.
+- **Two inaccuracies, both in text and neither in a verdict.** The Stop message's own explanation says the mode "was ended from inside a Bash command", and `status`'s reason says "stopped by the user". Neither is what happened here. The Stop message now names both routes, a Bash command or a process outside Claude's tool calls; `status`'s reason is left as is, since `deactivate` records it whoever runs it.
+- **`$.process.run` runs git "with repo hooks off"**, per the API docs, so the repository's own `pre-commit` and `commit-msg` hooks are skipped too.
+
+### I4. Stray writes — item 24: measured
+
+Loading a module from a plugin folder writes two things into it, under `claude -p` as well as interactively:
+
+- `.claude-plugin/types/`, holding `claude-code/`, `claude-code-mcp/`, `claude-code-tools/` and a `tsconfig.json`. It carries its own `.gitignore` of `*`, so git never shows it.
+- A root `tsconfig.json` containing `{"extends": "./.claude-plugin/types/tsconfig.json"}`, which is **untracked**. This repository must commit it with exactly that content, or a dogfooding session sees an untracked file and its phase cannot end clean.
+
+### I5. Visibility — item 25: half
+
+- **`$.ui.log`:** reached the user as a transcript row, `● adversarial-review-loop: arl-probe log line`. It is absent from the session's transcript `.jsonl`, which is what gets replayed to the model. So for this channel, item 12's question has its answer: the report reaches the user without the model relaying it.
+- **`$.ui.toast`:** called from the same hook, it was **not seen** in an interactive terminal session, in two attempts. The display therefore uses `$.ui.log` and the band, never a toast.
 
 ---
 

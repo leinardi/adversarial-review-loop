@@ -227,7 +227,7 @@ state.json was edited by something other than this gate, so what the gate could 
 UNREVIEWED_AT_EXIT: Final = """\
 adversarial-review-loop: the mode is {status}, and when it ended ({at}) HEAD was {head}, whose tree {head_tree} no review ever approved.
 
-Work was committed in this worktree without passing the review gate. If you did not stop the mode yourself, it was ended from inside a Bash command — the gate cannot tell those apart, so it reports rather than acts.
+Work was committed in this worktree without passing the review gate. If you did not stop the mode yourself, something else did: a Bash command Claude ran, or a mod or other process acting outside Claude's tool calls. The gate cannot tell any of those apart, so it reports rather than acts.
 
 Commits made after the mode ended are ungated by design and are not what this reports.
 
@@ -293,6 +293,15 @@ Implement it and commit it. If the remaining phases should be abandoned, say so 
 
 NOT_CLEAN: Final = """\
 adversarial-review-loop: the worktree is not clean, so the last of the work is not in any reviewed commit. Commit it (`git add -A && git commit -m "…"`) before the activation can be completed.
+
+{summary}
+"""
+
+#: Changes left after the last phase, with no cumulative review to come. See ``hooks.plan_done``.
+OUTSIDE_PLAN: Final = """\
+adversarial-review-loop: all {total} phases are committed and `final_review` is off, but the worktree still has changes. They belong to no phase, and the gate refuses to commit them: the activation completes only when the last phase's commit is HEAD.
+
+Undo them instead: revert the edits and delete any file the work generated (build output, caches), then end your turn. If the work is wanted, say so and let the user decide: /adversarial-review-loop:finish runs a cumulative review that covers it, and /adversarial-review-loop:resume with a revised plan gives it a phase.
 
 {summary}
 """
@@ -643,9 +652,10 @@ def _ended(gate: _Gate, status: str) -> NoReturn:
     instead of the model, so relaying it is not the model's decision.
 
     This is the only place a Rule 4 escape becomes visible. A Bash command that commits and then
-    runs ``arl.sh deactivate`` leaves exactly this shape, and the gate cannot tell it from a user
-    who stopped the mode with work outstanding -- so it reports rather than acts, because
-    reverting would take an exit away from the user.
+    runs ``arl.sh deactivate`` leaves exactly this shape, and so does a mod doing the same through
+    ``$.process.run``, which no ``PreToolUse`` or ``PostToolUse`` hook ever sees (``tests/STEP0.md``
+    item 23). The gate cannot tell either from a user who stopped the mode with work outstanding
+    -- so it reports rather than acts, because reverting would take an exit away from the user.
 
     **What changed is the question, not the choice.** Asking "is current HEAD approved?" is not a
     question about this gate: an ordinary commit made hours after a terminal transition was
@@ -848,6 +858,8 @@ def _review(gate: _Gate) -> NoReturn:
     # what it is looking at.
     _guard_exclude(gate, worktree)
 
+    _refuse_work_outside_the_plan(gate, worktree)
+
     # Unreviewed work sweep: anything not yet approved gets reviewed now. An approving sweep
     # returns the deferred-findings paragraph (or ""), which every response below carries as
     # its first paragraph -- the sweep has no response of its own to put it in.
@@ -912,6 +924,22 @@ def _review(gate: _Gate) -> NoReturn:
         )
         gate.hook.stop_ok(_say(gate, SKIP_PATH_STATE_INVALID.format(status=state.get("status"), phase=phase, total=total).rstrip("\n")))
     _final(gate, pending, snap=snap, total=total)
+
+
+def _refuse_work_outside_the_plan(gate: _Gate, worktree: str) -> None:
+    """Block the turn end on changes left after the last phase with no cumulative review to come.
+
+    They belong to no phase. Reviewing them as "phase total+1" and then asking for them to be
+    committed is how a finished activation used to end NEEDS_HUMAN: that commit is what the
+    no-review completion refuses, and pretool now refuses it too (``hooks.plan_done``).
+    """
+    if not hooks.plan_done(gate.state, gate.config):
+        return
+    from arl import gitsnap  # noqa: PLC0415 - module-scope git is off this module's hot path
+
+    if not gitsnap.worktree_clean(worktree):
+        summary = gitsnap.dirty_summary(worktree)
+        _block_counted(gate, OUTSIDE_PLAN.format(total=gate.state.phase_count(), summary=summary).rstrip("\n"))
 
 
 #: Distinguishes "the document has no ``exclude_digest``" from "it has an empty one". Mirrors

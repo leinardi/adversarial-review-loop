@@ -1457,6 +1457,24 @@ def _plan_section(revisions: list[tuple[dict[str, Any], bytes]], *, plan_in_sess
     return PLAN_HEADING + _render_plan_excerpt(active_content)
 
 
+def _phase_section(target: Target, state: State) -> str:
+    """Which phase this review is of, and its frozen description."""
+    count = state.phase_count()
+    if not target.is_phase:
+        return f"phases: {count} (all)\n"
+    if 0 < count < target.phase:
+        # A follow-up after the last phase has no description of its own; an empty section
+        # under "phase total+1" read as a phase the plan forgot. Only a cumulative review still
+        # to come lets such a commit through (`hooks.plan_done`).
+        return (
+            f"phase: follow-up after all {count} phases\n"
+            "\n## Frozen phase description (follow-up)\n\n"
+            "None: every frozen phase is already committed. This change follows the last one, typically to fix "
+            "the cumulative review's findings, and is judged against the plan as a whole.\n"
+        )
+    return f"phase: {target.phase} of {count}\n\n## Frozen phase description (phase {target.phase})\n\n{state.phase_desc(target.phase)}\n"
+
+
 def _range_text(  # noqa: PLR0913 - one independently meaningful piece of evidence per param; bundling them would be an artificial object
     target: Target,
     *,
@@ -1500,12 +1518,7 @@ def _range_text(  # noqa: PLR0913 - one independently meaningful piece of eviden
 
     out.append(_blocking_rules_section(target, config, previous_round_number=previous_round_number, scope=scope))
 
-    count = state.phase_count()
-    if target.is_phase:
-        out.append(f"phase: {target.phase} of {count}\n")
-        out.append(f"\n## Frozen phase description (phase {target.phase})\n\n{state.phase_desc(target.phase)}\n")
-    else:
-        out.append(f"phases: {count} (all)\n")
+    out.append(_phase_section(target, state))
     out.append("\n## All frozen phases\n\n")
     out.append(_phase_list(state))
 

@@ -1,5 +1,8 @@
 {
   "description": "adversarial-review-loop review gate. Registered at plugin load so the gate exists in every Claude Code process, not only the one that invoked /adversarial-review-loop:implement. A session that never armed pays one silent, sub-second pass-through per tool call.",
+  "modules": [
+    "./register.js"
+  ],
   "hooks": {
     "PreToolUse": [
       {
