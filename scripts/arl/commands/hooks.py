@@ -59,6 +59,7 @@ __all__ = [
     "escalate",
     "find_abandoned_marker_commit",
     "pending_intent",
+    "plan_done",
     "reconcile_recovery",
     "record_unstarted_arm",
     "resolve_abandoned_marker",
@@ -447,6 +448,21 @@ def reconcile_recovery(state: State) -> str:
     """
     parent = state.get("bad_commit_parent")
     return f"git reset --soft {parent}" if parent else "git update-ref -d HEAD"
+
+
+def plan_done(state: State, config: Config) -> bool:
+    """Is every phase committed, with no cumulative review still to come?
+
+    Then the plan has nothing left for a commit to belong to. The no-review completion path
+    needs the last phase's commit to *be* ``HEAD`` (``completion.phase_progress_gap``), so a
+    commit landing after it -- approved as "phase total+1", a phase with no description --
+    turns a finished activation into a ``NEEDS_HUMAN`` one at the next turn end. Measured: a
+    stray ``__pycache__`` the sweep reviewed and the clean check then asked to be committed.
+    With ``final_review`` on, or ``finish`` requested, post-plan commits are how the
+    cumulative review's findings get fixed, so this is false there.
+    """
+    total = state.phase_count()
+    return total > 0 and state.get_int("phase") > total and not config.as_bool("final_review") and state.get("finish_requested") != "true"
 
 
 def resolve_abandoned_marker(state: State, *, repo: str) -> str:

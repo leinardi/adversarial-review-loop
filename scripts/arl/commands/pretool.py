@@ -323,6 +323,13 @@ Raw output: {raw}
 Commit again to retry.
 """
 
+#: A commit after the last phase, with no cumulative review to come. See ``hooks.plan_done``.
+PLAN_DONE: Final = """\
+All {total} phases of the plan are already committed and `final_review` is off, so this commit belongs to no phase. The activation completes only when the last phase's commit is HEAD, so committing more work now would stop it from completing.
+
+Do not commit it. Undo the change instead: revert the edits and delete any file the work generated (build output, caches), then end your turn. If the work is wanted, say so and let the user decide: /adversarial-review-loop:finish runs a cumulative review that covers it, and /adversarial-review-loop:resume with a revised plan gives it a phase.
+"""
+
 RETRY_BACKOFF: Final = """\
 The reviewer hit a transient failure (a timeout, a rate/usage limit, or contention with another review of this phase already in progress) and this commit is denied without spending another provider call while it paces retries.
 
@@ -905,9 +912,9 @@ def _refuse_if_stale(state: State, config: Config, *, expected: hooks.Activation
         raise commands.Refused(REVIEW_SUPERSEDED.format(phase=phase))
 
 
-def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command: str) -> None:
-    """Decide on the Bash call that would create a commit, running the review if needed."""
-    from arl import gitsnap, report, reviewer  # noqa: PLC0415 - reached only by a commit
+def _refuse_before_any_shortcut(hook: Hook, *, state: State, config: Config, repo: str) -> None:
+    """The two denials no free shortcut may skip, because each is about HEAD rather than the tree."""
+    from arl import gitsnap  # noqa: PLC0415 - reached only by a commit, like `_gate_commit`'s own import
 
     # A commit resume --abandon-pending gave up on may still have landed, in the retired
     # session, after the marker was recorded. Nothing else in this activation ever sees that
@@ -918,6 +925,18 @@ def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command
         hooks.deny(hook, ABANDONED_MARKER_UNVERIFIABLE.format(error=exc))
     if bad:
         hooks.deny(hook, RECONCILE_FROM_ABANDONED.format(bad=bad, recovery=hooks.reconcile_recovery(state)))
+
+    # Even an empty or already-approved commit moves HEAD past the last phase's commit, which
+    # is what the no-review completion refuses.
+    if hooks.plan_done(state, config):
+        hooks.deny(hook, PLAN_DONE.format(total=state.phase_count()))
+
+
+def _gate_commit(hook: Hook, *, state: State, config: Config, repo: str, command: str) -> None:
+    """Decide on the Bash call that would create a commit, running the review if needed."""
+    from arl import gitsnap, report, reviewer  # noqa: PLC0415 - reached only by a commit
+
+    _refuse_before_any_shortcut(hook, state=state, config=config, repo=repo)
 
     snap = _prepare(hook, state=state, config=config, repo=repo, command=command)
     tree = snap.tree

@@ -297,6 +297,15 @@ adversarial-review-loop: the worktree is not clean, so the last of the work is n
 {summary}
 """
 
+#: Changes left after the last phase, with no cumulative review to come. See ``hooks.plan_done``.
+OUTSIDE_PLAN: Final = """\
+adversarial-review-loop: all {total} phases are committed and `final_review` is off, but the worktree still has changes. They belong to no phase, and the gate refuses to commit them: the activation completes only when the last phase's commit is HEAD.
+
+Undo them instead: revert the edits and delete any file the work generated (build output, caches), then end your turn. If the work is wanted, say so and let the user decide: /adversarial-review-loop:finish runs a cumulative review that covers it, and /adversarial-review-loop:resume with a revised plan gives it a phase.
+
+{summary}
+"""
+
 #: The one ignore file the gate cannot see past and cannot review. Every tree this gate builds
 #: comes out of ``git add -A``, which obeys ``info/exclude`` -- and that file lives outside the
 #: worktree, so no commit carries it and no review ever sees it. One line written there makes a
@@ -849,6 +858,8 @@ def _review(gate: _Gate) -> NoReturn:
     # what it is looking at.
     _guard_exclude(gate, worktree)
 
+    _refuse_work_outside_the_plan(gate, worktree)
+
     # Unreviewed work sweep: anything not yet approved gets reviewed now. An approving sweep
     # returns the deferred-findings paragraph (or ""), which every response below carries as
     # its first paragraph -- the sweep has no response of its own to put it in.
@@ -913,6 +924,22 @@ def _review(gate: _Gate) -> NoReturn:
         )
         gate.hook.stop_ok(_say(gate, SKIP_PATH_STATE_INVALID.format(status=state.get("status"), phase=phase, total=total).rstrip("\n")))
     _final(gate, pending, snap=snap, total=total)
+
+
+def _refuse_work_outside_the_plan(gate: _Gate, worktree: str) -> None:
+    """Block the turn end on changes left after the last phase with no cumulative review to come.
+
+    They belong to no phase. Reviewing them as "phase total+1" and then asking for them to be
+    committed is how a finished activation used to end NEEDS_HUMAN: that commit is what the
+    no-review completion refuses, and pretool now refuses it too (``hooks.plan_done``).
+    """
+    if not hooks.plan_done(gate.state, gate.config):
+        return
+    from arl import gitsnap  # noqa: PLC0415 - module-scope git is off this module's hot path
+
+    if not gitsnap.worktree_clean(worktree):
+        summary = gitsnap.dirty_summary(worktree)
+        _block_counted(gate, OUTSIDE_PLAN.format(total=gate.state.phase_count(), summary=summary).rstrip("\n"))
 
 
 #: Distinguishes "the document has no ``exclude_digest``" from "it has an empty one". Mirrors

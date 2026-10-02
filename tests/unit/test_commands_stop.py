@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -45,8 +46,8 @@ from pathlib import Path
 import pytest
 from conftest import BOOTSTRAP, git, run_bootstrap, run_hook, unborn_repo
 from test_commands_arm import armed_env, exclude_file, read_state, state_dir
-from test_commands_posttool import COMMIT, end_the_mode, gated_commit
-from test_commands_pretool import SESSION, active, active_until, arm, patch_state, payload, unborn_active
+from test_commands_posttool import COMMIT, confirm, context, end_the_mode, gated_commit
+from test_commands_pretool import SESSION, active, active_until, arm, patch_state, payload, pretool, unborn_active
 from test_commands_races import activation_lock, reviewer_stub, settle
 
 from arl import commands as commands_module
@@ -692,7 +693,7 @@ def test_outstanding_phases_block_the_turn(git_repo: Path, tmp_path: Path, clean
 
 
 def test_a_dirty_worktree_blocks_before_the_final_review(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
-    env = armed_env(clean_env)
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
     active(git_repo, tmp_path, env)
     committed_phase(git_repo, env)
     (git_repo / "left-over.txt").write_text("uncommitted\n")
@@ -1323,7 +1324,85 @@ def test_disabled_final_review_a_dirty_worktree_still_blocks(git_repo: Path, tmp
 
     reason = blocked(stop(git_repo, env))
 
-    assert "the worktree is not clean" in reason
+    assert "the worktree still has changes" in reason
+    assert "left-over.txt" in reason
+
+
+# --------------------------------------------------------------------------
+# Work after the last phase
+# --------------------------------------------------------------------------
+
+
+def test_work_left_after_the_last_phase_is_refused_rather_than_swept(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """Measured live: a ``__pycache__`` left after the last phase was swept as "phase 2 of 1",
+    the clean check then asked for it to be committed, and that commit is exactly what the
+    no-review completion refuses -- a finished activation ended NEEDS_HUMAN. Now the turn end
+    names the work as outside the plan, calls no reviewer, and completes once it is gone."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    committed_phase(git_repo, env)
+    (git_repo / "__pycache__").mkdir()
+    (git_repo / "__pycache__" / "greet.cpython-312.pyc").write_bytes(b"\x00")
+    env["ARL_REVIEWER_CMD"] = "/nonexistent/reviewer"
+
+    reason = blocked(stop(git_repo, env))
+
+    assert "They belong to no phase" in reason
+    assert "__pycache__" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert (document["status"], document["phase"]) == ("ACTIVE", 2)
+
+    shutil.rmtree(git_repo / "__pycache__")
+    assert "COMPLETE" in ended(stop(git_repo, env))
+
+
+def test_a_commit_after_the_last_phase_is_denied_without_a_cumulative_review(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """The commit side of the same wedge: old code reviewed it as phase total+1, approved it,
+    and moved ``phase`` to total+2 -- after which the activation could no longer complete."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    committed_phase(git_repo, env)
+    (git_repo / "extra.txt").write_text("not in the plan\n")
+
+    verdict, reason = pretool(git_repo, env, command=COMMIT)
+
+    assert verdict == "deny"
+    assert "this commit belongs to no phase" in reason
+    document = read_state(env, git_repo, SESSION)
+    assert (document["phase"], document["pending_approved_tree"]) == (2, "")
+
+
+def test_a_requested_finish_lets_a_follow_up_commit_through(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """``finish`` runs a cumulative review whatever ``final_review`` says, and a fix for its
+    findings has to be committable."""
+    env = armed_env(clean_env)
+    active(git_repo, tmp_path, env)
+    committed_phase(git_repo, env)
+    patch_state(env, git_repo, finish_requested=True)
+    (git_repo / "fix.txt").write_text("what the cumulative review asked for\n")
+
+    verdict, _ = pretool(git_repo, env, command=COMMIT)
+
+    assert verdict == "allow"
+
+
+def test_a_follow_up_commit_under_a_final_review_does_not_move_the_phase(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:
+    """With a cumulative review to come, a commit after the last phase is how its findings get
+    fixed. It belongs to no phase: ``phase`` stays at total+1, and no phase commit is recorded
+    for a phase the plan does not have. Old code moved it to total+2 ("phase 3/1")."""
+    env = armed_env(clean_env, ARL_FINAL_REVIEW="true")
+    active(git_repo, tmp_path, env)
+    committed_phase(git_repo, env)
+    recorded = read_state(env, git_repo, SESSION)["phase_commits"]
+
+    gated_commit(git_repo, env, "a fix the final review asked for\n")
+    _, stdout = confirm(git_repo, env, command=COMMIT)
+
+    assert "a follow-up commit after all 1 phases, verified" in context(stdout)
+    document = read_state(env, git_repo, SESSION)
+    assert document["phase"] == 2
+    assert document["phase_commits"] == recorded
+    assert "COMPLETE" in ended(stop(git_repo, env))
 
 
 def test_disabled_final_review_reconcile_still_blocks_and_never_completes(git_repo: Path, tmp_path: Path, clean_env: dict[str, str]) -> None:

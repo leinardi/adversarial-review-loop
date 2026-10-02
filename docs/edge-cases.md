@@ -269,6 +269,17 @@ every malformed chain. For any escalating shape, set `final_review true` or run 
 **before** the last turn ends; both put a reviewer back in the loop, which is where this
 evidence cannot reach.
 
+**Nothing is committed after the last phase, because that commit is what breaks the chain.**
+With `final_review` off and no `finish` requested (`hooks.plan_done`), a commit after the last
+phase belongs to no phase, and the chain must end *at* `HEAD`. It used to be reviewed as
+"phase total+1" with an empty description, approved, and counted, so `phase` walked to
+total+2 and the next turn end escalated a finished activation to `NEEDS_HUMAN`. Measured live:
+a `__pycache__` the turn-end sweep reviewed, and the clean check then asked to be committed.
+Now `pretool` denies the commit, and the Stop gate names any change left in the worktree as
+outside the plan and asks for it to be undone, calling no reviewer. With a cumulative review
+still to come, a post-plan commit is how its findings get fixed, so it is allowed. It is
+reviewed as a follow-up, and it moves neither `phase` nor `phase_commits`.
+
 Two further consequences worth knowing.
 
 **There is no remedy afterwards.** A `COMPLETE` activation can never be reviewed

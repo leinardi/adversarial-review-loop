@@ -257,6 +257,16 @@ COMPLETE nothing can.
 """
 )
 
+#: A commit after the last phase. Only reachable with a cumulative review still to come:
+#: without one, pretool refuses it (``hooks.plan_done``).
+FOLLOW_UP_COMMITTED: Final = """\
+**adversarial-review-loop: a follow-up commit after all {total} phases, verified.**
+
+The commit's tree is exactly the tree the reviewer approved, and the worktree is clean. It
+belongs to no phase, so the phase count did not move. End your turn: the Stop gate runs the
+cumulative review over the whole activation again.
+"""
+
 NEXT_PHASE: Final = (
     VERIFIED_HEADER
     + """
@@ -621,7 +631,12 @@ def _advance(check: _Check, *, pending: str, head: str) -> NoReturn:
             # Appended to the reloaded list, never to one read before the lock: two confirmations
             # racing here would otherwise each write a list missing the other's entry.
             recorded = [entry for entry in state.get_array_of_dicts("phase_commits") if entry.get("phase") != check.expected.phase]
-            recorded.append({"phase": check.expected.phase, "commit": head})
+            # A follow-up after the last phase (a fix for the cumulative review's findings)
+            # belongs to no phase: it neither moves `phase` past total+1 nor records a phase
+            # commit that `completion._recorded_phase_commits` would refuse as phase total+1.
+            follow_up = 0 < state.phase_count() < check.expected.phase
+            if not follow_up:
+                recorded.append({"phase": check.expected.phase, "commit": head})
             updates: dict[str, object] = {
                 "last_approved_tree": pending,
                 "pending_approved_tree": "",
@@ -629,7 +644,7 @@ def _advance(check: _Check, *, pending: str, head: str) -> NoReturn:
                 "pending_command": "",
                 "status": "ACTIVE",
                 "reason": "",
-                "phase": check.expected.phase + 1,
+                "phase": check.expected.phase if follow_up else check.expected.phase + 1,
                 "phase_commits": recorded,
                 "failures": 0,
                 # Phase 6: a transient failure/backoff belongs to the phase whose review hit
@@ -659,6 +674,8 @@ def _advance(check: _Check, *, pending: str, head: str) -> NoReturn:
     phase = check.expected.phase
     next_phase = phase + 1
     total = state.phase_count()
+    if 0 < total < phase:
+        check.hook.posttool_context(FOLLOW_UP_COMMITTED.format(total=total).rstrip("\n"))
     if next_phase > total:
         # Same `_Check.config` branch as the PAUSE_TARGET_REACHED / NEXT_PHASE choice below:
         # what the model is told to expect from ending its turn has to match what the Stop

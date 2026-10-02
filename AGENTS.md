@@ -81,6 +81,7 @@ Each line is a claim the code must keep true. `→ name` names its long form, [`
 - `_ENDED` (`DISARMED`, `COMPLETE`, `RESUMED`) is **disjoint from `_RECONCILABLE`**, makes no git call, and reports from the recorded end state; `NEEDS_HUMAN` and `STALE` deliberately stay on the current-HEAD path. → `deny-list-and-parser`
 - Only a *recorded* tree absent from `approved_trees` may carry the categorical headline; malformed, unreadable and unborn captures go through `ENDED_UNCERTAIN_REPORT`. → `end-state-record`
 - `confirm-commit` reports an **unborn HEAD** when `activation_commit` is non-empty — the one HEAD move the tree comparison cannot make. → `environment-hazards`
+- **Nothing is committed after the last phase unless a cumulative review follows** (`hooks.plan_done`). The no-review completion needs the last phase's commit to be `HEAD`, so `pretool` denies such a commit and the Stop gate names leftover changes as outside the plan rather than sweeping them. Under `final_review` or `finish` a follow-up commit is allowed, and it moves neither `phase` nor `phase_commits`. → `environment-hazards`
 - The final cumulative review is **opt-in** (`final_review`, off by default). Never write "the cumulative review will catch it" without saying which configuration you mean. → `deny-list-and-parser`
 
 ### Resume and retirement
