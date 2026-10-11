@@ -104,6 +104,16 @@ repos:
         additional_dependencies: ["prettier@3.9.9"]
         files: \.(yml|yaml)$
         args: ["--write"]
+      # Every source file carries the GPL-3.0-or-later header. Reads the whole tree, so it always
+      # runs; pinned to one stage because always_run makes a hook eligible at every installed
+      # stage, and commit-msg is one of them.
+      - id: check-license-headers
+        name: licence headers
+        entry: scripts/check-license-headers.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
       # The display module and its tests are the only JavaScript here, and pre-commit is the
       # only development toolchain: these two hooks run from the node environment pre-commit
       # builds out of their pinned dependencies, with no package.json and no npm step. TypeScript
