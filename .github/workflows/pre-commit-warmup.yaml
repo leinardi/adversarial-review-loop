@@ -1,17 +1,32 @@
 name: Pre-commit Cache Warm-up
 
+# Keeps a default-branch cache of the pre-commit hook environments for pull requests (and
+# ci.yaml's pre-commit-all) to restore. The weekly schedule is eviction insurance: GitHub evicts a
+# cache nobody restored for 7 days. The self-path re-runs the warm-up when this caller changes,
+# for example when Dependabot bumps the pinned version.
 on:
   push:
     branches:
       - main
     paths:
       - .pre-commit-config.yaml
+      - .github/workflows/pre-commit-warmup.yaml
+  schedule:
+    - cron: "37 3 * * 1"
   workflow_dispatch:
 
-# The reusable workflow only checks out and fills the cache; it declares the same.
+concurrency:
+  group: pre-commit-warmup-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   warm-pre-commit-cache:
-    uses: leinardi/gh-reusable-workflows/.github/workflows/pre-commit-warmup.yaml@4b8d094239089d9f91fd15b929db30fcb2a3c118 # v1.3.1
+    # actions: write lets the reusable workflow's prune job delete the older caches of this ref;
+    # without it the prune is skipped with a warning.
+    permissions:
+      contents: read
+      actions: write
+    uses: leinardi/gh-reusable-workflows/.github/workflows/pre-commit-warmup.yaml@ba5f6ec7596a5eb306ad2f7511a888ec8dde6d53 # v1.4.0
