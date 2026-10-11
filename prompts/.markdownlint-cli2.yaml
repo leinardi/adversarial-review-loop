@@ -1,0 +1,9 @@
+---
+# The text in this directory ships: Claude Code and the reviewer read these files as they are,
+# line breaks included. Their lines are not rewrapped to the repository's 100 columns, and their
+# nested lists keep the indentation they were written with, so no lint fix changes what a model
+# reads. Every other rule of the root .markdownlint-cli2.yaml still applies (settings merge).
+config:
+  line-length: false
+  ul-indent:
+    indent: 4

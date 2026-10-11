@@ -445,19 +445,19 @@ matters (it is what makes a future read-only deny unreachable without deliberate
 it) — it just shows up as less work inside the one Python process, not as fewer processes
 around it.
 
-Latency does not track the process count, and the reason is `scripts/arl.sh` itself: every
-hook call is wrapped in an outer watchdog at `<N>` seconds (below the timeout Claude Code
-enforces — see [`docs/design/interpreter-and-watchdog.md`](design/interpreter-and-watchdog.md)), so a hung parser
-still denies before the host tears the hook down with nothing. On this machine that wrapper
-alone measured **~90 ms**, flat, on every call — `timeout` here is `uutils-coreutils`' Rust
-reimplementation, and it appears to poll on a fixed interval rather than waking when the
-child exits (confirmed with `strace`: the child exits immediately, `timeout` still sleeps
-out the rest of its interval). The raw interpreter cost underneath it, `python3 -I` running
-the gate directly with no wrapper, measured **~45 ms**. Neither the wrapper's cost nor its
-presence is optional — Rule 1's "a hung parser must deny" needs it — but which number you
-see depends on which watchdog your system runs: GNU coreutils' `timeout` does not have this
-behaviour, and the perl supervisor used where there is no `timeout` at all (macOS) measured
-**~23 ms** over a bare exec, its cost being interpreter startup rather than polling.
+Latency does not track the process count, and the reason is `scripts/arl.sh` itself: every hook call
+is wrapped in an outer watchdog at `<N>` seconds (below the timeout Claude Code enforces — see
+[`docs/design/interpreter-and-watchdog.md`](design/interpreter-and-watchdog.md)), so a hung parser
+still denies before the host tears the hook down with nothing. On this machine that wrapper alone
+measured **~90 ms**, flat, on every call — `timeout` here is `uutils-coreutils`' Rust
+reimplementation, and it appears to poll on a fixed interval rather than waking when the child exits
+(confirmed with `strace`: the child exits immediately, `timeout` still sleeps out the rest of its
+interval). The raw interpreter cost underneath it, `python3 -I` running the gate directly with no
+wrapper, measured **~45 ms**. Neither the wrapper's cost nor its presence is optional — Rule 1's "a
+hung parser must deny" needs it — but which number you see depends on which watchdog your system
+runs: GNU coreutils' `timeout` does not have this behaviour, and the perl supervisor used where
+there is no `timeout` at all (macOS) measured **~23 ms** over a bare exec, its cost being
+interpreter startup rather than polling.
 
 One invariant sits underneath all of this and is easy to break by accident. The shim reads
 the gate's decision through `out=$(…)`, and a command substitution does not finish until

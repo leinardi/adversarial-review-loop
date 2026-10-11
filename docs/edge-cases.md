@@ -229,15 +229,14 @@ standing. That does not make the next turn end run the review while the worktree
 dirty — Stop checks cleanliness first and blocks — but once it is clean, the review runs,
 skipping the outstanding-phase check, so it can complete with phases still left.
 
-**Completing this way has to be earned, and the evidence is git's, not `state.json`'s.**
-With no reviewer in the loop, `phase == len(phases) + 1` proves only that an integer was
-incremented, so the gate proves phase progress against the repository instead:
-`confirm-commit` records the SHA it verified for each phase in `phase_commits`, and
-completion requires one per frozen phase, all distinct canonical object IDs, forming an
-ancestry chain from the activation commit through each phase in order, **each one moving the
-tree**, ending *at* `HEAD` rather than merely below it. The last clause is what stops `git commit --allow-empty` per phase from
-walking an unimplemented plan to `COMPLETE` through the unchanged-tree cache, which never
-calls the reviewer.
+**Completing this way has to be earned, and the evidence is git's, not `state.json`'s.** With no
+reviewer in the loop, `phase == len(phases) + 1` proves only that an integer was incremented, so the
+gate proves phase progress against the repository instead: `confirm-commit` records the SHA it
+verified for each phase in `phase_commits`, and completion requires one per frozen phase, all
+distinct canonical object IDs, forming an ancestry chain from the activation commit through each
+phase in order, **each one moving the tree**, ending *at* `HEAD` rather than merely below it. The
+last clause is what stops `git commit --allow-empty` per phase from walking an unimplemented plan to
+`COMPLETE` through the unchanged-tree cache, which never calls the reviewer.
 
 It fails closed, and three shapes land on that side of the line. An activation armed before
 `phase_commits` existed has no record and cannot produce one after the fact. A plan containing
@@ -287,14 +286,14 @@ cumulatively: `finish` refuses one, and so does `resume`. The decision is made a
 the turn ends, not later. If you want the pass, ask for it *before* that —
 `/adversarial-review-loop:finish`, which ignores `final_review`.
 
-**Refusals on this path escalate much faster.** When a completion is refused (the activation
-moved underneath it, the recorded phase evidence doesn't hold up), that becomes a counted
-no-progress block. The one exception is an expiry: a refusal because the activation went
-`STALE` mid-turn ends the turn uncounted, like any other stale turn end. With the review enabled there was a minutes-long
-reviewer call between attempts; without it, a worktree something else is rewriting can burn
-through `max_stop_blocks` in seconds and escalate to `NEEDS_HUMAN`. That escalation is the
-fail-closed direction and is working as intended — but it arrives sooner than it would with
-the cumulative review enabled.
+**Refusals on this path escalate much faster.** When a completion is refused (the activation moved
+underneath it, the recorded phase evidence doesn't hold up), that becomes a counted no-progress
+block. The one exception is an expiry: a refusal because the activation went `STALE` mid-turn ends
+the turn uncounted, like any other stale turn end. With the review enabled there was a minutes-long
+reviewer call between attempts; without it, a worktree something else is rewriting can burn through
+`max_stop_blocks` in seconds and escalate to `NEEDS_HUMAN`. That escalation is the fail-closed
+direction and is working as intended — but it arrives sooner than it would with the cumulative
+review enabled.
 
 ## After the mode ends
 
@@ -400,7 +399,8 @@ approval and that commit *does* land later (a killed session recovering, or land
 band), the gate still notices: it enters `RECONCILE` rather than silently accepting a
 commit nobody's current activation ever reviewed.
 
-*Why it is built this way, at length: [`design/resume-and-retirement.md`](design/resume-and-retirement.md).*
+*Why it is built this way, at length:
+[`design/resume-and-retirement.md`](design/resume-and-retirement.md).*
 
 ## History rewritten under a resume
 
@@ -426,19 +426,18 @@ fills the blocking list. A `severity=info actionable=no` remark repeated every r
 disagreement, and it does not spend a human interrupt. Retirement is unaffected: a
 `SUPERSEDES` still resolves against every finding of the round it names, blocking or not.
 
-**A reversal the reviewer declares is believed.** `SUPERSEDES round=N file=F` retires the
-round-`N` finding whose location is exactly `F`, and a retired finding is not "raised" for
-either check — so a round that retracts a finding and raises a genuinely different one in the
-same file is converging, not stuck, whether it does so in the next round or three rounds
-later. This cannot be used to dodge the check: a proper retraction counts towards the
-reversal signal instead (reversing one file in two separate rounds escalates on its own),
-and a finding dropped *silently* and raised again later still counts as a reappearance. Retirement is deliberately strict about what
-it will believe: a round number that names no earlier round, a location matching no finding
-of that round, a location matching *two* of them (which was reversed is unknowable), and a
-reversal already claimed by an earlier round all retire nothing. Every one of those was
-observed as a false escalation before the rule existed — most often the last one, since
-`prior-rounds.txt` keeps showing a reversal the reviewer already made, and restating it is
-not a second change of mind.
+**A reversal the reviewer declares is believed.** `SUPERSEDES round=N file=F` retires the round-`N`
+finding whose location is exactly `F`, and a retired finding is not "raised" for either check — so a
+round that retracts a finding and raises a genuinely different one in the same file is converging,
+not stuck, whether it does so in the next round or three rounds later. This cannot be used to dodge
+the check: a proper retraction counts towards the reversal signal instead (reversing one file in two
+separate rounds escalates on its own), and a finding dropped *silently* and raised again later still
+counts as a reappearance. Retirement is deliberately strict about what it will believe: a round
+number that names no earlier round, a location matching no finding of that round, a location
+matching *two* of them (which was reversed is unknowable), and a reversal already claimed by an
+earlier round all retire nothing. Every one of those was observed as a false escalation before the
+rule existed — most often the last one, since `prior-rounds.txt` keeps showing a reversal the
+reviewer already made, and restating it is not a second change of mind.
 
 **Accepted consequence:** a reviewer that raises a genuinely new, non-repeating objection
 every round never trips this. Nothing here distinguishes real, ongoing progress from an
@@ -459,11 +458,10 @@ activation does not complete, and any further edit changes the tree hash and put
 right back under review. It also clears a `NEEDS_HUMAN` escalation, which is otherwise
 something only a human can do — `resume` deliberately refuses to.
 
-Every acceptance is recorded: in `/adversarial-review-loop:status`, as its own numbered
-report visible through `/adversarial-review-loop:report`, and in a
-`## Manually accepted phases` section shown to every later review of that activation — including the final
-cumulative one — so nothing downstream mistakes an accepted phase for one that actually
-passed a gate.
+Every acceptance is recorded: in `/adversarial-review-loop:status`, as its own numbered report
+visible through `/adversarial-review-loop:report`, and in a `## Manually accepted phases` section
+shown to every later review of that activation — including the final cumulative one — so nothing
+downstream mistakes an accepted phase for one that actually passed a gate.
 
 Before accepting, though: when a finding is just *unclear*, or two rounds seem to contradict
 each other, Claude can run `arl.sh clarify --question "…"` to get one prose answer about the
