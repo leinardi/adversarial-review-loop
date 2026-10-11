@@ -17,6 +17,9 @@ Any HTML comment will be stripped when the markdown is rendered, so you don't ne
 - [ ] I have run `make test` locally and it has passed
 - [ ] Every commit message follows [Conventional
   Commits](https://www.conventionalcommits.org/en/v1.0.0/) with a scope (`type(scope): subject`)
+- [ ] The commit type matches whether the change ships: `feat` or `fix` for what users receive,
+  never `perf` or `refactor` for CI, tests or docs (commitizen counts both as a patch; see
+  `AGENTS.md`)
 - [ ] I have performed a self-review of my own code
 - [ ] There are no `WIP` commits in this PR
 

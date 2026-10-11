@@ -81,7 +81,7 @@ Then load the code authority for the changed paths:
 | Claude plugin or skills | `.claude-plugin/*.json`, `hooks/hooks.json`, `skills/*/SKILL.md`, `tests/STEP0.md` | host schema, hook registration, user-only commands, expansion assumptions |
 | tests or test infrastructure | `tests/selftest.sh`, `tests/unit/`, `tests/fixtures/fake-reviewer.sh`, `.mk/test.mk` | scratch isolation, failure injection, old-code failure |
 | user-visible behavior | `README.md` and the relevant skill body | command contract, recovery guidance, documented limitations |
-| build or CI tooling | `Makefile`, `.mk/*.mk`, `.pre-commit-config.yaml`, `.github/workflows/*.yaml` | reproducibility, network bootstrap, actual CI coverage |
+| build or CI tooling | `Makefile`, `.mk/*.mk`, `.pre-commit-config.yaml`, `.github/workflows/*.yaml`, `scripts/check-license-headers.sh` | reproducibility, network bootstrap, actual CI coverage; `ci-result` still needs every job |
 
 Runtime behavior wins when it disagrees with the docs, but drift in a
 user-facing contract is still a finding.
@@ -272,6 +272,31 @@ Run each relevant pass with "how can this approve something wrong?" framing:
   Make targets, CI and real behavior. Flag claims such as complete evidence,
   automatic disarming, user-only actions or exhaustive tests unless the code
   proves them.
+- **Commit type matches whether it ships:** commitizen (`.cz.toml`,
+  `cz bump --get-next`) derives the release from the commit types since the
+  last tag, and pull requests land as merge commits, so every commit counts.
+  The plugin ships as the repository at a tag: a change users receive
+  (`scripts/arl.sh`, `scripts/arl-bootstrap.py`, `scripts/arl/`, `hooks/`,
+  `prompts/`, `skills/`, `.claude-plugin/`) typed `build`, `chore`, `ci`,
+  `docs`, `style` or `test` never cuts a release on its own: a finding.
+  commitizen counts `perf` and `refactor` as a patch, so either one on CI,
+  tests or docs cuts a release with nothing in it, and so does a `feat` or
+  `fix` there: a finding. A stray `!` before the colon or a `BREAKING CHANGE:`
+  footer cuts a major. A revert of a shipped change is typed `fix`, since
+  `revert` bumps nothing. commitizen reads every line of every message, the
+  merge commit's pull request title included, not only the subject: a line
+  that opens with a word starting `feat`, `fix`, `refactor` or `perf` and a
+  colon (`fixtures:`, `performance:`) bumps as that type, and a line opening
+  with `word!:` cuts a major (`AGENTS.md` § Commits).
+- **A meta-test that can no longer fail:** `tests/unit/test_pins.py`,
+  `test_vendor.py`, `test_toolchain.py`, `test_mod_contract.py`,
+  `test_skill_arguments.py`, `test_license_headers.py` and
+  `scripts/check-license-headers.sh` guard claims the code cannot check for
+  itself. Break the guarded thing once (drift a pin, edit a vendored file,
+  drop a skill's `allowed-tools` rule, strip a header) and see whether the
+  test still fails. A check that passes because its file list is empty, its
+  pattern no longer matches anything, its loop never ran or a new path is
+  exempt by accident is a false pass: a finding.
 
 For each candidate finding, reproduce it or trace the bypass end to end. If
 that confirms it, report it. If not, dig once more; if it is still
