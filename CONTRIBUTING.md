@@ -60,3 +60,9 @@ bump nothing. See [`docs/release.md`](docs/release.md).
 Pull requests are merged with merge commits; squash and rebase merging are disabled. Every commit in
 a pull request therefore lands on `main` as it is and counts toward the version, so each commit
 needs a correct type, not just the pull request as a whole.
+
+commitizen reads every line of a message, not only the subject, and the merge commit's body is the
+pull request's title. A line that opens with a word starting `feat`, `fix`, `refactor` or `perf`
+followed by a colon (`fixtures:`, `performance:`) bumps as that type, and a line opening with
+`word!:` cuts a major. Keep such lines out of commit bodies, and give the pull request a title whose
+type matches what it ships.
