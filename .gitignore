@@ -12,8 +12,11 @@ desktop.ini
 out/
 .gradle/
 
-# VS Code
+# Other editors
 .vscode/
+*.code-workspace
+*.swp
+*~
 
 # Logs
 *.log
@@ -34,3 +37,9 @@ venv/
 .cache/
 .tmp/
 tmp/
+
+# Claude Code: the skills symlink (and shared settings, should they appear) are tracked; local
+# settings (settings.local.json) and session state never are.
+.claude/*
+!.claude/settings.json
+!.claude/skills

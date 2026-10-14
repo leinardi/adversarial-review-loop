@@ -159,10 +159,10 @@ jobs:
       # stop a GITHUB_TOKEN-authored pull request from firing `pull_request`, which would
       # leave the release PR with no CI at all - that is what this dispatch is insurance
       # against. Measured on PR #5 (run 33443605671) it fired anyway, with all eight
-      # contexts, so this produces a second run that executes only `test`, `test-macos` and
-      # `conventional-commits` (every other job in ci.yaml is gated on the event being a
-      # pull_request). Keep it until the automatic run has proven reliable across a few
-      # releases, then drop it and `actions: write` with it.
+      # contexts, so this produces a second run that executes only `pre-commit-all`, `test`,
+      # `test-macos`, `conventional-commits` and `ci-result` (every other job in ci.yaml is
+      # gated on the event being a pull_request). Keep it until the automatic run has proven
+      # reliable across a few releases, then drop it and `actions: write` with it.
       - name: Trigger CI checks on the bump branch
         env:
           GH_TOKEN: ${{ github.token }}

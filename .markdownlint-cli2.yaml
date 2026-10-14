@@ -2,14 +2,22 @@
 customRules:
   - markdownlint-rule-table-format
 
-# Disable some built-in rules
+# Built-in rules: everything on, with these adjustments.
 config:
   fenced-code-language: false
-  line-length: false
   no-inline-html: false
+  # Prose wraps at 100 columns (AGENTS.md); tables, code blocks and headings may run longer.
+  # prompts/ and skills/ override this in their own .markdownlint-cli2.yaml.
+  line-length:
+    line_length: 100
+    tables: false
+    code_blocks: false
+    headings: false
   ul-indent:
-    indent: 4
-
+    indent: 2
+  # Shell and configuration examples keep their own indentation.
+  no-hard-tabs:
+    code_blocks: false
   no-duplicate-heading:
     siblings_only: true
 
@@ -30,14 +38,9 @@ fix: true
 # Ignore files referenced by .gitignore (only valid at root)
 gitignore: true
 
-# Disable banner message on stdout (only valid at root)
-# noBanner: true
-
-# Disable inline config comments
-# noInlineConfig: true
-
-# Disable progress on stdout (only valid at root)
-# noProgress: true
+ignores:
+  # The vendored bashlex is kept diffable against upstream (scripts/arl/_vendor/README.md).
+  - scripts/arl/_vendor/**
 
 # Show found files on stdout (only valid at root)
 showFound: false

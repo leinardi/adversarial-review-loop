@@ -40,15 +40,14 @@ experiment, not theoretical:
   the same OS user and by the time it's asked about a command, that command is about to
   run.
 
-**A mod is a third way, on Claude Code 2.1.287 and later.** A JavaScript hooks module runs
-inside Claude Code rather than as a tool call, so it can commit and run `arl.sh deactivate`
-with no command for the gate to inspect. That case is measured. The docs say a mod can also
-overrule the gate's denial (a `tool.check` hook), or keep the gate's hooks from running at
-all, since modules sit above plugin command hooks in the hook chain; neither is measured. A
-mod is installed by you, or written by Claude into `~/.claude/dev-mods/` and loaded only if
-you answer "Enable hot reloading for this session". **Do not enable hot reloading of a
-Claude-written mod in a session with the loop armed**: that answer lasts for the whole
-session. The long form is in
+**A mod is a third way, on Claude Code 2.1.287 and later.** A JavaScript hooks module runs inside
+Claude Code rather than as a tool call, so it can commit and run `arl.sh deactivate` with no command
+for the gate to inspect. That case is measured. The docs say a mod can also overrule the gate's
+denial (a `tool.check` hook), or keep the gate's hooks from running at all, since modules sit above
+plugin command hooks in the hook chain; neither is measured. A mod is installed by you, or written
+by Claude into `~/.claude/dev-mods/` and loaded only if you answer "Enable hot reloading for this
+session". **Do not enable hot reloading of a Claude-written mod in a session with the loop armed**:
+that answer lasts for the whole session. The long form is in
 [`design/end-state-record.md`](design/end-state-record.md#mods-three-more-routes-none-of-them-a-tool-call).
 
 No file-based mechanism inside the plugin can close any of these: any token this plugin
@@ -60,16 +59,16 @@ at the human, not the model. Whether that message reliably reaches a human rathe
 the model transcript is one of the open items in `tests/STEP0.md` — see
 [edge-cases.md](edge-cases.md#what-isnt-settled-without-a-live-session).
 
-**Both reports are bounded to what the gate could observe while it was enforcing**, and the
-bound is what makes them worth reading. Every terminal transition records HEAD and its tree
-in the activation's own document, inside the same write as the status, and the two channels
-report from that record rather than from current HEAD. A commit made after the mode ended is
-therefore silent — it is ungated by design, and reporting it made the alarm fire on every
-turn end and every Bash call for the rest of the worktree's life, which is the same as it
-carrying no information. The wrapper escape above still reports, from evidence written at
-the moment it disarmed, and so does a mod that commits and disarms through its own process.
-A mod that suppresses the gate's hooks silences that report too. See [edge-cases.md](edge-cases.md#after-the-mode-ends) for the exact
-detection rule, what it does not prove, and the capture/save race.
+**Both reports are bounded to what the gate could observe while it was enforcing**, and the bound is
+what makes them worth reading. Every terminal transition records HEAD and its tree in the
+activation's own document, inside the same write as the status, and the two channels report from
+that record rather than from current HEAD. A commit made after the mode ended is therefore silent —
+it is ungated by design, and reporting it made the alarm fire on every turn end and every Bash call
+for the rest of the worktree's life, which is the same as it carrying no information. The wrapper
+escape above still reports, from evidence written at the moment it disarmed, and so does a mod that
+commits and disarms through its own process. A mod that suppresses the gate's hooks silences that
+report too. See [edge-cases.md](edge-cases.md#after-the-mode-ends) for the exact detection rule,
+what it does not prove, and the capture/save race.
 
 The state-edit escape is reported too, one step removed: a terminal document that carries no
 record cannot have reached that status through any of the three transitions that write one.
@@ -155,7 +154,8 @@ did. **Narrowing that check did not move the deny-list**: on the commit path `$`
 "$(x)"` is denied exactly as before, and a heredoc whose body contains the words `git commit`
 is still detected and refused as a commit shape.
 
-*Why it is built this way, at length: [`design/deny-list-and-parser.md`](design/deny-list-and-parser.md).*
+*Why it is built this way, at length:
+[`design/deny-list-and-parser.md`](design/deny-list-and-parser.md).*
 
 ### The accepted shapes
 
@@ -273,15 +273,15 @@ below turns on it.
   reaches the reviewer *inlined*, under either harness — through `-f` on OpenCode, in the stdin
   payload on Claude Code — from a directory outside the invocation's own read grants, so it
   cannot be re-opened by path.
-- **A continued session (`-s`, or `--resume`) — unbounded, and the gate never sees it.** This
-  one has no such story and it would be dishonest to give it one. Continuing a session hands the
-  reviewer the entire earlier conversation: every earlier round's attachments, the repository content inside those diffs
-  (which is where an injection would live), and the reviewer's own free prose across all of
-  them. None of it is re-read, re-validated or size-bounded by the gate at the point it
-  influences the next round — it lives in the reviewer CLI's own session store, which may also
-  compact it into a lossy summary the gate cannot inspect either. A continued round's verdict can therefore be
-  influenced by content the gate cannot enumerate, including content from a diff that this
-  round's own bundle no longer contains.
+- **A continued session (`-s`, or `--resume`) — unbounded, and the gate never sees it.** This one
+  has no such story and it would be dishonest to give it one. Continuing a session hands the
+  reviewer the entire earlier conversation: every earlier round's attachments, the repository
+  content inside those diffs (which is where an injection would live), and the reviewer's own free
+  prose across all of them. None of it is re-read, re-validated or size-bounded by the gate at the
+  point it influences the next round — it lives in the reviewer CLI's own session store, which may
+  also compact it into a lossy summary the gate cannot inspect either. A continued round's verdict
+  can therefore be influenced by content the gate cannot enumerate, including content from a diff
+  that this round's own bundle no longer contains.
 
 **`max_session_rounds` bounds the second channel in the one dimension that was unbounded.**
 A session carries at most `max_session_rounds` rounds (default `3`); the round after that
@@ -344,28 +344,29 @@ converging, at that price, is not one to carry.
   converge — whether from injected content or an ordinary disagreement — is exactly what
   `/adversarial-review-loop:accept` exists to break out of.
 
-And one thing continuity is *not*, so nobody spends the safety budget above chasing it: **it is
-not a large token saving.** Measured against the same 20k-token bundle, a continued round reads
-19968 tokens from the provider's prompt cache and pays 17128 uncached, against 20124 uncached for
-the equivalent cold round — single digits, not an order of magnitude. The reason is that the
-cached part is the conversation *history*, while the dominant cost is the diff, and the diff is
-re-attached as a **new message** every round, where no prompt cache can reach it. That
-re-attachment is deliberate and load-bearing, not an oversight to optimise away: `prompts/reviewer-phase.md`
-tells the reviewer that `incremental.diff` "does not replace `changes.NN.diff`, which is still the
-complete diff and still what your verdict is judged against", and to re-derive its findings "not
-from memory of an earlier round's diff". Attaching only the incremental diff would move the
-verdict's evidence into session memory, which the reviewer may compact into a lossy summary — trading
-a few percent of tokens for exactly the kind of unverifiable, model-held context this whole
-section exists to keep out of an approval. Continuity earns its place by keeping the reviewer
-*oriented* across rounds, not by being cheap.
+And one thing continuity is *not*, so nobody spends the safety budget above chasing it: **it is not
+a large token saving.** Measured against the same 20k-token bundle, a continued round reads 19968
+tokens from the provider's prompt cache and pays 17128 uncached, against 20124 uncached for the
+equivalent cold round — single digits, not an order of magnitude. The reason is that the cached part
+is the conversation *history*, while the dominant cost is the diff, and the diff is re-attached as a
+**new message** every round, where no prompt cache can reach it. That re-attachment is deliberate
+and load-bearing, not an oversight to optimise away: `prompts/reviewer-phase.md` tells the reviewer
+that `incremental.diff` "does not replace `changes.NN.diff`, which is still the complete diff and
+still what your verdict is judged against", and to re-derive its findings "not from memory of an
+earlier round's diff". Attaching only the incremental diff would move the verdict's evidence into
+session memory, which the reviewer may compact into a lossy summary — trading a few percent of
+tokens for exactly the kind of unverifiable, model-held context this whole section exists to keep
+out of an approval. Continuity earns its place by keeping the reviewer *oriented* across rounds, not
+by being cheap.
 
 ### What is attached to a reviewer call, and the window that cannot be closed
 
-Every path the gate hands the reviewer is validated for containment before it reaches the argv
-(or, on a harness that inlines from this process, before it is read): components checked, parents opened `O_NOFOLLOW` one level at a time, the leaf
-`lstat`-ed rather than `stat`-ed (`atomic.verified_file`). That refuses a planted symlink at
-any component, including the directory plant a per-file check cannot see — a symlinked
-`bundles/<seq>/` leaves ordinary regular files beneath it.
+Every path the gate hands the reviewer is validated for containment before it reaches the argv (or,
+on a harness that inlines from this process, before it is read): components checked, parents opened
+`O_NOFOLLOW` one level at a time, the leaf `lstat`-ed rather than `stat`-ed
+(`atomic.verified_file`). That refuses a planted symlink at any component, including the directory
+plant a per-file check cannot see — a symlinked `bundles/<seq>/` leaves ordinary regular files
+beneath it.
 
 **The attachment set is evidence, not a directory listing.** `build_bundle` writes a
 `manifest` last: one row per attachment, in attachment order, each carrying the SHA-256 of the
@@ -524,14 +525,15 @@ stored report, the reviewer's own `range.txt` and `make dry-run` all name the gu
 sha256, and every round leaves the exact prompt it ran under in the activation's `raw/`
 directory.
 
-*Why it is built this way, at length: [`design/config-keys-rationale.md`](design/config-keys-rationale.md).*
+*Why it is built this way, at length:
+[`design/config-keys-rationale.md`](design/config-keys-rationale.md).*
 
 ### The two harnesses, and which of these arguments is per-harness
 
-The reviewer CLI is configurable (`harness`: `claude-code` by default, `opencode`). Most of
-this page does not depend on which one runs — the contract parse, `block_severity`,
-`confirm-commit`, the deny-list and `pretool` are all upstream of the choice. Three things are per-harness, and each was measured rather than assumed
-(`tests/STEP0.md` records the probes):
+The reviewer CLI is configurable (`harness`: `claude-code` by default, `opencode`). Most of this
+page does not depend on which one runs — the contract parse, `block_severity`, `confirm-commit`, the
+deny-list and `pretool` are all upstream of the choice. Three things are per-harness, and each was
+measured rather than assumed (`tests/STEP0.md` records the probes):
 
 - **The evidence boundary holds under both, by the same mechanism.** Both inline every
   attachment: OpenCode through `-f`, Claude Code by concatenating them into the payload it
@@ -583,11 +585,11 @@ picker for the repository they are working in.
 same repository Claude is implementing a plan against, and an ordinary file Claude can
 rewrite once mutations are permitted. Every key it sets is a lever, not only `verify_cmd`:
 
-- **`{"ignore_globs": ["**"]}` is a full, silent review bypass**, not merely a relaxation.
-  A commit whose every changed path matches `ignore_globs` skips the reviewer entirely and
-  is approved with no model ever consulted — `gitsnap.all_paths_ignored`, exercised with
-  exactly this input in `tests/unit/test_commands_pretool.py`. This is the single most direct self-serving
-  edit available: write that one line, and every subsequent commit passes unreviewed.
+- **`{"ignore_globs": ["**"]}` is a full, silent review bypass**, not merely a relaxation. A commit
+  whose every changed path matches `ignore_globs` skips the reviewer entirely and is approved with
+  no model ever consulted — `gitsnap.all_paths_ignored`, exercised with exactly this input in
+  `tests/unit/test_commands_pretool.py`. This is the single most direct self-serving edit available:
+  write that one line, and every subsequent commit passes unreviewed.
 - **`block_severity` raised to `critical`** lets every medium and high finding through
   uncommented-on — the reviewer still runs and still writes the finding into the report,
   but nothing about it blocks the commit.
@@ -603,12 +605,12 @@ rewrite once mutations are permitted. Every key it sets is a lever, not only `ve
   cannot itself approve a commit, but setting it *is* code execution — not sandboxed, not
   reviewed before it runs, and the string can be anything, not only a command already
   present in the repo.
-- **`review_guide` names a file whose content becomes part of the reviewer's
-  instructions** — the only repository-authored input that is instruction rather than
-  evidence. It is weaker than both levers above (it cannot skip a review, and it cannot run
-  code), and it is bounded rather than trusted; the section
-  "[The one repository-authored channel that is instruction](#the-one-repository-authored-channel-that-is-instruction-not-evidence)"
-  above sets out what bounds it and what it can still do.
+- **`review_guide` names a file whose content becomes part of the reviewer's instructions** — the
+  only repository-authored input that is instruction rather than evidence. It is weaker than both
+  levers above (it cannot skip a review, and it cannot run code), and it is bounded rather than
+  trusted; the section "[The one repository-authored channel that is
+  instruction](#the-one-repository-authored-channel-that-is-instruction-not-evidence)" above sets
+  out what bounds it and what it can still do.
 
 None of the above needs the `config` command at all — `config`'s
 `disable-model-invocation` blocks the *command* that writes this file in a controlled way,
@@ -618,7 +620,8 @@ or self-serving agent could set to its own advantage, exactly as you'd treat any
 in the repository — because it *is* just another file in the repository. See
 [configuration.md](configuration.md#repo-config-is-not-trusted-for-policy).
 
-*Why it is built this way, at length: [`design/config-keys-rationale.md`](design/config-keys-rationale.md).*
+*Why it is built this way, at length:
+[`design/config-keys-rationale.md`](design/config-keys-rationale.md).*
 
 ## Interpreter invocation is hardened against two specific, confirmed exploits
 
@@ -646,7 +649,8 @@ single file it writes, and never widens an existing file's permissions across a 
 a config file you deliberately left at `0600` comes back `0600`, not the process umask
 default.
 
-*Why it is built this way, at length: [`design/interpreter-and-watchdog.md`](design/interpreter-and-watchdog.md).*
+*Why it is built this way, at length:
+[`design/interpreter-and-watchdog.md`](design/interpreter-and-watchdog.md).*
 
 ## What this doesn't claim
 

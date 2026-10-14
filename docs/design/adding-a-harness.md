@@ -1,6 +1,7 @@
 # Adding a harness
 
-The long form of the harness-seam invariants in [`AGENTS.md`](../../AGENTS.md): what a new reviewer CLI module must settle, and what it may never decide.
+The long form of the harness-seam invariants in [`AGENTS.md`](../../AGENTS.md): what a new reviewer
+CLI module must settle, and what it may never decide.
 
 A new reviewer CLI is a new module under `scripts/arl/harness/` plus one line in
 `harness._registry`. Nothing else in the gate learns its name — that is the property the seam

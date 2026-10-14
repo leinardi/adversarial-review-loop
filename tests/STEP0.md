@@ -1,12 +1,15 @@
 # Step 0 — the live-session runbook
 
-`tests/unit/` and `tests/selftest.sh` between them cover everything reachable from a shell. Neither can cover how **Claude Code itself** loads the skill, expands its body, and dispatches its hooks. This document is the procedure for settling that, once, before the mode is trusted on real work.
+`tests/unit/` and `tests/selftest.sh` between them cover everything reachable from a shell. Neither
+can cover how **Claude Code itself** loads the skill, expands its body, and dispatches its hooks.
+This document is the procedure for settling that, once, before the mode is trusted on real work.
 
 Budget about an hour, plus a handful of real model calls in session A.
 
 ## Before you start
 
-- `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` set to `40` in `settings.json`, and Claude Code restarted since. The variable is read at process start.
+- `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` set to `40` in `settings.json`, and Claude Code restarted since.
+  The variable is read at process start.
 - The plugin installed:
 
   ```text
@@ -14,19 +17,32 @@ Budget about an hour, plus a handful of real model calls in session A.
   /plugin install adversarial-review-loop
   ```
 
-- **A working Bash sandbox, or none at all.** Arming runs through Claude Code's Bash sandbox at prompt-expansion time, so if the sandbox cannot start, `arl arm` never runs. On Ubuntu-family kernels `kernel.apparmor_restrict_unprivileged_userns=1` blocks the unprivileged user namespace the sandbox needs, and every command dies with `apply-seccomp: write /proc/self/setgroups`. Check with `unshare --user --map-root-user true`.
+- **A working Bash sandbox, or none at all.** Arming runs through Claude Code's Bash sandbox at
+  prompt-expansion time, so if the sandbox cannot start, `arl arm` never runs. On Ubuntu-family
+  kernels `kernel.apparmor_restrict_unprivileged_userns=1` blocks the unprivileged user namespace
+  the sandbox needs, and every command dies with `apply-seccomp: write /proc/self/setgroups`. Check
+  with `unshare --user --map-root-user true`.
 
-  Two independent things must hold: the sandbox must be able to start, **and** it must permit writes to the state root. A `denyWrite` covering `~/` blocks `$XDG_STATE_HOME/adversarial-review-loop`, so arming fails on its first write even when the sandbox works.
+  Two independent things must hold: the sandbox must be able to start, **and** it must permit writes
+  to the state root. A `denyWrite` covering `~/` blocks `$XDG_STATE_HOME/adversarial-review-loop`,
+  so arming fails on its first write even when the sandbox works.
 
-- A throwaway fixture — never point this at work you care about, since the exercise is about provoking denials and bad commits:
+- A throwaway fixture — never point this at work you care about, since the exercise is about
+  provoking denials and bad commits:
 
   ```console
   tests/step0-fixture.sh          # creates ~/arl-step0
   ```
 
-**Two escape hatches, worth knowing before you need them.** Once armed, the session's tool calls are gated, so if a run wedges: `/adversarial-review-loop:stop` disarms it, and failing that `rm -rf ~/.local/state/adversarial-review-loop` removes all state. `/clear` also disarms, because the hooks are session-scoped.
+**Two escape hatches, worth knowing before you need them.** Once armed, the session's tool calls are
+gated, so if a run wedges: `/adversarial-review-loop:stop` disarms it, and failing that
+`rm -rf ~/.local/state/adversarial-review-loop` removes all state. `/clear` also disarms, because
+the hooks are session-scoped.
 
-Already settled empirically against `opencode 1.18.18` and `openai/gpt-5.6-sol`, so they are not in the runbook: `-f` attachments outside the repo are reachable with the pattern-scoped `external_directory`, and OpenCode's permission patterns are last-match-wins. Static checks against Claude Code 2.1.235 confirm every frontmatter key and hook event used here exists in the binary.
+Already settled empirically against `opencode 1.18.18` and `openai/gpt-5.6-sol`, so they are not in
+the runbook: `-f` attachments outside the repo are reachable with the pattern-scoped
+`external_directory`, and OpenCode's permission patterns are last-match-wins. Static checks against
+Claude Code 2.1.235 confirm every frontmatter key and hook event used here exists in the binary.
 
 ---
 
@@ -42,15 +58,32 @@ cd ~/arl-step0/repo && claude
 /adversarial-review-loop:implement ~/arl-step0/plan.md
 ```
 
-**Expect** a block beginning `**adversarial-review-loop is ARMED for this worktree.**`, naming the repository, a baseline tree, an activation commit, and the reviewer model — *before* Claude says anything.
+**Expect** a block beginning `**adversarial-review-loop is ARMED for this worktree.**`, naming the
+repository, a baseline tree, an activation commit, and the reviewer model — *before* Claude says
+anything.
 
-This is **item 2, and it is load-bearing.** It is the one result that can invalidate the architecture.
+This is **item 2, and it is load-bearing.** It is the one result that can invalidate the
+architecture.
 
-**Settled 2026-08-19: it passes.** The expansion ran, `${CLAUDE_PLUGIN_ROOT}` resolved, and `${CLAUDE_SESSION_ID}` interpolated to a real session id. The evidence came from a *failure* of the arm command rather than a success: the error quoted the fully-substituted command back, which is itself proof the expansion happened. The architecture holds; re-check only if the harness changes.
+**Settled 2026-08-19: it passes.** The expansion ran, `${CLAUDE_PLUGIN_ROOT}` resolved, and
+`${CLAUDE_SESSION_ID}` interpolated to a real session id. The evidence came from a *failure* of the
+arm command rather than a success: the error quoted the fully-substituted command back, which is
+itself proof the expansion happened. The architecture holds; re-check only if the harness changes.
 
-- **`[run this first, exactly as written, and use its output: …]` appears instead (item 2b)** → expansion works, but the permission check for the command answered `ask`. Since Claude Code 2.1.272 such a block is handed to the model instead of run, and the gate then denies the model's own `arm` as a Rule 4 escape, so arming fails closed with "arming never ran". This is the fallback behaving as designed, not a new failure mode. The skill's `allowed-tools` rule did not match: check the installed cache has the frontmatter (see "The install cache" in `AGENTS.md`), and check for a user `permissions.deny`/`ask` rule matching `arl.sh`. Reproduce with the Bash sandbox **off** (`.claude/settings.local.json`: `{"sandbox": {"enabled": false}}`). With the sandbox on, sandbox auto-allow hides the problem.
-- **Literal `` !`…` `` text appears instead** → expansion does not run in skill bodies. Stop the runbook and see "If A1 fails" below.
-- **Nothing appears and Claude immediately can't do anything** → same conclusion. Arming did not run, but the `UserPromptSubmit` hook recorded that it was asked for, so the dispatcher denies everything. That is the fail-closed design behaving correctly, not a bug.
+- **`[run this first, exactly as written, and use its output: …]` appears instead (item 2b)** →
+  expansion works, but the permission check for the command answered `ask`. Since Claude Code
+  2.1.272 such a block is handed to the model instead of run, and the gate then denies the model's
+  own `arm` as a Rule 4 escape, so arming fails closed with "arming never ran". This is the fallback
+  behaving as designed, not a new failure mode. The skill's `allowed-tools` rule did not match:
+  check the installed cache has the frontmatter (see "The install cache" in `AGENTS.md`), and check
+  for a user `permissions.deny`/`ask` rule matching `arl.sh`. Reproduce with the Bash sandbox
+  **off** (`.claude/settings.local.json`: `{"sandbox": {"enabled": false}}`). With the sandbox on,
+  sandbox auto-allow hides the problem.
+- **Literal `` !`…` `` text appears instead** → expansion does not run in skill bodies. Stop the
+  runbook and see "If A1 fails" below.
+- **Nothing appears and Claude immediately can't do anything** → same conclusion. Arming did not
+  run, but the `UserPromptSubmit` hook recorded that it was asked for, so the dispatcher denies
+  everything. That is the fail-closed design behaving correctly, not a bug.
 
 Confirm the state landed:
 
@@ -58,7 +91,8 @@ Confirm the state landed:
 ls ~/.local/state/adversarial-review-loop/worktrees/*/*/
 ```
 
-You should see `state.json` and `plan.frozen.md` — that is **item 7**, a hook script reading a plan from outside the repo.
+You should see `state.json` and `plan.frozen.md` — that is **item 7**, a hook script reading a plan
+from outside the repo.
 
 ### A2. Hook registration — item 1
 
@@ -66,9 +100,12 @@ You should see `state.json` and `plan.frozen.md` — that is **item 7**, a hook 
 /hooks
 ```
 
-**Expect** four entries pointing at `scripts/arl.sh`: `PreToolUse` (no matcher), `PostToolUse` (`Bash`), `PostToolUseFailure` (`Bash`), `Stop`. That `${CLAUDE_PLUGIN_ROOT}` resolved at all is **item 5** — a path that failed to expand would show up as a missing command on every tool call.
+**Expect** four entries pointing at `scripts/arl.sh`: `PreToolUse` (no matcher), `PostToolUse`
+(`Bash`), `PostToolUseFailure` (`Bash`), `Stop`. That `${CLAUDE_PLUGIN_ROOT}` resolved at all is
+**item 5** — a path that failed to expand would show up as a missing command on every tool call.
 
-If `PostToolUseFailure` is absent, the loop still holds: a stale pending approval is cleared by the next gate anyway. Drop the registration to avoid a dead entry.
+If `PostToolUseFailure` is absent, the loop still holds: a stale pending approval is cleared by the
+next gate anyway. Drop the registration to avoid a dead entry.
 
 ### A3. The silent-pass check — item 4, the dangerous one
 
@@ -86,7 +123,9 @@ Read the outcome carefully, because three different things look similar:
 | Denied, message says the activation state **is missing** | Ids differ, or A1 silently failed. Investigate before continuing |
 | **Claude edits the file** | **Critical.** The gate is not running at all. Stop and diagnose |
 
-The third row is the failure this item exists to catch: a session-id mismatch makes the gate *silently pass* rather than fail loudly, which is the one failure mode the whole design is meant to exclude.
+The third row is the failure this item exists to catch: a session-id mismatch makes the gate
+*silently pass* rather than fail loudly, which is the one failure mode the whole design is meant to
+exclude.
 
 Cross-check the ids directly:
 
@@ -98,26 +137,33 @@ The `session:` line must match the directory name under `worktrees/*/` from A1.
 
 ### A4. Run the loop for real
 
-Let Claude do what the skill tells it: propose two phases, run `set-phases`, implement phase 1, commit.
+Let Claude do what the skill tells it: propose two phases, run `set-phases`, implement phase 1,
+commit.
 
-**Expect**, in order: mutations become allowed once the phases are frozen; the commit is intercepted and takes a minute or two; either an approval and a phase advance, or a denial carrying findings. If it's denied, let Claude fix and re-commit — that cycle *is* the product.
+**Expect**, in order: mutations become allowed once the phases are frozen; the commit is intercepted
+and takes a minute or two; either an approval and a phase advance, or a denial carrying findings. If
+it's denied, let Claude fix and re-commit — that cycle *is* the product.
 
 Watch for two specific things:
 
-- After a verified commit, Claude should be told to continue into phase 2 **without ending its turn**.
+- After a verified commit, Claude should be told to continue into phase 2 **without ending its
+  turn**.
 - After the last phase, ending the turn should reach `COMPLETE`. With `final_review` at its
   default `false` no cumulative review runs — with a clean worktree the sweep has nothing to
   review either, so expect no reviewer call at all; check `status` and expect the `reason` to
   say the review was skipped. Run this item with `ARL_FINAL_REVIEW=true` if you want to
   exercise the cumulative-review path instead.
 
-Expect the reviewer to be strict. In my own end-to-end run it rejected two successive attempts on scope grounds before approving, which is the gate working, not a malfunction.
+Expect the reviewer to be strict. In my own end-to-end run it rejected two successive attempts on
+scope grounds before approving, which is the gate working, not a malfunction.
 
 ### A5. Isolation — item 10
 
-While session A is still armed, open a second terminal in **any other repository** and run `claude` there. Do something that mutates a file.
+While session A is still armed, open a second terminal in **any other repository** and run `claude`
+there. Do something that mutates a file.
 
-**Expect** no gate messages, no denials, no latency. The dispatcher exits early when the session pointer is missing or the worktree does not match.
+**Expect** no gate messages, no denials, no latency. The dispatcher exits early when the session
+pointer is missing or the worktree does not match.
 
 ### A6. Close out
 
@@ -129,9 +175,13 @@ While session A is still armed, open a second terminal in **any other repository
 
 ## Session B — argument handling (item 3)
 
-One session, four invocations back to back. No `/stop` needed between them: re-arming overwrites the state for that session, and `implement` runs at expansion time so it is never gated. Press Esc to interrupt Claude between attempts — only the banner matters.
+One session, four invocations back to back. No `/stop` needed between them: re-arming overwrites the
+state for that session, and `implement` runs at expansion time so it is never gated. Press Esc to
+interrupt Claude between attempts — only the banner matters.
 
-If the fixture has already been through an end-to-end run, rewind it first (`git -C ~/arl-step0/repo reset --hard <seed>`), or Claude will correctly report that the plan is already implemented and defer instead of working.
+If the fixture has already been through an end-to-end run, rewind it first
+(`git -C ~/arl-step0/repo reset --hard <seed>`), or Claude will correctly report that the plan is
+already implemented and defer instead of working.
 
 | Invocation | Expected |
 | --- | --- |
@@ -140,13 +190,24 @@ If the fixture has already been through an end-to-end run, rewind it first (`git
 | `/adversarial-review-loop:implement` (no argument) | `ARMING FAILED`, naming the missing plan |
 | `` /adversarial-review-loop:implement ~/arl-step0/pl`id`an.md `` | `ARMING FAILED … characters that are not safe` |
 
-**Settled 2026-08-19, and it changed the design.** The skill body originally passed `"$1" "$2"`. Claude Code's positional substitution is **0-based** — `$N` resolves `s[N]` of a zero-indexed array, so `$1` is the *second* argument — and an out-of-range `$N` is left in the body verbatim, where the expansion shell then turns it into the empty string. A single-argument invocation therefore armed with an empty plan path and failed closed with "no plan path was supplied".
+**Settled 2026-08-19, and it changed the design.** The skill body originally passed `"$1" "$2"`.
+Claude Code's positional substitution is **0-based** — `$N` resolves `s[N]` of a zero-indexed array,
+so `$1` is the *second* argument — and an out-of-range `$N` is left in the body verbatim, where the
+expansion shell then turns it into the empty string. A single-argument invocation therefore armed
+with an empty plan path and failed closed with "no plan path was supplied".
 
-The body now passes `--args "$ARGUMENTS"` as one string and splits it in `arl_split_args` (ported as `commands.arm.split_args`, in `scripts/arl/commands/arm.py`, since the Phase 8 Bash removal), which also keeps plan paths containing spaces intact. The same routine (`wPt`) confirms Claude Code does **not** shell-escape substituted arguments, which is why the character-set check in `cmd_arm` (now the same `scripts/arl/commands/arm.py`) and the probe below both matter.
+The body now passes `--args "$ARGUMENTS"` as one string and splits it in `arl_split_args` (ported as
+`commands.arm.split_args`, in `scripts/arl/commands/arm.py`, since the Phase 8 Bash removal), which
+also keeps plan paths containing spaces intact. The same routine (`wPt`) confirms Claude Code does
+**not** shell-escape substituted arguments, which is why the character-set check in `cmd_arm` (now
+the same `scripts/arl/commands/arm.py`) and the probe below both matter.
 
 ### The argument-safety probe, and what it established
 
-`$ARGUMENTS` is substituted into the skill body **textually and without shell escaping**, and the body then runs through `eval`. Claude Code acknowledges this internally: an import-fallback message in the binary notes that Gemini shell-escapes `{{args}}` inside `!{…}` while Claude Code's `$ARGUMENTS` substitution does not.
+`$ARGUMENTS` is substituted into the skill body **textually and without shell escaping**, and the
+body then runs through `eval`. Claude Code acknowledges this internally: an import-fallback message
+in the binary notes that Gemini shell-escapes `{{args}}` inside `!{…}` while Claude Code's
+`$ARGUMENTS` substitution does not.
 
 Confirmed empirically on 2026-08-20, by reproducing the substitute-then-`eval` sequence:
 
@@ -155,11 +216,20 @@ Confirmed empirically on 2026-08-20, by reproducing the substitute-then-`eval` s
 | `~/arl-step0/pl`​`id`​`an.md` | the backtick also closes the outer `` !`…` `` delimiter, truncating the command into a bash syntax error — the arm never runs |
 | `x"; id; echo "` | **`id` executes.** The quote closes `--args "…"`, the semicolon starts a new command |
 
-So the live backtick probe fails safe by accident, not by design: it breaks the syntax before it can run. The quote-and-semicolon form is the real test, and it injects.
+So the live backtick probe fails safe by accident, not by design: it breaks the syntax before it can
+run. The quote-and-semicolon form is the real test, and it injects.
 
-**This is not fixable inside the plugin.** No quoting of `$ARGUMENTS` in the body helps — double quotes are escaped by `"`, single quotes by `'` — because the substitution happens before any shell sees it. It is a property of `` !`…` `` expansion that every plugin interpolating `$ARGUMENTS` into a command shares.
+**This is not fixable inside the plugin.** No quoting of `$ARGUMENTS` in the body helps — double
+quotes are escaped by `"`, single quotes by `'` — because the substitution happens before any shell
+sees it. It is a property of `` !`…` `` expansion that every plugin interpolating `$ARGUMENTS` into
+a command shares.
 
-What bounds it here: `implement` is `disable-model-invocation: true`, so Claude cannot invoke the skill. The only party who can supply a hostile path is the person typing the slash command. The realistic risk is a pasted path from an untrusted source, not a compromised agent. The character-set check in `cmd_arm` (now `scripts/arl/commands/arm.py`) still refuses such a path, but it runs *after* the injected command has already executed, so it limits the review loop's state rather than preventing execution.
+What bounds it here: `implement` is `disable-model-invocation: true`, so Claude cannot invoke the
+skill. The only party who can supply a hostile path is the person typing the slash command. The
+realistic risk is a pasted path from an untrusted source, not a compromised agent. The character-set
+check in `cmd_arm` (now `scripts/arl/commands/arm.py`) still refuses such a path, but it runs
+*after* the injected command has already executed, so it limits the review loop's state rather than
+preventing execution.
 
 Worth reporting upstream if you want it changed.
 
@@ -167,75 +237,161 @@ Worth reporting upstream if you want it changed.
 
 ## Session C — the Stop-block cap (item 6)
 
-Worth doing because of how the caps interact. Our own `max_stop_blocks` (default 3) counts only **no-progress** blocks, so a productive multi-phase run resets it constantly — but Claude Code's cap counts **consecutive** blocks regardless of progress. A five-phase run can therefore hit the host cap without ever tripping our escalation, and the host's override **ends the turn**, which reads as success.
+Worth doing because of how the caps interact. Our own `max_stop_blocks` (default 3) counts only
+**no-progress** blocks, so a productive multi-phase run resets it constantly — but Claude Code's cap
+counts **consecutive** blocks regardless of progress. A five-phase run can therefore hit the host
+cap without ever tripping our escalation, and the host's override **ends the turn**, which reads as
+success.
 
 1. Temporarily set `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` to `3`. Restart.
 2. Arm, and end your turn repeatedly without doing any work.
-3. **Expect** the override message (`A hook blocked the turn from ending N consecutive times`) at 3, not 8.
+3. **Expect** the override message (`A hook blocked the turn from ending N consecutive times`) at 3,
+   not 8.
 4. Set it back to `40`. Restart.
 
-If it has no effect, the residual limit stands as documented in the README: our `max_stop_blocks` escalates to `needs-human` first in the no-progress case, so the loop reaches a loud stop rather than a silent one — but a long productive run stays exposed.
+If it has no effect, the residual limit stands as documented in the README: our `max_stop_blocks`
+escalates to `needs-human` first in the no-progress case, so the loop reaches a loud stop rather
+than a silent one — but a long productive run stays exposed.
 
 ---
 
 ## Session D — a host-only signal for the user's exits (item 11)
 
-Open, and the reason Rule 4 is documented as a limit rather than a guarantee. `finish` and `stop` are shell subcommands, so anything that can run a shell can run them; the gate cannot tell a user's `/adversarial-review-loop:stop` from the same command issued inside `bash escape.sh`. Confirmed by experiment: the script commits and disarms, and nothing prevents either.
+Open, and the reason Rule 4 is documented as a limit rather than a guarantee. `finish` and `stop`
+are shell subcommands, so anything that can run a shell can run them; the gate cannot tell a user's
+`/adversarial-review-loop:stop` from the same command issued inside `bash escape.sh`. Confirmed by
+experiment: the script commits and disarms, and nothing prevents either.
 
-What the gate now does about it is *report* — `confirm-commit` emits `additionalContext`, and the Stop gate emits a `systemMessage`. Both are covered by `tests/unit/test_commands_posttool.py` and `test_commands_stop.py`, so what remains here is the half a shell test cannot reach.
+What the gate now does about it is *report* — `confirm-commit` emits `additionalContext`, and the
+Stop gate emits a `systemMessage`. Both are covered by `tests/unit/test_commands_posttool.py` and
+`test_commands_stop.py`, so what remains here is the half a shell test cannot reach.
 
-1. Run the escape for real: have Claude write and run a script that commits and then invokes `arl.sh deactivate`. **Expect** the `additionalContext` report on the tool result, and the `systemMessage` at turn end.
-2. **Check where the `systemMessage` is rendered.** AGENTS.md rests on it reaching the *user*, so that relaying it is not the model's decision. Confirm it appears in the user's transcript, and note whether it is also fed back to the model. If it turns out to be model-visible only, the visibility argument in AGENTS.md is wrong and must be rewritten — this is the item that decides it.
-3. Then the open question: is there anything the host offers that the model cannot produce? Register a `UserPromptSubmit` hook and check whether it fires for a slash command, and what the payload carries. Compare the environment a skill body sees at prompt-expansion time against the one a `Bash` tool call sees; anything in the first and absent from the second is a candidate.
-4. **Expect**, if either works: `deactivate` and `finish` refuse unless the signal is present, and the wrapper escape stops ending the mode.
-5. **Fallback**, if neither does: the limit stands as AGENTS.md documents it, and the reporting path is the whole of the defence.
+1. Run the escape for real: have Claude write and run a script that commits and then invokes
+   `arl.sh deactivate`. **Expect** the `additionalContext` report on the tool result, and the
+   `systemMessage` at turn end.
+2. **Check where the `systemMessage` is rendered.** AGENTS.md rests on it reaching the *user*, so
+   that relaying it is not the model's decision. Confirm it appears in the user's transcript, and
+   note whether it is also fed back to the model. If it turns out to be model-visible only, the
+   visibility argument in AGENTS.md is wrong and must be rewritten — this is the item that decides
+   it.
+3. Then the open question: is there anything the host offers that the model cannot produce? Register
+   a `UserPromptSubmit` hook and check whether it fires for a slash command, and what the payload
+   carries. Compare the environment a skill body sees at prompt-expansion time against the one a
+   `Bash` tool call sees; anything in the first and absent from the second is a candidate.
+4. **Expect**, if either works: `deactivate` and `finish` refuse unless the signal is present, and
+   the wrapper escape stops ending the mode.
+5. **Fallback**, if neither does: the limit stands as AGENTS.md documents it, and the reporting path
+   is the whole of the defence.
 
-Note what a positive result would *not* fix. A model that can run arbitrary Bash can still edit `state.json` directly, so the signal would have to gate the transition rather than the command, and the state file would still be forgeable. Treat this as raising the bar, not closing the hole.
+Note what a positive result would *not* fix. A model that can run arbitrary Bash can still edit
+`state.json` directly, so the signal would have to gate the transition rather than the command, and
+the state file would still be forgeable. Treat this as raising the bar, not closing the hole.
 
 ---
 
 ## Session E — does `{"decision":"block"}` work on a post-hook (items 13, 14)
 
-The Python port's fail-closed fallback table (see docs/design/interpreter-and-watchdog.md) gives `confirm-commit` (`PostToolUse`) and `posttool-failure` (`PostToolUseFailure`) weaker fallbacks than `pretool` and `gate-stop`, because neither can deny — the tool call has already run by the time either fires. `confirm-commit` falls back to `additionalContext`, which is known to work because the entrypoint already emits it on its ordinary path. `posttool-failure` stays silent, matching its current behaviour. A stronger `{"decision":"block"}` would be preferable for both, but it is documented as **unverified for these events** rather than assumed, and this is the item that settles it.
+The Python port's fail-closed fallback table (see docs/design/interpreter-and-watchdog.md) gives
+`confirm-commit` (`PostToolUse`) and `posttool-failure` (`PostToolUseFailure`) weaker fallbacks than
+`pretool` and `gate-stop`, because neither can deny — the tool call has already run by the time
+either fires. `confirm-commit` falls back to `additionalContext`, which is known to work because the
+entrypoint already emits it on its ordinary path. `posttool-failure` stays silent, matching its
+current behaviour. A stronger `{"decision":"block"}` would be preferable for both, but it is
+documented as **unverified for these events** rather than assumed, and this is the item that settles
+it.
 
-1. With the fixture armed and phases frozen, have Claude run a plain, successful `Bash` call that is not a commit (`echo hi`). Point `ARL_REVIEWER_CMD` or a scratch build of `confirm-commit` at a stub that returns `{"decision":"block","reason":"step0 probe"}` instead of its normal `additionalContext` response, and watch whether the turn is actually blocked, or whether `decision` is simply ignored on `PostToolUse` the way an unrecognised key would be.
-2. **Expect**, if it works: the turn does not end (or Claude is redirected) with `"step0 probe"` visible, the same way a `Stop`-hook block behaves.
-3. **Fallback**, if it does not: `PostToolUse` only honours `hookSpecificOutput.additionalContext` (or nothing), and the table's existing choice stands, documented as a deliberate limit.
-4. Repeat for `PostToolUseFailure`: force a failing `Bash` call (a command that exits non-zero) while a `pending_approved_tree` is set, and have `posttool-failure` return `{"decision":"block","reason":"step0 probe"}` instead of its normal silent exit.
+1. With the fixture armed and phases frozen, have Claude run a plain, successful `Bash` call that is
+   not a commit (`echo hi`). Point `ARL_REVIEWER_CMD` or a scratch build of `confirm-commit` at a
+   stub that returns `{"decision":"block","reason":"step0 probe"}` instead of its normal
+   `additionalContext` response, and watch whether the turn is actually blocked, or whether
+   `decision` is simply ignored on `PostToolUse` the way an unrecognised key would be.
+2. **Expect**, if it works: the turn does not end (or Claude is redirected) with `"step0 probe"`
+   visible, the same way a `Stop`-hook block behaves.
+3. **Fallback**, if it does not: `PostToolUse` only honours `hookSpecificOutput.additionalContext`
+   (or nothing), and the table's existing choice stands, documented as a deliberate limit.
+4. Repeat for `PostToolUseFailure`: force a failing `Bash` call (a command that exits non-zero)
+   while a `pending_approved_tree` is set, and have `posttool-failure` return
+   `{"decision":"block","reason":"step0 probe"}` instead of its normal silent exit.
 5. **Expect**, if it works: same as above, the reason surfaces and the turn is blocked.
-6. **Fallback**, if it does not: `posttool-failure` stays silent, exactly as it is today — inventing a protocol shape here trades an inert inconsistency for a possibly-ignored message, which is worse.
-7. Whatever the result, it tightens (or confirms) the fallback table in `hookio.py`'s `failclosed_exit` and the corresponding row in `AGENTS.md`; it does not change `pretool` or `gate-stop`, which already have the strongest fallback either event supports.
+6. **Fallback**, if it does not: `posttool-failure` stays silent, exactly as it is today — inventing
+   a protocol shape here trades an inert inconsistency for a possibly-ignored message, which is
+   worse.
+7. Whatever the result, it tightens (or confirms) the fallback table in `hookio.py`'s
+   `failclosed_exit` and the corresponding row in `AGENTS.md`; it does not change `pretool` or
+   `gate-stop`, which already have the strongest fallback either event supports.
 
 ---
 
 ## Session F — hooks registered twice in one session (item 15) — superseded
 
-**This item is closed and the session below is obsolete.** It was written when `implement` and `resume` each carried their own `hooks:` block. They no longer do: every hook lives in `hooks/hooks.json` and registers once at plugin load, so a same-session `resume` registers nothing a second time and there is no double firing to measure. See "Plugin-level hooks, 2026-08-30" below for the result that moved them, and [`docs/design/resume-and-retirement.md`](../docs/design/resume-and-retirement.md) for why neither skill may grow one back. The rest of this section is kept only as the record of what was asked; do not run it.
+**This item is closed and the session below is obsolete.** It was written when `implement` and
+`resume` each carried their own `hooks:` block. They no longer do: every hook lives in
+`hooks/hooks.json` and registers once at plugin load, so a same-session `resume` registers nothing a
+second time and there is no double firing to measure. See "Plugin-level hooks, 2026-08-30" below for
+the result that moved them, and
+[`docs/design/resume-and-retirement.md`](../docs/design/resume-and-retirement.md) for why neither
+skill may grow one back. The rest of this section is kept only as the record of what was asked; do
+not run it.
 
-Untested at the time: `implement` and `resume` both carried an identical `hooks:` block. If both ran in the *same* session — arm, then later `resume` in that same session to change `--until`, the model, or the plan — Claude Code registers the `PreToolUse`/`PostToolUse`/`PostToolUseFailure`/`Stop` hooks a second time, pointing at the identical command.
+Untested at the time: `implement` and `resume` both carried an identical `hooks:` block. If both ran
+in the *same* session — arm, then later `resume` in that same session to change `--until`, the
+model, or the plan — Claude Code registers the
+`PreToolUse`/`PostToolUse`/`PostToolUseFailure`/`Stop` hooks a second time, pointing at the
+identical command.
 
-The handlers look idempotent by inspection: a second `confirm-commit` firing on the same tool call finds no `pending_approved_tree` and an already-approved `HEAD`, so it has nothing to do; a second `pretool` firing on the same commit finds the tree already approved and takes the cache-hit path rather than reviewing twice. But that is reasoning about what the handler does when called, not a measurement of *how many times Claude Code calls it* — once per tool call regardless of registration count, once per registration (so twice, sequentially), or with the second registration replacing the first. Any of those changes what "idempotent" needs to mean, and only one of the three costs nothing.
+The handlers look idempotent by inspection: a second `confirm-commit` firing on the same tool call
+finds no `pending_approved_tree` and an already-approved `HEAD`, so it has nothing to do; a second
+`pretool` firing on the same commit finds the tree already approved and takes the cache-hit path
+rather than reviewing twice. But that is reasoning about what the handler does when called, not a
+measurement of *how many times Claude Code calls it* — once per tool call regardless of registration
+count, once per registration (so twice, sequentially), or with the second registration replacing the
+first. Any of those changes what "idempotent" needs to mean, and only one of the three costs
+nothing.
 
 1. Arm normally (`implement`), let a phase or two run.
-2. In the *same* session, run `/adversarial-review-loop:resume` (same-session path — nothing to retire, nothing new to register against).
+2. In the *same* session, run `/adversarial-review-loop:resume` (same-session path — nothing to
+   retire, nothing new to register against).
 3. Run `/hooks` and count entries: one set of four, or two?
-4. If two: make a commit and watch whether it takes noticeably longer than a single-registration commit did earlier in the same run — a slow reviewer run twice, sequentially, is the one outcome that would not otherwise be visible from the handler's own idempotence.
+4. If two: make a commit and watch whether it takes noticeably longer than a single-registration
+   commit did earlier in the same run — a slow reviewer run twice, sequentially, is the one outcome
+   that would not otherwise be visible from the handler's own idempotence.
 
-**Expect**, if Claude Code fires an event once per tool call regardless of registration count: no observable difference from a single registration, and this item closes as a non-issue.
+**Expect**, if Claude Code fires an event once per tool call regardless of registration count: no
+observable difference from a single registration, and this item closes as a non-issue.
 
-**If it fires once per registration**: latency roughly doubles on every gated tool call for the rest of the session, which is wasteful but not unsafe given the handlers above — confirm that reasoning holds under an actual double firing rather than assuming it, and record whatever is found here.
+**If it fires once per registration**: latency roughly doubles on every gated tool call for the rest
+of the session, which is wasteful but not unsafe given the handlers above — confirm that reasoning
+holds under an actual double firing rather than assuming it, and record whatever is found here.
 
 ## Session G — the Claude Code harness end to end (items 19, 20)
 
-`claude-code` is now the **default** harness, so an ordinary run of `tests/step0-fixture.sh` exercises it without any configuration. Everything the harness module depends on was probed in isolation (see "The Claude Code harness, 2026-08-29" below); what a real run adds is the two things a probe cannot reach — a payload at the plugin's chunk ceilings, and the state of the user's own `/resume` picker afterwards.
+`claude-code` is now the **default** harness, so an ordinary run of `tests/step0-fixture.sh`
+exercises it without any configuration. Everything the harness module depends on was probed in
+isolation (see "The Claude Code harness, 2026-08-29" below); what a real run adds is the two things
+a probe cannot reach — a payload at the plugin's chunk ceilings, and the state of the user's own
+`/resume` picker afterwards.
 
-1. `make dry-run` in the fixture first, before any model call. Confirm the argv is the one below, and confirm the `# stdin` section carries **every** attachment, each between a matching `BEGIN`/`END` fence with the same per-run identifier, and no `context/` file named as a path anywhere in the argv. This is the cheapest check and it catches most wiring mistakes.
-2. Arm, freeze phases, and run a phase whose diff is large enough to chunk — over `chunk_diff_bytes` (400KB), so the payload is several attachments and comfortably past the 170KB that has already been verified byte-perfect. A generated file is fine; the point is the size, not the content.
-3. **Item 19 expects**: the review completes normally. A payload truncated on the way in would show up as a reviewer that discusses only part of the diff, or as a contract failure — not as an error from the CLI, which is why this needs a real run rather than a byte count.
-4. **Item 20**: with the run finished, open `claude` *in the fixture repository* and run `/resume`. Expect the picker to list only your own sessions, none of the review rounds — the harness runs from an empty `<act_dir>/cwd`, and `claude -p` buckets its session store by cwd. Then confirm the sessions do exist under `~/.claude/projects/<slug of act_dir/cwd>/`, or continuity is silently dropping every round (which costs tokens, not correctness — `AssignedSessions.capture` logs it).
-5. **If item 20 fails** — review sessions do appear in the repository's picker — the cwd is not being honoured, and the fix is in `harness.claudecode.session_cwd`, not in the gate. Do not "fix" it with `--no-session-persistence`: that would take `--resume` continuity with it.
+1. `make dry-run` in the fixture first, before any model call. Confirm the argv is the one below,
+   and confirm the `# stdin` section carries **every** attachment, each between a matching
+   `BEGIN`/`END` fence with the same per-run identifier, and no `context/` file named as a path
+   anywhere in the argv. This is the cheapest check and it catches most wiring mistakes.
+2. Arm, freeze phases, and run a phase whose diff is large enough to chunk — over `chunk_diff_bytes`
+   (400KB), so the payload is several attachments and comfortably past the 170KB that has already
+   been verified byte-perfect. A generated file is fine; the point is the size, not the content.
+3. **Item 19 expects**: the review completes normally. A payload truncated on the way in would show
+   up as a reviewer that discusses only part of the diff, or as a contract failure — not as an error
+   from the CLI, which is why this needs a real run rather than a byte count.
+4. **Item 20**: with the run finished, open `claude` *in the fixture repository* and run `/resume`.
+   Expect the picker to list only your own sessions, none of the review rounds — the harness runs
+   from an empty `<act_dir>/cwd`, and `claude -p` buckets its session store by cwd. Then confirm the
+   sessions do exist under `~/.claude/projects/<slug of act_dir/cwd>/`, or continuity is silently
+   dropping every round (which costs tokens, not correctness — `AssignedSessions.capture` logs it).
+5. **If item 20 fails** — review sessions do appear in the repository's picker — the cwd is not
+   being honoured, and the fix is in `harness.claudecode.session_cwd`, not in the gate. Do not "fix"
+   it with `--no-session-persistence`: that would take `--resume` continuity with it.
 
-Run the OpenCode side at least once too (`ARL_HARNESS=opencode`), since a default that changed is exactly when the other path stops getting exercised by accident.
+Run the OpenCode side at least once too (`ARL_HARNESS=opencode`), since a default that changed is
+exactly when the other path stops getting exercised by accident.
 
 ## Record the outcome
 
@@ -269,45 +425,137 @@ Run the OpenCode side at least once too (`ARL_HARNESS=opencode`), since a defaul
 
 ### Permission handoff, 2026-09-16 (item 2b)
 
-**The incident.** `/adversarial-review-loop:implement` from the 2.1.0 marketplace install never armed in a real repository on Claude Code 2.1.273. The transcript showed the skill body carrying `[run this first, exactly as written, and use its output:]` above the arm command, not the banner. The model ran `arm` itself, the gate refused it, and after four no-progress Stop blocks the activation was `NEEDS_HUMAN`. `:status` showed the same substitution. The same skills had expanded on 2.1.260.
+**The incident.** `/adversarial-review-loop:implement` from the 2.1.0 marketplace install never
+armed in a real repository on Claude Code 2.1.273. The transcript showed the skill body carrying
+`[run this first, exactly as written, and use its output:]` above the arm command, not the banner.
+The model ran `arm` itself, the gate refused it, and after four no-progress Stop blocks the
+activation was `NEEDS_HUMAN`. `:status` showed the same substitution. The same skills had expanded
+on 2.1.260.
 
-**The cause, read out of the binary.** Prompt-shell expansion runs the Bash permission check for each block. On `ask` (or an async-agent deny), 2.1.272+ replaces the block with that instruction and records `skill_inline_command_handoff`. The string is absent from 2.1.270. The repository's `.claude/settings.local.json` had the sandbox off, so nothing auto-allowed `arl.sh`. In a scratch repository with the sandbox on, the unmodified skill ran normally. A headless `claude -p` never hands off at all, so **this check needs an interactive session**.
+**The cause, read out of the binary.** Prompt-shell expansion runs the Bash permission check for
+each block. On `ask` (or an async-agent deny), 2.1.272+ replaces the block with that instruction and
+records `skill_inline_command_handoff`. The string is absent from 2.1.270. The repository's
+`.claude/settings.local.json` had the sandbox off, so nothing auto-allowed `arl.sh`. In a scratch
+repository with the sandbox on, the unmodified skill ran normally. A headless `claude -p` never
+hands off at all, so **this check needs an interactive session**.
 
-**The fix, measured.** Tested interactively in a scratch repository with the sandbox off, auto mode, and `--plugin-dir`. A copy of the tree with `allowed-tools` stripped handed off `status` and `implement`. The tree with the rules ran the block at expansion for every skill: `implement my plan.md --until 1`, `resume --until 2`, `accept some reason; with "quotes" && $(id)`, `config model x`, `pause 1`, `finish`, `stop`, `report 1`, `status`. So `Bash(<root>/scripts/arl.sh <sub>:*)` matches the here-document form, and `${CLAUDE_PLUGIN_ROOT}` resolves inside `allowed-tools`.
+**The fix, measured.** Tested interactively in a scratch repository with the sandbox off, auto mode,
+and `--plugin-dir`. A copy of the tree with `allowed-tools` stripped handed off `status` and
+`implement`. The tree with the rules ran the block at expansion for every skill:
+`implement my plan.md --until 1`, `resume --until 2`, `accept some reason; with "quotes" && $(id)`,
+`config model x`, `pause 1`, `finish`, `stop`, `report 1`, `status`. So
+`Bash(<root>/scripts/arl.sh <sub>:*)` matches the here-document form, and `${CLAUDE_PLUGIN_ROOT}`
+resolves inside `allowed-tools`.
 
-**What it also found.** `report` still handed off with its rule in place, because its body passed `"$1"`. Claude Code will not pre-allow a command carrying a shell expansion. `$1` was also wrong on its own terms: positional substitution is 0-based (item 3), so `/report 2` never reached the CLI. `report` now takes `--args-stdin` like the other argument skills, and passed on the re-run.
+**What it also found.** `report` still handed off with its rule in place, because its body passed
+`"$1"`. Claude Code will not pre-allow a command carrying a shell expansion. `$1` was also wrong on
+its own terms: positional substitution is 0-based (item 3), so `/report 2` never reached the CLI.
+`report` now takes `--args-stdin` like the other argument skills, and passed on the re-run.
 
-**What the measurement could not show.** Driven from `expect`, Claude Code's first shell spawn blocks at "Spawn-env probe" until interrupted, so each block was observed *starting* ("Shell command interrupted for pattern …"), not completing. That is enough for the question asked, which is whether the permission check allowed the command. **The end to end result came from a real terminal on the same day.** In the repository that failed, with the sandbox still off, the marketplace install disabled and the tree loaded through `--plugin-dir`, `/adversarial-review-loop:implement <plan>` showed the `ARMED` banner in the skill expansion, served from the working tree's `skills/implement`. Pre-phase Bash calls were denied, a multi-line `set-phases` was refused with its reason, the one-line retry froze 8 phases, and phase 1 edits went through. The same limit kept this run from observing a model-issued `arl.sh arm` being denied live. `arm` joined `cmdshape._ESCAPE_RE` in the same change, and `test_claude_may_not_re_arm_the_activation_itself` covers that denial in `ACTIVE` and `ARMED`.
+**What the measurement could not show.** Driven from `expect`, Claude Code's first shell spawn
+blocks at "Spawn-env probe" until interrupted, so each block was observed *starting* ("Shell command
+interrupted for pattern …"), not completing. That is enough for the question asked, which is whether
+the permission check allowed the command. **The end to end result came from a real terminal on the
+same day.** In the repository that failed, with the sandbox still off, the marketplace install
+disabled and the tree loaded through `--plugin-dir`, `/adversarial-review-loop:implement <plan>`
+showed the `ARMED` banner in the skill expansion, served from the working tree's `skills/implement`.
+Pre-phase Bash calls were denied, a multi-line `set-phases` was refused with its reason, the
+one-line retry froze 8 phases, and phase 1 edits went through. The same limit kept this run from
+observing a model-issued `arl.sh arm` being denied live. `arm` joined `cmdshape._ESCAPE_RE` in the
+same change, and `test_claude_may_not_re_arm_the_activation_itself` covers that denial in `ACTIVE`
+and `ARMED`.
 
 ### Isolation, 2026-08-20
 
-With the fixture armed, a separate session in an unrelated repository edited a file with no gate activity at all — no denial, no status message, no added latency.
+With the fixture armed, a separate session in an unrelated repository edited a file with no gate
+activity at all — no denial, no status message, no added latency.
 
-*(Superseded 2026-08-30 — see "Plugin-level hooks" below. The property held; it was also the hole.)* Note precisely what that establishes. A second session has no `arl` hooks registered, because skill hooks register on invocation rather than at plugin load, so the dispatcher never runs there. That is the property that matters day to day: **installing the plugin does not tax or gate sessions that never armed it.** The narrower branch — same session, different worktree, where the dispatcher *does* run and compares the pointer against the repo root — is covered by the scoping cases in `tests/unit/test_commands_pretool.py` rather than here.
+*(Superseded 2026-08-30 — see "Plugin-level hooks" below. The property held; it was also the hole.)*
+Note precisely what that establishes. A second session has no `arl` hooks registered, because skill
+hooks register on invocation rather than at plugin load, so the dispatcher never runs there. That is
+the property that matters day to day: **installing the plugin does not tax or gate sessions that
+never armed it.** The narrower branch — same session, different worktree, where the dispatcher
+*does* run and compares the pointer against the repo root — is covered by the scoping cases in
+`tests/unit/test_commands_pretool.py` rather than here.
 
 ### Plugin-level hooks, 2026-08-30
 
-The isolation property above turned out to be the hole. A real run (44 phases, `claude-code` harness) was interrupted at phase 13 with Esc, the session quit and the machine shut down. The next day `claude --resume` brought the same session id back, `/adversarial-review-loop:status` reported `ACTIVE`, phase 14 of 44, and Claude was told to `continue`. Phase 14 was implemented and committed with no gate at all: no review, no `pretool` denial, `last_approved_tree` still phase 13's, `rounds this phase: 0`. `/reload-plugins` in that session reported `0 hooks`, and `arl.sh selftest` passed 399/399 — the code was fine, the registration was gone. Skill hooks register per process, on invocation; nothing in the resumed process had invoked `implement` or `resume`, and the state file cannot tell whether hooks exist.
+The isolation property above turned out to be the hole. A real run (44 phases, `claude-code`
+harness) was interrupted at phase 13 with Esc, the session quit and the machine shut down. The next
+day `claude --resume` brought the same session id back, `/adversarial-review-loop:status` reported
+`ACTIVE`, phase 14 of 44, and Claude was told to `continue`. Phase 14 was implemented and committed
+with no gate at all: no review, no `pretool` denial, `last_approved_tree` still phase 13's,
+`rounds this phase: 0`. `/reload-plugins` in that session reported `0 hooks`, and `arl.sh selftest`
+passed 399/399 — the code was fine, the registration was gone. Skill hooks register per process, on
+invocation; nothing in the resumed process had invoked `implement` or `resume`, and the state file
+cannot tell whether hooks exist.
 
-The fix moves every hook into `hooks/hooks.json`, registered at plugin load. Consequences, all deliberate:
+The fix moves every hook into `hooks/hooks.json`, registered at plugin load. Consequences, all
+deliberate:
 
-- The dispatcher runs in every session the plugin is enabled in. Unarmed sessions pay a silent pass (~0.1s, no writes). "Installing the plugin does not gate sessions that never armed it" still holds; "does not tax" now means one interpreter start per tool call.
-- **Rule 0 changed shape.** "No pointer means `arm` never executed" no longer follows, since the dispatcher running no longer proves the skill was invoked. No pointer now means "this session never bound". In a worktree whose `latest` activation is live, that session is denied every mutation until `resume` binds it; anywhere else it passes — *provided* the worktree could be resolved at all. `paths.repo_root_or_raise` tells git's "not a repository" apart from a git that cannot run, a vanished `cwd` or a timeout; only the first passes. Adversarial review of the first draft caught the alternative: with `repo_root()` folding every failure into `""`, dropping `git` from the hook's PATH would have turned the gate off.
-- **An `arm` that never started is still caught, by a different witness.** The same review caught the first draft's claim that `implement`'s banner covers it — this file already records ("A failed arm never reaches Claude", below) that a failed expansion aborts the skill and Claude gets no turn. So `commands/intent.py` now runs on `UserPromptSubmit` and records a marker when the prompt *starts with* `/adversarial-review-loop:implement` or `:resume`, before anything expands; `pointer_write` clears it. A marker with no pointer is the old "arming never ran" branch, `ARM_FAILED` recorded by the dispatcher, message and counting unchanged.
-- A `SessionStart` hook now also fires on `resume`, so a resumed session is re-oriented by the plugin rather than by whatever the transcript happened to carry.
+- The dispatcher runs in every session the plugin is enabled in. Unarmed sessions pay a silent pass
+  (~0.1s, no writes). "Installing the plugin does not gate sessions that never armed it" still
+  holds; "does not tax" now means one interpreter start per tool call.
+- **Rule 0 changed shape.** "No pointer means `arm` never executed" no longer follows, since the
+  dispatcher running no longer proves the skill was invoked. No pointer now means "this session
+  never bound". In a worktree whose `latest` activation is live, that session is denied every
+  mutation until `resume` binds it; anywhere else it passes — *provided* the worktree could be
+  resolved at all. `paths.repo_root_or_raise` tells git's "not a repository" apart from a git that
+  cannot run, a vanished `cwd` or a timeout; only the first passes. Adversarial review of the first
+  draft caught the alternative: with `repo_root()` folding every failure into `""`, dropping `git`
+  from the hook's PATH would have turned the gate off.
+- **An `arm` that never started is still caught, by a different witness.** The same review caught
+  the first draft's claim that `implement`'s banner covers it — this file already records ("A failed
+  arm never reaches Claude", below) that a failed expansion aborts the skill and Claude gets no
+  turn. So `commands/intent.py` now runs on `UserPromptSubmit` and records a marker when the prompt
+  *starts with* `/adversarial-review-loop:implement` or `:resume`, before anything expands;
+  `pointer_write` clears it. A marker with no pointer is the old "arming never ran" branch,
+  `ARM_FAILED` recorded by the dispatcher, message and counting unchanged.
+- A `SessionStart` hook now also fires on `resume`, so a resumed session is re-oriented by the
+  plugin rather than by whatever the transcript happened to carry.
 - Item 15 closes: one registration per process, nothing to double.
 
-Not yet measured against a live session: that the `resume` matcher fires on `claude --resume` the way `compact` fires on compaction. **Measured 2026-08-30**, across two incidents (below): `UserPromptSubmit` fires for a slash-command prompt and its `prompt` field carries the command verbatim — but its marker write is **not ordered before the skill's `` !`…` `` expansion**. The second incident caught the marker landing *after* a resume had already run to completion. The first incident had been read as proving "fires before expansion"; that inference was wrong, and the design now depends on no ordering at all.
+Not yet measured against a live session: that the `resume` matcher fires on `claude --resume` the
+way `compact` fires on compaction. **Measured 2026-08-30**, across two incidents (below):
+`UserPromptSubmit` fires for a slash-command prompt and its `prompt` field carries the command
+verbatim — but its marker write is **not ordered before the skill's `` !`…` `` expansion**. The
+second incident caught the marker landing *after* a resume had already run to completion. The first
+incident had been read as proving "fires before expansion"; that inference was wrong, and the design
+now depends on no ordering at all.
 
 ### The unanswered marker, 2026-08-30
 
-First live run of the intent design, against the same 44-phase activation: `claude --resume`, then `/adversarial-review-loop:resume --allow-dirty`. The `UserPromptSubmit` hook recorded the marker (proving the two open items above), the resume **succeeded** and printed its banner — and the very next tool call was denied with "Arming never ran", after which the Stop-block stall escalated the live activation to `NEEDS_HUMAN`.
+First live run of the intent design, against the same 44-phase activation: `claude --resume`, then
+`/adversarial-review-loop:resume --allow-dirty`. The `UserPromptSubmit` hook recorded the marker
+(proving the two open items above), the resume **succeeded** and printed its banner — and the very
+next tool call was denied with "Arming never ran", after which the Stop-block stall escalated the
+live activation to `NEEDS_HUMAN`.
 
-The hole: only three arming paths wrote a pointer — first arm, arm failure, cross-session takeover — and a *same-session* resume is deliberately none of them (it has a valid pointer already and "a same-session failure writes nothing"). So the marker outlived a successful resume, and `record_unstarted_arm` then overwrote the live `ACTIVE` document with `ARM_FAILED`. The state survived otherwise (phases, approvals and `phase_commits` are merged over, not wiped), and `stop` → `resume` recovers it, since `DISARMED` is resumable and `NEEDS_HUMAN` is not.
+The hole: only three arming paths wrote a pointer — first arm, arm failure, cross-session takeover —
+and a *same-session* resume is deliberately none of them (it has a valid pointer already and "a
+same-session failure writes nothing"). So the marker outlived a successful resume, and
+`record_unstarted_arm` then overwrote the live `ACTIVE` document with `ARM_FAILED`. The state
+survived otherwise (phases, approvals and `phase_commits` are merged over, not wiped), and `stop` →
+`resume` recovers it, since `DISARMED` is resumable and `NEEDS_HUMAN` is not.
 
-The fix sharpens what the marker means: it guards an expansion that **never started**, nothing else. `arm.run` and `resume.run` therefore answer it at entry — republishing the session's existing pointer with the marker's token — whenever a pointer already exists. A first arm still keeps its marker until its own success or failure record writes the pointer, so a hard crash mid-first-arm still reads as "arming never ran". A failed same-session resume request (a bad flag) now leaves the previous activation enforcing, exactly as before the intent design existed.
+The fix sharpens what the marker means: it guards an expansion that **never started**, nothing else.
+`arm.run` and `resume.run` therefore answer it at entry — republishing the session's existing
+pointer with the marker's token — whenever a pointer already exists. A first arm still keeps its
+marker until its own success or failure record writes the pointer, so a hard crash mid-first-arm
+still reads as "arming never ran". A failed same-session resume request (a bad flag) now leaves the
+previous activation enforcing, exactly as before the intent design existed.
 
-The very next live attempt (same day, same activation) failed *again*, and settled the ordering question above: `stop` → `resume --allow-dirty` ran the fixed code, the resume succeeded and left the loop `ACTIVE` — and the marker landed **after** it, so the entry-ack had found nothing to answer. The next tool call read the fresh marker as "arming never ran" and overwrote the just-resumed activation with `ARM_FAILED` a second time. The entry-ack only closes the marker-first ordering; nothing closed marker-last. Now `pending_intent` answers a marker whose worktree already has a **live, gating** activation (`ACTIVE`/`ARMED`/`RECONCILE`) bound to the same session — acknowledged via `pointer_write`, never recorded as a failure — because in both possible histories (the requested arm ran; an earlier arm is still enforcing) the gate is on, which is the only thing the marker exists to guarantee. Terminal and failed statuses (`DISARMED`, `COMPLETE`, `ARM_FAILED`, …) still read as pending: those are exactly the pointers a failed re-arm must not hide behind.
+The very next live attempt (same day, same activation) failed *again*, and settled the ordering
+question above: `stop` → `resume --allow-dirty` ran the fixed code, the resume succeeded and left
+the loop `ACTIVE` — and the marker landed **after** it, so the entry-ack had found nothing to
+answer. The next tool call read the fresh marker as "arming never ran" and overwrote the
+just-resumed activation with `ARM_FAILED` a second time. The entry-ack only closes the marker-first
+ordering; nothing closed marker-last. Now `pending_intent` answers a marker whose worktree already
+has a **live, gating** activation (`ACTIVE`/`ARMED`/`RECONCILE`) bound to the same session —
+acknowledged via `pointer_write`, never recorded as a failure — because in both possible histories
+(the requested arm ran; an earlier arm is still enforcing) the gate is on, which is the only thing
+the marker exists to guarantee. Terminal and failed statuses (`DISARMED`, `COMPLETE`, `ARM_FAILED`,
+…) still read as pending: those are exactly the pointers a failed re-arm must not hide behind.
 
 ### The gate enforcing a half-applied edit, 2026-08-30
 
@@ -339,108 +587,229 @@ thing being complained about.
 
 ### The first clean end-to-end run, 2026-08-20
 
-Two phases against `openai/gpt-5.6-sol`, roughly 80 seconds in total: arm at expansion, `set-phases` via the one permitted Bash call, mutations allowed only after the phases were frozen, both commits intercepted and reviewed, `confirm-commit` verifying each tree and advancing the phase, then the final cumulative review completing the activation and disarming the mode.
+Two phases against `openai/gpt-5.6-sol`, roughly 80 seconds in total: arm at expansion, `set-phases`
+via the one permitted Bash call, mutations allowed only after the phases were frozen, both commits
+intercepted and reviewed, `confirm-commit` verifying each tree and advancing the phase, then the
+final cumulative review completing the activation and disarming the mode.
 
-Three real reviews landed in `reports/` with their bundles. The reviewer globbed the repository, read `greet.py` and `README.md`, read the diff from the bundle under `$XDG_STATE_HOME`, and emitted the marker block correctly — worth checking the reviewer's own transcript yourself the first time (`raw/NNN-<label>.out`, next to `bundles/` rather than inside it), since an approval is only as good as the evidence the reviewer actually opened.
+Three real reviews landed in `reports/` with their bundles. The reviewer globbed the repository,
+read `greet.py` and `README.md`, read the diff from the bundle under `$XDG_STATE_HOME`, and emitted
+the marker block correctly — worth checking the reviewer's own transcript yourself the first time
+(`raw/NNN-<label>.out`, next to `bundles/` rather than inside it), since an approval is only as good
+as the evidence the reviewer actually opened.
 
-A second full run on 2026-08-20 repeated this against genuinely broken code (`greet.py` rewound to the seed), producing commits `9a8cb7e` and `57625c9`, three more real `gpt-5.6-sol` reviews, and a clean `COMPLETE`.
+A second full run on 2026-08-20 repeated this against genuinely broken code (`greet.py` rewound to
+the seed), producing commits `9a8cb7e` and `57625c9`, three more real `gpt-5.6-sol` reviews, and a
+clean `COMPLETE`.
 
-That run also showed a rough edge worth knowing about: re-running `implement` in a session that already holds an older arm failure in its context, Claude reported the **stale** failure rather than the fresh banner. It corrected itself one tool call later — the gate's denial named the real state — but if a banner and Claude's summary disagree, believe the banner and `/adversarial-review-loop:status`, not the prose.
+That run also showed a rough edge worth knowing about: re-running `implement` in a session that
+already holds an older arm failure in its context, Claude reported the **stale** failure rather than
+the fresh banner. It corrected itself one tool call later — the gate's denial named the real state —
+but if a banner and Claude's summary disagree, believe the banner and
+`/adversarial-review-loop:status`, not the prose.
 
-Items 1 and 4 fall out of this run: all four hooks fired, and the pre-phase `Read` of the frozen plan was permitted while the gate still denied mutations, which is only possible if the expansion-time session id matches the one the hooks receive.
+Items 1 and 4 fall out of this run: all four hooks fired, and the pre-phase `Read` of the frozen
+plan was permitted while the gate still denied mutations, which is only possible if the
+expansion-time session id matches the one the hooks receive.
 
 ### The block cap, 2026-08-20
 
-With `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=3`, the host overrode on the **fourth** consecutive block: `A hook blocked the turn from ending 4 consecutive times — overriding and ending turn.` The default would have allowed roughly nine. The setting is honoured, so a configured `40` is real.
+With `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=3`, the host overrode on the **fourth** consecutive block:
+`A hook blocked the turn from ending 4 consecutive times — overriding and ending turn.` The default
+would have allowed roughly nine. The setting is honoured, so a configured `40` is real.
 
-Read the number as *blocks tolerated*, not blocks attempted: `N` permits N blocks and overrides on N+1.
+Read the number as *blocks tolerated*, not blocks attempted: `N` permits N blocks and overrides on
+N+1.
 
 Inducing the condition needed more care than expected, and the detours are worth recording:
 
-- **A failed arm never reaches Claude.** When the `` !`…` `` command exits non-zero, Claude Code aborts the skill invocation and Claude gets no turn at all — so no Stop hook fires, and `stop_blocks` stays at 0. That is benign (nothing runs), but it means the `ARM_FAILED` Stop branch is unreachable from a *fresh* failed arm. It is reachable only once Claude already has turns: a re-arm that fails, or the dispatcher recording an arm that never executed.
-- **`ARMED` is not a stable blocking state**, because the block message tells Claude to run `set-phases`, which it then does — that is progress, and the counter resets by design.
-- **`STALE` is the reliable lever.** Nothing Claude can do resolves it, since only the user can re-arm. Arm normally, then from a *second terminal* (the session must stay open) backdate the activation with `jq '.armed_at = 1'`, and every subsequent turn end blocks with no progress in between.
+- **A failed arm never reaches Claude.** When the `` !`…` `` command exits non-zero, Claude Code
+  aborts the skill invocation and Claude gets no turn at all — so no Stop hook fires, and
+  `stop_blocks` stays at 0. That is benign (nothing runs), but it means the `ARM_FAILED` Stop branch
+  is unreachable from a *fresh* failed arm. It is reachable only once Claude already has turns: a
+  re-arm that fails, or the dispatcher recording an arm that never executed.
+- **`ARMED` is not a stable blocking state**, because the block message tells Claude to run
+  `set-phases`, which it then does — that is progress, and the counter resets by design.
+- **`STALE` is the reliable lever.** Nothing Claude can do resolves it, since only the user can
+  re-arm. Arm normally, then from a *second terminal* (the session must stay open) backdate the
+  activation with `jq '.armed_at = 1'`, and every subsequent turn end blocks with no progress in
+  between.
 
-  *Superseded 2026-09-01:* that same sentence — nothing Claude can do resolves it — is why `STALE` was a bug, not a lever. The Stop gate now ends a stale turn with a system message and counts nothing (`stop.py`, `_by_status`), because counting escalated it to `NEEDS_HUMAN` within one turn and `resume` refuses that. Levers that still count: a `RECONCILE` (commit from a second terminal so `HEAD` diverges from the approved tree), an `ARM_FAILED` from a re-arm that fails once Claude already has turns, or phases left outstanding while Claude is told not to implement them.
+  *Superseded 2026-09-01:* that same sentence — nothing Claude can do resolves it — is why `STALE`
+  was a bug, not a lever. The Stop gate now ends a stale turn with a system message and counts
+  nothing (`stop.py`, `_by_status`), because counting escalated it to `NEEDS_HUMAN` within one turn
+  and `resume` refuses that. Levers that still count: a `RECONCILE` (commit from a second terminal
+  so `HEAD` diverges from the approved tree), an `ARM_FAILED` from a re-arm that fails once Claude
+  already has turns, or phases left outstanding while Claude is told not to implement them.
 
 ### The Claude Code harness, 2026-08-29
 
-Probed against `claude` 2.1.251, before `scripts/arl/harness/claudecode.py` was written. Three of the four things that module depends on are not what the flag help implies, and each one changed the design.
+Probed against `claude` 2.1.251, before `scripts/arl/harness/claudecode.py` was written. Three of
+the four things that module depends on are not what the flag help implies, and each one changed the
+design.
 
-- **`--tools` bounds the built-in tool set only.** A run given exactly `--tools "Read,Grep,Glob"` still listed every connected MCP server's tools in its init event — Gmail, Drive and a code-editing server among them. `--strict-mcp-config` is what removes them (`mcp_servers: []`), so the harness passes it **unconditionally** rather than under `pure`: it is that harness's share of the `"*": "deny"` at the head of OpenCode's permission document, not of `--pure`.
-- **`--safe-mode --strict-mcp-config --disable-slash-commands` does isolate.** `skills` and `slash_commands` both came back empty. `plugins` still *listed* the installed plugins, including this one — that listing is inert metadata, not a live surface, which settles the question the plan raised. Note that `--restricted` is **not** equivalent: it drops MCP servers but left 15 skills and 45 slash commands loaded.
-- **The file tools are confined to cwd + each `--add-dir`, with no `--restricted` needed.** A `Read` of an absolute path outside both was refused with no prompt and recorded in `permission_denials`. This is what makes the working directory a read boundary — and therefore why the harness runs from an empty `<act_dir>/cwd` rather than from the activation directory, which holds `context/`.
-- **A denial does not fail the run.** That probe exited `0` with `is_error: false` and a plausible answer. Only `permission_denials` said anything had gone wrong, which is why `claudecode.transcript` refuses on it (Rule 1).
-- **`--output-format json` emits a JSON *list* of events**, not a single object; the last is the `result`. 43 events for a one-tool run, 17 for a no-tool one.
-- **Sessions round-trip.** `--session-id <uuid>` was echoed back unchanged in the result event, and `--resume <uuid>` recalled the previous turn's tool use. A `--resume` of an id the store no longer holds exits `1` with an empty stdout — which would reach the gate as a blocking `OP_FAILURE` on every retry, so `AssignedSessions.verify` checks the store first and drops continuity instead.
-- **Sessions persist under `~/.claude/projects/<cwd slug>/<uuid>.jsonl`**, and that bucket is what the interactive `/resume` picker lists. Repeating `--add-dir` accumulates rather than replaces.
+- **`--tools` bounds the built-in tool set only.** A run given exactly `--tools "Read,Grep,Glob"`
+  still listed every connected MCP server's tools in its init event — Gmail, Drive and a
+  code-editing server among them. `--strict-mcp-config` is what removes them (`mcp_servers: []`), so
+  the harness passes it **unconditionally** rather than under `pure`: it is that harness's share of
+  the `"*": "deny"` at the head of OpenCode's permission document, not of `--pure`.
+- **`--safe-mode --strict-mcp-config --disable-slash-commands` does isolate.** `skills` and
+  `slash_commands` both came back empty. `plugins` still *listed* the installed plugins, including
+  this one — that listing is inert metadata, not a live surface, which settles the question the plan
+  raised. Note that `--restricted` is **not** equivalent: it drops MCP servers but left 15 skills
+  and 45 slash commands loaded.
+- **The file tools are confined to cwd + each `--add-dir`, with no `--restricted` needed.** A `Read`
+  of an absolute path outside both was refused with no prompt and recorded in `permission_denials`.
+  This is what makes the working directory a read boundary — and therefore why the harness runs from
+  an empty `<act_dir>/cwd` rather than from the activation directory, which holds `context/`.
+- **A denial does not fail the run.** That probe exited `0` with `is_error: false` and a plausible
+  answer. Only `permission_denials` said anything had gone wrong, which is why
+  `claudecode.transcript` refuses on it (Rule 1).
+- **`--output-format json` emits a JSON *list* of events**, not a single object; the last is the
+  `result`. 43 events for a one-tool run, 17 for a no-tool one.
+- **Sessions round-trip.** `--session-id <uuid>` was echoed back unchanged in the result event, and
+  `--resume <uuid>` recalled the previous turn's tool use. A `--resume` of an id the store no longer
+  holds exits `1` with an empty stdout — which would reach the gate as a blocking `OP_FAILURE` on
+  every retry, so `AssignedSessions.verify` checks the store first and drops continuity instead.
+- **Sessions persist under `~/.claude/projects/<cwd slug>/<uuid>.jsonl`**, and that bucket is what
+  the interactive `/resume` picker lists. Repeating `--add-dir` accumulates rather than replaces.
 
-Items 19 and 20 still need a real session: a payload at the plugin's chunk ceilings, and a confirmation that the reviewed repository's own `/resume` list stays clean across a run. Session G above is the runbook for both.
+Items 19 and 20 still need a real session: a payload at the plugin's chunk ceilings, and a
+confirmation that the reviewed repository's own `/resume` list stays clean across a run. Session G
+above is the runbook for both.
 
 ## Session H — session identity across `/clear` and `/resume` (documented ahead of measurement)
 
-`docs/faq.md` ("Picking up where you left off") and `docs/edge-cases.md` now answer the two commonest real-world interruptions, and both answers turn on one host behaviour nobody has measured: **which session id you come back under.** The plugin binds an activation to `(worktree, session id)`, so that single fact decides whether "just continue" is correct or whether the call is denied until `resume` binds the session. The docs assert the assumptions below; if a measurement contradicts one, the docs are what changes, not the gate.
+`docs/faq.md` ("Picking up where you left off") and `docs/edge-cases.md` now answer the two
+commonest real-world interruptions, and both answers turn on one host behaviour nobody has measured:
+**which session id you come back under.** The plugin binds an activation to
+`(worktree, session id)`, so that single fact decides whether "just continue" is correct or whether
+the call is denied until `resume` binds the session. The docs assert the assumptions below; if a
+measurement contradicts one, the docs are what changes, not the gate.
 
 Two assumptions, both currently unverified:
 
-1. **`/clear` starts a new session id**, leaving the cleared conversation unbound in an armed worktree (so it is denied every mutation there until `resume`), while the pre-clear activation stays live and untouched.
-2. **`/resume` back to an earlier session restores that session's own id**, so a conversation returned to this way is bound again with no command needed — the same property `claude --resume` was measured to have on 2026-08-30 (the phase-13 incident above).
+1. **`/clear` starts a new session id**, leaving the cleared conversation unbound in an armed
+   worktree (so it is denied every mutation there until `resume`), while the pre-clear activation
+   stays live and untouched.
+2. **`/resume` back to an earlier session restores that session's own id**, so a conversation
+   returned to this way is bound again with no command needed — the same property `claude --resume`
+   was measured to have on 2026-08-30 (the phase-13 incident above).
 
 The runbook:
 
-1. Arm the fixture, freeze phases, and get partway into a phase with **uncommitted work in the tree**. Note the session id (`/adversarial-review-loop:status` prints it).
-2. `/clear`. In the cleared conversation, run `status`: does it report the activation, or a denial naming the previous session? Then attempt an ordinary file edit **in the armed worktree**. **Expect** a denial naming the activation and pointing at `resume` — that is assumption 1 holding.
-3. Edit a file in an *unrelated* repository from the same cleared conversation. **Expect** a silent pass, no denial and no added latency.
-4. `/resume` back to the original session. Run `status` and compare the session id against step 1. **Expect** the same id, `ACTIVE`, and the phase you left.
-5. Tell Claude to continue, and let it finish and commit the phase. **Expect** a normal gated commit — one review, the uncommitted work from step 1 included in the reviewed tree — and **no** `resume` having been needed anywhere.
+1. Arm the fixture, freeze phases, and get partway into a phase with **uncommitted work in the
+   tree**. Note the session id (`/adversarial-review-loop:status` prints it).
+2. `/clear`. In the cleared conversation, run `status`: does it report the activation, or a denial
+   naming the previous session? Then attempt an ordinary file edit **in the armed worktree**.
+   **Expect** a denial naming the activation and pointing at `resume` — that is assumption 1
+   holding.
+3. Edit a file in an *unrelated* repository from the same cleared conversation. **Expect** a silent
+   pass, no denial and no added latency.
+4. `/resume` back to the original session. Run `status` and compare the session id against step 1.
+   **Expect** the same id, `ACTIVE`, and the phase you left.
+5. Tell Claude to continue, and let it finish and commit the phase. **Expect** a normal gated commit
+   — one review, the uncommitted work from step 1 included in the reviewed tree — and **no**
+   `resume` having been needed anywhere.
 
-**If step 2 passes instead of denying**, assumption 1 is wrong in the dangerous direction: a cleared conversation would be mutating an armed worktree ungated, which is the phase-13 shape again. Check `/hooks` first (registration), then `commands.latest_session` against the worktree.
+**If step 2 passes instead of denying**, assumption 1 is wrong in the dangerous direction: a cleared
+conversation would be mutating an armed worktree ungated, which is the phase-13 shape again. Check
+`/hooks` first (registration), then `commands.latest_session` against the worktree.
 
-**If step 4 comes back under a *different* id**, assumption 2 is wrong and the docs' "just continue" advice for the `/clear` → `/resume` round trip is wrong with it: that case collapses into the ordinary unbound one, and the FAQ table's second row becomes `/adversarial-review-loop:resume --allow-dirty`.
+**If step 4 comes back under a *different* id**, assumption 2 is wrong and the docs' "just continue"
+advice for the `/clear` → `/resume` round trip is wrong with it: that case collapses into the
+ordinary unbound one, and the FAQ table's second row becomes
+`/adversarial-review-loop:resume --allow-dirty`.
 
-**If step 5 shows no review at all**, stop and treat it as the phase-13 incident recurring — a commit landing with `last_approved_tree` unmoved and `rounds this phase: 0` is the signature.
+**If step 5 shows no review at all**, stop and treat it as the phase-13 incident recurring — a
+commit landing with `last_approved_tree` unmoved and `rounds this phase: 0` is the signature.
 
 ## Session I — Mods (items 21–25), measured 2026-10-02
 
-Claude Code 2.1.287 added Mods: a plugin's `hooks/hooks.json` may name a JavaScript hooks module (`"modules": ["./register.js"]`) whose handlers run **inside** Claude Code, beside the command hooks. The plan is to ship one as a display only: a band above the prompt showing the activation's state, and a transcript line when an alert appears. Nothing in the gate may come to depend on it. The docs say a module that throws, times out or answers the wrong shape is skipped and the call proceeds, which is why the gate stays on command hooks, and why item 21 had to hold.
+Claude Code 2.1.287 added Mods: a plugin's `hooks/hooks.json` may name a JavaScript hooks module
+(`"modules": ["./register.js"]`) whose handlers run **inside** Claude Code, beside the command
+hooks. The plan is to ship one as a display only: a band above the prompt showing the activation's
+state, and a transcript line when an alert appears. Nothing in the gate may come to depend on it.
+The docs say a module that throws, times out or answers the wrong shape is skipped and the call
+proceeds, which is why the gate stays on command hooks, and why item 21 had to hold.
 
-**How it was measured.** A clone of `main` (`e86592d`) was loaded with `--plugin-dir`, the marketplace install disabled through `--settings`, and its own `XDG_STATE_HOME`, so neither the real state root nor this checkout was involved. The clone's `hooks.json` gained the `modules` line, a `| tee -a` on the `pretool`, `confirm-commit` and `gate-stop` commands, and one extra `UserPromptSubmit` command hook appending the hook input's `session_id` to a file. A probe module appended `$.session.id()` to another file from `session.start` and `turn.start`. Every repository was a fresh `git init`, armed from a terminal with `arl.sh arm --session <uuid> --plan <plan>`. The headless runs used `claude -p --model haiku --setting-sources project,local --strict-mcp-config`. Without the last two flags a user `SessionStart` hook sent haiku chasing an MCP server until `--max-turns` ran out. A turn that ends that way (`error_max_turns`) fires no `Stop` hook, which voided the first attempt at item 23.
+**How it was measured.** A clone of `main` (`e86592d`) was loaded with `--plugin-dir`, the
+marketplace install disabled through `--settings`, and its own `XDG_STATE_HOME`, so neither the real
+state root nor this checkout was involved. The clone's `hooks.json` gained the `modules` line, a
+`| tee -a` on the `pretool`, `confirm-commit` and `gate-stop` commands, and one extra
+`UserPromptSubmit` command hook appending the hook input's `session_id` to a file. A probe module
+appended `$.session.id()` to another file from `session.start` and `turn.start`. Every repository
+was a fresh `git init`, armed from a terminal with `arl.sh arm --session <uuid> --plan <plan>`. The
+headless runs used `claude -p --model haiku --setting-sources project,local --strict-mcp-config`.
+Without the last two flags a user `SessionStart` hook sent haiku chasing an MCP server until
+`--max-turns` ran out. A turn that ends that way (`error_max_turns`) fires no `Stop` hook, which
+voided the first attempt at item 23.
 
 ### I1. Independence — item 21: pass
 
-In a worktree armed by another session, Claude was asked to create a file with the Write tool, which must be denied (Rule 0, unbound session).
+In a worktree armed by another session, Claude was asked to create a file with the Write tool, which
+must be denied (Rule 0, unbound session).
 
-- **A module that does not parse.** The debug log has `[ERROR] hooks module adversarial-review-loop@inline failed to load: … register.js does not parse`. `pretool` still denied the write, and the file was not created.
-- **A module whose `session.start`, `turn.start`, `prompt.submit` and `tool.call` hooks all throw.** Each was logged as `hook skipped: threw Error: …`. The `tool.call` one ran on the very call being gated. `pretool` still denied it, and the file was not created.
-- **A control run** in an unarmed repository with a working module created the file, so the denials above were the gate's and not the prompt's.
+- **A module that does not parse.** The debug log has
+  `[ERROR] hooks module adversarial-review-loop@inline failed to load: … register.js does not parse`.
+  `pretool` still denied the write, and the file was not created.
+- **A module whose `session.start`, `turn.start`, `prompt.submit` and `tool.call` hooks all throw.**
+  Each was logged as `hook skipped: threw Error: …`. The `tool.call` one ran on the very call being
+  gated. `pretool` still denied it, and the file was not created.
+- **A control run** in an unarmed repository with a working module created the file, so the denials
+  above were the gate's and not the prompt's.
 
-A module the engine refuses whole is the same case as the first one. The engine refuses at load a hook that is neither an inline function nor a function declared at the top of the file: `the hook "boom" is not a function declared at the top of this file`.
+A module the engine refuses whole is the same case as the first one. The engine refuses at load a
+hook that is neither an inline function nor a function declared at the top of the file:
+`the hook "boom" is not a function declared at the top of this file`.
 
 ### I2. Session identity — item 22: pass
 
-`$.session.id()` equalled the command hooks' `session_id` under `claude -p --session-id`, under `claude -p --resume`, in an interactive session, and in that session after `/clear`. **`/clear` starts a new session id**, which settles Session H's first assumption. **`session.start` does not fire after `/clear`; `turn.start` does.** So a module that wants the current session must read the id on each refresh, not cache it from `session.start`.
+`$.session.id()` equalled the command hooks' `session_id` under `claude -p --session-id`, under
+`claude -p --resume`, in an interactive session, and in that session after `/clear`. **`/clear`
+starts a new session id**, which settles Session H's first assumption. **`session.start` does not
+fire after `/clear`; `turn.start` does.** So a module that wants the current session must read the
+id on each refresh, not cache it from `session.start`.
 
 ### I3. A mod commits around the gate — item 23: measured
 
-Item 23 used a session armed with its own id. On a prompt starting `arl-probe route1`, a `prompt.submit` hook ran `$.process.run(['git', 'commit', '-qam', …])` and then the copy's `arl.sh deactivate --session <id>`, then passed the prompt on with `next(e)`. Both exited `0`. That is the wrapper-script escape with its one observable step, the Bash call, removed.
+Item 23 used a session armed with its own id. On a prompt starting `arl-probe route1`, a
+`prompt.submit` hook ran `$.process.run(['git', 'commit', '-qam', …])` and then the copy's
+`arl.sh deactivate --session <id>`, then passed the prompt on with `next(e)`. Both exited `0`. That
+is the wrapper-script escape with its one observable step, the Bash call, removed.
 
 - **`confirm-commit`: silent.** No Bash call ran, so no `PostToolUse` fired.
-- **The Stop gate at the end of that turn: reported.** It emitted its ended-record `systemMessage`: `the mode is DISARMED, and when it ended (…) HEAD was 4623cc1…, whose tree ffd12d6… no review ever approved`. It reads `state.json`, not the tool call.
+- **The Stop gate at the end of that turn: reported.** It emitted its ended-record `systemMessage`:
+  `the mode is DISARMED, and when it ended (…) HEAD was 4623cc1…, whose tree ffd12d6… no review ever approved`. <!-- markdownlint-disable-line line-length -->
+  It reads `state.json`, not the tool call.
 - **`status` from a terminal:** `DISARMED`, `reason: stopped by the user`.
-- **Two inaccuracies, both in text and neither in a verdict.** The Stop message's own explanation says the mode "was ended from inside a Bash command", and `status`'s reason says "stopped by the user". Neither is what happened here. The Stop message now names both routes, a Bash command or a process outside Claude's tool calls; `status`'s reason is left as is, since `deactivate` records it whoever runs it.
-- **`$.process.run` runs git "with repo hooks off"**, per the API docs, so the repository's own `pre-commit` and `commit-msg` hooks are skipped too.
+- **Two inaccuracies, both in text and neither in a verdict.** The Stop message's own explanation
+  says the mode "was ended from inside a Bash command", and `status`'s reason says "stopped by the
+  user". Neither is what happened here. The Stop message now names both routes, a Bash command or a
+  process outside Claude's tool calls; `status`'s reason is left as is, since `deactivate` records
+  it whoever runs it.
+- **`$.process.run` runs git "with repo hooks off"**, per the API docs, so the repository's own
+  `pre-commit` and `commit-msg` hooks are skipped too.
 
 ### I4. Stray writes — item 24: measured
 
-Loading a module from a plugin folder writes two things into it, under `claude -p` as well as interactively:
+Loading a module from a plugin folder writes two things into it, under `claude -p` as well as
+interactively:
 
-- `.claude-plugin/types/`, holding `claude-code/`, `claude-code-mcp/`, `claude-code-tools/` and a `tsconfig.json`. It carries its own `.gitignore` of `*`, so git never shows it.
-- A root `tsconfig.json` containing `{"extends": "./.claude-plugin/types/tsconfig.json"}`, which is **untracked**. This repository must commit it with exactly that content, or a dogfooding session sees an untracked file and its phase cannot end clean.
+- `.claude-plugin/types/`, holding `claude-code/`, `claude-code-mcp/`, `claude-code-tools/` and a
+  `tsconfig.json`. It carries its own `.gitignore` of `*`, so git never shows it.
+- A root `tsconfig.json` containing `{"extends": "./.claude-plugin/types/tsconfig.json"}`, which is
+  **untracked**. This repository must commit it with exactly that content, or a dogfooding session
+  sees an untracked file and its phase cannot end clean.
 
 ### I5. Visibility — item 25: half
 
-- **`$.ui.log`:** reached the user as a transcript row, `● adversarial-review-loop: arl-probe log line`. It is absent from the session's transcript `.jsonl`, which is what gets replayed to the model. So for this channel, item 12's question has its answer: the report reaches the user without the model relaying it.
-- **`$.ui.toast`:** called from the same hook, it was **not seen** in an interactive terminal session, in two attempts. The display therefore uses `$.ui.log` and the band, never a toast.
+- **`$.ui.log`:** reached the user as a transcript row,
+  `● adversarial-review-loop: arl-probe log line`. It is absent from the session's transcript
+  `.jsonl`, which is what gets replayed to the model. So for this channel, item 12's question has
+  its answer: the report reaches the user without the model relaying it.
+- **`$.ui.toast`:** called from the same hook, it was **not seen** in an interactive terminal
+  session, in two attempts. The display therefore uses `$.ui.log` and the band, never a toast.
 
 ---
 
@@ -450,10 +819,16 @@ Expansion not running in skill bodies is the only outcome that forces a redesign
 
 1. Remove the `` !`…` `` line from `skills/implement/SKILL.md`.
 2. Have the body instruct Claude to run `arl.sh arm …` as its first action.
-3. Add a narrow `pretool` exception for exactly that command, mirroring the existing `set-phases` exception in `scripts/arl/commands/pretool.py`.
+3. Add a narrow `pretool` exception for exactly that command, mirroring the existing `set-phases`
+   exception in `scripts/arl/commands/pretool.py`.
 
-That reintroduces a one-command hole in the pre-activation guard — smaller than the original design's, but not zero, and it must be written to match only the exact arm command shape.
+That reintroduces a one-command hole in the pre-activation guard — smaller than the original
+design's, but not zero, and it must be written to match only the exact arm command shape.
 
 ## What the first real run also taught
 
-Anything that writes into the worktree between the gate and the commit — an editor writing back a buffer, an MCP server dropping a state directory, a file watcher — changes the tree out from under the approval and lands you in `RECONCILE`. The gate is behaving correctly when it does this. The fixture gitignores the usual offenders; add your own before arming rather than fighting the reconcile.
+Anything that writes into the worktree between the gate and the commit — an editor writing back a
+buffer, an MCP server dropping a state directory, a file watcher — changes the tree out from under
+the approval and lands you in `RECONCILE`. The gate is behaving correctly when it does this. The
+fixture gitignores the usual offenders; add your own before arming rather than fighting the
+reconcile.
