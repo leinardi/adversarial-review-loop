@@ -5,7 +5,7 @@
 # pinned by rev in .pre-commit-config.yaml and run in pre-commit's own environments.
 #
 # Install with: make dev-deps
-pytest==9.1.1
+pytest==9.2.0
 # Parallel test execution. The suite is subprocess-heavy -- most tests run the gate as a real
 # process -- so it is bound by process startup rather than by CPU: 80s serial against 14s on
 # 32 cores. Optional at runtime: `make test-unit` falls back to a serial run without it.
@@ -13,4 +13,4 @@ pytest-xdist==3.8.0
 # Derives the next version from the Conventional Commits since the last release tag, for
 # .github/workflows/release.yaml. Configured in .cz.toml. Not a locally invoked tool -- it lives
 # here rather than pinned inline in the workflow so Dependabot's pip ecosystem keeps it current.
-commitizen==4.19.0
+commitizen==4.19.3
