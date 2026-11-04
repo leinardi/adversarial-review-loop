@@ -534,9 +534,11 @@ def test_a_stat_failure_is_not_swallowed(state_env: dict[str, str], monkeypatch:
     def boom(fd: int) -> None:
         raise PermissionError(1, "Operation not permitted")
 
-    monkeypatch.setattr(os, "fstat", boom)
     st.new()
-    with pytest.raises(PermissionError):
+    # Scoped to the save: pytest's own fd capture calls os.fstat when it snaps the test's output,
+    # which happens before fixture teardown would undo a test-wide patch.
+    with monkeypatch.context() as patch, pytest.raises(PermissionError):
+        patch.setattr(os, "fstat", boom)
         st.save()
 
 
