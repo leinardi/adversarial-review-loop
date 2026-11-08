@@ -36,7 +36,7 @@ MK_COMMON_BOOTSTRAP := $(shell "$(MK_COMMON_BOOTSTRAP_SCRIPT)" \
 
 
 # Project-specific snippets that live only in this repo
-MK_LOCAL_FILES := test.mk
+MK_LOCAL_FILES := test.mk release.mk
 
 # -----------------------------------------------------------------------------
 # Include shared make logic (fetched from make-common)
