@@ -483,7 +483,8 @@ Run before considering an edit done. `make check` applies to every row.
 | `skills/*/SKILL.md`, `prompts/*.md` | `make test`; the relevant `tests/STEP0.md` items for skill frontmatter or `!` blocks |
 | `requirements-dev.txt`, the mypy hooks' `additional_dependencies` | `make sync-pins`, then `make test-unit` (`tests/unit/test_pins.py`) |
 | `scripts/check-license-headers.sh` | `python3 -m pytest tests/unit/test_license_headers.py` |
-| `.pre-commit-config.yaml`, `.markdownlint-cli2.yaml`, `Makefile`, `.mk/test.mk` | `make check`, `make help` |
+| `.pre-commit-config.yaml`, `.markdownlint-cli2.yaml`, `Makefile`, `.mk/test.mk`, `.mk/release.mk` | `make check`, `make help` |
+| `scripts/release_bump.py`, `.claude-plugin/plugin.json`'s layout | `make test-unit` (`tests/unit/test_release_bump.py`); `make release-bump VERSION=<higher>` shows a one-line diff (then restore the file) |
 | `.github/workflows/**` | `pre-commit run actionlint --all-files`; a new job also goes into `ci-result`'s `needs` |
 | `docs/**`, root `*.md`, `.agents/skills/**` | `make check`: prose wraps at 100 columns, except in `prompts/` and `skills/`, which ship and keep their line breaks |
 
@@ -533,32 +534,32 @@ job. Types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, `c
 built from these messages: `gh release create --generate-notes` lists the merged pull requests by
 title. Example: `fix(cmdshape): reject git commit --only`.
 
-A release with no explicit version is derived by commitizen (`cz bump --get-next`, configured in
-`.cz.toml`) from the commits since the last release tag, so a wrong type ships a wrong version:
+A release with no explicit version is derived by svu (in the Release workflow) from the commits
+since the last release tag, so a wrong type ships a wrong version:
 
 | Release | Commit | Example |
 | --- | --- | --- |
 | major | any type with `!` before the colon, or a `BREAKING CHANGE:` footer | `feat(config)!: rename the block_severity key` |
 | minor | `feat` | `feat(harness): add a reviewer harness` |
-| patch | `fix`, `perf`, `refactor` | `fix(cmdshape): reject git commit --only` |
-| none | everything else: `build`, `chore`, `ci`, `docs`, `style`, `test`, `revert` | `docs(design): explain the watchdog layers` |
+| patch | `fix` | `fix(cmdshape): reject git commit --only` |
+| none | everything else: `perf`, `refactor`, `build`, `chore`, `ci`, `docs`, `style`, `test`, `revert` | `docs(design): explain the watchdog layers` |
 
 The highest bump among the commits wins; with only "none" commits since the last tag, a release with
-no version fails with "nothing to bump". commitizen counts `perf` and `refactor` as a patch, so
-either one is enough to make a release on its own. A `revert` of a shipped `feat` or `fix` bumps
-nothing; type it `fix` when the revert should ship. PRs land as merge commits, so every commit
+no version fails with "nothing to bump". `perf` and `refactor` bump nothing, so a performance
+improvement or a refactor users should receive is a `fix`. A `revert` of a shipped `feat` or `fix`
+bumps nothing; type it `fix` when the revert should ship. PRs land as merge commits, so every commit
 counts, not just the PR title. See [`docs/release.md`](docs/release.md).
 
 Pick the type by whether the change should ship. The plugin is the repository at a tag, so a change
 users receive (`scripts/arl.sh`, `scripts/arl-bootstrap.py`, `scripts/arl/`, `hooks/`, `prompts/`,
-`skills/`, `.claude-plugin/`) is `feat` or `fix` (or a `perf` or `refactor` patch). A change they do
-not receive (CI, tests, docs, linters, the Makefile) is `build`, `chore`, `ci`, `docs`, `style` or
-`test`, never `perf` or `refactor`, which would cut a release with nothing in it.
+`skills/`, `.claude-plugin/`) is `feat` or `fix`. A change they do not receive (CI, tests, docs,
+linters, the Makefile) is any other type: `build`, `chore`, `ci`, `docs`, `perf`, `refactor`,
+`style` or `test`.
 
-commitizen reads every line of every message, not only the subject, and the merge commit's body is
-the pull request's title. A line that opens with a word starting `feat`, `fix`, `refactor` or
-`perf` followed by a colon (`fixtures:`, `performance:`) bumps as that type, and a line opening
-with `word!:` cuts a major, so keep such lines out of bodies and titles.
+svu matches `feat` and `fix` anywhere in a subject, so a word ending in either directly before a
+colon (`prefix:`) bumps as that type. It also reads every body for a `BREAKING CHANGE:` footer, and
+the merge commit's body is the pull request's title: give the pull request a title whose type
+matches what it ships.
 
 ### The install cache, and what it means for iterating
 

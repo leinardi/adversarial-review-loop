@@ -209,10 +209,11 @@ Portability, releases and CI:
   a filesystem or Git behavior. macOS ships no `timeout` and Bash 3.2, so a
   change that reintroduces either requirement breaks every Mac.
 - **Release and CI stay reconcilable and pinned.** `docs/release.md` is the
-  contract. `auto-tag-release.yaml` must finish on a re-run: create the tag
-  only if missing, fail (never move it) if the tag marks another commit,
-  create the release only if missing, and pass `--latest` only for the highest
-  version. An explicit release version must exceed the latest tag. Workflows
+  contract. `release.yaml` stays a thin caller of gh-reusable-workflows'
+  `version-bump-pr`, `release-on-merge` and `simple-tag-and-release`, all
+  three pinned to the same commit and given the same `tag_prefix`,
+  `version_command` and `allowed_files`; `make release-bump` writes only
+  `.claude-plugin/plugin.json` and never commits. Workflows
   set `contents: read` at the top and grant extra permissions per job, with a
   reason. Every action is pinned to a full SHA with a `# vX.Y.Z` comment;
   workflow inputs reach the shell through `env:`, never `${{ }}` inside
@@ -272,22 +273,21 @@ Run each relevant pass with "how can this approve something wrong?" framing:
   Make targets, CI and real behavior. Flag claims such as complete evidence,
   automatic disarming, user-only actions or exhaustive tests unless the code
   proves them.
-- **Commit type matches whether it ships:** commitizen (`.cz.toml`,
-  `cz bump --get-next`) derives the release from the commit types since the
-  last tag, and pull requests land as merge commits, so every commit counts.
+- **Commit type matches whether it ships:** svu (in the Release workflow)
+  derives the release from the commit types since the last tag, and pull
+  requests land as merge commits, so every commit counts.
   The plugin ships as the repository at a tag: a change users receive
   (`scripts/arl.sh`, `scripts/arl-bootstrap.py`, `scripts/arl/`, `hooks/`,
   `prompts/`, `skills/`, `.claude-plugin/`) typed `build`, `chore`, `ci`,
   `docs`, `style` or `test` never cuts a release on its own: a finding.
-  commitizen counts `perf` and `refactor` as a patch, so either one on CI,
-  tests or docs cuts a release with nothing in it, and so does a `feat` or
-  `fix` there: a finding. A stray `!` before the colon or a `BREAKING CHANGE:`
+  A `feat` or `fix` on CI, tests or docs cuts a release with nothing in it: a
+  finding. `perf` and `refactor` bump nothing, so one on a shipped change
+  never releases it. A stray `!` before the colon or a `BREAKING CHANGE:`
   footer cuts a major. A revert of a shipped change is typed `fix`, since
-  `revert` bumps nothing. commitizen reads every line of every message, the
-  merge commit's pull request title included, not only the subject: a line
-  that opens with a word starting `feat`, `fix`, `refactor` or `perf` and a
-  colon (`fixtures:`, `performance:`) bumps as that type, and a line opening
-  with `word!:` cuts a major (`AGENTS.md` § Commits).
+  `revert` bumps nothing. svu matches `feat`/`fix` anywhere in a subject
+  (`prefix:` counts as `fix:`), and reads every body, the merge commit's pull
+  request title included, for a `BREAKING CHANGE:` footer
+  (`AGENTS.md` § Commits).
 - **A meta-test that can no longer fail:** `tests/unit/test_pins.py`,
   `test_vendor.py`, `test_toolchain.py`, `test_mod_contract.py`,
   `test_skill_arguments.py`, `test_license_headers.py` and
