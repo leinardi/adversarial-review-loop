@@ -52,17 +52,17 @@ Mark breaking changes with `!` before the colon or a `BREAKING CHANGE: <descript
 
 ## Versioning
 
-A release with no explicit version is derived from these types by commitizen: since the last
-release, any `feat` makes the next release a minor, any `fix`, `perf` or `refactor` a patch, and `!`
-or a `BREAKING CHANGE:` footer a major; `build`, `chore`, `ci`, `docs`, `revert`, `style` and `test`
-bump nothing. See [`docs/release.md`](docs/release.md).
+A release with no explicit version is derived from these types by svu: since the last release,
+any `feat` makes the next release a minor, any `fix` a patch, and `!` or a `BREAKING CHANGE:`
+footer a major; every other type (`build`, `chore`, `ci`, `docs`, `perf`, `refactor`, `revert`,
+`style`, `test`) bumps nothing, so a change users receive is a `fix` even when it is a performance
+improvement or a refactor. See [`docs/release.md`](docs/release.md).
 
 Pull requests are merged with merge commits; squash and rebase merging are disabled. Every commit in
 a pull request therefore lands on `main` as it is and counts toward the version, so each commit
 needs a correct type, not just the pull request as a whole.
 
-commitizen reads every line of a message, not only the subject, and the merge commit's body is the
-pull request's title. A line that opens with a word starting `feat`, `fix`, `refactor` or `perf`
-followed by a colon (`fixtures:`, `performance:`) bumps as that type, and a line opening with
-`word!:` cuts a major. Keep such lines out of commit bodies, and give the pull request a title whose
-type matches what it ships.
+svu matches `feat` and `fix` anywhere in a subject, so a word ending in either directly before a
+colon (`prefix:`) bumps as that type. It also reads the message body for a `BREAKING CHANGE:`
+footer, and the merge commit's body is the pull request's title: give the pull request a title
+whose type matches what it ships.

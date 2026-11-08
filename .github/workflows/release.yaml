@@ -1,172 +1,68 @@
 name: Release
 
+# Both halves of a release, on gh-reusable-workflows:
+#   - a dispatch (bump) resolves the version (explicit, or derived by svu from the Conventional
+#     Commits since the last adversarial-review-loop--vX.Y.Z tag), writes it into .claude-plugin/plugin.json
+#     with `make release-bump`, and opens the release/<tag> pull request, with CI dispatched on it;
+#   - merging that pull request (release) is checked to be exactly that bump, waits for CI on the
+#     merge commit, and publish tags it and creates the GitHub release.
+# The tag shape, <plugin-name>--vX.Y.Z, is what Claude Code's plugin dependency resolver looks for
+# and what `claude plugin tag` produces. See docs/release.md.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (e.g. 0.13.0 or v0.13.0). Leave empty to derive it from the Conventional Commits since the last release tag."
+        description: "Version, e.g. 3.1.0 or v3.1.0 (empty: derive from the commits since the last release)"
         required: false
+        type: string
+      dry_run:
+        description: "Dry run: resolve the version and show the bump, change nothing"
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - .claude-plugin/plugin.json
 
 permissions:
   contents: read
 
-# Two releases at once would race for the same bump branch and version.
-concurrency:
-  group: release
-  cancel-in-progress: false
-
+# No concurrency group here: each reusable workflow has its own, never cancelled.
 jobs:
   bump:
-    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
       pull-requests: write
-      # Needed for the explicit `gh workflow run` call below. See the comment at that step
-      # for why it is still there even though it currently duplicates a run.
       actions: write
-    steps:
-      # The bump branch is cut from the dispatched ref; from any other branch it would release
-      # commits that are not on main. A failing step, not a job-level `if`, so a wrong dispatch
-      # shows up red instead of as a skipped, green run.
-      - name: Refuse to release from a branch other than main
-        if: github.ref != 'refs/heads/main'
-        run: |
-          echo "Dispatch the release from main, not $GITHUB_REF." >&2
-          exit 1
+    uses: leinardi/gh-reusable-workflows/.github/workflows/version-bump-pr.yaml@2d081e865362f09c19a32f5ec86bc8a122d7c4aa # v1.5.1
+    with:
+      version: ${{ inputs.version }}
+      dry_run: ${{ inputs.dry_run }}
+      tag_prefix: adversarial-review-loop--v
+      version_command: jq -r .version .claude-plugin/plugin.json
+      bump_command: make release-bump VERSION="$RELEASE_VERSION"
+      allowed_files: .claude-plugin/plugin.json
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # commitizen's scm version provider reads the current version from the highest
-          # matching git tag, so the tags have to be fetched, not just the history.
-          fetch-depth: 0
-          fetch-tags: true
+  release:
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    uses: leinardi/gh-reusable-workflows/.github/workflows/release-on-merge.yaml@2d081e865362f09c19a32f5ec86bc8a122d7c4aa # v1.5.1
+    with:
+      tag_prefix: adversarial-review-loop--v
+      version_command: jq -r .version .claude-plugin/plugin.json
+      allowed_files: .claude-plugin/plugin.json
 
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.12"
-
-      - name: Install dev dependencies
-        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
-
-      - name: Resolve the version to release
-        id: version
-        env:
-          RAW: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [ -n "$RAW" ]; then
-            VERSION="${RAW#v}"
-            if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-              echo "Version must look like X.Y.Z, without leading zeros (got '$RAW')" >&2
-              exit 1
-            fi
-          else
-            # --get-next prints only the computed version on stdout. Two exit codes are
-            # routine rather than broken, and both mean the same thing to us - measured
-            # against commitizen 4.18.0, not read off the docs:
-            #   3  NO_COMMITS_FOUND    - nothing at all since the last tag
-            #   21 NoneIncrementExit   - commits exist but none are eligible (a docs-only
-            #                            or chore-only stretch, which is common here)
-            # stderr is left attached so commitizen's own [NO_COMMITS_TO_BUMP] line lands
-            # in the log next to the message below.
-            set +e
-            VERSION=$(cz bump --get-next)
-            STATUS=$?
-            set -e
-            case "$STATUS" in
-              0) ;;
-              3 | 21)
-                echo "No feat/fix/perf/refactor or breaking-change commit since the last release tag, so there is nothing to bump. Re-run this workflow with an explicit version to force one." >&2
-                exit 1
-                ;;
-              *)
-                echo "cz bump --get-next failed with exit code $STATUS" >&2
-                exit "$STATUS"
-                ;;
-            esac
-          fi
-          # An explicit version skips commitizen's own check, so compare it here: a version at or
-          # below the latest release would tag a release older than the one users already have.
-          # The derived one is always higher. commitizen reads the current version from the
-          # highest release tag (.cz.toml), and reports 0.0.0 when there is none.
-          CURRENT=$(cz version --project)
-          HIGHEST=$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -n 1)
-          if [ "$VERSION" = "$CURRENT" ] || [ "$HIGHEST" != "$VERSION" ]; then
-            echo "$VERSION is not higher than the latest release, $CURRENT." >&2
-            exit 1
-          fi
-          echo "Releasing $VERSION (latest release: $CURRENT)"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Bump the version in plugin.json
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" .claude-plugin/plugin.json
-
-      - name: Commit and push the bump branch
-        id: branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          BRANCH="release/v$VERSION"
-
-          # A run that fails after this push - as the first 1.0.0 attempt did, on the PR
-          # step - leaves the branch behind, and every retry then dies on a non-fast-forward
-          # because the branch is cut afresh from a main that has since moved. The branch is
-          # fully derived state (main, plus one generated line), so recreating it is always
-          # correct. An open pull request on it is not derived state: deleting the branch
-          # would close it silently, so stop and say so instead.
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            OPEN_PR=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')
-            if [ -n "$OPEN_PR" ]; then
-              echo "$BRANCH already has an open pull request (#$OPEN_PR). Merge or close it before releasing $VERSION again." >&2
-              exit 1
-            fi
-            echo "Deleting $BRANCH, left behind by an earlier run."
-            git push origin --delete "$BRANCH"
-          fi
-
-          git switch -c "$BRANCH"
-          git add .claude-plugin/plugin.json
-          if git diff --cached --quiet; then
-            echo "Nothing changed - is $VERSION already the current version?" >&2
-            exit 1
-          fi
-          git commit -m "chore(release): bump version to $VERSION"
-          git push origin "$BRANCH"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-
-      - name: Open PR
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
-          BRANCH: ${{ steps.branch.outputs.branch }}
-        run: |
-          set -euo pipefail
-          gh pr create \
-            --base main \
-            --head "$BRANCH" \
-            --title "chore(release): bump version to $VERSION" \
-            --body "Automated version bump. Review the diff, then merge — merging triggers \`auto-tag-release.yaml\`, which tags \`adversarial-review-loop--v$VERSION\` and creates the GitHub release."
-
-      # Belt and braces, and currently redundant. GitHub's loop prevention is documented to
-      # stop a GITHUB_TOKEN-authored pull request from firing `pull_request`, which would
-      # leave the release PR with no CI at all - that is what this dispatch is insurance
-      # against. Measured on PR #5 (run 33443605671) it fired anyway, with all eight
-      # contexts, so this produces a second run that executes only `pre-commit-all`, `test`,
-      # `test-macos`, `conventional-commits` and `ci-result` (every other job in ci.yaml is
-      # gated on the event being a pull_request). Keep it until the automatic run has proven
-      # reliable across a few releases, then drop it and `actions: write` with it.
-      - name: Trigger CI checks on the bump branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ steps.branch.outputs.branch }}
-        run: |
-          set -euo pipefail
-          gh workflow run ci.yaml --ref "$BRANCH"
+  publish:
+    needs: release
+    if: needs.release.outputs.release == 'true'
+    permissions:
+      contents: write
+    uses: leinardi/gh-reusable-workflows/.github/workflows/simple-tag-and-release.yaml@2d081e865362f09c19a32f5ec86bc8a122d7c4aa # v1.5.1
+    with:
+      version: ${{ needs.release.outputs.tag }}
+      tag_prefix: adversarial-review-loop--v
