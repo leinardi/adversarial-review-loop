@@ -5,29 +5,56 @@ title: "[Bug]: "
 labels: ["bug"]
 assignees: []
 ---
+## Step 1: Are you in the right place?
 
-## Checklist
+* [ ] I have checked that there are no duplicate active or recent issues (bugs, questions, or
+  feature requests) describing this problem.
+* [ ] I am using the latest released version of adversarial-review-loop (or have tested on the
+  main/default branch).
+* [ ] This is not a security vulnerability (those go through the private process in SECURITY.md).
 
-- [ ] I found no duplicate active or recent issue.
-- [ ] I reproduced this with the latest release or `main`.
+## Step 2: Describe your environment
 
-## Environment
+* Plugin version or commit: `?`
+* Claude Code or OpenCode version: `?`
+* Operating system and version: `?`
+* Shell and version: `?`
+* Python version (`python3 --version`): `?`
 
-- Project version or commit: `?`
-- Operating system and version: `?`
-- Shell and version: `?`
-- Claude Code or OpenCode version: `?`
+## Step 3: Describe the problem
 
-## Steps to reproduce
+### Steps to reproduce
 
 1. ---
 2. ---
 3. ---
 
-## Observed behavior
+### Observed results
 
-<!-- Include relevant command output, logs, or screenshots. -->
+<!-- What happened? This could be a description, error message, or log output. -->
 
-## Expected behavior
+*
 
-<!-- Describe expected result. -->
+### Expected results
+
+<!-- What did you expect to happen? -->
+
+*
+
+### Relevant code, configuration, or data
+
+<!-- Paste the smallest possible code or config snippet that reproduces the issue. -->
+
+```text
+# Example snippet (replace with your own)
+```
+
+### Error / log output
+
+<!-- If you are getting an error, paste the output here. -->
+
+```text
+<paste logs or error messages here>
+```
+
+<!-- Adding screenshots, screen recordings, or additional context is always helpful. -->

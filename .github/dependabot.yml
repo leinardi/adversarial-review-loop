@@ -9,9 +9,9 @@ updates:
     # 3 days), so a broken or compromised release has time to be yanked.
     cooldown:
       default-days: 7
+    labels: ["dependencies", "ci"]
     commit-message:
       prefix: "chore(deps)"
-    labels: ["dependencies", "ci"]
     groups:
       github-actions:
         patterns:
@@ -23,9 +23,9 @@ updates:
       interval: "monthly"
     cooldown:
       default-days: 7
+    labels: ["dependencies", "ci"]
     commit-message:
       prefix: "chore(deps)"
-    labels: ["dependencies", "ci"]
     groups:
       pre-commit-hooks:
         patterns:
@@ -39,9 +39,9 @@ updates:
       interval: "monthly"
     cooldown:
       default-days: 7
+    labels: ["dependencies", "ci"]
     commit-message:
       prefix: "chore(deps)"
-    labels: ["dependencies", "ci"]
     groups:
       python:
         patterns:
