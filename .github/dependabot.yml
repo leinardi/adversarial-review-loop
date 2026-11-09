@@ -7,7 +7,6 @@ multi-ecosystem-groups:
   dev-tools:
     schedule:
       interval: "monthly"
-    labels: ["dependencies", "ci"]
     # requirements-dev.txt and the hook revs never ship: the plugin itself has no runtime
     # dependencies, so a bump here stays chore(deps).
     commit-message:
@@ -34,6 +33,9 @@ updates:
     directory: "/"
     multi-ecosystem-group: "dev-tools"
     patterns: ["*"]
+    # Labels on the group are not applied: the first dev-tools pull request got Dependabot's
+    # default labels instead. Set on each entry, as on the ungrouped ones.
+    labels: ["dependencies", "ci"]
     cooldown:
       default-days: 7
 
@@ -41,5 +43,6 @@ updates:
     directory: "/"
     multi-ecosystem-group: "dev-tools"
     patterns: ["*"]
+    labels: ["dependencies", "ci"]
     cooldown:
       default-days: 7
