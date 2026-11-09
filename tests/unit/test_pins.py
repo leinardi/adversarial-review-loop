@@ -5,11 +5,12 @@ install, and in the ``additional_dependencies`` of the mypy hooks in
 ``.pre-commit-config.yaml``, which is what gives mypy the ``py.typed`` marker it needs to see
 ``@fixture`` and ``@parametrize`` as typed.
 
-Nothing keeps the two copies in step. Dependabot's ``pip`` ecosystem rewrites the requirements
-file only; its ``pre-commit`` ecosystem bumps ``rev:`` only, and never looks inside
-``additional_dependencies``. So a bump PR merges green with mypy still type-checking the tests
-against the *previous* pytest -- a silent difference between the version CI runs and the
-version CI checks, which surfaces later as stub errors nobody can reproduce locally.
+Each Dependabot ecosystem rewrites only its own copy: ``pip`` the requirements file,
+``pre-commit`` the hooks' ``additional_dependencies``. Without this check one half could merge
+green with mypy type-checking the tests against a different pytest than the one CI runs -- a
+silent difference that surfaces later as stub errors nobody can reproduce locally. With it, the
+halves must land together, which is why ``.github/dependabot.yml`` puts both ecosystems in one
+multi-ecosystem group.
 
 This module is the check; ``make sync-pins`` (``scripts/sync_pins.py``) is the fix. Both read
 the files through the same functions, so a green run here means that command has nothing left
@@ -73,9 +74,7 @@ def test_no_hook_disagrees_with_another_hook() -> None:
 def test_no_pin_drifts_between_the_two_files() -> None:
     _, changes = sync(REQUIREMENTS.read_text(), PRE_COMMIT.read_text())
     assert not changes, (
-        ".pre-commit-config.yaml disagrees with requirements-dev.txt: "
-        + "; ".join(changes)
-        + ". Dependabot rewrites requirements-dev.txt only -- run `make sync-pins` and commit the result."
+        ".pre-commit-config.yaml disagrees with requirements-dev.txt: " + "; ".join(changes) + ". Run `make sync-pins` and commit the result."
     )
 
 

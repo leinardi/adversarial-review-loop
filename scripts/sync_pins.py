@@ -4,12 +4,13 @@
 ``requirements-dev.txt`` is the single source of truth for a dev dependency's version. A few
 of those versions are necessarily duplicated in the ``additional_dependencies`` of the hooks
 in ``.pre-commit-config.yaml`` -- pytest is there so mypy can see its ``py.typed`` marker --
-and nothing keeps the copies in step: Dependabot's ``pip`` ecosystem rewrites the requirements
-file only, and its ``pre-commit`` ecosystem bumps ``rev:`` only.
+and each Dependabot ecosystem rewrites only its own copy: ``pip`` the requirements file,
+``pre-commit`` the hooks' ``rev:`` and ``additional_dependencies``. The two share one
+multi-ecosystem group in ``.github/dependabot.yml`` so a bump arrives as a single pull request.
 
 This is the fix-up half of that story; ``tests/unit/test_pins.py`` is the check half, and both
 read the files through the functions below so they cannot disagree about what a pin is. Run it
-after a Dependabot bump::
+after a hand edit of ``requirements-dev.txt``, or a bump that reached only one file::
 
     make sync-pins
 
