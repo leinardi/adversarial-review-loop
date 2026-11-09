@@ -1,5 +1,18 @@
 version: 2
 
+# pip and pre-commit share one pull request. pytest is pinned in requirements-dev.txt and again in
+# the mypy hooks' additional_dependencies, and each ecosystem bumps only its own copy; as two
+# pull requests, each one fails tests/unit/test_pins.py until the other has merged.
+multi-ecosystem-groups:
+  dev-tools:
+    schedule:
+      interval: "monthly"
+    labels: ["dependencies", "ci"]
+    # requirements-dev.txt and the hook revs never ship: the plugin itself has no runtime
+    # dependencies, so a bump here stays chore(deps).
+    commit-message:
+      prefix: "chore(deps)"
+
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -19,30 +32,14 @@ updates:
 
   - package-ecosystem: "pre-commit"
     directory: "/"
-    schedule:
-      interval: "monthly"
+    multi-ecosystem-group: "dev-tools"
+    patterns: ["*"]
     cooldown:
       default-days: 7
-    labels: ["dependencies", "ci"]
-    commit-message:
-      prefix: "chore(deps)"
-    groups:
-      pre-commit-hooks:
-        patterns:
-          - "*"
 
-  # requirements-dev.txt only: the plugin itself has no runtime dependencies, so a bump here never
-  # ships and stays chore(deps).
   - package-ecosystem: "pip"
     directory: "/"
-    schedule:
-      interval: "monthly"
+    multi-ecosystem-group: "dev-tools"
+    patterns: ["*"]
     cooldown:
       default-days: 7
-    labels: ["dependencies", "ci"]
-    commit-message:
-      prefix: "chore(deps)"
-    groups:
-      python:
-        patterns:
-          - "*"

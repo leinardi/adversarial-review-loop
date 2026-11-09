@@ -434,10 +434,12 @@ the standard library, and the vendored bashlex under `scripts/arl/_vendor/`, and
 straight from a checkout with no install step.
 
 pytest is pinned in two places — `requirements-dev.txt` and the `additional_dependencies` of the
-mypy hooks in `.pre-commit-config.yaml`, which is what gives mypy pytest's `py.typed`. Dependabot
-bumps the first and never the second, so `tests/unit/test_pins.py` fails when they drift.
-`make sync-pins` propagates `requirements-dev.txt` into the hook config; run it on a Dependabot bump
-and commit the result alongside.
+mypy hooks in `.pre-commit-config.yaml`, which is what gives mypy pytest's `py.typed`. Dependabot's
+`pip` ecosystem bumps the first and its `pre-commit` ecosystem the second, so the two share the
+`dev-tools` multi-ecosystem group in `.github/dependabot.yml` and arrive as one pull request; split
+apart, each fails `tests/unit/test_pins.py` until the other merges. `make sync-pins` propagates
+`requirements-dev.txt` into the hook config for a hand edit, or for a bump that reaches only one
+side.
 
 `make test` must pass before any commit. A change to the gate needs a test that **fails on the old
 code** — a test that only asserts a helper's return value while the end-to-end bypass survives is
