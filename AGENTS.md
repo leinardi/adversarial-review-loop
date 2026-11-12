@@ -58,21 +58,21 @@ Target architecture (the phases build it):
 | `scripts/arl.sh` | launcher: finds a Python 3.12 or newer and runs the bootstrap |
 | `scripts/arl-bootstrap.py` | trusted absolute entrypoint; establishes `sys.path` and `sys.pycache_prefix` before `arl` is imported |
 | `scripts/arl/cli.py` | subcommand dispatch: argv in, one JSON answer on stdout |
-| `scripts/arl/commands.py` | the run commands: `init`, `resume`, `set-phases`, `root-add`, `root-baseline`, `status`, `pause`, `stop`, `finish`, `accept`, `next-action` |
+| `scripts/arl/commands.py` | the command table: `init`, `resume`, `set-phases`, `root-add`, `root-baseline`, `status`, `pause`, `stop`, `finish`, `accept`, `next-action`, and the `review`/`clarify` subcommands |
 | `scripts/arl/state.py` | the run state in `<launch dir>/.arl/state.json`: stages, approvals, tickets, `next_action` |
 | `scripts/arl/workspace.py` | workspace roots: git and shadow snapshots, nested-repository discovery, late baselines |
 | `scripts/arl/contract.py` | the reviewer output contract: `FINDING`/`SUPERSEDES` grammar, `parse`, the recomputed verdict, the late-round scope type, `parse_clarify` |
-| `scripts/arl/bundle.py` | the review bundle: diff chunks, `range.txt`, plan and guide evidence, prior rounds, prompt composition |
+| `scripts/arl/review.py` | the review pipeline: `review prepare`/`record`/`run-external`, repair, failure budgets, stalls, `clarify` |
+| `scripts/arl/bundle.py` | the review bundle: alias-prefixed diff chunks per root, `range.txt`, `verification.txt`, prior rounds, prompt composition |
 | `scripts/arl/runner.py` | running the reviewer: the bounded runner, transcript reduction, failure classification |
-| `scripts/arl/harness/` | the reviewer-CLI seam; `opencode.py` is the one external harness |
-| `scripts/arl/v3state.py`, `paths.py` | v3's activation state, still read by `bundle.py`; removed in phase 3 |
+| `scripts/arl/harness/`, `reviewer_probe.py` | the reviewer-CLI seam; `opencode.py` is the one external harness, and the probe lists its models |
 | `scripts/arl/gitsnap.py` | temp-index snapshot, oversized guard, submodule detection |
 | `scripts/arl/oscillation.py` | stall detection across rounds |
-| `scripts/arl/guide.py`, `planrev.py` | the repo-supplied review guide, plan revisions |
+| `scripts/arl/guidance.py` | project review guidance: each root's review skill and the `review_guide` file |
 | `scripts/arl/report.py` | report storage and the text Claude sees |
 | `scripts/arl/atomic.py`, `config.py`, `globmatch.py`, `util.py`, `errors.py` | shared plumbing |
 | `prompts/*.md` | the reviewer prompts |
-| `tests/unit/` | pytest unit tests; shared fixtures in `conftest.py`, review helpers in `reviewer_common.py` |
+| `tests/unit/` | pytest unit tests; shared fixtures in `conftest.py`, run fixtures in `run_common.py`, reviewer stand-ins in `reviewer_common.py` |
 | `tests/selftest.sh` | smoke test for `scripts/arl.sh` |
 | `tests/STEP0.md` | live-session measurements of the Claude Code host; Session J covers the v4 mod surface |
 

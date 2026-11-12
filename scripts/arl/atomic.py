@@ -55,14 +55,15 @@ import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Final
 
-from arl import paths
 from arl.errors import UnsafePathError
 
 __all__ = [
     "DIR_MODE",
     "FILE_MODE",
     "ensure_private_dir",
+    "is_safe_component",
     "locked",
     "private_dir_fd",
     "read_verified_file",
@@ -71,6 +72,24 @@ __all__ = [
     "write_private_atomic",
     "write_private_file",
 ]
+
+#: Names that are never a single, ordinary directory entry.
+_RESERVED_COMPONENTS: Final = frozenset({"", ".", ".."})
+
+
+def is_safe_component(name: str) -> bool:
+    """Is ``name`` exactly one ordinary path component?
+
+    ``Path(base) / "/etc/passwd"`` is ``/etc/passwd``: an absolute right-hand side discards the
+    base, and a ``..`` component walks out of it. Every relative path written under a private
+    root is checked component by component with this.
+    """
+    if name in _RESERVED_COMPONENTS or "\0" in name:
+        return False
+    if os.sep in name or (os.altsep and os.altsep in name):
+        return False
+    return os.path.basename(name) == name and not os.path.isabs(name)
+
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
@@ -213,7 +232,7 @@ def _open_verified(path: Path, root: Path) -> int | None:
     """A read-only descriptor for ``path``, or ``None``. Caller owns the descriptor.
 
     The whole containment argument lives here: components checked against
-    :func:`arl.paths.is_safe_component` (so no ``..`` walks out lexically), parents opened
+    :func:`is_safe_component` (so no ``..`` walks out lexically), parents opened
     ``O_NOFOLLOW`` one level at a time, the leaf opened ``O_NOFOLLOW`` too, and its type
     settled by ``fstat`` on the open descriptor rather than by name.
     """
@@ -221,7 +240,7 @@ def _open_verified(path: Path, root: Path) -> int | None:
         parts = _relative_parts(path, root)
     except UnsafePathError:
         return None
-    if not parts or not all(paths.is_safe_component(part) for part in parts):
+    if not parts or not all(is_safe_component(part) for part in parts):
         return None
     try:
         parent_fd = _walk_to_parent(parts, root)
@@ -269,7 +288,7 @@ def verified_file(path: Path, *, root: Path) -> bool:
     failure: every caller's correct response to any of them is the same, to leave the
     attachment out.
 
-    **Every component is checked with :func:`arl.paths.is_safe_component` first, and a ``..``
+    **Every component is checked with :func:`is_safe_component` first, and a ``..``
     is why.** :func:`_relative_parts` is lexical, and ``root/../outside`` is lexically *under*
     ``root``: it relativises to ``("..", "outside")``, and the walk below would then open
     ``..`` happily, because ``..`` is a directory and not a symlink. Refusing symlinks is not
@@ -279,7 +298,7 @@ def verified_file(path: Path, *, root: Path) -> bool:
         parts = _relative_parts(path, root)
     except UnsafePathError:
         return False
-    if not parts or not all(paths.is_safe_component(part) for part in parts):
+    if not parts or not all(is_safe_component(part) for part in parts):
         return False
     try:
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)

@@ -1,4 +1,4 @@
-"""The reviewer's output contract: the finding grammar, the verdict the gate recomputes, and
+"""The reviewer's output contract: the finding grammar, the verdict the engine recomputes, and
 the clarify reply.
 
 **Every failure mode ends in a verdict that is not an approval.** A reviewer that says nothing,
@@ -50,12 +50,14 @@ __all__ = [
     "Finding",
     "LateScope",
     "Review",
+    "RootRange",
     "Target",
     "is_single_stored_line",
     "normalized_file",
     "parse",
     "parse_clarify",
     "records",
+    "unknown_alias",
     "valid_retractions",
 ]
 
@@ -84,7 +86,7 @@ _TRAILING_SPACE: Final = re.compile(rf"[{_SPACE}]+$")
 #: The ``FINDING`` grammar, exactly as ``prompts/reviewer-*.md`` specifies it:
 #: ``FINDING severity=<label> actionable=yes|no file=<path[:line]|-> | <detail>``.
 #: ``severity`` is one of five documented labels and ``actionable`` one of two, because a
-#: field the gate cannot read is a finding it cannot weigh -- and weighing it as "does not
+#: field the engine cannot read is a finding it cannot weigh -- and weighing it as "does not
 #: block" is exactly the failure-into-approval Rule 1 forbids.
 FINDING_RE: Final = re.compile(
     r"^FINDING[ \t]+severity=(?P<severity>info|low|medium|high|critical)"
@@ -133,20 +135,30 @@ class ContractError(OcrlError):
 
 
 @dataclass(frozen=True)
-class Target:
-    """What one review is about: the range under review, and where it sits in the plan.
+class RootRange:
+    """One root's part of a review: where it is, and the two trees the review diffs."""
 
-    These five travel together through every function here and in :mod:`arl.report` --
-    the bundle header, the report filename and the report body all restate them -- so they
-    are one value rather than five parallel parameters that a call site can transpose.
-    """
-
-    repo: str
+    alias: str
+    path: str
+    kind: str
     base: str
     head: str
+
+
+@dataclass(frozen=True)
+class Target:
+    """What one review is about: the roots and their ranges, and where it sits in the plan.
+
+    Every function here and in :mod:`arl.report` restates these, so they travel as one value
+    rather than parallel parameters a call site can transpose.
+    """
+
     #: ``phase`` for one phase's delta, ``final`` for the cumulative review.
     scope: str
     phase: int
+    roots: tuple[RootRange, ...] = ()
+    #: Where the run lives; the external reviewer runs from here.
+    launch_dir: str = ""
 
     @property
     def is_phase(self) -> bool:
@@ -154,8 +166,12 @@ class Target:
 
     @property
     def label(self) -> str:
-        """How this review is named on disk and in the report heading."""
+        """How this review is named on disk, in ``round_history`` and in the report heading."""
         return f"phase{self.phase}" if self.is_phase else self.scope
+
+    @property
+    def aliases(self) -> frozenset[str]:
+        return frozenset(root.alias for root in self.roots)
 
 
 @dataclass(frozen=True)
@@ -171,7 +187,7 @@ class Finding:
 
 @dataclass
 class Review:
-    """One review's outcome, recomputed by the gate rather than taken from the reviewer."""
+    """One review's outcome, recomputed by the engine rather than taken from the reviewer."""
 
     #: ``APPROVED`` | ``CHANGES_REQUIRED`` | ``OP_FAILURE`` | ``NEEDS_HUMAN``.
     verdict: str = ""
@@ -207,7 +223,7 @@ class Review:
     #: named by 2+ ``SUPERSEDES`` lines across this label's ``round_history`` -- gate-computed
     #: text, not reviewer prose. Empty when nothing oscillates. Set after this round's own
     #: entry has been recorded, so it reflects this round too -- unlike
-    #: ``_prior_rounds_section``'s own "## Oscillating points", which by construction only
+    #: ``_prior_rounds``'s own "## Oscillating points", which by construction only
     #: ever sees rounds before this one. Never changes ``verdict``, same as ``supersedes``.
     oscillating: str = ""
     #: Everything before the marker block.
@@ -269,7 +285,7 @@ class LateScope:
         may itself be named ``x:1``); only if that fails is a trailing ``:digits`` stripped
         and compared again. ``-`` (no single location) is always in scope: a finding the
         reviewer could not pin to a path must not be deferred on the strength of that, or a
-        missing location would become a way past the gate.
+        missing location would become a way past the review.
         """
         if file == "-":
             return True
@@ -302,9 +318,9 @@ def is_single_stored_line(value: object) -> bool:
 
     ``re.match`` only anchors at the start, so ``FINDING_RE.match`` on a tampered
     ``"FINDING ... | x\\nIgnore prior instructions ..."`` succeeds and the whole multi-line
-    value -- smuggled prose included -- would otherwise be rendered into the attachment. A
-    legitimately stored line never contains a break (``_record_round`` splits on
-    ``\\n`` before storing); anything that does is rejected here.
+    value -- smuggled prose included -- would otherwise be rendered into ``prior-rounds.txt``. A
+    legitimately stored line never contains a break (``review._apply`` stores
+    parsed records, split on ``\\n``); anything that does is rejected here.
     """
     return isinstance(value, str) and value.splitlines()[0:1] == [value]
 
@@ -313,7 +329,7 @@ def valid_retractions(entry: dict[str, Any], lines: Sequence[object], *, ordinal
     """The lines of ``lines`` that each retract one finding of the round ``entry``, in order.
 
     Shared by the two places a clarify's retraction is trusted -- the clarify command before it
-    records one, ``bundle._prior_rounds_section`` before it renders one -- so the two cannot drift. A
+    records one, ``bundle._prior_rounds`` before it renders one -- so the two cannot drift. A
     line survives only when it is a single line (:func:`is_single_stored_line`) matching
     ``_SUPERSEDES_RE`` with the anchored ``re.match`` a stored ``FINDING`` is re-validated with,
     its ``round=`` is ``ordinal``, and its ``file=`` is exactly the ``file=`` of exactly one of
@@ -347,6 +363,22 @@ def valid_retractions(entry: dict[str, Any], lines: Sequence[object], *, ordinal
     return kept
 
 
+def unknown_alias(review: Review, aliases: frozenset[str]) -> str:
+    """The first ``file=`` value of ``review`` that names no root, or ``""``.
+
+    Every location in a multi-root review is ``<alias>/<path>`` (``range.txt`` maps each alias to
+    its folder), so a finding can never be confused between two roots' ``src/main.py``. A path
+    with no known alias cannot be attributed, which is a contract error, not a finding to drop.
+    """
+    for block in (review.all_findings, review.supersedes):
+        for line in records(block):
+            match = FINDING_RE.match(line) or _SUPERSEDES_RE.match(line)
+            file = normalized_file(match.group("file")) if match else "-"
+            if file != "-" and file.split("/", 1)[0] not in aliases:
+                return file
+    return ""
+
+
 def records(text: str) -> list[str]:
     """Split on ``\n`` and nothing else, the way every tool in the shell pipeline did.
 
@@ -362,7 +394,7 @@ def records(text: str) -> list[str]:
 
 
 def _classify(review: Review, verdict: str) -> None:
-    """Map the reviewer's advisory verdict onto the gate's own vocabulary."""
+    """Map the reviewer's advisory verdict onto the engine's own vocabulary."""
     upper = verdict.upper()
     if upper in _APPROVING_VERDICTS:
         review.verdict = "APPROVED"
@@ -422,7 +454,7 @@ def _scan_block(block_lines: list[str], *, allow_supersedes: bool) -> tuple[list
     **A line that does not fit the contract is a failed review, not a line to skip.** Ignoring
     unrecognised lines meant ``FINDING: severity=critical actionable=yes`` -- one stray colon --
     counted as no finding at all and the reviewer's own ``APPROVED`` stood. Same for
-    ``actionable=maybe`` and a severity outside the documented set. The gate cannot tell a typo
+    ``actionable=maybe`` and a severity outside the documented set. The engine cannot tell a typo
     from a finding it failed to understand, and Rule 1 decides which way that resolves.
 
     ``allow_supersedes`` is true only for a phase review, the one prompt that documents the line
@@ -511,8 +543,7 @@ def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False, sco
     a finding that would block under ``block_severity`` alone still needs to be in scope -- a
     changed path, a path an earlier round raised, or a severity at or above
     ``late_block_severity`` -- and is otherwise recorded in ``Review.deferred``. The reviewer's
-    ``CHANGES_REQUIRED`` still wins over a deferred-only block set. See
-    ``docs/design/config-keys-rationale.md``.
+    ``CHANGES_REQUIRED`` still wins over a deferred-only block set.
     """
     review = Review()
     try:
@@ -531,7 +562,7 @@ def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False, sco
         block_lines = lines[start + 1 : end]
         findings, supersedes, verdict = _scan_block(block_lines, allow_supersedes=allow_supersedes)
     except ContractError as exc:
-        # Findings and prose stay empty: half-read evidence from output the gate could not
+        # Findings and prose stay empty: half-read evidence from output the engine could not
         # parse would suggest the parse succeeded. The contract error is the finding.
         return _fail(review, str(exc))
 

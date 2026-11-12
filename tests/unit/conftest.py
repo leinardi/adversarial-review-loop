@@ -30,7 +30,6 @@ import pytest
 
 import arl
 from arl import runner
-from arl import v3state as state
 from arl.config import DEFAULTS, Config
 
 PLUGIN_ROOT = arl.PLUGIN_ROOT
@@ -241,11 +240,8 @@ def unborn_repo(tmp_path: Path) -> Path:
 
 
 # --------------------------------------------------------------------------
-# The reviewer suite (``test_reviewer_*.py``, helpers in ``reviewer_common.py``)
+# The reviewer suite (``test_runner.py``, ``test_contract.py``; helpers in ``reviewer_common.py``)
 # --------------------------------------------------------------------------
-
-#: The session id every reviewer activation is armed under.
-SESSION = "revsess"
 
 
 @pytest.fixture
@@ -270,25 +266,6 @@ def short_kill_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     than made autouse here, which would patch the constant for every unit test.
     """
     monkeypatch.setattr(runner, "KILL_GRACE_SEC", 0.2)
-
-
-@pytest.fixture
-def activation(review_env: dict[str, str], git_repo: Path) -> state.State:
-    """An armed activation for the scratch repository, with two frozen phases."""
-    st = state.State(str(git_repo), SESSION)
-    st.new()
-    st.update(
-        status="ACTIVE",
-        session_id=SESSION,
-        worktree=str(git_repo),
-        phases=["first phase", "second phase"],
-        phase=1,
-        activation_commit=git(git_repo, "rev-parse", "HEAD"),
-        baseline_tree=git(git_repo, "rev-parse", "HEAD^{tree}"),
-    )
-    st.save()
-    (st.act_dir / "plan.frozen.md").write_text("# The frozen plan\n\nDo the thing.\n")
-    return st
 
 
 def git_status_ignored(repo: Path) -> str:

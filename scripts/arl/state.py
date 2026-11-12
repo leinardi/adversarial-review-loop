@@ -77,7 +77,10 @@ STATUSES: Final = ("active", "paused", "stopped", "complete")
 
 #: The decisions a run can be waiting on the user for, besides a root's baseline (which is read
 #: off the roots themselves, so it cannot go stale).
-WAIT_KINDS: Final = ("stall", "failures", "oversized")
+WAIT_KINDS: Final = ("stall", "failures", "oversized", "needs-human")
+
+#: The waits only the user ends; the others clear once their condition is gone.
+_DECISIONS: Final = frozenset({"stall", "needs-human"})
 
 Stage = Literal["plan", "phase", "final", "done"]
 
@@ -138,6 +141,11 @@ def new_document(*, plan_source: str, final_review: bool) -> dict[str, Any]:
         "approvals": [],
         "rounds": 0,
         "round_history": [],
+        "clarify_history": [],
+        "review_seq": 0,
+        "stall_floor": 0,
+        "failures": 0,
+        "transient_failures": 0,
         "final_review": final_review,
         "final_requested": False,
         "final_approved": False,
@@ -163,6 +171,11 @@ _SCHEMA: Final[Mapping[str, type | tuple[type, ...]]] = {
     "approvals": list,
     "rounds": int,
     "round_history": list,
+    "clarify_history": list,
+    "review_seq": int,
+    "stall_floor": int,
+    "failures": int,
+    "transient_failures": int,
     "final_review": bool,
     "final_requested": bool,
     "final_approved": bool,
@@ -268,6 +281,27 @@ class RunState:
         """The 1-based phase under work, or ``0`` outside the ``phase`` stage."""
         return self.approved_phases + 1 if self.stage() == "phase" else 0
 
+    def label(self) -> str:
+        """The name the current stage's reviews are recorded under: ``phase<N>`` or ``final``."""
+        return "final" if self.stage() == "final" else f"phase{self.current_phase()}"
+
+    def rounds_of(self, label: str) -> list[dict[str, Any]]:
+        """``round_history`` entries of ``label`` under the current phase list.
+
+        A replan renumbers what ``phase<N>`` means, and reopens the work a final review judged,
+        so earlier rounds count only when they were recorded against this ``phases_revision``.
+        """
+        revision = self.data["phases_revision"]
+        return [
+            entry
+            for entry in self.data["round_history"]
+            if isinstance(entry, dict) and entry.get("label") == label and entry.get("revision") == revision
+        ]
+
+    def next_review_seq(self) -> int:
+        self.data["review_seq"] += 1
+        return int(self.data["review_seq"])
+
     def unknown_baselines(self) -> list[dict[str, Any]]:
         return [root for root in self.data["roots"] if root.get("baseline") == "unknown"]
 
@@ -301,7 +335,7 @@ class RunState:
         self.data["rounds"] = 0
         self.invalidate_ticket("replanned")
 
-    def approve(self, trees: Mapping[str, str], *, by: Literal["review", "user"]) -> None:
+    def approve(self, trees: Mapping[str, str], *, by: Literal["review", "user", "ignored"]) -> None:
         """Approve the current phase, or the final review, at ``trees`` (alias to snapshot tree).
 
         Every root's ``approved_tree`` moves to the tree given for it, so the next phase is
@@ -324,6 +358,7 @@ class RunState:
             self.data["final_approved"] = True
         self.data["rounds"] = 0
         self.data["waiting"] = None
+        self.data["failures"] = self.data["transient_failures"] = 0
         self.invalidate_ticket("approved")
         if self.stage() == "done":
             self.data["status"] = "complete"
@@ -333,9 +368,26 @@ class RunState:
         self.data["rounds"] += 1
 
     def wait_for_user(self, kind: str, detail: str) -> None:
+        """Wait for the user on ``kind``. A stall or a reviewer's call for the user is a decision
+        only the user ends, so a later oversized file or failure budget never replaces it: those
+        clear themselves, and would take the decision with them."""
         if kind not in WAIT_KINDS:
             raise ValueError(f"unknown wait kind {kind!r}")
+        current = self.data["waiting"]
+        if isinstance(current, dict) and current.get("kind") in _DECISIONS and kind not in _DECISIONS:
+            return
         self.data["waiting"] = {"kind": kind, "detail": detail}
+
+    def pending_decision(self) -> dict[str, Any] | None:
+        """The wait only the user ends (a stall, a reviewer's call for the user), or ``None``."""
+        waiting = self.data["waiting"]
+        return waiting if isinstance(waiting, dict) and waiting.get("kind") in _DECISIONS else None
+
+    def clear_wait(self, kind: str) -> None:
+        """Drop the decision the run waits on, if it is ``kind``: the condition has gone away."""
+        waiting = self.data["waiting"]
+        if isinstance(waiting, dict) and waiting.get("kind") == kind:
+            self.data["waiting"] = None
 
     def request_final(self) -> None:
         """``/finish``: require the cumulative review, before or after the last phase approval.
@@ -382,12 +434,17 @@ class RunState:
         session is prompted even if the state is otherwise unchanged.
         """
         self.require_status("active", "paused")
+        if self.pending_decision() is not None and self.data["waiting"]["kind"] == "stall":
+            # "Keep going" past a stall: the rounds that stalled no longer count towards the
+            # next one, or the very next round would stall again on the same window.
+            self.data["stall_floor"] = self.data["review_seq"]
         ticket = self.data["pending_ticket"]
         abandoned = ticket is not None and not (session and ticket.get("session") == session)
         if abandoned:
             self.invalidate_ticket("abandoned")
         self.data["status"] = "active"
         self.data["waiting"] = None
+        self.data["failures"] = self.data["transient_failures"] = 0
         self.data["last_continuation"] = ""
         return {"abandoned_review": abandoned, "pending_review": self.data["pending_ticket"] is not None}
 

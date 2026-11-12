@@ -63,17 +63,17 @@ __all__ = [
 #: ``arl.harness.model``, the one reader every command shares. An empty ``model`` therefore
 #: means "whatever this harness calls its default", never "no model".
 #:
-#: ``harness`` defaults to ``opencode``, the one reviewer CLI the engine runs itself. The name
-#: never falls back: see ``arl.harness.UnknownHarness``.
+#: ``harness`` defaults to ``subagent``: the mod spawns a fresh Claude Code subagent per round, and
+#: the engine only prepares and records. ``opencode`` is the one reviewer CLI the engine runs
+#: itself (``review run-external``). The name never falls back: see ``arl.harness.UnknownHarness``.
 #:
-#: ``review_guide`` defaults to ``""`` (off). It is the one key whose value names a file whose
-#: *content becomes instruction* rather than data, so it is resolved and frozen once, at arm --
-#: a later edit to the key, or to the file it named, changes nothing about a running
-#: activation. See ``arl.guide`` for what the framing around it allows and forbids.
+#: ``review_guide`` names one Markdown file spliced into every review prompt, and ``review_skill``
+#: selects each root's own review skill (``auto``, a skill name, or ``off``). Both are read fresh
+#: for every review; see ``arl.guidance``.
 #: ``roots`` lists extra workspace roots every run in this directory starts with, besides the
 #: launch directory, ``--root`` arguments and the paths the plan names (``arl init``).
 DEFAULTS: Final[dict[str, Any]] = {
-    "harness": "opencode",
+    "harness": "subagent",
     "model": "",
     "variant": "",
     "block_severity": "medium",
@@ -81,8 +81,9 @@ DEFAULTS: Final[dict[str, Any]] = {
     "timeout_sec": 900,
     "max_failures": 2,
     "max_transient_failures": 5,
+    # The command Claude is told to run before asking for a review. The engine never runs it:
+    # what it reported reaches the reviewer as `verification.txt`.
     "verify_cmd": "",
-    "pure": True,
     "disable_project_config": False,
     "chunk_diff_bytes": 400000,
     "hard_diff_ceiling": 8388608,
@@ -91,16 +92,15 @@ DEFAULTS: Final[dict[str, Any]] = {
     "max_findings": 200,
     "max_findings_bytes": 65536,
     "max_clarifications": 2,
-    "stall_rounds": 3,
-    "allow_dirty": False,
-    "ttl_hours": 24,
+    "stall_rounds": 5,
     "ignore_globs": [],
     "final_review": False,
     "review_guide": "",
+    "review_skill": "auto",
     "roots": [],
 }
 
-BOOL_KEYS: Final = ("pure", "disable_project_config", "allow_dirty", "final_review")
+BOOL_KEYS: Final = ("disable_project_config", "final_review")
 
 INT_KEYS: Final = (
     "timeout_sec",
@@ -114,7 +114,6 @@ INT_KEYS: Final = (
     "max_findings_bytes",
     "max_clarifications",
     "stall_rounds",
-    "ttl_hours",
 )
 
 LIST_KEYS: Final = ("ignore_globs", "roots")
@@ -252,8 +251,8 @@ def load(
     """Merge every layer into one configuration.
 
     Precedence, lowest to highest: defaults < user config < repo config < ``overrides`` <
-    environment. ``overrides`` is a per-activation overlay (``state.json``'s ``overrides``
-    field, e.g. a ``--model`` given to ``implement`` or ``resume``) -- it beats the config
+    environment. ``overrides`` is a per-run overlay (for example a ``--model`` the user gave
+    for this run) -- it beats the config
     files but not ``ARL_*``, so the environment still has the final word. Only keys already
     in :data:`DEFAULTS` are accepted from it; anything else is dropped, because the overlay
     is written into state and state is not a trust boundary the config layer should widen.

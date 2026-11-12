@@ -1,6 +1,6 @@
 """The harness seam: the contract every reviewer CLI implementation must satisfy.
 
-Separate from the ``test_reviewer_*`` modules because these are assertions about the *seam*, not about
+Separate from ``test_runner.py`` because these are assertions about the *seam*, not about
 OpenCode: each one is parametrised over every registered harness, so a second implementation
 cannot be added without meeting them.
 """
@@ -24,8 +24,6 @@ cannot be added without meeting them.
 
 from __future__ import annotations
 
-import dataclasses
-import hashlib
 import json
 import time
 from pathlib import Path
@@ -48,32 +46,16 @@ def every_harness() -> list[harness.Harness]:
     return [harness.get(name) for name in harness.names()]
 
 
-def written(path: Path, text: str = "evidence\n") -> harness.Attachment:
-    """An attachment that exists on disk, with the digest the gate would have staged it under.
-
-    A harness may *name* its attachments in the argv (OpenCode's ``-f``) or **inline** them
-    into the payload it composes (Claude Code's stdin), and the second kind reads every one of
-    them -- and re-hashes them -- while building the command. A fixture that only invented
-    pathnames would therefore pass for one harness and fail for the other, which is precisely
-    the drift these parametrised tests exist to catch.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-    return harness.Attachment(path, hashlib.sha256(path.read_bytes()).hexdigest())
-
-
-def spec_for(implementation: harness.Harness, tmp_path: Path, *, cold: bool = False, system_prompt: str = "") -> harness.ReviewSpec:
+def spec_for(implementation: harness.Harness, tmp_path: Path, *, system_prompt: str = "") -> harness.ReviewSpec:
     del implementation
     return harness.ReviewSpec(
-        repo="/repo",
+        repo="/launch",
         prompt_text="review this",
         system_prompt=system_prompt,
         title="review-loop phase 1",
-        bundle_dir=tmp_path / "bundles" / "001",
-        act_dir=tmp_path,
+        bundle_dir=tmp_path / "reviews" / "001" / "bundle",
+        roots=("/launch/api", "/elsewhere/web"),
         config=config_with(),
-        attachments=(written(tmp_path / "bundles" / "001" / "range.txt"),),
-        cold=cold,
     )
 
 
@@ -171,51 +153,6 @@ def test_a_review_command_starts_with_the_harness_binary(implementation: harness
     assert built.argv[0] == implementation.binary
 
 
-@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
-def test_a_cold_review_never_carries_a_session(implementation: harness.Harness, tmp_path: Path) -> None:
-    """A session-less invocation -- a contract repair -- must not continue a session under any
-    harness.
-
-    The gate decides which calls are session-less, but every harness has to be incapable of
-    quietly reintroducing continuity into one that must not have it.
-
-    Driven with the ``new_session_id`` such a call really carries, not with an empty spec: it
-    is a *fresh* invocation, so ``reviewer._mint_session`` gives it an id of its own, and a
-    harness that spelled that as a resume rather than as a new, empty session would hand the
-    one call that must remember nothing the entire earlier conversation. ``session_id`` stays
-    "" because that is what the gate passes here -- the seam's structural refusal of a
-    *continuation* is asserted by ``ClarifySpec`` having no such field at all, in the test
-    below.
-    """
-    spec = dataclasses.replace(
-        spec_for(implementation, tmp_path, cold=True),
-        new_session_id=implementation.sessions().mint() or "ses_mintedfresh01",
-    )
-    built = implementation.review_command(spec)
-    assert "-s" not in built.argv
-    assert "--resume" not in built.argv
-
-
-@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
-def test_a_clarify_command_never_carries_a_session(implementation: harness.Harness, tmp_path: Path) -> None:
-    """``ClarifySpec`` has no ``session_id`` field, so no harness can be handed one."""
-    assert not hasattr(harness.ClarifySpec, "session_id")
-    built = implementation.clarify_command(
-        harness.ClarifySpec(
-            repo="/repo",
-            prompt_text="answer this",
-            title="clarify",
-            bundle_dir=tmp_path / "bundles" / "001",
-            act_dir=tmp_path,
-            config=config_with(),
-            question_file=written(tmp_path / "q.txt", "why?\n"),
-            attachments=(written(tmp_path / "bundles" / "001" / "range.txt"),),
-        )
-    )
-    assert "-s" not in built.argv
-    assert "--resume" not in built.argv
-
-
 def test_an_unknown_harness_is_refused_not_defaulted() -> None:
     with pytest.raises(harness.UnknownHarness):
         harness.get("no-such-harness")
@@ -224,47 +161,6 @@ def test_an_unknown_harness_is_refused_not_defaulted() -> None:
 # --------------------------------------------------------------------------
 # Session continuity: the strategy every harness has to bring
 # --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
-def test_every_harness_brings_a_session_strategy(implementation: harness.Harness) -> None:
-    strategy = implementation.sessions()
-    assert isinstance(strategy, harness.SessionStrategy)
-    assert strategy.capture_timeout_sec >= 0, "a negative window would shrink a lease below the work it covers"
-
-
-@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
-def test_a_minted_id_is_one_its_own_strategy_recognises(implementation: harness.Harness) -> None:
-    """``mint`` and ``is_session_id`` are two halves of one shape and must agree.
-
-    A strategy that minted an id its own validator rejects would pre-assign a session and
-    then refuse to continue it -- continuity silently dead, and every round paying full token
-    price with nothing to show for it. ``""`` is the other legal answer: the harness cannot
-    pre-assign, so discovery is the only route.
-    """
-    strategy = implementation.sessions()
-    minted = strategy.mint()
-    assert minted == "" or strategy.is_session_id(minted)
-
-
-@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
-def test_is_session_id_refuses_a_trailing_newline_and_a_non_string(implementation: harness.Harness) -> None:
-    """Both checks belong to the strategy, because both call sites read untrusted values.
-
-    Every caller takes its value out of ``state.json`` or a CLI's own output, neither of which
-    is a trust boundary. A ``$``-anchored pattern accepts a single trailing newline, and such
-    an id travelled as a session id everywhere and rendered a line break into ``arl status``;
-    a non-string reaches the same validators from the same document.
-    """
-    strategy = implementation.sessions()
-    minted = strategy.mint() or "ses_abcdefgh"
-    if not strategy.is_session_id(minted):  # pragma: no cover - a harness whose ids this stand-in does not fit
-        pytest.skip(f"{implementation.name} mints nothing and does not recognise the stand-in id")
-
-    assert not strategy.is_session_id(minted + "\n")
-    assert not strategy.is_session_id(None)
-    assert not strategy.is_session_id(12345)
-    assert not strategy.is_session_id("")
 
 
 # --------------------------------------------------------------------------
@@ -376,25 +272,14 @@ def test_every_harness_delivers_the_working_guidance_somewhere(implementation: h
 # --------------------------------------------------------------------------
 
 
-def test_a_cold_permission_narrows_to_the_single_bundle(tmp_path: Path) -> None:
-    """A continued reviewer may re-open earlier rounds' bundles; a session-less call -- a
-    contract repair, a clarify -- is scoped to the one bundle it was handed."""
-    bundle_dir = tmp_path / "bundles" / "007"
-    continued = json.loads(opencode.permission(bundle_dir))
-    cold = json.loads(opencode.permission(bundle_dir, cold=True))
-    assert continued["external_directory"] == {"*": "deny", f"{bundle_dir.parent}/**": "allow"}
-    assert cold["external_directory"] == {"*": "deny", f"{bundle_dir}/**": "allow"}
-
-
 def test_a_huge_configured_timeout_is_clamped_to_the_ceiling() -> None:
     assert runner._timeout_sec(config_with(timeout_sec=100_000)) == runner.MAX_TIMEOUT_SEC
     assert runner._timeout_sec(config_with(timeout_sec=60)) == 60
 
 
-def test_a_harness_that_needs_no_reduction_leaves_no_envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_harness_that_needs_no_reduction_leaves_no_envelope(tmp_path: Path) -> None:
     """OpenCode writes the answer and nothing around it, so nothing is rewritten."""
     answer = b"Fine.\n\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>\n"
-    monkeypatch.setattr(runner, "state_root", lambda: tmp_path)
     out = tmp_path / "raw" / "001-phase.out"
     out.parent.mkdir()
     out.write_bytes(answer)
@@ -403,3 +288,32 @@ def test_a_harness_that_needs_no_reduction_leaves_no_envelope(tmp_path: Path, mo
 
     assert out.read_bytes() == answer
     assert not (tmp_path / "raw" / "001-phase.out.envelope").exists()
+
+
+def test_the_permission_reads_the_bundle_and_every_root_and_nothing_else(tmp_path: Path) -> None:
+    """A root outside the launch directory is still a root under review: a reviewer denied it
+    would judge its diff blind. Nothing but the bundle and the roots is opened up."""
+    bundle_dir = tmp_path / "reviews" / "007" / "bundle"
+    document = json.loads(opencode.permission(bundle_dir, ("/launch/api", "/elsewhere/web/")))
+    assert document["external_directory"] == {
+        "*": "deny",
+        "/launch/api/**": "allow",
+        "/elsewhere/web/**": "allow",
+        f"{bundle_dir}/**": "allow",
+    }
+    assert next(iter(document)) == "*", "the broad deny must come first: patterns are last-match-wins"
+    assert {key for key, value in document.items() if value == "allow"} == {"read", "grep", "glob", "list"}
+
+
+@pytest.mark.parametrize("which", ["review", "clarify"])
+def test_both_opencode_commands_carry_the_roots_in_their_permission(which: str, tmp_path: Path) -> None:
+    spec = spec_for(opencode.HARNESS, tmp_path)
+    if which == "review":
+        built = opencode.HARNESS.review_command(spec)
+    else:
+        built = opencode.HARNESS.clarify_command(
+            harness.ClarifySpec(repo=spec.repo, prompt_text="why?", title="t", bundle_dir=spec.bundle_dir, roots=spec.roots, config=spec.config)
+        )
+    allowed = json.loads(built.env["OPENCODE_PERMISSION"])["external_directory"]
+    assert "/elsewhere/web/**" in allowed
+    assert "-s" not in built.argv, "every round is a fresh reviewer; nothing continues a session"

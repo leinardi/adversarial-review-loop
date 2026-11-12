@@ -1,7 +1,7 @@
-"""Invocation, failure classification, and contract parsing.
+"""The reviewer output contract: the findings block, the recomputed verdict, the late-round
+scope, ``SUPERSEDES`` and a clarify reply's retraction block.
 
-The property asserted throughout: **Rule 1**. No reviewer output and no operational
-failure produces ``APPROVED``.
+No reviewer output the contract does not allow produces ``APPROVED``.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -23,316 +23,16 @@ failure produces ``APPROVED``.
 
 from __future__ import annotations
 
-import dataclasses
-import os
-import stat
-import time
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_REVIEWER, config_with, git_status_ignored
-from reviewer_common import (
-    MODE_VERDICTS,
-    PLAIN_VERDICT,
-    assert_descendant_never_ran,
-    contract_text,
-    execute_fake,
-    fake_reviewer_output,
-    invocation,
-    review_round,
-    spawner,
-    target_for,
-)
+from conftest import config_with
+from reviewer_common import MODE_VERDICTS, contract_text, fake_reviewer_output
 
-from arl import contract, harness, report, runner
-from arl import v3state as state
+from arl import config as arl_config
+from arl import contract
 from arl.config import Config
-from arl.contract import Review, Target
-from arl.runner import Invocation, ReviewerFailed
-
-#: Shortens the SIGTERM-to-SIGKILL grace for this module. Requested by mark rather than
-#: made autouse in ``conftest.py``, which would change the constant for every unit test.
-pytestmark = pytest.mark.usefixtures("short_kill_grace")
-
-# --------------------------------------------------------------------------
-# Invocation
-# --------------------------------------------------------------------------
-
-
-TARGET = Target(repo="/repo", base="b", head="h", scope="phase", phase=1)
-
-
-def invoke_fake(tmp_path: Path, mode: str, *, config: Config | None = None, **env: str) -> Path:
-    run = invocation(tmp_path)
-    runner.invoke(
-        TARGET,
-        run,
-        config=config or config_with(),
-        environ={**os.environ, "ARL_REVIEWER_CMD": str(FAKE_REVIEWER), "ARL_FAKE_MODE": mode, **env},
-    )
-    return run.out_path
-
-
-def test_the_reviewer_seam_receives_the_bundle(tmp_path: Path) -> None:
-    out = invoke_fake(tmp_path, "echo-bundle")
-    assert contract.FINDINGS_MARKER in out.read_text()
-
-
-def test_a_nonzero_reviewer_exit_is_a_failure(tmp_path: Path) -> None:
-    with pytest.raises(ReviewerFailed) as caught:
-        invoke_fake(tmp_path, "nonzero")
-    assert str(caught.value) == "the reviewer exited with status 3"
-
-
-def test_a_slow_reviewer_times_out(tmp_path: Path) -> None:
-    with pytest.raises(ReviewerFailed) as caught:
-        invoke_fake(tmp_path, "slow", config=config_with(timeout_sec=1))
-    assert str(caught.value) == "the reviewer timed out after 1s"
-
-
-def test_a_missing_reviewer_is_a_failure_not_a_pass(tmp_path: Path) -> None:
-    out = tmp_path / "reviewer.out"
-    with pytest.raises(ReviewerFailed) as caught:
-        runner.invoke(
-            TARGET,
-            Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=out),
-            config=config_with(),
-            environ={**os.environ, "ARL_REVIEWER_CMD": str(tmp_path / "does-not-exist")},
-        )
-    assert str(caught.value) == "the reviewer exited with status 127"
-
-
-def test_terminal_escapes_are_stripped(tmp_path: Path) -> None:
-    script = tmp_path / "ansi.sh"
-    script.write_text("#!/usr/bin/env bash\nprintf '\\033[1;32mVERDICT\\033[0m APPROVED\\n'\n")
-    script.chmod(0o755)
-
-    out = tmp_path / "reviewer.out"
-    runner.invoke(
-        TARGET,
-        Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=out),
-        config=config_with(),
-        environ={**os.environ, "ARL_REVIEWER_CMD": str(script)},
-    )
-    assert out.read_bytes() == PLAIN_VERDICT
-
-
-def test_the_raw_output_is_private(tmp_path: Path) -> None:
-    out = invoke_fake(tmp_path, "approve")
-    assert stat.S_IMODE(out.stat().st_mode) == 0o600
-
-
-def test_a_timed_out_reviewers_partial_output_is_still_kept(tmp_path: Path) -> None:
-    """It is evidence for the report, and the verdict is decided by the exception."""
-    script = tmp_path / "partial.sh"
-    script.write_text("#!/usr/bin/env bash\nprintf 'half an answer\\n'\nsleep 30\n")
-    script.chmod(0o755)
-
-    out = tmp_path / "reviewer.out"
-    with pytest.raises(ReviewerFailed):
-        runner.invoke(
-            TARGET,
-            Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=out),
-            config=config_with(timeout_sec=1),
-            environ={**os.environ, "ARL_REVIEWER_CMD": str(script)},
-        )
-    assert out.read_text() == "half an answer\n"
-
-
-def test_a_timeout_kills_what_the_reviewer_spawned(tmp_path: Path) -> None:
-    """``subprocess``'s own timeout kills the direct child only; GNU ``timeout`` does not.
-
-    Measured before the fix: the grandchild created its file two seconds after the
-    one-second deadline, so a reviewer that backgrounded work kept running after the gate
-    had given up on it.
-    """
-    marker = tmp_path / "descendant"
-    started = time.monotonic()
-    with pytest.raises(ReviewerFailed):
-        runner.invoke(
-            TARGET,
-            Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=tmp_path / "reviewer.out"),
-            config=config_with(timeout_sec=1),
-            environ={**os.environ, "ARL_REVIEWER_CMD": str(spawner(tmp_path, marker))},
-        )
-    assert_descendant_never_ran(marker, started=started)
-
-
-@pytest.mark.parametrize("deaf", [False, True])
-def test_a_timeout_kills_a_descendant_that_ignores_sigterm(tmp_path: Path, deaf: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    """SIGTERM then SIGKILL, to the group, whatever the direct child did in between.
-
-    The grace is shortened so the descendant's own delay outlasts it. A descendant that
-    ignores SIGTERM and finishes its work *within* the grace is not prevented -- that window
-    is the price of letting a build tear itself down, and ``timeout``, which never escalates
-    at all, gives such a process the rest of time.
-    """
-    monkeypatch.setattr(runner, "KILL_GRACE_SEC", 0.2)
-    marker = tmp_path / f"deaf-{deaf}"
-    started = time.monotonic()
-    with pytest.raises(ReviewerFailed):
-        runner.invoke(
-            TARGET,
-            Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=tmp_path / "reviewer.out"),
-            config=config_with(timeout_sec=1),
-            environ={**os.environ, "ARL_REVIEWER_CMD": str(spawner(tmp_path, marker, deaf=deaf, name=f"deaf-{deaf}.sh"))},
-        )
-    assert_descendant_never_ran(marker, started=started)
-
-
-# --------------------------------------------------------------------------
-# Phase 6: failure classification
-# --------------------------------------------------------------------------
-
-
-def test_reviewer_failed_carries_the_exit_status(tmp_path: Path) -> None:
-    with pytest.raises(ReviewerFailed) as caught:
-        invoke_fake(tmp_path, "nonzero")
-    assert caught.value.status == 3
-
-
-def test_a_timeout_carries_its_own_exit_status(tmp_path: Path) -> None:
-    with pytest.raises(ReviewerFailed) as caught:
-        invoke_fake(tmp_path, "slow", config=config_with(timeout_sec=1))
-    assert caught.value.status in runner._TIMEOUT_STATUSES
-
-
-@pytest.mark.parametrize(
-    ("status", "kind"),
-    [
-        (124, "transient"),  # `timeout`'s own SIGTERM status
-        (137, "transient"),  # `timeout`'s own SIGKILL status
-        (126, "operational"),  # not executable
-        (127, "operational"),  # no `opencode` on PATH
-        (1, "operational"),  # a generic non-zero exit, no rate-limit signal in its output
-    ],
-)
-def test_classify_op_failure_is_an_allow_list_not_a_catch_all(tmp_path: Path, status: int, kind: str) -> None:
-    """A bad ``--model``/``--variant`` and an expired credential all exit non-zero the same
-
-    way ``126``/``127`` do -- five attempts against any of them must burn the ordinary
-    ``failures`` budget, not the transient one, or a missing binary alone would exhaust
-    ``max_transient_failures`` on nothing but dead waiting.
-    """
-    out = tmp_path / "o"
-    out.write_text("some ordinary CLI error text, no known signal in it\n")
-    exc = ReviewerFailed(f"the reviewer exited with status {status}", status=status)
-    assert runner.classify_op_failure(exc, out) == kind
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Error: rate limit exceeded, please retry later\n",
-        "429 Too Many Requests\n",
-        "quota exceeded for this model\n",
-        "usage limit reached, try again tomorrow\n",
-        "Rate-Limited: backing off\n",
-    ],
-)
-def test_a_matched_rate_limit_signal_is_transient_even_on_a_plain_exit(tmp_path: Path, text: str) -> None:
-    out = tmp_path / "o"
-    out.write_text(text)
-    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert runner.classify_op_failure(exc, out) == "transient"
-
-
-@pytest.mark.parametrize("text", ["command not found\n", "permission denied\n", ""])
-def test_output_with_no_rate_limit_phrase_stays_operational(tmp_path: Path, text: str) -> None:
-    out = tmp_path / "o"
-    out.write_text(text)
-    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert runner.classify_op_failure(exc, out) == "operational"
-
-
-def test_the_rate_limit_signal_is_only_read_from_the_head_of_the_output(tmp_path: Path) -> None:
-    """ "Bounded" -- a signal past the head is not scanned for, so a large transcript is never
-    read in full just to classify a failure."""
-    out = tmp_path / "o"
-    out.write_text(("x" * runner._TRANSIENT_OUTPUT_HEAD_BYTES) + "rate limit exceeded\n")
-    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert runner.classify_op_failure(exc, out) == "operational"
-
-
-def test_classify_op_failure_never_reads_the_whole_file_into_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-zero exit can still have written an unbounded amount to ``out_path`` before it
-
-    did; the classifier must read only the bounded head from disk, never load the whole file
-    first and slice it after the fact.
-    """
-    out = tmp_path / "o"
-    out.write_text("rate limit exceeded\n")
-
-    def forbidden(self: Path) -> bytes:
-        raise AssertionError("_classify_op_failure must not call Path.read_bytes()")
-
-    monkeypatch.setattr(Path, "read_bytes", forbidden)
-    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert runner.classify_op_failure(exc, out) == "transient"
-
-
-@pytest.mark.parametrize("text", ["rateXlimit exceeded\n", "notarratelimiter\n", "arbitraryrate_limitingtoken\n", "rate limitation for this month\n"])
-def test_the_rate_limit_pattern_does_not_glue_across_unrelated_characters(tmp_path: Path, text: str) -> None:
-    """A bare ``.?`` between "rate" and "limit" would also match "rateXlimit" or catch the
-
-    phrase glued onto an unrelated identifier -- only a real word, bounded and separated by
-    nothing, a space, a hyphen or an underscore, counts.
-    """
-    out = tmp_path / "o"
-    out.write_text(text)
-    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert runner.classify_op_failure(exc, out) == "operational"
-
-
-@pytest.mark.parametrize("text", ["rate_limit_exceeded\n", "RATE-LIMIT hit\n", "ratelimit reached\n"])
-def test_every_documented_rate_limit_separator_still_matches(tmp_path: Path, text: str) -> None:
-    out = tmp_path / "o"
-    out.write_text(text)
-    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert runner.classify_op_failure(exc, out) == "transient"
-
-
-def test_a_missing_out_path_falls_back_to_operational(tmp_path: Path) -> None:
-    exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert runner.classify_op_failure(exc, tmp_path / "never-written") == "operational"
-
-
-def test_run_invocation_classifies_a_timeout_as_transient(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ARL_REVIEWER_CMD", str(FAKE_REVIEWER))
-    monkeypatch.setenv("ARL_FAKE_MODE", "slow")
-    review, invoked = runner.run_invocation(TARGET, invocation(tmp_path), config=config_with(timeout_sec=1))
-    assert invoked is False
-    assert review.verdict == "OP_FAILURE"
-    assert review.kind == "transient"
-
-
-def test_run_invocation_classifies_a_plain_nonzero_exit_as_operational(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ARL_REVIEWER_CMD", str(FAKE_REVIEWER))
-    monkeypatch.setenv("ARL_FAKE_MODE", "nonzero")
-    review, invoked = runner.run_invocation(TARGET, invocation(tmp_path), config=config_with())
-    assert invoked is False
-    assert review.verdict == "OP_FAILURE"
-    assert review.kind == "operational"
-
-
-def test_a_command_that_cannot_be_composed_is_kind_bundle_and_never_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A harness refusing to compose the command is a failure to launch, not a reviewer
-    failure and never an approval: ``run_invocation`` reports it as ``kind="bundle"``."""
-
-    def refuse(_self: object, _spec: harness.ReviewSpec) -> harness.Command:
-        raise harness.PayloadError("an attachment could not be read")
-
-    monkeypatch.delenv("ARL_REVIEWER_CMD", raising=False)
-    monkeypatch.setattr(type(harness.selected(config_with())), "review_command", refuse)
-
-    run = dataclasses.replace(invocation(tmp_path), prompt_text="Review the change.")
-    review, invoked = runner.run_invocation(TARGET, run, config=config_with())
-
-    assert invoked is False
-    assert review.verdict == "OP_FAILURE"
-    assert review.kind == "bundle"
-    assert review.error == "an attachment could not be read"
-
+from arl.contract import Review
 
 # --------------------------------------------------------------------------
 # Contract parsing
@@ -431,24 +131,6 @@ def test_output_that_is_not_valid_utf8_is_refused(tmp_path: Path) -> None:
 
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.error == "the reviewer output is not valid UTF-8, so the contract cannot be validated"
-
-
-def test_a_non_utf8_review_appends_no_round_history_and_still_reports(activation: state.State, git_repo: Path, tmp_path: Path) -> None:
-    script = tmp_path / "bad-utf8-reviewer.sh"
-    script.write_text(
-        "#!/usr/bin/env bash\n"
-        "printf 'p\\n\\n<<<ARL-FINDINGS>>>\\n'\n"
-        r"printf 'FINDING severity=high actionable=yes file=a | \xff\n'" + "\n"
-        "printf 'VERDICT CHANGES_REQUIRED\\n<<<ARL-END>>>\\n'\n"
-    )
-    script.chmod(0o755)
-    os.environ["ARL_REVIEWER_CMD"] = str(script)
-
-    review = review_round(activation, target_for(git_repo), config=config_with())
-
-    assert review.verdict == "OP_FAILURE"
-    assert activation.get_array_of_dicts("round_history") == []
-    assert Path(review.report).is_file()
 
 
 def parse_text(tmp_path: Path, text: str, config: Config | None = None) -> Review:
@@ -736,59 +418,211 @@ def test_a_carriage_return_does_not_split_a_finding(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
-# One full review
+# Late-round blocking scope (late_block_severity)
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("mode", "verdict"), MODE_VERDICTS)
-def test_a_full_review_reaches_the_same_verdict_end_to_end(activation: state.State, git_repo: Path, mode: str, verdict: str) -> None:
-    assert execute_fake(activation, git_repo, mode).verdict == verdict
+def _scope(changed: tuple[str, ...] = (), prior: tuple[str, ...] = ()) -> contract.LateScope:
+    return contract.LateScope(changed_paths=frozenset(changed), prior_files=frozenset(prior))
 
 
-def test_a_full_review_stores_a_report_and_bumps_the_sequence(activation: state.State, git_repo: Path) -> None:
-    review = execute_fake(activation, git_repo, "changes")
-
-    assert activation.get_int("report_seq") == 1
-    assert Path(review.report).is_file()
-    assert Path(review.report).name == "001-phase1-changes_required.md"
-    assert Path(review.raw).read_text().count(contract.FINDINGS_MARKER) == 1
-    assert "Returns success on a failed lookup" in review.findings
-
-
-def test_consecutive_reviews_do_not_overwrite_each_others_report(activation: state.State, git_repo: Path) -> None:
-    execute_fake(activation, git_repo, "changes")
-    execute_fake(activation, git_repo, "approve")
-
-    assert activation.get_int("report_seq") == 2
-    assert report.list_reports(activation.act_dir) == ["001-phase1-changes_required.md", "002-phase1-approved.md"]
+def test_scope_covers_a_changed_path_exactly_and_by_line_stripping() -> None:
+    scope = _scope(changed=("src/a.py",))
+    assert scope.covers("src/a.py")
+    assert scope.covers("src/a.py:42")
+    assert scope.covers("./src/a.py:42"), "a leading ./ is normalised on the finding side only"
+    assert not scope.covers("src/b.py:42")
+    assert not scope.covers("src/a.py.bak")
 
 
-def test_a_failed_reviewer_still_leaves_its_evidence(activation: state.State, git_repo: Path) -> None:
-    review = execute_fake(activation, git_repo, "nonzero")
-
-    assert review.verdict == "OP_FAILURE"
-    assert review.error == "the reviewer exited with status 3"
-    assert Path(review.report).is_file()
-    assert "boom" in Path(review.report).read_text(), "the raw output is what a failure is diagnosed from"
-
-
-def test_an_oversized_diff_escalates_the_whole_review(activation: state.State, git_repo: Path) -> None:
-    (git_repo / "big.txt").write_text("x\n" * 5000)
-    review = execute_fake(activation, git_repo, "approve", config=config_with(hard_diff_ceiling=1024))
-
-    assert review.verdict == "NEEDS_HUMAN"
-    assert "above hard_diff_ceiling" in review.error
-    assert review.report == "", "there is no review to report on"
+def test_scope_matches_a_changed_file_literally_named_with_a_colon_suffix() -> None:
+    """A file called ``x:1`` matches exactly; the line-stripping fallback runs only after."""
+    scope = _scope(changed=("x:1",))
+    assert scope.covers("x:1")
+    assert not scope.covers("x"), "the changed path is `x:1`, not `x`"
+    assert scope.covers("x:1:7"), "`x:1` at line 7"
 
 
-def test_a_final_review_names_itself_as_such(activation: state.State, git_repo: Path) -> None:
-    review = execute_fake(activation, git_repo, "approve", scope="final")
-    assert Path(review.report).name == "001-final-approved.md"
+def test_scope_always_covers_a_finding_with_no_location() -> None:
+    assert _scope().covers("-"), "a missing location must never widen a bypass"
 
 
-def test_a_review_writes_nothing_into_the_repository(activation: state.State, git_repo: Path) -> None:
-    execute_fake(activation, git_repo, "approve")
-    assert git_status_ignored(git_repo) == "?? a.txt\n"
+def test_scope_covers_a_prior_round_file_exactly_and_line_stripped() -> None:
+    scope = _scope(prior=("lib/x.go:10", "lib/x.go"))
+    assert scope.covers("lib/x.go:10")
+    assert scope.covers("lib/x.go:99"), "re-raised at another line of a file an earlier round named"
+    assert scope.covers("lib/x.go")
+
+
+def test_scope_matches_a_dot_slash_finding_against_its_normalised_prior_file() -> None:
+    """Both sides go through the same normalisation, so a value always matches itself."""
+    scope = _scope(prior=("README.md:4", "README.md"))
+    assert scope.covers("./README.md:4")
+    assert scope.covers("README.md:4")
+    assert scope.covers("./README.md:9"), "another line of a file an earlier round named"
+
+
+def _write_block(tmp_path: Path, *findings: str, verdict: str = "APPROVED") -> Path:
+    out = tmp_path / "late.out"
+    body = "prose\n\n<<<ARL-FINDINGS>>>\n" + "".join(f"{line}\n" for line in findings) + f"VERDICT {verdict}\n<<<ARL-END>>>\n"
+    out.write_text(body)
+    return out
+
+
+MEDIUM_UNTOUCHED = "FINDING severity=medium actionable=yes file=untouched.py:3 | new medium in an untouched file"
+MEDIUM_CHANGED = "FINDING severity=medium actionable=yes file=changed.py:3 | medium in a changed file"
+HIGH_UNTOUCHED = "FINDING severity=high actionable=yes file=untouched.py:3 | high anywhere"
+MEDIUM_PRIOR = "FINDING severity=medium actionable=yes file=known.py:77 | re-raised at another line"
+
+
+def test_parse_without_a_scope_blocks_every_finding_at_or_above_block_severity(tmp_path: Path) -> None:
+    review = contract.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config_with(), allow_supersedes=True)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.findings == f"{MEDIUM_UNTOUCHED}\n"
+    assert review.deferred == ""
+
+
+def test_parse_with_a_scope_defers_a_new_medium_outside_the_changed_paths(tmp_path: Path) -> None:
+    scope = _scope(changed=("changed.py",), prior=("known.py:1", "known.py"))
+    review = contract.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config_with(), allow_supersedes=True, scope=scope)
+    assert review.verdict == "APPROVED"
+    assert review.findings == ""
+    assert review.deferred == f"{MEDIUM_UNTOUCHED}\n"
+    assert review.all_findings == f"{MEDIUM_UNTOUCHED}\n", "deferred is still reported and recorded"
+
+
+def test_parse_with_a_scope_blocks_a_medium_in_a_changed_path(tmp_path: Path) -> None:
+    scope = _scope(changed=("changed.py",))
+    review = contract.parse(_write_block(tmp_path, MEDIUM_CHANGED), config=config_with(), allow_supersedes=True, scope=scope)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.findings == f"{MEDIUM_CHANGED}\n"
+    assert review.deferred == ""
+
+
+def test_parse_with_a_scope_blocks_a_high_anywhere(tmp_path: Path) -> None:
+    scope = _scope(changed=("changed.py",))
+    review = contract.parse(_write_block(tmp_path, HIGH_UNTOUCHED), config=config_with(), allow_supersedes=True, scope=scope)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.findings == f"{HIGH_UNTOUCHED}\n"
+
+
+def test_parse_with_a_scope_blocks_a_medium_in_a_prior_round_file(tmp_path: Path) -> None:
+    scope = _scope(changed=(), prior=("known.py:1", "known.py"))
+    review = contract.parse(_write_block(tmp_path, MEDIUM_PRIOR), config=config_with(), allow_supersedes=True, scope=scope)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.findings == f"{MEDIUM_PRIOR}\n"
+
+
+def test_late_block_severity_medium_restores_the_ordinary_rule(tmp_path: Path) -> None:
+    scope = _scope(changed=("changed.py",))
+    config = config_with(late_block_severity="medium")
+    review = contract.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config, allow_supersedes=True, scope=scope)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.deferred == ""
+
+
+def test_late_block_severity_below_block_severity_is_clamped_up(tmp_path: Path) -> None:
+    """``late_block_severity`` can only defer, never widen: set below ``block_severity`` it
+    reads as ``block_severity`` itself, so a *low* finding still does not block."""
+    scope = _scope(changed=("changed.py",))
+    config = config_with(block_severity="high", late_block_severity="low")
+    assert arl_config.late_threshold_rank(config) == arl_config.threshold_rank("high")
+    review = contract.parse(_write_block(tmp_path, MEDIUM_CHANGED), config=config, allow_supersedes=True, scope=scope)
+    assert review.verdict == "APPROVED"
+    assert review.deferred == "", "below block_severity is not deferred, it is simply non-blocking"
+
+
+def test_the_reviewers_own_changes_required_still_wins_over_a_deferred_only_set(tmp_path: Path) -> None:
+    scope = _scope(changed=("changed.py",))
+    out = _write_block(tmp_path, MEDIUM_UNTOUCHED, verdict="CHANGES_REQUIRED")
+    review = contract.parse(out, config=config_with(), allow_supersedes=True, scope=scope)
+    assert review.verdict == "CHANGES_REQUIRED", "stricter wins; the scope narrows the gate's recomputation only"
+    assert review.findings == ""
+    assert review.deferred == f"{MEDIUM_UNTOUCHED}\n"
+
+
+def test_a_scope_never_defers_a_finding_below_block_severity_into_the_deferred_set(tmp_path: Path) -> None:
+    low = "FINDING severity=low actionable=yes file=untouched.py:1 | low"
+    review = contract.parse(_write_block(tmp_path, low), config=config_with(), allow_supersedes=True, scope=_scope(changed=("x",)))
+    assert review.verdict == "APPROVED"
+    assert review.deferred == ""
+    assert review.all_findings == f"{low}\n"
+
+
+# --------------------------------------------------------------------------
+# SUPERSEDES
+# --------------------------------------------------------------------------
+
+
+SUPERSEDES_OK = [
+    "SUPERSEDES round=1 file=a.txt:9 | the null case cannot occur here",
+    "SUPERSEDES round=12 file=pkg/x.go | retracted after reading the caller",
+    "SUPERSEDES round=3 file=- | an earlier round misread the frozen plan",
+    "SUPERSEDES round=1 file=a b/c.txt:2 | a path with spaces is still a location",
+]
+SUPERSEDES_BAD = [
+    "SUPERSEDES file=a.txt:9 | no round number",
+    "SUPERSEDES round= file=a.txt:9 | empty round",
+    "SUPERSEDES round=x file=a.txt:9 | non-numeric round",
+    "SUPERSEDES round=1 | no file clause at all",
+    "SUPERSEDES round=1 file=a.txt:9 |",
+    "SUPERSEDES round=1 file=a.txt:9",
+    "SUPERSEDES: round=1 file=a.txt:9 | a stray colon",
+    "  SUPERSEDES round=1 file=a.txt:9 | leading whitespace",
+    "SUPERSEDESX round=1 file=a.txt:9 | wrong keyword",
+]
+
+
+@pytest.mark.parametrize("line", SUPERSEDES_OK)
+def test_the_supersedes_grammar_accepts_a_well_formed_line(line: str) -> None:
+    assert contract._SUPERSEDES_RE.match(line) is not None
+
+
+@pytest.mark.parametrize("line", SUPERSEDES_BAD)
+def test_the_supersedes_grammar_rejects_a_malformed_line(line: str) -> None:
+    assert contract._SUPERSEDES_RE.match(line) is None
+
+
+def _block(*body: str) -> bytes:
+    return ("Prose first.\n\n<<<ARL-FINDINGS>>>\n" + "".join(f"{line}\n" for line in body) + "<<<ARL-END>>>\n").encode()
+
+
+def test_a_supersedes_line_is_recorded_and_never_clears_a_blocking_finding(tmp_path: Path) -> None:
+    out = tmp_path / "r.out"
+    out.write_bytes(
+        _block(
+            "FINDING severity=high actionable=yes file=a.txt:1 | still broken",
+            "SUPERSEDES round=1 file=b.txt:2 | retracting a different, earlier finding",
+            "VERDICT CHANGES_REQUIRED",
+        )
+    )
+    review = contract.parse(out, config=config_with(), allow_supersedes=True)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert "still broken" in review.findings
+    assert review.supersedes == "SUPERSEDES round=1 file=b.txt:2 | retracting a different, earlier finding\n"
+
+
+def test_a_supersedes_line_alongside_approved_does_not_flip_the_verdict(tmp_path: Path) -> None:
+    out = tmp_path / "r.out"
+    out.write_bytes(_block("SUPERSEDES round=1 file=a.txt:1 | round 1 was wrong; this is fine now", "VERDICT APPROVED"))
+    review = contract.parse(out, config=config_with(), allow_supersedes=True)
+    assert review.verdict == "APPROVED"
+    assert review.supersedes.startswith("SUPERSEDES round=1 ")
+
+
+def test_a_near_miss_of_the_supersedes_grammar_is_still_a_contract_failure(tmp_path: Path) -> None:
+    out = tmp_path / "r.out"
+    out.write_bytes(_block("SUPERCEDES round=1 file=a.txt:1 | a typo in the keyword", "VERDICT APPROVED"))
+    assert contract.parse(out, config=config_with(), allow_supersedes=True).verdict == "OP_FAILURE"
+
+
+def test_a_supersedes_line_from_a_final_review_fails_the_contract(tmp_path: Path) -> None:
+    """`reviewer-final.md` permits only FINDING and VERDICT -- SUPERSEDES is not scoped to it,
+    so a final reviewer emitting one is an unrecognised line, not a silently-accepted one."""
+    out = tmp_path / "r.out"
+    out.write_bytes(_block("SUPERSEDES round=1 file=a.txt:1 | not allowed here", "VERDICT APPROVED"))
+    assert contract.parse(out, config=config_with(), allow_supersedes=False).verdict == "OP_FAILURE"
+    assert contract.parse(out, config=config_with()).verdict == "OP_FAILURE"
 
 
 # --------------------------------------------------------------------------

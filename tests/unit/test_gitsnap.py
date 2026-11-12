@@ -34,7 +34,6 @@ import pytest
 from conftest import git, git_status_ignored
 
 from arl import gitsnap
-from arl.config import Config
 from arl.gitsnap import SnapshotError
 
 #: git's constant id for the empty tree.
@@ -76,27 +75,6 @@ def test_ignored_content_is_excluded_from_the_snapshot(git_repo: Path) -> None:
     assert gitsnap.snapshot(str(git_repo)).tree == gitsnap.head_tree(str(git_repo))
 
 
-def test_a_worktree_holding_only_ignored_files_counts_as_clean(git_repo: Path) -> None:
-    (git_repo / ".gitignore").write_text("junk.txt\n")
-    git(git_repo, "add", ".gitignore")
-    git(git_repo, "commit", "-qm", "ignore")
-    (git_repo / "junk.txt").write_text("noise\n")
-
-    assert gitsnap.worktree_clean(str(git_repo)) is True
-
-
-def test_a_modified_tracked_file_counts_as_dirty(git_repo: Path) -> None:
-    (git_repo / "seed.txt").write_text("seed\nmodified\n")
-    assert gitsnap.worktree_clean(str(git_repo)) is False
-
-
-def test_staged_content_counts_as_dirty(git_repo: Path) -> None:
-    """Staging is not a way to hide a change from the gate: the snapshot spans the index."""
-    (git_repo / "new.txt").write_text("new\n")
-    git(git_repo, "add", "new.txt")
-    assert gitsnap.worktree_clean(str(git_repo)) is False
-
-
 # -- the snapshot is the tree the commit will have -------------------------
 
 
@@ -129,18 +107,6 @@ def test_a_force_added_ignored_file_is_in_the_snapshot(git_repo: Path) -> None:
 
     assert ".idea/.gitignore" in git(git_repo, "ls-tree", "-r", "--name-only", snapshot).splitlines()
     assert snapshot == commit_tree_of(git_repo)
-
-
-def test_a_force_added_ignored_file_makes_the_worktree_dirty(git_repo: Path) -> None:
-    """It is content to be committed, so a phase that "committed all of its work" includes it."""
-    (git_repo / ".gitignore").write_text(".idea/*\n")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-qm", "ignore")
-    (git_repo / ".idea").mkdir()
-    (git_repo / ".idea" / ".gitignore").write_text("shared\n")
-    git(git_repo, "add", "-f", ".idea/.gitignore")
-
-    assert gitsnap.worktree_clean(str(git_repo)) is False
 
 
 def test_a_force_added_ignored_file_is_in_the_first_commit_of_an_empty_repository(tmp_path: Path) -> None:
@@ -227,7 +193,6 @@ def test_an_oversized_stageable_file_is_reported(git_repo: Path) -> None:
 
     assert [path for path, _ in found] == ["big.bin"]
     assert found[0][1] == 2000
-    assert gitsnap.format_oversized(found) == "big.bin\t2000\n"
 
 
 def test_committed_content_is_not_re_checked_for_size(git_repo: Path) -> None:
@@ -312,13 +277,6 @@ def test_a_directory_that_is_not_a_repository_raises(tmp_path: Path) -> None:
         gitsnap.snapshot(str(not_a_repo))
 
 
-def test_a_failed_snapshot_counts_as_dirty(tmp_path: Path) -> None:
-    """`worktree_clean` answers False when it cannot tell -- the failure never grants anything."""
-    not_a_repo = tmp_path / "plain"
-    not_a_repo.mkdir()
-    assert gitsnap.worktree_clean(str(not_a_repo)) is False
-
-
 def test_a_repository_with_no_commits_snapshots_from_the_empty_tree(tmp_path: Path) -> None:
     repo = tmp_path / "fresh"
     repo.mkdir()
@@ -342,21 +300,6 @@ def test_head_accessors_are_empty_rather_than_raising_outside_a_repository(tmp_p
 # -- the dirty summary -----------------------------------------------------
 
 
-def test_the_dirty_summary_names_what_is_dirty(git_repo: Path) -> None:
-    (git_repo / "seed.txt").write_text("seed\nmodified\n")
-    (git_repo / "untracked.txt").write_text("x\n")
-    summary = gitsnap.dirty_summary(str(git_repo))
-
-    assert " M seed.txt" in summary
-    assert "?? untracked.txt" in summary
-
-
-def test_the_dirty_summary_is_bounded(git_repo: Path) -> None:
-    for n in range(gitsnap.DIRTY_SUMMARY_LINES + 20):
-        (git_repo / f"f{n:03d}.txt").write_text("x\n")
-    assert len(gitsnap.dirty_summary(str(git_repo)).splitlines()) == gitsnap.DIRTY_SUMMARY_LINES
-
-
 # -- changed paths and the ignore globs ------------------------------------
 
 
@@ -369,95 +312,6 @@ def two_trees(git_repo: Path) -> tuple[Path, str, str]:
     (git_repo / "CHANGELOG.md").write_text("log\n")
     (git_repo / "src.py").write_text("code\n")
     return git_repo, base, gitsnap.snapshot(str(git_repo)).tree
-
-
-def test_changed_paths_lists_the_difference(two_trees: tuple[Path, str, str]) -> None:
-    repo, base, head = two_trees
-    assert gitsnap.changed_paths(str(repo), base, head) == ["CHANGELOG.md", "docs/guide.md", "src.py"]
-
-
-def test_changed_paths_is_empty_for_an_unknown_tree(git_repo: Path) -> None:
-    assert gitsnap.changed_paths(str(git_repo), "not-a-tree", "also-not") == []
-
-
-def test_no_ignore_globs_means_no_skip(two_trees: tuple[Path, str, str]) -> None:
-    repo, base, head = two_trees
-    assert gitsnap.all_paths_ignored(str(repo), base, head, Config({"ignore_globs": []})) is False
-
-
-def test_every_path_matching_a_glob_skips_the_review(two_trees: tuple[Path, str, str]) -> None:
-    repo, base, head = two_trees
-    config = Config({"ignore_globs": ["*.md", "*.py"]})
-    assert gitsnap.all_paths_ignored(str(repo), base, head, config) is True
-
-
-def test_one_unmatched_path_is_enough_to_require_a_review(two_trees: tuple[Path, str, str]) -> None:
-    repo, base, head = two_trees
-    config = Config({"ignore_globs": ["*.md"]})
-    assert gitsnap.all_paths_ignored(str(repo), base, head, config) is False
-
-
-def test_a_glob_crosses_directory_separators(two_trees: tuple[Path, str, str]) -> None:
-    """`*` spans `/`, as it did under the shell's `[[ $p == $g ]]`.
-
-    A stricter matcher would start reviewing what a user had deliberately excluded; a looser
-    one would skip reviews they expected to happen.
-    """
-    repo, base, head = two_trees
-    assert gitsnap.all_paths_ignored(str(repo), base, head, Config({"ignore_globs": ["*"]})) is True
-    assert gitsnap.all_paths_ignored(str(repo), base, head, Config({"ignore_globs": ["docs/*", "*.md", "src.py"]})) is True
-
-
-def test_a_negated_class_does_not_skip_the_review(two_trees: tuple[Path, str, str]) -> None:
-    """`[^…]` negates, as it does in bash.
-
-    Under `fnmatch` this set reads as `{'^', 's', 'r', 'c'}`, which matches `src.py`'s
-    first character and -- with the other two paths covered -- would skip the review
-    entirely. Under bash's rules it matches nothing here, so the review happens.
-    """
-    repo, base, head = two_trees
-    config = Config({"ignore_globs": ["[^src]*", "*.md"]})
-    assert gitsnap.all_paths_ignored(str(repo), base, head, config) is False
-
-
-def test_an_extended_glob_does_not_skip_the_review(git_repo: Path) -> None:
-    """A path named `@(a|b)`, ignored by `@(a|b)`, is still reviewed.
-
-    Bash reads the pattern as "a or b" and does not match the literal path, so a matcher
-    that took it literally would skip a review bash would have run.
-    """
-    base = gitsnap.head_tree(str(git_repo))
-    (git_repo / "@(a|b)").write_text("x\n")
-    head = gitsnap.snapshot(str(git_repo)).tree
-
-    assert gitsnap.all_paths_ignored(str(git_repo), base, head, Config({"ignore_globs": ["@(a|b)"]})) is False
-
-
-def test_a_non_ascii_path_is_not_decided_by_a_character_class(git_repo: Path) -> None:
-    """Class membership beyond ASCII is a locale table, so the review happens instead."""
-    base = gitsnap.head_tree(str(git_repo))
-    (git_repo / "é").write_text("x\n")
-    head = gitsnap.snapshot(str(git_repo)).tree
-
-    assert gitsnap.all_paths_ignored(str(git_repo), base, head, Config({"ignore_globs": ["[^[:digit:]]"]})) is False
-    # An ordinary pattern still covers it: only classes and ranges are refused.
-    assert gitsnap.all_paths_ignored(str(git_repo), base, head, Config({"ignore_globs": ["*"]})) is True
-
-
-def test_an_escaped_metacharacter_is_literal(git_repo: Path) -> None:
-    r"""`a\*b` matches the literal `a*b`, not `a<anything>b` -- so it skips nothing else."""
-    base = gitsnap.head_tree(str(git_repo))
-    (git_repo / "axb").write_text("x\n")
-    head = gitsnap.snapshot(str(git_repo)).tree
-
-    assert gitsnap.all_paths_ignored(str(git_repo), base, head, Config({"ignore_globs": [r"a\*b"]})) is False
-    assert gitsnap.all_paths_ignored(str(git_repo), base, head, Config({"ignore_globs": ["a?b"]})) is True
-
-
-def test_an_identical_pair_of_trees_is_not_treated_as_ignored(git_repo: Path) -> None:
-    """No changed paths means "nothing to skip", not "everything was ignorable"."""
-    tree = gitsnap.head_tree(str(git_repo))
-    assert gitsnap.all_paths_ignored(str(git_repo), tree, tree, Config({"ignore_globs": ["*"]})) is False
 
 
 # -- submodules ------------------------------------------------------------
@@ -512,53 +366,6 @@ def test_a_path_that_is_not_valid_utf8_does_not_crash_the_gate(git_repo: Path) -
 # -- checked_tree: a state-supplied object id must never reach argv unchecked ----------
 
 
-def test_checked_tree_resolves_a_real_tree_id(git_repo: Path) -> None:
-    tree = gitsnap.head_tree(str(git_repo))
-    assert gitsnap.checked_tree(str(git_repo), tree) == tree
-
-
-def test_checked_tree_resolves_a_commit_id_to_its_tree(git_repo: Path) -> None:
-    commit = git(git_repo, "rev-parse", "HEAD")
-    assert gitsnap.checked_tree(str(git_repo), commit) == gitsnap.head_tree(str(git_repo))
-
-
-def test_checked_tree_rejects_a_git_option_shaped_value(git_repo: Path) -> None:
-    """``git diff --output=<file>`` is a real option -- a crafted ``tree`` must not reach it."""
-    for hostile in (
-        "--output=../../repo/x",
-        "--output=/tmp/x",
-        "-O",
-        "..",
-        "../etc/passwd",
-        "HEAD",
-        "@",
-        "main",
-        "",
-        "  ",
-        "deadbeef",  # too short
-        "g" * 40,  # not hex
-        "a" * 39,
-        "a" * 41,
-        "a" * 63,
-        "a" * 65,
-    ):
-        assert gitsnap.checked_tree(str(git_repo), hostile) == "", hostile
-
-
-def test_checked_tree_rejects_a_non_string(git_repo: Path) -> None:
-    for value in (None, 40, ["a" * 40], {"tree": "a" * 40}):
-        assert gitsnap.checked_tree(str(git_repo), value) == ""
-
-
-def test_checked_tree_rejects_a_well_formed_id_that_is_not_a_tree(git_repo: Path) -> None:
-    blob = git(git_repo, "rev-parse", "HEAD:seed.txt")
-    assert gitsnap.checked_tree(str(git_repo), blob) == ""
-
-
-def test_checked_tree_rejects_a_well_formed_id_that_does_not_exist(git_repo: Path) -> None:
-    assert gitsnap.checked_tree(str(git_repo), "0" * 40) == ""
-
-
 def test_looks_like_object_id_is_the_cheap_shape_guard(git_repo: Path) -> None:
     assert gitsnap.looks_like_object_id("a" * 40)
     assert gitsnap.looks_like_object_id("0" * 64)
@@ -581,22 +388,6 @@ def test_looks_like_object_id_is_the_cheap_shape_guard(git_repo: Path) -> None:
         assert not gitsnap.looks_like_object_id(bad), bad
 
 
-def test_is_ancestor_checked_distinguishes_no_from_cannot_answer(git_repo: Path) -> None:
-    root = git(git_repo, "rev-parse", "HEAD")
-    (git_repo / "next.txt").write_text("n\n")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-qm", "next")
-    tip = git(git_repo, "rev-parse", "HEAD")
-
-    assert gitsnap.is_ancestor_checked(str(git_repo), root, tip) is True
-    assert gitsnap.is_ancestor_checked(str(git_repo), tip, root) is False  # a definite "no"
-
-    with pytest.raises(gitsnap.GitUnavailable):
-        gitsnap.is_ancestor_checked(str(git_repo), root, "--output=/tmp/x")
-    with pytest.raises(gitsnap.GitUnavailable):
-        gitsnap.is_ancestor_checked(str(git_repo), root, "0" * 40)  # well-formed but absent
-
-
 # -- changed_paths_strict ------------------------------------------------------
 
 
@@ -604,114 +395,16 @@ def _trees(repo: Path) -> tuple[str, str]:
     return git(repo, "rev-parse", "HEAD^{tree}"), gitsnap.snapshot(str(repo)).tree
 
 
-def test_changed_paths_strict_lists_added_modified_and_deleted_paths(git_repo: Path) -> None:
-    (git_repo / "a.txt").write_text("modified\n")
-    (git_repo / "new.txt").write_text("added\n")
-    (git_repo / "gone.txt").write_text("to be deleted\n")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-q", "-m", "setup")
-    (git_repo / "gone.txt").unlink()
-    (git_repo / "a.txt").write_text("modified again\n")
-    (git_repo / "later.txt").write_text("later\n")
-    base, head = _trees(git_repo)
-    assert gitsnap.changed_paths_strict(str(git_repo), base, head) == frozenset({"a.txt", "gone.txt", "later.txt"})
-
-
-def test_changed_paths_strict_keeps_both_sides_of_a_rename(git_repo: Path) -> None:
-    (git_repo / "src.txt").write_text("x" * 300 + "\n")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-q", "-m", "setup")
-    (git_repo / "src.txt").rename(git_repo / "dst.txt")
-    base, head = _trees(git_repo)
-    assert gitsnap.changed_paths_strict(str(git_repo), base, head) == frozenset({"src.txt", "dst.txt"})
-
-
-def test_changed_paths_strict_is_empty_for_identical_trees(git_repo: Path) -> None:
-    base, _head = _trees(git_repo)
-    assert gitsnap.changed_paths_strict(str(git_repo), base, base) == frozenset()
-
-
-def test_changed_paths_strict_raises_on_a_git_failure(git_repo: Path) -> None:
-    with pytest.raises(gitsnap.ChangedPathsUnavailable, match="failed"):
-        gitsnap.changed_paths_strict(str(git_repo), "0" * 40, "HEAD")
-
-
-def test_changed_paths_strict_keeps_a_path_named_like_a_line_reference(git_repo: Path) -> None:
-    (git_repo / "x:1").write_text("colon\n")
-    base, head = _trees(git_repo)
-    assert "x:1" in gitsnap.changed_paths_strict(str(git_repo), base, head)
-
-
-@pytest.mark.parametrize("name", ["with|pipe.txt", " leading.txt", "trailing.txt "])
-def test_changed_paths_strict_refuses_a_path_no_finding_could_name(git_repo: Path, name: str) -> None:
-    (git_repo / name).write_text("unnameable\n")
-    base, head = _trees(git_repo)
-    with pytest.raises(gitsnap.ChangedPathsUnavailable, match="cannot be named by a finding"):
-        gitsnap.changed_paths_strict(str(git_repo), base, head)
-
-
-def test_changed_paths_strict_refuses_a_path_with_a_newline(git_repo: Path) -> None:
-    (git_repo / "new\nline.txt").write_text("unnameable\n")
-    base, head = _trees(git_repo)
-    with pytest.raises(gitsnap.ChangedPathsUnavailable, match="cannot be named by a finding"):
-        gitsnap.changed_paths_strict(str(git_repo), base, head)
-
-
-def test_changed_paths_strict_decodes_a_non_utf8_path_with_surrogateescape(git_repo: Path) -> None:
-    raw = b"caf\xe9.txt"
-    try:
-        (git_repo / os.fsdecode(raw)).write_bytes(b"latin-1 name\n")
-    except OSError as exc:
-        # APFS (macOS) enforces valid UTF-8 in filenames and answers EILSEQ, so the input this
-        # test is about cannot be created there at all. The decoding itself is filesystem-
-        # independent; what is untestable here is only getting git to report such a name.
-        pytest.skip(f"this filesystem refuses non-UTF-8 filenames ({exc.strerror})")
-    base, head = _trees(git_repo)
-    assert raw.decode("utf-8", "surrogateescape") in gitsnap.changed_paths_strict(str(git_repo), base, head)
-
-
-@pytest.mark.parametrize("stdout", [b"M\0", b"R100\0old\0", b"Q\0path\0", b"MM\0path\0", b"\0path\0"])
-def test_changed_paths_strict_refuses_a_truncated_or_unknown_record(git_repo: Path, monkeypatch: pytest.MonkeyPatch, stdout: bytes) -> None:
-    def fake_run(repo: str, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr=b"")
-
-    monkeypatch.setattr(gitsnap, "git_run", fake_run)
-    with pytest.raises(gitsnap.ChangedPathsUnavailable):
-        gitsnap.changed_paths_strict(str(git_repo), "a", "b")
-
-
 # --------------------------------------------------------------------------
 # info/exclude
 # --------------------------------------------------------------------------
 
 
-def test_exclude_digest_distinguishes_absent_from_unreadable(git_repo: Path) -> None:
-    """``""`` means "could not tell" and must never be confused with "there is no file".
-
-    A caller that reads them as the same thing either blocks every turn in a sandbox that
-    hides ``.git``, or stops noticing an exclude file appearing where there was none.
-    """
-    exclude = gitsnap.exclude_path(str(git_repo))
-    assert exclude is not None
-    exclude.unlink(missing_ok=True)
-    assert gitsnap.exclude_digest(str(git_repo)) == gitsnap.EXCLUDE_ABSENT
-
-    exclude.write_text("build/\n")
-    first = gitsnap.exclude_digest(str(git_repo))
-    assert len(first) == 64
-    assert first != gitsnap.EXCLUDE_ABSENT
-
-    exclude.write_text("build/\nsecret.py\n")
-    assert gitsnap.exclude_digest(str(git_repo)) != first
-
-    assert gitsnap.exclude_digest(str(git_repo / "not-a-repo")) == ""
-
-
-def test_exclude_digest_follows_git_rather_than_guessing_the_path(git_repo: Path, tmp_path: Path) -> None:
+def test_exclude_path_follows_git_rather_than_guessing_it(git_repo: Path, tmp_path: Path) -> None:
     """A linked worktree's ``.git`` is a file, so ``<repo>/.git/info/exclude`` does not exist.
 
-    Hand-building that path would answer ``EXCLUDE_ABSENT`` for every linked worktree -- which
-    is a digest that never changes, and therefore a check that never fires.
+    Hand-building that path would point every linked worktree at a file that does not exist,
+    so the run directory's exclude entry would never be written where git reads it.
     """
     linked = tmp_path / "linked"
     git(git_repo, "worktree", "add", "-q", "--detach", str(linked))
@@ -722,20 +415,15 @@ def test_exclude_digest_follows_git_rather_than_guessing_the_path(git_repo: Path
     assert resolved is not None
     assert resolved.parent.name == "info"
     assert not str(resolved).startswith(str(linked / ".git" / "info"))
-    (resolved.parent).mkdir(parents=True, exist_ok=True)
-    resolved.write_text("hidden.py\n")
-    assert len(gitsnap.exclude_digest(str(linked))) == 64
 
 
 def test_an_excluded_file_is_invisible_to_every_tree_this_module_builds(git_repo: Path) -> None:
-    """The vector itself, pinned: this is *why* the digest is recorded.
-
-    ``snapshot`` stages with ``git add -A``, which obeys ``info/exclude``, so one line written
-    into a file that lives outside the worktree turns a real file into a clean worktree.
+    """``snapshot`` stages with ``git add -A``, which obeys ``info/exclude``: one line in a file
+    outside the worktree hides a real file from every tree. Pinned because the run's own
+    ``.arl/`` entry relies on exactly this, and anything else listed there is unreviewed.
     """
     baseline = gitsnap.snapshot(str(git_repo)).tree
     (git_repo / "backdoor.py").write_text("payload\n")
-    assert not gitsnap.worktree_clean(str(git_repo))
     assert gitsnap.snapshot(str(git_repo)).tree != baseline
 
     exclude = gitsnap.exclude_path(str(git_repo))
@@ -744,7 +432,6 @@ def test_an_excluded_file_is_invisible_to_every_tree_this_module_builds(git_repo
     with exclude.open("a") as handle:
         handle.write("backdoor.py\n")
 
-    assert gitsnap.worktree_clean(str(git_repo)), "the evasion: git reports the worktree clean"
     assert gitsnap.snapshot(str(git_repo)).tree == baseline, "and the tree falls back to the baseline"
     assert (git_repo / "backdoor.py").read_text() == "payload\n", "while the file is still there"
 

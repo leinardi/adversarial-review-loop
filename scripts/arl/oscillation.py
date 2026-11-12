@@ -2,7 +2,7 @@
 
 A phase can flip a design point across rounds without ever saying so: round 1 blocks on
 missing warn-before, round 2 on missing warn-after instead, round 3 on "needs both". Nothing
-in the ordinary evidence says "this is a reversal", so the gate cannot tell a genuinely new
+in the ordinary evidence says "this is a reversal", so the engine cannot tell a genuinely new
 finding from a rehash. This module answers that from ``round_history`` alone.
 
 A finding's **anchor** is what it is *about*: its ``file`` value with any trailing ``:line``
@@ -51,8 +51,7 @@ rather than inventing one. That is also why the round numbering must be *provabl
 ``SUPERSEDES`` is read: a renumbering could manufacture a retirement. **A well-formed edit is
 not covered.** Anything that can write ``round_history`` can write entries that spell out a
 genuine A / absent / A history and force a ``NEEDS_HUMAN`` -- an escalation, never an
-approval, which is the direction this module is allowed to be wrong in. See
-``docs/design/state-fields.md``.
+approval, which is the direction this module is allowed to be wrong in.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -170,7 +169,7 @@ def _parsed_findings(entry: Mapping[str, object], *, block_severity: str) -> lis
 
     ``block_severity`` is ranked exactly as :func:`arl.contract.parse` ranks it: an unrecognised
     *finding* severity ranks highest so it still blocks, an unrecognised *threshold* ranks lowest
-    so a typo makes the gate stricter.
+    so a typo makes the engine stricter.
     """
     threshold = threshold_rank(block_severity)
     stored = entry.get("findings")
@@ -233,7 +232,7 @@ def _ordered_rounds(history: Sequence[Mapping[str, object]], label: str) -> tupl
     in what order.
 
     **Stored order, deliberately not ``seq`` order.** ``round=N`` means the ordinal the reviewer
-    was shown, which is ``bundle._prior_rounds_section``'s stored-order enumeration. Re-deriving
+    was shown, which is ``bundle._prior_rounds``'s stored-order enumeration. Re-deriving
     an order from ``seq`` -- an untrusted integer -- hands a doctored history a lever to renumber
     rounds underneath claims written against the numbering on screen: with stored order ``A, B,
     C`` and seqs ``2, 1, 3``, sorting renumbers ``A`` to round 2 and can manufacture two
@@ -251,7 +250,7 @@ def _ordered_rounds(history: Sequence[Mapping[str, object]], label: str) -> tupl
             continue
         seq = _entry_seq(entry)
         if seq is None:
-            # Dropped here but still numbered by `_prior_rounds_section`, so every ordinal
+            # Dropped here but still numbered by `_prior_rounds`, so every ordinal
             # after it now disagrees with the screen.
             trustworthy = False
             continue
@@ -266,16 +265,16 @@ def ordinal_of(history: Sequence[Mapping[str, object]], label: str, seq: int) ->
     """The round number the reviewer was shown for the round of ``label`` whose ``seq`` is ``seq``, or
     ``None`` when that cannot be proved.
 
-    ``round=N`` means the 1-based **stored-order** position ``bundle._prior_rounds_section``
+    ``round=N`` means the 1-based **stored-order** position ``bundle._prior_rounds``
     renders and ``range.txt``'s ``review round of this phase`` counts, so this is
     :func:`_ordered_rounds`' numbering and nothing re-derived from ``seq``. ``None`` when that
     numbering is not trustworthy (a dropped or non-increasing ``seq`` anywhere in the label), and
     when ``seq`` names no round or more than one -- a duplicate is already non-increasing, but the
-    answer does not rest on that. ``history`` should already be narrowed to one
-    ``activation_generation``, as for :func:`reversals`.
+    answer does not rest on that. ``history`` should already be narrowed to the current phase
+    list (``RunState.rounds_of``), as for :func:`reversals`.
 
     Read-only, and neither signal calls it. Its callers are the clarify command, which records a
-    clarify's retraction only against a proved ordinal, and ``bundle._prior_rounds_section``,
+    clarify's retraction only against a proved ordinal, and ``bundle._prior_rounds``,
     which renders one only under the same proof -- so the two cannot disagree about which round a
     ``SUPERSEDES`` line names.
     """
@@ -470,7 +469,7 @@ def persisting(history: Sequence[Mapping[str, object]], label: str, stall_rounds
     Fewer than ``stall_rounds`` rounds recorded yet answers ``[]``: there is not enough
     history for "every one of the last N" to mean anything. ``stall_rounds <= 0`` also
     answers ``[]`` -- the caller's own config gate (``0`` disables the check entirely), kept
-    here too so a caller that forgets the gate still gets the safe answer rather than a
+    here too so a caller that forgets the engine still gets the safe answer rather than a
     negative-slice surprise.
 
     Scoping, ordering and the untrusted-input handling are exactly :func:`reversals`': entries
@@ -547,7 +546,7 @@ def render(points: Sequence[OscillationPoint], *, max_points: int | None = None,
     by a reader; it is not something a tampered ``round_history`` can turn into smuggled text
     (see the module docstring).
 
-    Bounded the same way ``bundle._prior_rounds_section`` bounds its own findings, and for
+    Bounded the same way ``bundle._prior_rounds`` bounds its own findings, and for
     the same reason: a phase with enough rounds (a non-converging one raises a fresh finding
     every round, by design -- see phase 5) can have an unbounded number of anchors, and this
     text is appended, unbounded, straight into the message Claude is shown

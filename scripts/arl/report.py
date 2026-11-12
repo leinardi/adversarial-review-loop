@@ -1,13 +1,10 @@
-"""Storing reports on disk and rendering the text Claude actually sees.
+"""Storing reports under ``.arl/reports/`` and rendering the text Claude sees.
 
-Ports ``scripts/lib/report.sh``. Every ``FINDING`` line is returned inline; prose is what
-truncates, never the actionable set. A finding trimmed for length is a finding the model
-never fixes.
+Every ``FINDING`` line is returned inline; prose is what truncates, never the actionable set. A
+finding trimmed for length is a finding the model never fixes.
 
-**Nothing here writes to stdout** (Rule 2). This code runs inside the hook entrypoints,
-whose stdout is the hook's JSON response, so the renderers return text and the caller
-decides where it goes. The shell needed a comment on ``arl_report_store`` saying so; here
-it is enforced by the signatures.
+**Nothing here writes to stdout** (AGENTS.md rule 3): the renderers return text and the command
+decides where it goes.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -29,28 +26,23 @@ it is enforced by the signatures.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from arl import harness
-from arl.atomic import ensure_private_dir, write_private_atomic
+from arl.atomic import write_private_atomic
 from arl.config import Config
-from arl.paths import state_root
 from arl.util import truncate
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle broken for the type checker only
     from arl.contract import Review, Target
 
 __all__ = [
-    "AcceptRecord",
-    "accept_report_path",
     "deferred_text",
     "list_reports",
     "reason",
     "render",
-    "render_accept",
     "render_report",
     "report_path",
     "store",
@@ -68,9 +60,8 @@ _DEFERRED_INTRO = (
 def deferred_text(review: Review, *, what: str) -> str:
     """The paragraph every approval path shows when ``review.deferred`` is non-empty.
 
-    ``what`` names the thing that was approved despite them -- "commit" for the commit gate,
-    "turn end" for the Stop sweep. Empty when nothing was deferred, so a caller can append it
-    unconditionally. The lines are the ``FINDING`` lines verbatim, exactly as the blocking set
+    ``what`` names the thing that was approved despite them ("approval"). Empty when nothing
+    was deferred, so a caller can append it unconditionally. The lines are the ``FINDING`` lines verbatim, exactly as the blocking set
     is rendered: deferral changes what blocks, never what is shown.
     """
     if not review.deferred:
@@ -83,9 +74,9 @@ def _timestamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def report_path(act_dir: Path, target: Target, seq: str, verdict: str) -> Path:
+def report_path(reports_dir: Path, target: Target, seq: str, verdict: str) -> Path:
     """Where a report is stored. The verdict is in the filename, so ``ls`` is a summary."""
-    return act_dir / "reports" / f"{seq}-{target.label}-{verdict.lower()}.md"
+    return reports_dir / f"{seq}-{target.label}-{verdict.lower()}.md"
 
 
 def _findings_and_raw(review: Review) -> str:
@@ -112,7 +103,7 @@ def _findings_and_raw(review: Review) -> str:
         # reasoning, everything written before the malformed block -- is only in this one.
         out.append("\n## Malformed primary transcript\n\n")
         out.append(
-            "The reviewer ran to completion and then wrote a findings block the gate could not parse. The block "
+            "The reviewer ran to completion and then wrote a findings block the engine could not parse. The block "
             "above was re-emitted by a separate repair call, which is shown as the raw output; this is the review "
             "it was re-emitted from, and it is the one to read for what the reviewer actually said.\n\n"
         )
@@ -172,22 +163,19 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
     variant = config.as_str("variant")
 
     out: list[str] = [f"# Review {seq} ({target.label})\n\n"]
-    out.append(f"- verdict (recomputed by the gate): **{verdict}**\n")
-    out.append(f"- base tree: `{target.base}`\n")
-    out.append(f"- head tree: `{target.head}`\n")
+    out.append(f"- verdict (recomputed by the engine): **{verdict}**\n")
+    for root in target.roots:
+        out.append(f"- root `{root.alias}` ({root.path}): `{root.base}` -> `{root.head}`\n")
     # `display_model`, not `model`: a report is written *after* a review ran, including the
     # ones that failed, and a stored record of what happened must not be the thing that
     # raises. The harness name is printed beside it, unvalidated, so a configuration that
-    # changed underneath the activation is visible in the report rather than hidden by it.
+    # changed underneath the run is visible in the report rather than hidden by it.
     out.append(f"- harness: `{config.as_str('harness')}`\n")
     out.append(f"- model: `{harness.display_model(config)}`{f' (variant `{variant}`)' if variant else ''}\n")
     out.append(f"- block_severity: `{config.as_str('block_severity')}`\n")
-    # Retroactive disclosure: `/adversarial-review-loop:report` is where a human goes to ask
-    # what a past review was told to do, and a repo-supplied guide is part of that answer.
-    # Carried on the `Review` rather than re-read from state, so the report names the guide
-    # *this* round was composed with -- a later `resume --guide` must not rewrite history.
+    # What this round was told: the project guidance it ran under, as the ticket recorded it.
     if review.guide:
-        out.append(f"- review guide: {review.guide}\n")
+        out.append("- review guidance:\n" + "".join(f"  {line}\n" for line in review.guide.splitlines()))
     if target.is_phase:
         out.append(f"- late_block_severity: `{config.as_str('late_block_severity')}`\n")
     out.append(f"- generated: {_timestamp()}\n")
@@ -195,7 +183,7 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
         out.append(f"- findings block: re-emitted by a repair call; the primary transcript is `{review.repaired}`\n")
     out.append(_usage_line(review))
     if review.error:
-        out.append(f"- gate note: {review.error}\n")
+        out.append(f"- engine note: {review.error}\n")
 
     out.append(_findings_and_raw(review))
     return "".join(out)
@@ -216,58 +204,18 @@ def _raw_text(raw: str) -> str:
         return ""
 
 
-def store(review: Review, target: Target, *, seq: str, act_dir: Path, config: Config) -> Path:
-    """Write the report and record its path on ``review``.
-
-    Deliberately silent, and deliberately durable: the report is what a denial points the
-    user at, so a half-written one is worse than none.
-    """
-    path = report_path(act_dir, target, seq, review.verdict or "UNKNOWN")
-    ensure_private_dir(path.parent, root=state_root())
-    write_private_atomic(path, render_report(review, target, seq=seq, config=config), root=state_root(), errors="surrogateescape")
+def store(review: Review, target: Target, *, seq: str, reports_dir: Path, config: Config) -> Path:
+    """Write the report and record its path on ``review``. Durable: a half-written report is
+    worse than none, since it is what a refusal points the user at."""
+    path = report_path(reports_dir, target, seq, review.verdict or "UNKNOWN")
+    reports_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    write_private_atomic(path, render_report(review, target, seq=seq, config=config), root=reports_dir, errors="surrogateescape")
     review.report = str(path)
     return path
 
 
-def accept_report_path(act_dir: Path, seq: str, label: str) -> Path:
-    """Where a manual acceptance's report is stored."""
-    return act_dir / "reports" / f"{seq}-{label}-accepted.md"
-
-
-@dataclass(frozen=True)
-class AcceptRecord:
-    """Everything one manual acceptance's report needs to render.
-
-    The ``manual_accepts`` entry the run records, plus the report sequence and the filenames of
-    the reviews it overrides.
-    """
-
-    seq: str
-    phase: int
-    tree: str
-    base: str
-    reason: str
-    reviews: list[str]
-
-
-def render_accept(record: AcceptRecord) -> str:
-    """A manual acceptance's report: what was accepted, and the reviews it overrides."""
-    out: list[str] = [f"# Manual acceptance {record.seq} (phase{record.phase})\n\n"]
-    out.append("- verdict: **ACCEPTED (manual, by the user)**\n")
-    out.append(f"- phase: {record.phase}\n")
-    out.append(f"- tree: `{record.tree}`\n")
-    out.append(f"- base tree (last approved before this acceptance): `{record.base}`\n")
-    out.append(f"- accepted: {_timestamp()}\n")
-    out.append(f"- reviews overridden: {len(record.reviews)}\n")
-    out.append("\n## Reason\n\n")
-    out.append(f"{record.reason or '(none given)'}\n")
-    out.append("\n## Reviews this acceptance overrides\n\n")
-    out.append("".join(f"- {name}\n" for name in record.reviews) if record.reviews else "(none)\n")
-    return "".join(out)
-
-
 def reason(review: Review, headline: str, *, config: Config) -> str:
-    """The message handed back through a deny or a Stop block.
+    """The message ``review record`` hands back to Claude when a review did not approve.
 
     Order is the point: the blocking set first, the full set next, prose last, because prose
     is the only part that may be cut. ``max_reason_bytes`` bounds the prose alone.
@@ -308,23 +256,23 @@ def reason(review: Review, headline: str, *, config: Config) -> str:
     return "".join(out)
 
 
-def list_reports(act_dir: Path) -> list[str]:
-    """Report filenames for this activation, oldest first. Empty when there are none."""
-    directory = act_dir / "reports"
+def list_reports(reports_dir: Path) -> list[str]:
+    """Report filenames for this run, oldest first. Empty when there are none."""
+    directory = reports_dir
     if not directory.is_dir():
         return []
     return sorted(path.name for path in directory.glob("*.md"))
 
 
-def render(act_dir: Path, n: int | None = None) -> str:
+def render(reports_dir: Path, n: int | None = None) -> str:
     """One stored report in full: the ``n``-th, or the newest when ``n`` is omitted.
 
     Returns the text rather than printing it, so a hook entrypoint cannot corrupt its own
-    response by calling this (Rule 2).
+    response by calling this (AGENTS.md rule 3).
     """
-    directory = act_dir / "reports"
+    directory = reports_dir
     if not directory.is_dir():
-        return "No reports have been produced for this activation yet.\n"
+        return "No reports have been produced for this run yet.\n"
 
     if n is None:
         candidates = sorted(directory.glob("*.md"))
@@ -334,7 +282,7 @@ def render(act_dir: Path, n: int | None = None) -> str:
         chosen = candidates[0] if candidates else None
 
     if chosen is None:
-        available = "".join(f"{name}\n" for name in list_reports(act_dir))
+        available = "".join(f"{name}\n" for name in list_reports(reports_dir))
         return f"No such report. Available:\n{available}"
     try:
         return chosen.read_bytes().decode("utf-8", "surrogateescape")

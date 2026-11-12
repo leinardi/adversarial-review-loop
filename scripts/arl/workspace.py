@@ -63,7 +63,7 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, Final
 
-from arl import gitsnap
+from arl import config, gitsnap
 from arl.atomic import ensure_private_dir
 from arl.gitsnap import SnapshotError, git_run
 from arl.state import RunError, RunPaths, RunState
@@ -75,9 +75,11 @@ __all__ = [
     "SCAN_DEPTH",
     "TOUCH_TOLERANCE_NS",
     "WALK_LIMIT",
+    "Oversized",
     "alias_for",
     "discover",
     "empty_tree",
+    "git_command",
     "register",
     "resolve",
     "scan_nested",
@@ -86,6 +88,23 @@ __all__ = [
     "snapshot_all",
     "touched_since",
 ]
+
+
+class Oversized(SnapshotError):
+    """A root holds new or modified files past ``max_file_bytes``; nothing was snapshotted.
+
+    Refused before staging rather than after: a snapshot writes every new file into an object
+    store, and a run launched from a folder with a multi-gigabyte file in it would otherwise
+    copy all of it before anything could say no.
+    """
+
+    code: Final = "oversized"
+
+    def __init__(self, alias: str, entries: Sequence[tuple[str, int]], limit: int) -> None:
+        self.entries = [(f"{alias}/{path}", size) for path, size in entries]
+        listing = "".join(f"\n  {path} ({size} bytes)" for path, size in self.entries)
+        super().__init__(f"root {alias} holds files larger than max_file_bytes ({limit} bytes):{listing}")
+
 
 #: The empty tree's id in a SHA-1 and in a SHA-256 repository.
 EMPTY_TREE_SHA1: Final = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -219,6 +238,20 @@ def _shadow_git(root: dict[str, Any], paths: RunPaths, args: Sequence[str]) -> A
     return git_run(root["path"], [*_shadow_args(root, paths), *args], env=_shadow_env())
 
 
+def git_command(root: dict[str, Any], paths: RunPaths) -> tuple[list[str], dict[str, str] | None] | None:
+    """The ``git`` argv prefix and environment that read ``root``'s snapshot trees.
+
+    A git root's trees live in its own repository; a folder's in its shadow. ``None`` for a git
+    root whose directory is gone, since its object store went with it.
+    """
+    if root["kind"] == "git":
+        if not Path(root["path"]).is_dir():
+            return None
+        return ["git", "-C", root["path"]], None
+    # The git dir alone: a tree-to-tree diff needs no work tree, and the folder may be gone.
+    return ["git", "--git-dir", str(_shadow_dir(root, paths))], _shadow_env()
+
+
 def _ensure_shadow(root: dict[str, Any], paths: RunPaths) -> None:
     git_dir = _shadow_dir(root, paths)
     if (git_dir / "HEAD").is_file():
@@ -234,7 +267,10 @@ def _first_line(proc: Any) -> str:
 
 
 def snapshot(root: dict[str, Any], roots: Sequence[dict[str, Any]], paths: RunPaths) -> str:
-    """The tree id of ``root``'s current content, or :class:`SnapshotError`. Never a stale tree."""
+    """The tree id of ``root``'s current content, or :class:`SnapshotError`. Never a stale tree.
+
+    :class:`Oversized` when a file it would newly stage is past ``max_file_bytes``.
+    """
     excluded = _excluded(root, roots, paths)
     here = Path(root["path"])
     if not here.exists():
@@ -252,8 +288,10 @@ def snapshot(root: dict[str, Any], roots: Sequence[dict[str, Any]], paths: RunPa
         top = _first_line(git_run(root["path"], ["rev-parse", "--show-toplevel"]))
         if not top or Path(top).resolve() != here.resolve():
             raise SnapshotError(f"root {root['alias']} is no longer the top of a git repository: {here}")
+        _guard_size(root, paths)
         return gitsnap.snapshot(root["path"], exclude=excluded).tree
     _ensure_shadow(root, paths)
+    _guard_size(root, paths)
     if excluded:
         specs = [f":(literal){path}" for path in excluded]
         if _shadow_git(root, paths, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", *specs]).returncode != 0:
@@ -268,6 +306,16 @@ def snapshot(root: dict[str, Any], roots: Sequence[dict[str, Any]], paths: RunPa
     if not tree:
         raise SnapshotError(f"git write-tree failed in the shadow repository of {root['alias']}")
     return tree
+
+
+def _guard_size(root: dict[str, Any], paths: RunPaths) -> None:
+    limit = config.load(str(paths.launch_dir)).as_int("max_file_bytes")
+    if root["kind"] == "git":
+        found = gitsnap.oversized(root["path"], limit)
+    else:
+        found = gitsnap.oversized(root["path"], limit, git_args=_shadow_args(root, paths), env=_shadow_env())
+    if found:
+        raise Oversized(root["alias"], found, limit)
 
 
 def empty_tree(root: dict[str, Any], paths: RunPaths) -> str:

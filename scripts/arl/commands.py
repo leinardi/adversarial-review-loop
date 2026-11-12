@@ -32,7 +32,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Final
 
-from arl import config, workspace
+from arl import config, review, workspace
 from arl.atomic import ensure_private_dir, write_private_atomic
 from arl.errors import StateLoadError
 from arl.state import RunError, RunPaths, RunState, locked_run_dir, locked_state, new_document, next_action
@@ -239,7 +239,14 @@ def cmd_accept(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
         # or rides into it as an unreviewed gitlink. Found, its unknown baseline refuses below.
         if workspace.discover(run, late=True):
             run.save()
-        run.approve(workspace.snapshot_all(run), by="user")
+        try:
+            trees = workspace.snapshot_all(run)
+        except workspace.Oversized as exc:
+            # An approval moves every root to a snapshot, and this one cannot be taken.
+            raise RunError(
+                "oversized", f"{exc}\nAccepting cannot get past this: remove the file(s), or ignore them in the root's .gitignore."
+            ) from exc
+        run.approve(trees, by="user")
         run.save()
         return {"ok": True, "run": run.summary()}
 
@@ -264,4 +271,10 @@ COMMANDS: Final[Mapping[str, Command]] = {
     "finish": _transition("request_final"),
     "accept": cmd_accept,
     "next-action": cmd_next_action,
+    "review-prepare": review.prepare,
+    "review-record": review.record,
+    "review-run-external": review.run_external,
+    "clarify-prepare": review.clarify_prepare,
+    "clarify-record": review.clarify_record,
+    "clarify-run-external": review.clarify_run_external,
 }

@@ -245,3 +245,14 @@ def test_a_malformed_document_is_refused_whole(tmp_path: Path, document: str) ->
     run.paths.state_file.write_text(document)
     with pytest.raises(StateLoadError):
         RunState.load(run.paths)
+
+
+@pytest.mark.parametrize("decision", ["stall", "needs-human"])
+@pytest.mark.parametrize("later", ["failures", "oversized"])
+def test_a_wait_that_clears_itself_never_replaces_a_users_decision(tmp_path: Path, decision: str, later: str) -> None:
+    run = make_run(tmp_path)
+    run.wait_for_user(decision, "x")
+    run.wait_for_user(later, "y")
+    run.clear_wait(later)
+    assert run.data["waiting"] == {"kind": decision, "detail": "x"}
+    assert run.pending_decision() == {"kind": decision, "detail": "x"}

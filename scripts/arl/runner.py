@@ -31,7 +31,6 @@ import re
 import signal
 import subprocess
 import time
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Final
@@ -40,9 +39,8 @@ import arl
 from arl import harness
 from arl.atomic import FILE_MODE, read_verified_file, write_private_file
 from arl.config import Config
-from arl.contract import LateScope, Review, Target, parse
+from arl.contract import Target
 from arl.errors import OcrlError
-from arl.paths import state_root
 from arl.util import decode, log
 
 __all__ = [
@@ -57,15 +55,12 @@ __all__ = [
     "kill_group",
     "run_bounded",
     "run_clarify",
-    "run_invocation",
 ]
 
 
 #: The largest ``timeout_sec`` the reviewer will honour. Configuration is unbounded, but a
-#: reviewer deadline past this is not a deadline -- the hook that launched it, and the session
-#: around it, are long gone. Clamping here is what keeps :data:`_MAX_LEASE_SEC` derivable: an
-#: unbounded ``timeout_sec`` makes the largest *legitimate* lease unbounded too, and then no
-#: honest ceiling on a stored lease exists at all (see :func:`_timeout_sec`).
+#: reviewer deadline past this is not a deadline: the session that asked for the review is
+#: long gone.
 MAX_TIMEOUT_SEC: Final = 6 * 60 * 60
 
 
@@ -138,42 +133,17 @@ class ReviewerFailed(OcrlError):
 
 @dataclass(frozen=True)
 class Invocation:
-    """One reviewer call: the argv the harness composes, its deadline, and what it may emit.
+    """One external reviewer call: its prompt, the bundle it reads, and its deadline.
 
     ``timeout_sec`` is ``0`` for every ordinary invocation, meaning "the configured
-    ``timeout_sec``, clamped". A caller with its own, smaller ceiling sets it, carried on the
-    invocation so the deadline a call runs under and the argv it runs with are one object.
-
-    ``attachments`` is the complete ``-f`` list with each file's digest. **Nothing in this
-    module builds it yet**: v3's staging step that did is gone, and the v4 review command
-    (phase 3) must build it from the bundle's own ``chunks`` count. An empty list hands the
-    reviewer a prompt with no diff.
-
-    ``allow_supersedes`` narrows what this *call* may emit and is ANDed with ``target.is_phase``
-    rather than replacing it, so it can only ever forbid more. ``False`` for the contract repair:
-    it sees a truncated tail of one transcript and has no earlier round to reverse, so a
-    ``SUPERSEDES`` from it would be fabricated -- and it would not stay inert, since
-    :mod:`arl.oscillation` counts reversals as one of the two signals that escalate a phase.
-
-    See ``permission`` and the module docstring for the evidence boundary this call runs under.
+    ``timeout_sec``, clamped".
     """
 
     bundle_dir: Path
     prompt_file: Path
     title: str
     out_path: Path
-    session_id: str = ""
-    new_session_id: str = ""
-    attachments: tuple[tuple[Path, str], ...] = ()
-    context_files: tuple[Path, ...] = ()
-    cold: bool = False
     timeout_sec: int = 0
-    allow_supersedes: bool = True
-    #: The prompt's bytes as this process composed them. **This, not ``prompt_file``, is what
-    #: the reviewer is actually told**, whenever it is set -- see :func:`invoke`. Empty for the
-    #: two invocations whose prompt is a fixed plugin file (contract repair, clarify), which
-    #: are read from disk as before.
-    prompt_text: str = ""
 
 
 def _harness(config: Config) -> harness.Harness:
@@ -212,12 +182,8 @@ def efficiency_text() -> str:
 def _timeout_sec(config: Config) -> int:
     """``timeout_sec``, clamped to :data:`MAX_TIMEOUT_SEC`.
 
-    Every reader of ``timeout_sec`` goes through here, so the value the reviewer is actually
-    bounded by and the value the lease is sized from can never disagree. The clamp is what
-    makes :data:`_MAX_LEASE_SEC` an honest ceiling: without it a large enough configured
-    timeout produces a *legitimate* lease above any fixed ceiling, `_claim_is_live` reads that
-    lease as tampered, falls back to the observer's own window -- and the claim is
-    observer-relative again, which is the whole thing recording it was meant to stop.
+    Every reader of ``timeout_sec`` goes through here, so no caller can bound a reviewer by
+    an unclamped value.
     """
     configured = config.as_int("timeout_sec")
     if configured > MAX_TIMEOUT_SEC:
@@ -230,7 +196,7 @@ def kill_group(proc: subprocess.Popen[bytes]) -> None:
     """Kill the timed-out process **and everything it spawned**.
 
     ``subprocess``'s own timeout kills the direct child only, so backgrounded work keeps running
-    after the gate gave up on it -- measured: a grandchild created its file two seconds after the
+    after the engine gave up on it -- measured: a grandchild created its file two seconds after the
     one-second deadline. ``start_new_session=True`` plus ``killpg`` is GNU ``timeout``'s own
     arrangement.
 
@@ -251,8 +217,8 @@ def kill_group(proc: subprocess.Popen[bytes]) -> None:
         pgid = None
     if pgid is not None and pgid == os.getpgrp():
         # Only reachable if a future edit drops `start_new_session`, and it must never be
-        # allowed to happen: signalling our own group kills the gate mid-response, which a
-        # PreToolUse caller reads as a non-blocking error and proceeds through. Confirmed
+        # allowed to happen: signalling our own group kills the engine mid-response, which leaves
+        # the mod with no answer at all. Confirmed
         # by experiment -- the guard was added after this killed the test runner itself.
         log(f"{name} shares this process group; killing only the child")
         pgid = None
@@ -352,7 +318,7 @@ def _strip_ansi(path: Path) -> None:
 #: What the CLI's own output is kept as when a harness reduced it to a transcript. Beside the
 #: transcript rather than instead of it: the reduction is a derivation, and the bytes it was
 #: derived from are what an operator needs to check it against -- the denied tool calls, the
-#: cost, the session the CLI says it actually used. Never read by the gate.
+#: cost, the session the CLI says it actually used. Never read by the engine.
 _ENVELOPE_SUFFIX: Final = ".envelope"
 
 
@@ -373,7 +339,7 @@ def _reduce_transcript(implementation: harness.Harness, out_path: Path) -> harne
     because that is what :func:`classify_op_failure` reads to tell a rate limit from a bad model
     name, and a wrapper this function could not parse is itself the diagnosis.
     """
-    raw = read_verified_file(out_path, root=state_root())
+    raw = read_verified_file(out_path, root=out_path.parent)
     if raw is None:
         raise ReviewerFailed(f"the reviewer's output at {out_path} could not be read back")
     usage = implementation.usage(raw)
@@ -383,16 +349,6 @@ def _reduce_transcript(implementation: harness.Harness, out_path: Path) -> harne
     write_private_file(out_path.with_name(out_path.name + _ENVELOPE_SUFFIX), raw)
     write_private_file(out_path, reduced)
     return usage
-
-
-def _act_dir_of(bundle_dir: Path) -> Path:
-    """The activation directory a bundle belongs to: ``<act_dir>/bundles/<seq>`` -> ``<act_dir>``.
-
-    The same derivation :func:`context_attachments` makes for ``context/``, kept in one place
-    so the two cannot drift. Not read off ``State`` because both callers here are handed a
-    bundle rather than the state it came from.
-    """
-    return bundle_dir.parent.parent
 
 
 def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str, str] | None = None) -> harness.Usage | None:
@@ -408,49 +364,36 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
     branch anywhere reads it.
     """
     env = dict(os.environ if environ is None else environ)
-    # `run.timeout_sec` is the repair call's own, much smaller ceiling; 0 -- every ordinary
-    # invocation -- means the configured one, clamped.
     timeout_sec = run.timeout_sec or _timeout_sec(config)
     reviewer_cmd = env.get("ARL_REVIEWER_CMD", "")
 
     stdin: bytes | None = None
     cwd: str | None = None
+    if not any(run.bundle_dir.glob("changes.*.diff")):
+        # A review prompt names the bundle's files; one with no diff in it would be judged on
+        # nothing, and an empty judgement reads as an approval.
+        raise LaunchError(f"the bundle at {run.bundle_dir} holds no changes.*.diff")
     if reviewer_cmd:
         env["ARL_BUNDLE_DIR"] = str(run.bundle_dir)
-        if run.session_id:
-            env["ARL_SESSION_ID"] = run.session_id
-        if run.context_files:
-            # The stub reviewer never builds an argv, so the `-f context/…` channel the real
-            # path uses is surfaced as an env var for the tests to read. Read off the
-            # invocation, not re-listed from disk -- same reason `review_argv` takes it.
-            env["ARL_CONTEXT_FILES"] = "\n".join(str(path) for path in run.context_files)
         command = [reviewer_cmd, str(run.bundle_dir), str(run.prompt_file)]
     else:
-        # Trailing newlines are stripped. The composed bytes are used from memory when they
-        # were composed in this process, so the reviewer is told exactly what was composed;
-        # only the two fixed plugin prompts (contract repair, clarify) are read from disk.
-        message = (run.prompt_text or decode(run.prompt_file.read_bytes())).rstrip("\n")
+        try:
+            prompt_text = decode(run.prompt_file.read_bytes()).rstrip("\n")
+        except OSError as exc:
+            raise LaunchError(f"the reviewer prompt at {run.prompt_file} could not be read: {exc.strerror or exc}") from exc
         spec = harness.ReviewSpec(
-            repo=target.repo,
-            prompt_text=message,
+            repo=target.launch_dir,
+            prompt_text=prompt_text,
             system_prompt=efficiency_text(),
             title=run.title,
             bundle_dir=run.bundle_dir,
-            act_dir=_act_dir_of(run.bundle_dir),
+            roots=tuple(root.path for root in target.roots),
             config=config,
-            # The digests come along, not just the paths, so a harness that *inlines* its
-            # attachments can check the bytes it actually sends. See `arl.harness.Attachment`.
-            attachments=tuple(harness.Attachment(path, digest) for path, digest in run.attachments),
-            session_id=run.session_id,
-            new_session_id=run.new_session_id,
-            cold=run.cold,
         )
         try:
             built = _harness(config).review_command(spec)
         except harness.PayloadError as exc:
-            # Composing the command failed, so nothing was launched -- the same standing as a
-            # staged attachment that moved, and reported through the same class so
-            # `run_invocation` reads it as "nothing ran" rather than as a reviewer failure.
+            # Composing the command failed, so nothing was launched.
             raise LaunchError(str(exc)) from exc
         command, stdin, cwd = built.argv, built.stdin, built.cwd
         env.update(built.env)
@@ -472,31 +415,23 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
         raise ReviewerFailed(str(exc)) from exc
 
 
-def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invocation, exactly as review_argv notes
-    repo: str,
+def run_clarify(  # noqa: PLR0913 - one knob per argument, as `run_bounded` notes
+    launch_dir: str,
     bundle_dir: Path,
-    attachments: Sequence[tuple[Path, str]],
-    question_file: tuple[Path, str],
     *,
     prompt_file: Path,
     title: str,
     out_path: Path,
     config: Config,
-    environ: dict[str, str] | None = None,
+    roots: tuple[str, ...] = (),
 ) -> str:
-    """Answer one question about a review already given, from its stored bundle.
+    """Answer one question about a review already given, from its stored bundle, and return the
+    reply. No ``VERDICT`` is parsed. Raises :class:`ReviewerFailed` on a timeout or a non-zero exit,
+    so a failed clarify is reported, never silently empty.
 
-    Cold and session-less like the contract repair: no ``-s``, the bundle-scoped ``permission``
-    document, and the ``context/`` question is the only model-derived text in the call.
-    ``attachments`` is the manifest-validated list, each carrying the digest it was staged under
-    so a harness that inlines them can hash what it sends. **No ``VERDICT`` is parsed** -- the
-    caller prints the prose reply verbatim. Raises :class:`ReviewerFailed` on a timeout or
-    non-zero exit, so a failed clarify is reported, not silently empty.
-
-    ``ARL_REVIEWER_CMD`` is honoured for the tests, which read the question through
-    ``ARL_QUESTION_FILE``.
+    ``ARL_REVIEWER_CMD`` is honoured for the tests.
     """
-    env = dict(os.environ if environ is None else environ)
+    env = dict(os.environ)
     timeout_sec = _timeout_sec(config)
     reviewer_cmd = env.get("ARL_REVIEWER_CMD", "")
 
@@ -504,35 +439,33 @@ def run_clarify(  # noqa: PLR0913 - each arg is an independent knob of the invoc
     cwd: str | None = None
     if reviewer_cmd:
         env["ARL_BUNDLE_DIR"] = str(bundle_dir)
-        env["ARL_QUESTION_FILE"] = str(question_file[0])
         command = [reviewer_cmd, str(bundle_dir), str(prompt_file)]
     else:
-        message = decode(prompt_file.read_bytes()).rstrip("\n")
+        try:
+            prompt_text = decode(prompt_file.read_bytes()).rstrip("\n")
+        except OSError as exc:
+            raise ReviewerFailed(f"the clarify prompt at {prompt_file} could not be read: {exc.strerror or exc}") from exc
         spec = harness.ClarifySpec(
-            repo=repo,
-            prompt_text=message,
+            repo=launch_dir,
+            prompt_text=prompt_text,
             system_prompt=efficiency_text(),
             title=title,
             bundle_dir=bundle_dir,
-            act_dir=_act_dir_of(bundle_dir),
+            roots=roots,
             config=config,
-            attachments=tuple(harness.Attachment(path, digest) for path, digest in attachments),
-            question_file=harness.Attachment(*question_file),
         )
         try:
             built = _harness(config).clarify_command(spec)
         except harness.PayloadError as exc:
-            # Nothing ran. A clarify has no bundle-failure path of its own, so this is reported as
-            # a failed clarify, and no reply is printed.
             raise ReviewerFailed(str(exc)) from exc
         command, stdin, cwd = built.argv, built.stdin, built.cwd
         env.update(built.env)
 
     status = _capture_to_file(command, env, out_path, timeout_sec, stdin, cwd)
     if status in _TIMEOUT_STATUSES:
-        raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s")
+        raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s", status=status)
     if status != 0:
-        raise ReviewerFailed(f"the reviewer exited with status {status}")
+        raise ReviewerFailed(f"the reviewer exited with status {status}", status=status)
     if not reviewer_cmd:
         try:
             _reduce_transcript(_harness(config), out_path)
@@ -559,36 +492,3 @@ def classify_op_failure(exc: ReviewerFailed, out_path: Path) -> str:
     if _RATE_LIMIT_RE.search(head):
         return "transient"
     return "operational"
-
-
-def run_invocation(target: Target, run: Invocation, *, config: Config, scope: LateScope | None = None) -> tuple[Review, bool]:
-    """One invoke()+parse() cycle. The bool says whether the process ran to completion.
-
-    ``scope`` is handed straight to :func:`parse`; the same one serves the primary invocation
-    and the contract repair, since both judge the same bundle under the same rules.
-
-    ``SUPERSEDES`` is permitted only when the *target* is a phase **and** the invocation
-    itself allows it -- an AND, so a call that forbids it can never widen what the target
-    permits. See :class:`Invocation` for the one call that forbids it and why."""
-    review = Review()
-    review.raw = str(run.out_path)
-    try:
-        usage = invoke(target, run, config=config)
-    except LaunchError as exc:
-        # The harness could not compose the command, so nothing ran and there is no
-        # transcript to parse.
-        review.verdict = "OP_FAILURE"
-        review.error = str(exc)
-        review.kind = "bundle"
-        return review, False
-    except ReviewerFailed as exc:
-        review.verdict = "OP_FAILURE"
-        review.error = str(exc)
-        review.kind = classify_op_failure(exc, run.out_path)
-        return review, False
-    review = parse(run.out_path, config=config, allow_supersedes=target.is_phase and run.allow_supersedes, scope=scope)
-    review.raw = str(run.out_path)
-    # `parse` builds a fresh `Review` from the transcript, so the cost has to be carried over
-    # explicitly -- it is a property of the invocation, not of anything the reviewer wrote.
-    review.usage = usage
-    return review, True
