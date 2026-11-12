@@ -30,9 +30,9 @@ import pytest
 from conftest import config_with
 from reviewer_common import execute_fake, target_for
 
+from arl import bundle, contract, gitsnap, state
 from arl import config as arl_config
-from arl import gitsnap, reviewer, state
-from arl.reviewer import BundleError
+from arl.bundle import BundleError
 
 #: Shortens the SIGTERM-to-SIGKILL grace for this module. Requested by mark rather than
 #: made autouse in ``conftest.py``, which would change the constant for every unit test.
@@ -43,8 +43,8 @@ pytestmark = pytest.mark.usefixtures("short_kill_grace")
 # --------------------------------------------------------------------------
 
 
-def _scope(changed: tuple[str, ...] = (), prior: tuple[str, ...] = ()) -> reviewer.LateScope:
-    return reviewer.LateScope(changed_paths=frozenset(changed), prior_files=frozenset(prior))
+def _scope(changed: tuple[str, ...] = (), prior: tuple[str, ...] = ()) -> contract.LateScope:
+    return contract.LateScope(changed_paths=frozenset(changed), prior_files=frozenset(prior))
 
 
 def test_scope_covers_a_changed_path_exactly_and_by_line_stripping() -> None:
@@ -97,7 +97,7 @@ MEDIUM_PRIOR = "FINDING severity=medium actionable=yes file=known.py:77 | re-rai
 
 
 def test_parse_without_a_scope_blocks_every_finding_at_or_above_block_severity(tmp_path: Path) -> None:
-    review = reviewer.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config_with(), allow_supersedes=True)
+    review = contract.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config_with(), allow_supersedes=True)
     assert review.verdict == "CHANGES_REQUIRED"
     assert review.findings == f"{MEDIUM_UNTOUCHED}\n"
     assert review.deferred == ""
@@ -105,7 +105,7 @@ def test_parse_without_a_scope_blocks_every_finding_at_or_above_block_severity(t
 
 def test_parse_with_a_scope_defers_a_new_medium_outside_the_changed_paths(tmp_path: Path) -> None:
     scope = _scope(changed=("changed.py",), prior=("known.py:1", "known.py"))
-    review = reviewer.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config_with(), allow_supersedes=True, scope=scope)
+    review = contract.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config_with(), allow_supersedes=True, scope=scope)
     assert review.verdict == "APPROVED"
     assert review.findings == ""
     assert review.deferred == f"{MEDIUM_UNTOUCHED}\n"
@@ -114,7 +114,7 @@ def test_parse_with_a_scope_defers_a_new_medium_outside_the_changed_paths(tmp_pa
 
 def test_parse_with_a_scope_blocks_a_medium_in_a_changed_path(tmp_path: Path) -> None:
     scope = _scope(changed=("changed.py",))
-    review = reviewer.parse(_write_block(tmp_path, MEDIUM_CHANGED), config=config_with(), allow_supersedes=True, scope=scope)
+    review = contract.parse(_write_block(tmp_path, MEDIUM_CHANGED), config=config_with(), allow_supersedes=True, scope=scope)
     assert review.verdict == "CHANGES_REQUIRED"
     assert review.findings == f"{MEDIUM_CHANGED}\n"
     assert review.deferred == ""
@@ -122,14 +122,14 @@ def test_parse_with_a_scope_blocks_a_medium_in_a_changed_path(tmp_path: Path) ->
 
 def test_parse_with_a_scope_blocks_a_high_anywhere(tmp_path: Path) -> None:
     scope = _scope(changed=("changed.py",))
-    review = reviewer.parse(_write_block(tmp_path, HIGH_UNTOUCHED), config=config_with(), allow_supersedes=True, scope=scope)
+    review = contract.parse(_write_block(tmp_path, HIGH_UNTOUCHED), config=config_with(), allow_supersedes=True, scope=scope)
     assert review.verdict == "CHANGES_REQUIRED"
     assert review.findings == f"{HIGH_UNTOUCHED}\n"
 
 
 def test_parse_with_a_scope_blocks_a_medium_in_a_prior_round_file(tmp_path: Path) -> None:
     scope = _scope(changed=(), prior=("known.py:1", "known.py"))
-    review = reviewer.parse(_write_block(tmp_path, MEDIUM_PRIOR), config=config_with(), allow_supersedes=True, scope=scope)
+    review = contract.parse(_write_block(tmp_path, MEDIUM_PRIOR), config=config_with(), allow_supersedes=True, scope=scope)
     assert review.verdict == "CHANGES_REQUIRED"
     assert review.findings == f"{MEDIUM_PRIOR}\n"
 
@@ -137,7 +137,7 @@ def test_parse_with_a_scope_blocks_a_medium_in_a_prior_round_file(tmp_path: Path
 def test_late_block_severity_medium_restores_the_ordinary_rule(tmp_path: Path) -> None:
     scope = _scope(changed=("changed.py",))
     config = config_with(late_block_severity="medium")
-    review = reviewer.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config, allow_supersedes=True, scope=scope)
+    review = contract.parse(_write_block(tmp_path, MEDIUM_UNTOUCHED), config=config, allow_supersedes=True, scope=scope)
     assert review.verdict == "CHANGES_REQUIRED"
     assert review.deferred == ""
 
@@ -148,7 +148,7 @@ def test_late_block_severity_below_block_severity_is_clamped_up(tmp_path: Path) 
     scope = _scope(changed=("changed.py",))
     config = config_with(block_severity="high", late_block_severity="low")
     assert arl_config.late_threshold_rank(config) == arl_config.threshold_rank("high")
-    review = reviewer.parse(_write_block(tmp_path, MEDIUM_CHANGED), config=config, allow_supersedes=True, scope=scope)
+    review = contract.parse(_write_block(tmp_path, MEDIUM_CHANGED), config=config, allow_supersedes=True, scope=scope)
     assert review.verdict == "APPROVED"
     assert review.deferred == "", "below block_severity is not deferred, it is simply non-blocking"
 
@@ -156,7 +156,7 @@ def test_late_block_severity_below_block_severity_is_clamped_up(tmp_path: Path) 
 def test_the_reviewers_own_changes_required_still_wins_over_a_deferred_only_set(tmp_path: Path) -> None:
     scope = _scope(changed=("changed.py",))
     out = _write_block(tmp_path, MEDIUM_UNTOUCHED, verdict="CHANGES_REQUIRED")
-    review = reviewer.parse(out, config=config_with(), allow_supersedes=True, scope=scope)
+    review = contract.parse(out, config=config_with(), allow_supersedes=True, scope=scope)
     assert review.verdict == "CHANGES_REQUIRED", "stricter wins; the scope narrows the gate's recomputation only"
     assert review.findings == ""
     assert review.deferred == f"{MEDIUM_UNTOUCHED}\n"
@@ -164,7 +164,7 @@ def test_the_reviewers_own_changes_required_still_wins_over_a_deferred_only_set(
 
 def test_a_scope_never_defers_a_finding_below_block_severity_into_the_deferred_set(tmp_path: Path) -> None:
     low = "FINDING severity=low actionable=yes file=untouched.py:1 | low"
-    review = reviewer.parse(_write_block(tmp_path, low), config=config_with(), allow_supersedes=True, scope=_scope(changed=("x",)))
+    review = contract.parse(_write_block(tmp_path, low), config=config_with(), allow_supersedes=True, scope=_scope(changed=("x",)))
     assert review.verdict == "APPROVED"
     assert review.deferred == ""
     assert review.all_findings == f"{low}\n"
@@ -174,18 +174,18 @@ def test_a_scope_never_defers_a_finding_below_block_severity_into_the_deferred_s
 
 
 def test_round_one_has_no_scope(activation: state.State, git_repo: Path) -> None:
-    assert reviewer.late_scope(target_for(git_repo), state=activation) is None
+    assert bundle.late_scope(target_for(git_repo), state=activation) is None
 
 
 def test_a_final_review_has_no_scope(activation: state.State, git_repo: Path) -> None:
     execute_fake(activation, git_repo, "changes")
-    assert reviewer.late_scope(target_for(git_repo, scope="final"), state=activation) is None
+    assert bundle.late_scope(target_for(git_repo, scope="final"), state=activation) is None
 
 
 def test_round_two_scope_holds_the_paths_changed_since_round_one_and_round_ones_files(activation: state.State, git_repo: Path) -> None:
     execute_fake(activation, git_repo, "changes")  # a.txt:1, high
     (git_repo / "b.txt").write_text("second round\n")
-    scope = reviewer.late_scope(target_for(git_repo), state=activation)
+    scope = bundle.late_scope(target_for(git_repo), state=activation)
     assert scope is not None
     assert scope.changed_paths == frozenset({"b.txt"})
     assert scope.prior_files == frozenset({"a.txt:1", "a.txt"})
@@ -196,7 +196,7 @@ def test_prior_files_are_stored_with_a_leading_dot_slash_normalised_away(activat
     os.environ["ARL_FAKE_FILE"] = "./README.md:4"  # `medium-file` emits this value verbatim
     execute_fake(activation, git_repo, "medium-file")
     (git_repo / "b.txt").write_text("second round\n")
-    scope = reviewer.late_scope(target_for(git_repo), state=activation)
+    scope = bundle.late_scope(target_for(git_repo), state=activation)
     assert scope is not None
     assert scope.prior_files == frozenset({"README.md:4", "README.md"})
     assert scope.covers("./README.md:4")
@@ -206,7 +206,7 @@ def test_round_two_scope_keeps_both_sides_of_a_rename(activation: state.State, g
     (git_repo / "renamed-src.txt").write_text("x" * 200 + "\n")
     execute_fake(activation, git_repo, "approve")
     (git_repo / "renamed-src.txt").rename(git_repo / "renamed-dst.txt")
-    scope = reviewer.late_scope(target_for(git_repo), state=activation)
+    scope = bundle.late_scope(target_for(git_repo), state=activation)
     assert scope is not None
     assert {"renamed-src.txt", "renamed-dst.txt"} <= scope.changed_paths, "a reviewer may name either side"
     assert scope.covers("renamed-src.txt:1")
@@ -222,7 +222,7 @@ def test_a_malformed_round_history_entry_disables_the_scope(activation: state.St
     activation.update(round_history=history)
     activation.save()
     (git_repo / "b.txt").write_text("second round\n")
-    assert reviewer.late_scope(target_for(git_repo), state=activation) is None
+    assert bundle.late_scope(target_for(git_repo), state=activation) is None
 
 
 @pytest.mark.parametrize("field", ["seq", "tree", "verdict", "findings"])
@@ -233,7 +233,7 @@ def test_a_tampered_round_history_field_disables_the_scope(activation: state.Sta
     activation.update(round_history=history)
     activation.save()
     (git_repo / "b.txt").write_text("second round\n")
-    assert reviewer.late_scope(target_for(git_repo), state=activation) is None
+    assert bundle.late_scope(target_for(git_repo), state=activation) is None
 
 
 def test_an_unresolvable_previous_tree_disables_the_scope(activation: state.State, git_repo: Path) -> None:
@@ -243,7 +243,7 @@ def test_an_unresolvable_previous_tree_disables_the_scope(activation: state.Stat
     activation.update(round_history=history)
     activation.save()
     (git_repo / "b.txt").write_text("second round\n")
-    assert reviewer.late_scope(target_for(git_repo), state=activation) is None
+    assert bundle.late_scope(target_for(git_repo), state=activation) is None
 
 
 def test_a_failed_changed_path_listing_is_a_bundle_error_not_a_scope(
@@ -255,9 +255,9 @@ def test_a_failed_changed_path_listing_is_a_bundle_error_not_a_scope(
     def broken(repo: str, base: str, head: str) -> frozenset[str]:
         raise gitsnap.ChangedPathsUnavailable("simulated git failure")
 
-    monkeypatch.setattr(reviewer, "changed_paths_strict", broken)
+    monkeypatch.setattr(bundle, "changed_paths_strict", broken)
     with pytest.raises(BundleError, match="simulated git failure"):
-        reviewer.late_scope(target_for(git_repo), state=activation)
+        bundle.late_scope(target_for(git_repo), state=activation)
 
 
 def test_a_scope_build_failure_is_an_op_failure_of_kind_bundle_never_an_approval(
@@ -269,7 +269,7 @@ def test_a_scope_build_failure_is_an_op_failure_of_kind_bundle_never_an_approval
     def broken(repo: str, base: str, head: str) -> frozenset[str]:
         raise gitsnap.ChangedPathsUnavailable("simulated git failure")
 
-    monkeypatch.setattr(reviewer, "changed_paths_strict", broken)
+    monkeypatch.setattr(bundle, "changed_paths_strict", broken)
     review = execute_fake(activation, git_repo, "approve")
     assert review.verdict == "OP_FAILURE"
     assert review.kind == "bundle"

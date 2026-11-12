@@ -29,9 +29,8 @@
 # Governed: Python, shell, TypeScript and JavaScript sources, the Makefile and the repo-local .mk
 # fragments. A Python file carries the header after its module docstring (the IntelliJ "GNU
 # GPLv3" profile in .idea/copyright places it there), so for Python the window starts where the
-# docstring ends. Exempt, each for a stated reason: the vendored bashlex under
-# scripts/arl/_vendor/ (upstream's code under upstream's licence, kept diffable), the API types
-# Claude Code generates into .claude-plugin/types/, and the make-common files the bootstrap
+# docstring ends. Exempt, each for a stated reason: the API types Claude Code generates into
+# .claude-plugin/types/, and the make-common files the bootstrap
 # fetches (make-common's, under its MIT licence, named in the Makefile's MK_COMMON_FILES).
 # YAML, JSON and Markdown are never governed.
 
@@ -70,7 +69,6 @@ COPYRIGHT_RE='Copyright \(c\) [0-9]{4}(-[0-9]{4})? Roberto Leinardi$'
 # Path prefixes and exact paths that are not this project's own source.
 EXEMPT_PREFIXES=(
     ".claude-plugin/types/"
-    "scripts/arl/_vendor/"
 )
 EXEMPT_PATHS=(
     "scripts/bootstrap-mk-common.sh"

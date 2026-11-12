@@ -28,7 +28,7 @@ Guidance text is weaker than both. What contains it:
   readable. A path that fails is replaced with a gate-authored phrase in the prose and with
   ``-`` in the contract's ``file=`` slot.
 * Arm and resume refuse a guide containing either contract marker
-  (:data:`_CONTRACT_MARKERS`), and ``reviewer.parse`` already requires *exactly one* marker
+  (:data:`_CONTRACT_MARKERS`), and ``contract.parse`` already requires *exactly one* marker
   block -- a guide that induces a second one is a ``ContractError``, which blocks.
 * The verdict is recomputed from the ``FINDING`` lines with stricter-wins, so a coerced
   ``VERDICT APPROVED`` alongside a blocking finding still blocks.
@@ -109,7 +109,7 @@ PLACEHOLDER: Final = "<!-- ARL:PROJECT-GUIDANCE -->"
 MAX_GUIDE_BYTES: Final = 65536
 
 #: The reviewer contract's own markers. A guide containing either is refused at arm/resume:
-#: ``reviewer.parse`` requires exactly one marker block, so a guide that induces a second one
+#: ``contract.parse`` requires exactly one marker block, so a guide that induces a second one
 #: fails the contract -- which blocks, but blames the reviewer for the repository's doing.
 _CONTRACT_MARKERS: Final = ("<<<ARL-FINDINGS>>>", "<<<ARL-END>>>")
 
@@ -138,7 +138,7 @@ _SHA256_HEX_RE: Final = re.compile(r"[0-9a-f]{64}")
 #: illegal in it. No escape set fixes that, because the payload *is* the readable text. So the
 #: rule is inverted: a path is reproduced only when every character in it is one of these, and
 #: anything else is not rendered at all. No space, so no sentence; no backtick, asterisk or
-#: bracket, so no markdown span to close; no ``|`` or whitespace, so ``reviewer._FINDING_RE``
+#: bracket, so no markdown span to close; no ``|`` or whitespace, so ``contract.FINDING_RE``
 #: can carry what survives.
 _SHOWABLE_PATH_RE: Final = re.compile(r"[A-Za-z0-9._/@:+,~-]+")
 
@@ -480,7 +480,7 @@ def _display_path(path: str) -> str:
 def _contract_slot(path: str) -> str:
     """The path as the reviewer contract's ``file=`` slot can carry it, or ``-``.
 
-    ``reviewer._FINDING_RE`` matches ``file=`` per line and stops the value at ``|``, so a
+    ``contract.FINDING_RE`` matches ``file=`` per line and stops the value at ``|``, so a
     path containing either cannot be emitted there at all: telling the reviewer to write one
     would demand a line the gate then refuses to parse, turning "the guide tried to steer the
     verdict" -- the one finding this framing *requires* -- into a ``ContractError`` blamed on

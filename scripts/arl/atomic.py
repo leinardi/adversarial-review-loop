@@ -69,6 +69,7 @@ __all__ = [
     "verified_file",
     "write_atomic",
     "write_private_atomic",
+    "write_private_file",
 ]
 
 DIR_MODE = 0o700
@@ -193,7 +194,7 @@ def read_verified_file(path: Path, *, root: Path) -> bytes | None:
     they are the same operation on the same inode.
 
     It does **not**, on its own, make what a *different process* later opens by pathname safe;
-    see :func:`arl.reviewer.stage_attachments` for what is done about that and what remains.
+    a harness that inlines attachments reads them through this function for that reason.
 
     Answers ``None`` for anything it cannot establish, exactly as :func:`verified_file` does.
     """
@@ -335,6 +336,18 @@ def write_private_atomic(path: Path, text: str, *, root: Path, errors: str = "st
         # previous pointer -- and the hooks in a freshly armed worktree would then read the
         # old worktree and scope themselves out of the activation they were registered for.
         os.fsync(dir_fd)
+
+
+def write_private_file(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` with an explicit ``0600``, never inheriting the umask.
+
+    Not atomic: for files inside a directory the caller has just created for itself, such as a
+    review bundle. ``O_NOFOLLOW`` because such a directory may be recreated on every review, and
+    a leftover symlink at a name this is about to write would otherwise redirect the write.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, FILE_MODE)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
 
 
 def write_atomic(path: Path, text: str) -> None:

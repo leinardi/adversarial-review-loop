@@ -34,7 +34,7 @@ import pytest
 from conftest import config_with, git
 
 from arl import harness, report, state
-from arl.reviewer import Review, Target
+from arl.contract import Review, Target
 from arl.util import TRUNCATION_MARKER
 
 SESSION = "repsess"
@@ -114,7 +114,7 @@ def test_the_report_records_what_decided_it(act_dir: Path) -> None:
     assert "- verdict (recomputed by the gate): **CHANGES_REQUIRED**\n" in text
     assert "- base tree: `basetree`\n" in text
     assert "- head tree: `headtree`\n" in text
-    assert "- model: `opus` (variant `thinking`)\n" in text
+    assert f"- model: `{harness.get('opencode').default_model}` (variant `thinking`)\n" in text
     assert "- block_severity: `medium`\n" in text
     assert "- gate note: the reviewer timed out after 900s\n" in text
     assert "Returns success on a failed lookup" in text
@@ -153,19 +153,6 @@ def test_a_missing_raw_file_does_not_stop_the_report(act_dir: Path, tmp_path: Pa
 # --------------------------------------------------------------------------
 
 
-def test_a_continued_review_shows_its_session_and_round(act_dir: Path) -> None:
-    review = a_review(session="ses_abc12345", round=2)
-    text = report.store(review, a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
-    assert "- reviewer session: `ses_abc12345` (round 2, continued)\n" in text
-
-
-def test_a_fresh_sessions_first_round_is_not_called_continued(act_dir: Path) -> None:
-    review = a_review(session="ses_abc12345", round=1)
-    text = report.store(review, a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
-    assert "- reviewer session: `ses_abc12345` (round 1)\n" in text
-    assert "continued" not in text
-
-
 def test_a_session_less_review_shows_no_session_line(act_dir: Path) -> None:
     text = report.store(a_review(session=""), a_target(), seq="001", act_dir=act_dir, config=config_with()).read_text()
     assert "opencode session" not in text
@@ -187,7 +174,7 @@ def test_the_reason_leads_with_the_headline_and_ends_with_the_instruction() -> N
     text = report.reason(a_review(), "adversarial-review-loop: changes required.", config=config_with())
 
     assert text.startswith("adversarial-review-loop: changes required.\n")
-    assert text.endswith("Verify and address the findings above, then commit again. The commit is gated until the review passes.\n")
+    assert text.endswith("Verify and address the findings above, then ask for the review again.\n")
 
 
 def test_every_blocking_finding_is_quoted_inline() -> None:
@@ -337,39 +324,6 @@ def a_state(*, clarifications: int) -> state.State:
     st.load()
     st.update(clarifications=clarifications)
     return st
-
-
-def test_the_clarify_hint_names_the_remaining_budget(act_dir: Path) -> None:
-    hint = report.clarify_hint(state=a_state(clarifications=1), config=config_with(max_clarifications=3))
-    assert "Clarifications left: 2 of 3." in hint
-    assert 'clarify --question "..."' in hint
-    assert hint.endswith("3.")
-
-
-def test_the_clarify_hint_is_a_single_line(act_dir: Path) -> None:
-    """It is appended as its own line; a hint with newlines of its own would break that up."""
-    assert "\n" not in report.clarify_hint(state=a_state(clarifications=0), config=config_with())
-
-
-def test_the_clarify_hint_is_empty_once_the_allowance_is_spent(act_dir: Path) -> None:
-    config = config_with(max_clarifications=2)
-    assert report.clarify_hint(state=a_state(clarifications=2), config=config) == ""
-    # A counter past the limit (a lowered `max_clarifications` on a resumed activation) must
-    # not wrap round to a positive "left".
-    assert report.clarify_hint(state=a_state(clarifications=5), config=config) == ""
-    assert report.clarify_hint(state=a_state(clarifications=0), config=config_with(max_clarifications=0)) == ""
-
-
-def test_with_clarify_hint_leaves_a_headline_alone_when_the_allowance_is_spent(act_dir: Path) -> None:
-    config = config_with(max_clarifications=1)
-    assert report.with_clarify_hint("headline", state=a_state(clarifications=1), config=config) == "headline"
-    assert report.with_clarify_hint("headline", state=a_state(clarifications=0), config=config).startswith("headline\n\nIf a finding")
-
-
-def test_the_clarify_hint_names_the_entrypoint_the_gate_accepts(act_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/plugins/arl")
-    hint = report.clarify_hint(state=a_state(clarifications=0), config=config_with())
-    assert '`/plugins/arl/scripts/arl.sh clarify --question "..."`' in hint
 
 
 # --------------------------------------------------------------------------

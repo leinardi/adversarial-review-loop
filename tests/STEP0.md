@@ -6,6 +6,11 @@ This document is the procedure for settling that, once, before the mode is trust
 
 Budget about an hour, plus a handful of real model calls in session A.
 
+**v4 note.** Sessions A to I measured v3, the enforcement gate. The tooling they run
+(`tests/step0-fixture.sh`, `make dry-run`, `arl arm`, the `claude-code` harness) was removed in
+v4, so read them as a record of what was measured, not as a procedure to rerun. Session J
+measures the v4 mod surface and is current.
+
 ## Before you start
 
 - `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` set to `40` in `settings.json`, and Claude Code restarted since.

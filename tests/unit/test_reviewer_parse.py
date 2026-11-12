@@ -23,6 +23,7 @@ failure produces ``APPROVED``.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import stat
 import time
@@ -34,19 +35,19 @@ from reviewer_common import (
     MODE_VERDICTS,
     PLAIN_VERDICT,
     assert_descendant_never_ran,
-    build,
-    contract,
-    dirty,
+    contract_text,
     execute_fake,
     fake_reviewer_output,
     invocation,
+    review_round,
     spawner,
     target_for,
 )
 
-from arl import report, reviewer, state
+from arl import contract, harness, report, runner, state
 from arl.config import Config
-from arl.reviewer import Invocation, Review, ReviewerFailed, Target
+from arl.contract import Review, Target
+from arl.runner import Invocation, ReviewerFailed
 
 #: Shortens the SIGTERM-to-SIGKILL grace for this module. Requested by mark rather than
 #: made autouse in ``conftest.py``, which would change the constant for every unit test.
@@ -62,7 +63,7 @@ TARGET = Target(repo="/repo", base="b", head="h", scope="phase", phase=1)
 
 def invoke_fake(tmp_path: Path, mode: str, *, config: Config | None = None, **env: str) -> Path:
     run = invocation(tmp_path)
-    reviewer.invoke(
+    runner.invoke(
         TARGET,
         run,
         config=config or config_with(),
@@ -73,7 +74,7 @@ def invoke_fake(tmp_path: Path, mode: str, *, config: Config | None = None, **en
 
 def test_the_reviewer_seam_receives_the_bundle(tmp_path: Path) -> None:
     out = invoke_fake(tmp_path, "echo-bundle")
-    assert reviewer.FINDINGS_MARKER in out.read_text()
+    assert contract.FINDINGS_MARKER in out.read_text()
 
 
 def test_a_nonzero_reviewer_exit_is_a_failure(tmp_path: Path) -> None:
@@ -91,7 +92,7 @@ def test_a_slow_reviewer_times_out(tmp_path: Path) -> None:
 def test_a_missing_reviewer_is_a_failure_not_a_pass(tmp_path: Path) -> None:
     out = tmp_path / "reviewer.out"
     with pytest.raises(ReviewerFailed) as caught:
-        reviewer.invoke(
+        runner.invoke(
             TARGET,
             Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=out),
             config=config_with(),
@@ -106,7 +107,7 @@ def test_terminal_escapes_are_stripped(tmp_path: Path) -> None:
     script.chmod(0o755)
 
     out = tmp_path / "reviewer.out"
-    reviewer.invoke(
+    runner.invoke(
         TARGET,
         Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=out),
         config=config_with(),
@@ -128,7 +129,7 @@ def test_a_timed_out_reviewers_partial_output_is_still_kept(tmp_path: Path) -> N
 
     out = tmp_path / "reviewer.out"
     with pytest.raises(ReviewerFailed):
-        reviewer.invoke(
+        runner.invoke(
             TARGET,
             Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=out),
             config=config_with(timeout_sec=1),
@@ -147,7 +148,7 @@ def test_a_timeout_kills_what_the_reviewer_spawned(tmp_path: Path) -> None:
     marker = tmp_path / "descendant"
     started = time.monotonic()
     with pytest.raises(ReviewerFailed):
-        reviewer.invoke(
+        runner.invoke(
             TARGET,
             Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=tmp_path / "reviewer.out"),
             config=config_with(timeout_sec=1),
@@ -165,30 +166,16 @@ def test_a_timeout_kills_a_descendant_that_ignores_sigterm(tmp_path: Path, deaf:
     is the price of letting a build tear itself down, and ``timeout``, which never escalates
     at all, gives such a process the rest of time.
     """
-    monkeypatch.setattr(reviewer, "KILL_GRACE_SEC", 0.2)
+    monkeypatch.setattr(runner, "KILL_GRACE_SEC", 0.2)
     marker = tmp_path / f"deaf-{deaf}"
     started = time.monotonic()
     with pytest.raises(ReviewerFailed):
-        reviewer.invoke(
+        runner.invoke(
             TARGET,
             Invocation(bundle_dir=tmp_path, prompt_file=Path("prompt.md"), title="t", out_path=tmp_path / "reviewer.out"),
             config=config_with(timeout_sec=1),
             environ={**os.environ, "ARL_REVIEWER_CMD": str(spawner(tmp_path, marker, deaf=deaf, name=f"deaf-{deaf}.sh"))},
         )
-    assert_descendant_never_ran(marker, started=started)
-
-
-def test_a_timeout_kills_what_verify_cmd_spawned(activation: state.State, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    marker = tmp_path / "verify-descendant"
-    script = spawner(tmp_path, marker, deaf=True)
-    dest = activation.act_dir / "bundles" / "001"
-
-    monkeypatch.setattr(reviewer, "VERIFY_TIMEOUT_SEC", 1)
-    monkeypatch.setattr(reviewer, "KILL_GRACE_SEC", 0.2)
-    started = time.monotonic()
-    build(activation, git_repo, dest, config_with(verify_cmd=str(script)))
-
-    assert "[exit status: 124]" in (dest / "verify.txt").read_text()
     assert_descendant_never_ran(marker, started=started)
 
 
@@ -206,7 +193,7 @@ def test_reviewer_failed_carries_the_exit_status(tmp_path: Path) -> None:
 def test_a_timeout_carries_its_own_exit_status(tmp_path: Path) -> None:
     with pytest.raises(ReviewerFailed) as caught:
         invoke_fake(tmp_path, "slow", config=config_with(timeout_sec=1))
-    assert caught.value.status in reviewer._TIMEOUT_STATUSES
+    assert caught.value.status in runner._TIMEOUT_STATUSES
 
 
 @pytest.mark.parametrize(
@@ -229,7 +216,7 @@ def test_classify_op_failure_is_an_allow_list_not_a_catch_all(tmp_path: Path, st
     out = tmp_path / "o"
     out.write_text("some ordinary CLI error text, no known signal in it\n")
     exc = ReviewerFailed(f"the reviewer exited with status {status}", status=status)
-    assert reviewer._classify_op_failure(exc, out) == kind
+    assert runner.classify_op_failure(exc, out) == kind
 
 
 @pytest.mark.parametrize(
@@ -246,7 +233,7 @@ def test_a_matched_rate_limit_signal_is_transient_even_on_a_plain_exit(tmp_path:
     out = tmp_path / "o"
     out.write_text(text)
     exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert reviewer._classify_op_failure(exc, out) == "transient"
+    assert runner.classify_op_failure(exc, out) == "transient"
 
 
 @pytest.mark.parametrize("text", ["command not found\n", "permission denied\n", ""])
@@ -254,16 +241,16 @@ def test_output_with_no_rate_limit_phrase_stays_operational(tmp_path: Path, text
     out = tmp_path / "o"
     out.write_text(text)
     exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert reviewer._classify_op_failure(exc, out) == "operational"
+    assert runner.classify_op_failure(exc, out) == "operational"
 
 
 def test_the_rate_limit_signal_is_only_read_from_the_head_of_the_output(tmp_path: Path) -> None:
     """ "Bounded" -- a signal past the head is not scanned for, so a large transcript is never
     read in full just to classify a failure."""
     out = tmp_path / "o"
-    out.write_text(("x" * reviewer._TRANSIENT_OUTPUT_HEAD_BYTES) + "rate limit exceeded\n")
+    out.write_text(("x" * runner._TRANSIENT_OUTPUT_HEAD_BYTES) + "rate limit exceeded\n")
     exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert reviewer._classify_op_failure(exc, out) == "operational"
+    assert runner.classify_op_failure(exc, out) == "operational"
 
 
 def test_classify_op_failure_never_reads_the_whole_file_into_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -280,7 +267,7 @@ def test_classify_op_failure_never_reads_the_whole_file_into_memory(tmp_path: Pa
 
     monkeypatch.setattr(Path, "read_bytes", forbidden)
     exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert reviewer._classify_op_failure(exc, out) == "transient"
+    assert runner.classify_op_failure(exc, out) == "transient"
 
 
 @pytest.mark.parametrize("text", ["rateXlimit exceeded\n", "notarratelimiter\n", "arbitraryrate_limitingtoken\n", "rate limitation for this month\n"])
@@ -293,7 +280,7 @@ def test_the_rate_limit_pattern_does_not_glue_across_unrelated_characters(tmp_pa
     out = tmp_path / "o"
     out.write_text(text)
     exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert reviewer._classify_op_failure(exc, out) == "operational"
+    assert runner.classify_op_failure(exc, out) == "operational"
 
 
 @pytest.mark.parametrize("text", ["rate_limit_exceeded\n", "RATE-LIMIT hit\n", "ratelimit reached\n"])
@@ -301,18 +288,18 @@ def test_every_documented_rate_limit_separator_still_matches(tmp_path: Path, tex
     out = tmp_path / "o"
     out.write_text(text)
     exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert reviewer._classify_op_failure(exc, out) == "transient"
+    assert runner.classify_op_failure(exc, out) == "transient"
 
 
 def test_a_missing_out_path_falls_back_to_operational(tmp_path: Path) -> None:
     exc = ReviewerFailed("the reviewer exited with status 1", status=1)
-    assert reviewer._classify_op_failure(exc, tmp_path / "never-written") == "operational"
+    assert runner.classify_op_failure(exc, tmp_path / "never-written") == "operational"
 
 
 def test_run_invocation_classifies_a_timeout_as_transient(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ARL_REVIEWER_CMD", str(FAKE_REVIEWER))
     monkeypatch.setenv("ARL_FAKE_MODE", "slow")
-    review, invoked = reviewer._run_invocation(TARGET, invocation(tmp_path), config=config_with(timeout_sec=1))
+    review, invoked = runner.run_invocation(TARGET, invocation(tmp_path), config=config_with(timeout_sec=1))
     assert invoked is False
     assert review.verdict == "OP_FAILURE"
     assert review.kind == "transient"
@@ -321,17 +308,29 @@ def test_run_invocation_classifies_a_timeout_as_transient(tmp_path: Path, monkey
 def test_run_invocation_classifies_a_plain_nonzero_exit_as_operational(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ARL_REVIEWER_CMD", str(FAKE_REVIEWER))
     monkeypatch.setenv("ARL_FAKE_MODE", "nonzero")
-    review, invoked = reviewer._run_invocation(TARGET, invocation(tmp_path), config=config_with())
+    review, invoked = runner.run_invocation(TARGET, invocation(tmp_path), config=config_with())
     assert invoked is False
     assert review.verdict == "OP_FAILURE"
     assert review.kind == "operational"
 
 
-def test_execute_classifies_a_bundle_error_as_kind_bundle(activation: state.State, git_repo: Path) -> None:
-    target = Target(repo=str(git_repo), base="deadbeef", head=dirty(git_repo), scope="phase", phase=1)
-    review = reviewer.execute(target, state=activation, config=config_with())
+def test_a_command_that_cannot_be_composed_is_kind_bundle_and_never_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A harness refusing to compose the command is a failure to launch, not a reviewer
+    failure and never an approval: ``run_invocation`` reports it as ``kind="bundle"``."""
+
+    def refuse(_self: object, _spec: harness.ReviewSpec) -> harness.Command:
+        raise harness.PayloadError("an attachment could not be read")
+
+    monkeypatch.delenv("ARL_REVIEWER_CMD", raising=False)
+    monkeypatch.setattr(type(harness.selected(config_with())), "review_command", refuse)
+
+    run = dataclasses.replace(invocation(tmp_path), prompt_text="Review the change.")
+    review, invoked = runner.run_invocation(TARGET, run, config=config_with())
+
+    assert invoked is False
     assert review.verdict == "OP_FAILURE"
     assert review.kind == "bundle"
+    assert review.error == "an attachment could not be read"
 
 
 # --------------------------------------------------------------------------
@@ -342,13 +341,13 @@ def test_execute_classifies_a_bundle_error_as_kind_bundle(activation: state.Stat
 @pytest.mark.parametrize(("mode", "verdict"), MODE_VERDICTS)
 def test_each_reviewer_shape_reaches_the_right_verdict(tmp_path: Path, mode: str, verdict: str) -> None:
     out = fake_reviewer_output(tmp_path, mode)
-    assert reviewer.parse(out, config=config_with()).verdict == verdict
+    assert contract.parse(out, config=config_with()).verdict == verdict
 
 
 @pytest.mark.parametrize(("mode", "verdict"), MODE_VERDICTS)
 def test_no_reviewer_shape_produces_an_approval_it_did_not_earn(tmp_path: Path, mode: str, verdict: str) -> None:
     """Rule 1, stated as its own assertion so a future change cannot quietly relax it."""
-    parsed = reviewer.parse(fake_reviewer_output(tmp_path, mode), config=config_with())
+    parsed = contract.parse(fake_reviewer_output(tmp_path, mode), config=config_with())
     if verdict != "APPROVED":
         assert parsed.verdict != "APPROVED"
         assert parsed.error or parsed.findings
@@ -357,7 +356,7 @@ def test_no_reviewer_shape_produces_an_approval_it_did_not_earn(tmp_path: Path, 
 def test_missing_markers_are_a_failure(tmp_path: Path) -> None:
     out = tmp_path / "o"
     out.write_text("VERDICT APPROVED\n")
-    parsed = reviewer.parse(out, config=config_with())
+    parsed = contract.parse(out, config=config_with())
     assert parsed.verdict == "OP_FAILURE"
     assert "missing the <<<ARL-FINDINGS>>> / <<<ARL-END>>> markers" in parsed.error
 
@@ -380,7 +379,7 @@ def test_output_carrying_a_nul_byte_is_refused(tmp_path: Path, payload: bytes) -
     """
     out = tmp_path / "o"
     out.write_bytes(payload)
-    parsed = reviewer.parse(out, config=config_with())
+    parsed = contract.parse(out, config=config_with())
 
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.error == "the reviewer output contains a NUL byte, so the contract cannot be validated"
@@ -390,13 +389,13 @@ def test_a_nul_byte_inside_a_finding_line_is_refused(tmp_path: Path) -> None:
     out = tmp_path / "o"
     out.write_bytes(b"prose\n<<<ARL-FINDINGS>>>\nFINDING severity=critical actionable=n\0o file=a | x\nVERDICT APPROVED\n<<<ARL-END>>>\n")
 
-    mine = reviewer.parse(out, config=config_with())
+    mine = contract.parse(out, config=config_with())
 
     assert mine.verdict == "OP_FAILURE"
 
 
 def test_a_missing_output_file_is_a_failure(tmp_path: Path) -> None:
-    parsed = reviewer.parse(tmp_path / "never-written", config=config_with())
+    parsed = contract.parse(tmp_path / "never-written", config=config_with())
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.error == "the reviewer produced no output"
     assert parsed.kind == "contract"
@@ -405,17 +404,17 @@ def test_a_missing_output_file_is_a_failure(tmp_path: Path) -> None:
 def test_missing_markers_carry_kind_contract(tmp_path: Path) -> None:
     out = tmp_path / "o"
     out.write_text("VERDICT APPROVED\n")
-    assert reviewer.parse(out, config=config_with()).kind == "contract"
+    assert contract.parse(out, config=config_with()).kind == "contract"
 
 
 def test_a_nul_refusal_carries_kind_contract(tmp_path: Path) -> None:
     out = tmp_path / "o"
     out.write_bytes(b"\0prose\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>\n")
-    assert reviewer.parse(out, config=config_with()).kind == "contract"
+    assert contract.parse(out, config=config_with()).kind == "contract"
 
 
 def test_an_unrecognised_verdict_carries_kind_contract(tmp_path: Path) -> None:
-    parsed = parse_text(tmp_path, contract("VERDICT MAYBE"))
+    parsed = parse_text(tmp_path, contract_text("VERDICT MAYBE"))
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.kind == "contract"
 
@@ -427,7 +426,7 @@ def test_output_that_is_not_valid_utf8_is_refused(tmp_path: Path) -> None:
     out = tmp_path / "o"
     out.write_bytes(b"prose\n<<<ARL-FINDINGS>>>\nFINDING severity=high actionable=yes file=a | bad \xff byte\nVERDICT APPROVED\n<<<ARL-END>>>\n")
 
-    parsed = reviewer.parse(out, config=config_with())
+    parsed = contract.parse(out, config=config_with())
 
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.error == "the reviewer output is not valid UTF-8, so the contract cannot be validated"
@@ -444,7 +443,7 @@ def test_a_non_utf8_review_appends_no_round_history_and_still_reports(activation
     script.chmod(0o755)
     os.environ["ARL_REVIEWER_CMD"] = str(script)
 
-    review = reviewer.execute(target_for(git_repo), state=activation, config=config_with())
+    review = review_round(activation, target_for(git_repo), config=config_with())
 
     assert review.verdict == "OP_FAILURE"
     assert activation.get_array_of_dicts("round_history") == []
@@ -454,12 +453,12 @@ def test_a_non_utf8_review_appends_no_round_history_and_still_reports(activation
 def parse_text(tmp_path: Path, text: str, config: Config | None = None) -> Review:
     out = tmp_path / "o"
     out.write_text(text)
-    return reviewer.parse(out, config=config or config_with())
+    return contract.parse(out, config=config or config_with())
 
 
 def test_an_unlabelled_severity_is_a_contract_failure(tmp_path: Path) -> None:
     """Omitting the field is not a way under the threshold, and not a finding to drop."""
-    parsed = parse_text(tmp_path, contract("FINDING actionable=yes file=a.txt:1 | No severity given", "VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text("FINDING actionable=yes file=a.txt:1 | No severity given", "VERDICT APPROVED"))
 
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.error.startswith("the reviewer emitted a line the contract does not allow: FINDING actionable=yes")
@@ -467,12 +466,12 @@ def test_an_unlabelled_severity_is_a_contract_failure(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("severity", ["spicy", "CRITICAL", "sev5", ""])
 def test_a_severity_outside_the_documented_set_is_a_contract_failure(tmp_path: Path, severity: str) -> None:
-    parsed = parse_text(tmp_path, contract(f"FINDING severity={severity} actionable=yes file=a.txt:1 | Odd label", "VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text(f"FINDING severity={severity} actionable=yes file=a.txt:1 | Odd label", "VERDICT APPROVED"))
     assert parsed.verdict == "OP_FAILURE"
 
 
 def test_an_actionable_finding_blocks(tmp_path: Path) -> None:
-    parsed = parse_text(tmp_path, contract("FINDING severity=high actionable=yes file=a | x", "VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text("FINDING severity=high actionable=yes file=a | x", "VERDICT APPROVED"))
     assert parsed.verdict == "CHANGES_REQUIRED"
 
 
@@ -483,14 +482,14 @@ def test_an_actionable_field_the_gate_cannot_read_never_approves(tmp_path: Path,
     Every one of these used to be read as "not actionable", so a ``critical`` finding was
     dropped and the reviewer's own ``APPROVED`` stood.
     """
-    parsed = parse_text(tmp_path, contract(f"FINDING severity=critical actionable={value} file=a | x", "VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text(f"FINDING severity=critical actionable={value} file=a | x", "VERDICT APPROVED"))
 
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.findings == "" and parsed.all_findings == ""
 
 
 def test_actionable_no_is_recorded_without_blocking(tmp_path: Path) -> None:
-    parsed = parse_text(tmp_path, contract("FINDING severity=critical actionable=no file=a | x", "VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text("FINDING severity=critical actionable=no file=a | x", "VERDICT APPROVED"))
     assert parsed.verdict == "APPROVED"
     assert parsed.all_findings and not parsed.findings
 
@@ -509,7 +508,7 @@ def test_actionable_no_is_recorded_without_blocking(tmp_path: Path) -> None:
 )
 def test_only_the_documented_finding_shape_is_accepted(tmp_path: Path, line: str) -> None:
     """The last case is legal -- trailing text is detail -- and is here to pin that down."""
-    parsed = parse_text(tmp_path, contract(line, "VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text(line, "VERDICT APPROVED"))
     if line.endswith("severity=low"):
         assert parsed.verdict == "CHANGES_REQUIRED"
     else:
@@ -517,24 +516,24 @@ def test_only_the_documented_finding_shape_is_accepted(tmp_path: Path, line: str
 
 
 def test_a_path_with_spaces_is_still_a_finding(tmp_path: Path) -> None:
-    parsed = parse_text(tmp_path, contract("FINDING severity=high actionable=yes file=my file.txt:1 | x", "VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text("FINDING severity=high actionable=yes file=my file.txt:1 | x", "VERDICT APPROVED"))
     assert parsed.verdict == "CHANGES_REQUIRED"
 
 
 def test_a_line_the_contract_does_not_allow_fails_the_review(tmp_path: Path) -> None:
-    parsed = parse_text(tmp_path, contract("Nothing worth reporting, honestly.", "VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text("Nothing worth reporting, honestly.", "VERDICT APPROVED"))
 
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.error == "the reviewer emitted a line the contract does not allow: Nothing worth reporting, honestly."
 
 
 def test_the_echoed_line_is_bounded(tmp_path: Path) -> None:
-    parsed = parse_text(tmp_path, contract("z" * 5000, "VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text("z" * 5000, "VERDICT APPROVED"))
     assert len(parsed.error) < 200
 
 
 def test_blank_lines_inside_the_block_are_allowed(tmp_path: Path) -> None:
-    parsed = parse_text(tmp_path, contract("", "   ", "VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text("", "   ", "VERDICT APPROVED"))
     assert parsed.verdict == "APPROVED"
 
 
@@ -542,11 +541,11 @@ def test_a_stray_end_marker_above_the_block_never_approves(tmp_path: Path) -> No
     """The sed range took the first opening marker, so findings above it simply vanished."""
     text = (
         "prose\n"
-        f"{reviewer.END_MARKER}\n"
+        f"{contract.END_MARKER}\n"
         "FINDING severity=critical actionable=yes file=a.txt:7 | Nil deref\n"
-        f"{reviewer.FINDINGS_MARKER}\n"
+        f"{contract.FINDINGS_MARKER}\n"
         "VERDICT APPROVED\n"
-        f"{reviewer.END_MARKER}\n"
+        f"{contract.END_MARKER}\n"
     )
     parsed = parse_text(tmp_path, text)
 
@@ -555,7 +554,7 @@ def test_a_stray_end_marker_above_the_block_never_approves(tmp_path: Path) -> No
 
 
 def test_two_marker_blocks_never_approve(tmp_path: Path) -> None:
-    text = contract("FINDING severity=critical actionable=yes file=a | boom") + contract("VERDICT APPROVED")
+    text = contract_text("FINDING severity=critical actionable=yes file=a | boom") + contract_text("VERDICT APPROVED")
     parsed = parse_text(tmp_path, text)
 
     assert parsed.verdict == "OP_FAILURE"
@@ -573,7 +572,7 @@ def test_two_marker_blocks_never_approve(tmp_path: Path) -> None:
 )
 def test_a_marker_buried_in_a_line_does_not_open_the_block(tmp_path: Path, marker_line: str) -> None:
     """Substring matching let a contract smuggled into a sentence parse as the real one."""
-    parsed = parse_text(tmp_path, f"{marker_line}\nVERDICT APPROVED\n{reviewer.END_MARKER}\n")
+    parsed = parse_text(tmp_path, f"{marker_line}\nVERDICT APPROVED\n{contract.END_MARKER}\n")
 
     assert parsed.verdict == "OP_FAILURE"
     assert "missing the" in parsed.error
@@ -581,23 +580,23 @@ def test_a_marker_buried_in_a_line_does_not_open_the_block(tmp_path: Path, marke
 
 @pytest.mark.parametrize("marker_line", ["<<<ARL-END>>> and more", "text <<<ARL-END>>>"])
 def test_a_buried_end_marker_does_not_close_the_block(tmp_path: Path, marker_line: str) -> None:
-    parsed = parse_text(tmp_path, f"prose\n{reviewer.FINDINGS_MARKER}\nVERDICT APPROVED\n{marker_line}\n")
+    parsed = parse_text(tmp_path, f"prose\n{contract.FINDINGS_MARKER}\nVERDICT APPROVED\n{marker_line}\n")
     assert parsed.verdict == "OP_FAILURE"
 
 
 @pytest.mark.parametrize("pad", ["", "  ", "\t"])
 def test_surrounding_whitespace_on_a_marker_is_tolerated(tmp_path: Path, pad: str) -> None:
-    parsed = parse_text(tmp_path, f"prose\n{pad}{reviewer.FINDINGS_MARKER}{pad}\nVERDICT APPROVED\n{pad}{reviewer.END_MARKER}{pad}\n")
+    parsed = parse_text(tmp_path, f"prose\n{pad}{contract.FINDINGS_MARKER}{pad}\nVERDICT APPROVED\n{pad}{contract.END_MARKER}{pad}\n")
     assert parsed.verdict == "APPROVED"
 
 
 def test_one_line_holding_both_markers_never_approves(tmp_path: Path) -> None:
-    parsed = parse_text(tmp_path, f"prose\n{reviewer.FINDINGS_MARKER} {reviewer.END_MARKER}\nVERDICT APPROVED\n")
+    parsed = parse_text(tmp_path, f"prose\n{contract.FINDINGS_MARKER} {contract.END_MARKER}\nVERDICT APPROVED\n")
     assert parsed.verdict == "OP_FAILURE"
 
 
 def test_the_threshold_is_applied(tmp_path: Path) -> None:
-    text = contract(
+    text = contract_text(
         "FINDING severity=medium actionable=yes file=a | below",
         "FINDING severity=high actionable=yes file=b | at",
         "VERDICT APPROVED",
@@ -613,7 +612,7 @@ def test_a_critical_block_severity_blocks_only_critical_findings(tmp_path: Path)
     """`critical` is a real fifth tier the reviewer contract's `FINDING` regex accepts, not a
     typo that should fall through `threshold_rank`'s unrecognised-value fallback (rank 1,
     which would block on everything instead of the critical-only threshold asked for)."""
-    text = contract(
+    text = contract_text(
         "FINDING severity=high actionable=yes file=a | serious but not critical",
         "FINDING severity=critical actionable=yes file=b | critical",
         "VERDICT APPROVED",
@@ -632,7 +631,7 @@ def test_an_unrecognised_block_severity_blocks_everything_rather_than_nothing(tm
     finding would sail through APPROVED. The threshold must use `threshold_rank`, whose
     fallback is the opposite direction (rank 1), so a typo'd or unrecognised threshold makes
     the gate block on everything rather than on nothing (Rule 1)."""
-    text = contract(
+    text = contract_text(
         "FINDING severity=low actionable=yes file=a | trivial-looking",
         "VERDICT APPROVED",
     )
@@ -646,7 +645,7 @@ def test_an_unrecognised_block_severity_blocks_everything_rather_than_nothing(tm
 def test_an_actionable_low_finding_is_recorded_but_does_not_block_at_the_default_threshold(tmp_path: Path) -> None:
     """``block_severity`` defaults to ``medium``: an actionable ``low`` finding is real
     evidence, kept in ``all_findings``, but it no longer meets the threshold on its own."""
-    text = contract(
+    text = contract_text(
         "FINDING severity=low actionable=yes file=a | trivial-looking",
         "VERDICT APPROVED",
     )
@@ -659,7 +658,7 @@ def test_an_actionable_low_finding_is_recorded_but_does_not_block_at_the_default
 
 
 def test_an_actionable_low_finding_still_blocks_when_the_threshold_is_lowered(tmp_path: Path) -> None:
-    text = contract(
+    text = contract_text(
         "FINDING severity=low actionable=yes file=a | trivial-looking",
         "VERDICT APPROVED",
     )
@@ -675,7 +674,7 @@ def test_the_gate_actually_approves_an_actionable_low_finding_at_the_default_thr
     finding alongside its own ``VERDICT APPROVED`` must have that verdict stand at the default
     threshold -- not merely have ``review.findings`` come back empty while some other path
     still forces ``CHANGES_REQUIRED``."""
-    text = contract(
+    text = contract_text(
         "FINDING severity=low actionable=yes file=a.txt:1 | Could be named better",
         "VERDICT APPROVED",
     )
@@ -686,14 +685,14 @@ def test_the_gate_actually_approves_an_actionable_low_finding_at_the_default_thr
 
 
 def test_an_unrecognised_verdict_is_a_failure(tmp_path: Path) -> None:
-    parsed = parse_text(tmp_path, contract("VERDICT MAYBE"))
+    parsed = parse_text(tmp_path, contract_text("VERDICT MAYBE"))
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.error == "the reviewer emitted an unrecognised verdict: MAYBE"
 
 
 @pytest.mark.parametrize("line", ["VERDICT APPROVED", "  VERDICT: APPROVED", "VERDICT:APPROVED", "VERDICT   APPROVED   "])
 def test_the_verdict_line_is_read_the_way_the_shell_read_it(tmp_path: Path, line: str) -> None:
-    assert parse_text(tmp_path, contract(line)).verdict == "APPROVED"
+    assert parse_text(tmp_path, contract_text(line)).verdict == "APPROVED"
 
 
 @pytest.mark.parametrize(
@@ -702,14 +701,14 @@ def test_the_verdict_line_is_read_the_way_the_shell_read_it(tmp_path: Path, line
 )
 def test_a_second_verdict_line_fails_the_review(tmp_path: Path, verdicts: tuple[str, str]) -> None:
     """Last-wins let a trailing APPROVED overrule the reviewer's own CHANGES_REQUIRED."""
-    parsed = parse_text(tmp_path, contract(*verdicts))
+    parsed = parse_text(tmp_path, contract_text(*verdicts))
     assert parsed.verdict == "OP_FAILURE"
     assert parsed.error == "the reviewer emitted more than one VERDICT line"
 
 
 def test_the_findings_cap_escalates_instead_of_trimming(tmp_path: Path) -> None:
     lines = [f"FINDING severity=low actionable=no file=a:{i} | finding {i}" for i in range(6)]
-    parsed = parse_text(tmp_path, contract(*lines, "VERDICT APPROVED"), config_with(max_findings=5))
+    parsed = parse_text(tmp_path, contract_text(*lines, "VERDICT APPROVED"), config_with(max_findings=5))
 
     assert parsed.verdict == "NEEDS_HUMAN"
     assert "above max_findings (5)" in parsed.error
@@ -718,20 +717,20 @@ def test_the_findings_cap_escalates_instead_of_trimming(tmp_path: Path) -> None:
 
 def test_the_findings_byte_cap_escalates(tmp_path: Path) -> None:
     parsed = parse_text(
-        tmp_path, contract("FINDING severity=low actionable=no file=a | " + "x" * 500, "VERDICT APPROVED"), config_with(max_findings_bytes=100)
+        tmp_path, contract_text("FINDING severity=low actionable=no file=a | " + "x" * 500, "VERDICT APPROVED"), config_with(max_findings_bytes=100)
     )
     assert parsed.verdict == "NEEDS_HUMAN"
     assert "above max_findings_bytes (100)" in parsed.error
 
 
 def test_prose_stops_at_the_marker(tmp_path: Path) -> None:
-    parsed = parse_text(tmp_path, contract("VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text("VERDICT APPROVED"))
     assert parsed.prose == "prose line"
 
 
 def test_a_carriage_return_does_not_split_a_finding(tmp_path: Path) -> None:
     """``grep``/``sed`` break on ``\n`` alone; ``str.splitlines`` also breaks on ``\r``."""
-    parsed = parse_text(tmp_path, contract("FINDING severity=high actionable=yes file=a | x\ry", "VERDICT APPROVED"))
+    parsed = parse_text(tmp_path, contract_text("FINDING severity=high actionable=yes file=a | x\ry", "VERDICT APPROVED"))
     assert parsed.verdict == "CHANGES_REQUIRED"
 
 
@@ -751,7 +750,7 @@ def test_a_full_review_stores_a_report_and_bumps_the_sequence(activation: state.
     assert activation.get_int("report_seq") == 1
     assert Path(review.report).is_file()
     assert Path(review.report).name == "001-phase1-changes_required.md"
-    assert Path(review.raw).read_text().count(reviewer.FINDINGS_MARKER) == 1
+    assert Path(review.raw).read_text().count(contract.FINDINGS_MARKER) == 1
     assert "Returns success on a failed lookup" in review.findings
 
 
@@ -800,11 +799,11 @@ _RETRACTION = "SUPERSEDES round=1 file=a.txt:1 | the premise was wrong"
 
 def test_a_clarify_reply_with_no_markers_is_all_prose() -> None:
     text = "Just an answer.\nOn two lines.\n"
-    assert reviewer.parse_clarify(text) == reviewer.ClarifyReply(prose=text)
+    assert contract.parse_clarify(text) == contract.ClarifyReply(prose=text)
 
 
 def test_a_clarify_retraction_block_is_split_from_the_prose_above_it() -> None:
-    reply = reviewer.parse_clarify(f"You are right.\n\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n\n<<<ARL-END>>>\n")
+    reply = contract.parse_clarify(f"You are right.\n\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n\n<<<ARL-END>>>\n")
     assert reply.prose == "You are right."
     assert reply.supersedes == (_RETRACTION,)
     assert reply.problem == ""
@@ -823,7 +822,7 @@ def test_a_clarify_retraction_block_is_split_from_the_prose_above_it() -> None:
 def test_a_clarify_block_holding_anything_but_supersedes_yields_no_retraction(block_line: str) -> None:
     """A ``FINDING`` or a ``VERDICT`` in a clarify block is a re-review, which a clarify is not.
     The valid line beside it is not salvaged: a block that breaks the contract yields nothing."""
-    reply = reviewer.parse_clarify(f"Prose above.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n{block_line}\n<<<ARL-END>>>\n")
+    reply = contract.parse_clarify(f"Prose above.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n{block_line}\n<<<ARL-END>>>\n")
     assert reply.supersedes == ()
     assert reply.problem
     assert reply.prose == "Prose above.", "the prose above a located block is still returned"
@@ -840,7 +839,7 @@ def test_a_clarify_block_holding_anything_but_supersedes_yields_no_retraction(bl
     ids=["two-blocks", "inverted", "no-end-marker", "no-start-marker"],
 )
 def test_a_clarify_block_that_cannot_be_located_yields_no_retraction(text: str) -> None:
-    reply = reviewer.parse_clarify(text)
+    reply = contract.parse_clarify(text)
     assert reply.supersedes == ()
     assert reply.problem
     assert reply.prose == text, "with no block located, the whole reply is the prose"
@@ -860,27 +859,27 @@ def test_a_clarify_block_followed_by_text_yields_no_retraction(trailing: str) ->
     """The block must end the reply. Text after it can take the retraction back, so recording the
     block while dropping that text would report a retraction the reviewer no longer makes."""
     text = f"You are right.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n<<<ARL-END>>>\n\n{trailing}\n"
-    reply = reviewer.parse_clarify(text)
+    reply = contract.parse_clarify(text)
     assert reply.supersedes == ()
     assert "must end the reply" in reply.problem
     assert reply.prose == text, "the trailing text is shown, not hidden"
 
 
 def test_blank_lines_after_a_clarify_block_are_allowed() -> None:
-    reply = reviewer.parse_clarify(f"You are right.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n<<<ARL-END>>>\n\n  \n\t\n")
+    reply = contract.parse_clarify(f"You are right.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n<<<ARL-END>>>\n\n  \n\t\n")
     assert reply.supersedes == (_RETRACTION,)
     assert reply.problem == ""
 
 
 def test_an_empty_clarify_block_yields_no_retraction() -> None:
-    reply = reviewer.parse_clarify("Prose.\n<<<ARL-FINDINGS>>>\n\n<<<ARL-END>>>\n")
+    reply = contract.parse_clarify("Prose.\n<<<ARL-FINDINGS>>>\n\n<<<ARL-END>>>\n")
     assert reply.supersedes == ()
     assert "no SUPERSEDES" in reply.problem
     assert reply.prose == "Prose."
 
 
 def test_a_clarify_block_carrying_a_nul_byte_yields_no_retraction() -> None:
-    reply = reviewer.parse_clarify(f"Prose.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\0\n<<<ARL-END>>>\n")
+    reply = contract.parse_clarify(f"Prose.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\0\n<<<ARL-END>>>\n")
     assert reply.supersedes == ()
     assert "NUL" in reply.problem
 
@@ -889,6 +888,23 @@ def test_a_clarify_block_that_is_not_valid_utf8_yields_no_retraction() -> None:
     """``_decode`` keeps invalid bytes as lone surrogates, and one reaching ``clarify_history``
     could not be encoded when ``state.json`` is saved."""
     raw = f"Prose.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}".encode() + b"\xff\n<<<ARL-END>>>\n"
-    reply = reviewer.parse_clarify(raw.decode("utf-8", "surrogateescape"))
+    reply = contract.parse_clarify(raw.decode("utf-8", "surrogateescape"))
     assert reply.supersedes == ()
     assert "UTF-8" in reply.problem
+
+
+def test_a_finding_detail_with_a_unicode_line_separator_stays_one_record(tmp_path: Path) -> None:
+    """Records split on ``\\n`` only, never ``str.splitlines``: a valid detail carrying U+2028
+    stays one finding instead of two fragments, the second of which breaks the contract."""
+    out = tmp_path / "reviewer.out"
+    out.write_text(
+        "Look.\n\n<<<ARL-FINDINGS>>>\n"
+        "FINDING severity=high actionable=yes file=a.txt:1 | first line\u2028second line\n"
+        "VERDICT CHANGES_REQUIRED\n<<<ARL-END>>>\n",
+        encoding="utf-8",
+    )
+    assert len(contract.records(out.read_text(encoding="utf-8"))) == 6
+    review = contract.parse(out, config=config_with())
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert len(contract.records(review.findings)) == 1, f"the U+2028 must not have split the record: {review.findings!r}"
+    assert "\u2028second line" in review.findings

@@ -29,82 +29,40 @@ it is enforced by the signatures.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from arl import commands, harness
+from arl import harness
 from arl.atomic import ensure_private_dir, write_private_atomic
 from arl.config import Config
 from arl.paths import state_root
 from arl.util import truncate
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle broken for the type checker only
-    from arl.reviewer import Review, Target
-    from arl.state import State
+    from arl.contract import Review, Target
 
 __all__ = [
     "AcceptRecord",
     "accept_report_path",
-    "clarify_hint",
     "deferred_text",
     "list_reports",
-    "promote_accept",
     "reason",
     "render",
     "render_accept",
     "render_report",
     "report_path",
-    "stage_accept",
     "store",
-    "with_clarify_hint",
 ]
 
-_FOOTER = "Verify and address the findings above, then commit again. The commit is gated until the review passes.\n"
+_FOOTER = "Verify and address the findings above, then ask for the review again.\n"
 
 _DEFERRED_INTRO = (
     "Deferred findings -- actionable, at or above block_severity, but new and outside the paths changed since the "
     "previous round, so below late_block_severity they did not block this {what}. Fix them now if cheap; they are "
     "recorded, and if this phase is reviewed again they will block:"
 )
-
-
-_CLARIFY_HINT = (
-    "If a finding is ambiguous, or contradicts an earlier round, ask one question with "
-    '`{entrypoint} clarify --question "..."` before guessing at a fix -- a wrong guess burns another whole round. '
-    "Clarifications left: {left} of {limit}."
-)
-
-
-def clarify_hint(*, state: State, config: Config) -> str:
-    """The line every blocking phase verdict carries, or "" when the allowance is spent.
-
-    Claude used ``clarify`` zero times across two full activations, so the hint gets its own
-    line rather than trailing a headline sentence, and names what is left: an allowance whose
-    size is invisible reads like something to save for later, and never gets spent at all.
-
-    Empty when nothing is left, so a caller can append it unconditionally -- pointing at a
-    command that can only refuse would cost a turn to discover. Only phase-scoped verdicts
-    should show it: ``clarify`` targets the current phase's latest ``round_history`` entry, and
-    a final cumulative review has none.
-    """
-    limit = config.as_int("max_clarifications")
-    left = max(limit - state.get_int("clarifications"), 0)
-    if left == 0:
-        return ""
-    return _CLARIFY_HINT.format(entrypoint=commands.entrypoint(), left=left, limit=limit)
-
-
-def with_clarify_hint(headline: str, *, state: State, config: Config) -> str:
-    """``headline`` with :func:`clarify_hint` under it, as a paragraph of its own.
-
-    Unchanged when the allowance is spent, so both blocking phase paths -- the commit gate and
-    the Stop sweep -- can call it unconditionally.
-    """
-    hint = clarify_hint(state=state, config=config)
-    return f"{headline}\n\n{hint}" if hint else headline
 
 
 def deferred_text(review: Review, *, what: str) -> str:
@@ -128,19 +86,6 @@ def _timestamp() -> str:
 def report_path(act_dir: Path, target: Target, seq: str, verdict: str) -> Path:
     """Where a report is stored. The verdict is in the filename, so ``ls`` is a summary."""
     return act_dir / "reports" / f"{seq}-{target.label}-{verdict.lower()}.md"
-
-
-def _session_line(review: Review) -> str:
-    """``- reviewer session: `…` (round N[, continued])``, or "" when there is none.
-
-    Names the role rather than the CLI: which reviewer produced it is reported once, on the
-    ``harness`` line :func:`render_report` writes, and an id spelled by one harness must not
-    be labelled with another's name.
-    """
-    if not review.session:
-        return ""
-    suffix = ", continued" if review.round > 1 else ""
-    return f"- reviewer session: `{review.session}` (round {review.round}{suffix})\n"
 
 
 def _findings_and_raw(review: Review) -> str:
@@ -248,7 +193,6 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
     out.append(f"- generated: {_timestamp()}\n")
     if review.repaired:
         out.append(f"- findings block: re-emitted by a repair call; the primary transcript is `{review.repaired}`\n")
-    out.append(_session_line(review))
     out.append(_usage_line(review))
     if review.error:
         out.append(f"- gate note: {review.error}\n")
@@ -286,28 +230,16 @@ def store(review: Review, target: Target, *, seq: str, act_dir: Path, config: Co
 
 
 def accept_report_path(act_dir: Path, seq: str, label: str) -> Path:
-    """Where a manual acceptance's report lands once it is promoted. ``arl accept`` only."""
+    """Where a manual acceptance's report is stored."""
     return act_dir / "reports" / f"{seq}-{label}-accepted.md"
-
-
-def _accept_staging_path(act_dir: Path, seq: str, label: str) -> Path:
-    """Where a manual acceptance's report is written before it is durable.
-
-    The leading dot and the ``.pending`` suffix both keep it off ``list_reports`` and
-    ``render``'s ``*.md`` globs -- invisible to every reader until ``promote_accept`` renames
-    it onto :func:`accept_report_path`, which only happens once the approval it documents is
-    itself durable. See ``arl.commands.accept`` for why the two must not be able to come
-    apart in the unsafe direction.
-    """
-    return act_dir / "reports" / f".accept-{seq}-{label}.pending"
 
 
 @dataclass(frozen=True)
 class AcceptRecord:
     """Everything one manual acceptance's report needs to render.
 
-    Mirrors the ``manual_accepts`` entry ``arl.commands.accept`` writes to ``state.json``,
-    plus the report sequence and the filenames of the reviews it overrides.
+    The ``manual_accepts`` entry the run records, plus the report sequence and the filenames of
+    the reviews it overrides.
     """
 
     seq: str
@@ -332,33 +264,6 @@ def render_accept(record: AcceptRecord) -> str:
     out.append("\n## Reviews this acceptance overrides\n\n")
     out.append("".join(f"- {name}\n" for name in record.reviews) if record.reviews else "(none)\n")
     return "".join(out)
-
-
-def stage_accept(content: str, *, act_dir: Path, seq: str, label: str) -> Path:
-    """Write a manual acceptance's report where no reader can see it yet.
-
-    The caller promotes it with :func:`promote_accept`, and only after the approval it
-    documents is durably written -- see that function's docstring for why the order matters.
-    """
-    path = _accept_staging_path(act_dir, seq, label)
-    ensure_private_dir(path.parent, root=state_root())
-    write_private_atomic(path, content, root=state_root())
-    return path
-
-
-def promote_accept(staged: Path, *, act_dir: Path, seq: str, label: str) -> Path:
-    """Publish a staged acceptance report by renaming it onto its real, discoverable name.
-
-    Same directory as the staged file, so the rename is atomic -- there is no window in which
-    a reader sees a half-written report at the final name. Called only after the transaction
-    that granted the approval has itself saved successfully: an acceptance report at its final
-    name for an approval that was never durably recorded is worse than one left staged and
-    invisible, because a later review can reuse the same report sequence and the accepted
-    report -- ``accepted`` sorts before every other verdict -- would then shadow it.
-    """
-    final = accept_report_path(act_dir, seq, label)
-    os.replace(staged, final)
-    return final
 
 
 def reason(review: Review, headline: str, *, config: Config) -> str:

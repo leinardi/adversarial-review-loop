@@ -84,13 +84,13 @@ from arl.config import severity_rank, threshold_rank
 __all__ = ["Anchor", "OscillationPoint", "PersistingPoint", "ordinal_of", "persisting", "render", "render_persisting", "reversals"]
 
 #: POSIX ``[[:space:]]`` in the C locale, spelled out rather than left to ``\s`` -- the same
-#: reasoning and the same literal class as ``reviewer._SPACE``.
+#: reasoning and the same literal class as ``contract._SPACE``.
 _SPACE: Final = " \t\n\r\f\v"
 
 #: The full ``FINDING`` / ``SUPERSEDES`` grammar, byte-for-byte the same character classes
-#: and named groups as ``reviewer._FINDING_RE`` / ``reviewer._SUPERSEDES_RE``. This module keeps its own copy rather than importing ``reviewer``'s:
-#: ``reviewer.py`` is this module's caller (``_prior_rounds_section``, ``execute``), and
-#: importing back would cycle. Matching only a loose ``severity=`` / ``file=...|`` fragment
+#: and named groups as ``contract.FINDING_RE`` / ``contract._SUPERSEDES_RE``. This module keeps
+#: its own copy rather than importing the contract's, so it stays a leaf that the bundle and
+#: the stall checks can both import. Matching only a loose ``severity=`` / ``file=...|`` fragment
 #: (an earlier version of this module did) accepts a line like
 #: ``FINDING severity=medium garbage file=x.py | fake`` -- missing ``actionable=``, extra
 #: prose in between -- as a real anchor. Requiring the *whole* grammar, anchored at the
@@ -114,7 +114,7 @@ _LINE_SUFFIX_RE: Final = re.compile(r":[0-9]+$")
 def _is_single_line(value: object) -> bool:
     """A stored value that is exactly one ``_records`` record: no embedded ``\\n``.
 
-    Mirrors ``reviewer._records`` -- the only place a ``round_history`` finding/supersedes
+    Mirrors ``contract.records`` -- the only place a ``round_history`` finding/supersedes
     line is ever split going in -- which splits on ``\\n`` alone, deliberately not
     ``str.splitlines()``'s broader break set (``\\r``, ``\\v``, ``\\f``, ...): "``grep``,
     ``sed`` and ``head`` break on ``\\n`` alone, so a ``FINDING`` line carrying a stray
@@ -168,7 +168,7 @@ def _parsed_findings(entry: Mapping[str, object], *, block_severity: str) -> lis
     ``blocking=False`` rather than dropped: excluding it would renumber the positions a
     ``SUPERSEDES`` line resolves against.
 
-    ``block_severity`` is ranked exactly as ``reviewer._interpret`` ranks it: an unrecognised
+    ``block_severity`` is ranked exactly as :func:`arl.contract.parse` ranks it: an unrecognised
     *finding* severity ranks highest so it still blocks, an unrecognised *threshold* ranks lowest
     so a typo makes the gate stricter.
     """
@@ -233,7 +233,7 @@ def _ordered_rounds(history: Sequence[Mapping[str, object]], label: str) -> tupl
     in what order.
 
     **Stored order, deliberately not ``seq`` order.** ``round=N`` means the ordinal the reviewer
-    was shown, which is ``reviewer._prior_rounds_section``'s stored-order enumeration. Re-deriving
+    was shown, which is ``bundle._prior_rounds_section``'s stored-order enumeration. Re-deriving
     an order from ``seq`` -- an untrusted integer -- hands a doctored history a lever to renumber
     rounds underneath claims written against the numbering on screen: with stored order ``A, B,
     C`` and seqs ``2, 1, 3``, sorting renumbers ``A`` to round 2 and can manufacture two
@@ -266,7 +266,7 @@ def ordinal_of(history: Sequence[Mapping[str, object]], label: str, seq: int) ->
     """The round number the reviewer was shown for the round of ``label`` whose ``seq`` is ``seq``, or
     ``None`` when that cannot be proved.
 
-    ``round=N`` means the 1-based **stored-order** position ``reviewer._prior_rounds_section``
+    ``round=N`` means the 1-based **stored-order** position ``bundle._prior_rounds_section``
     renders and ``range.txt``'s ``review round of this phase`` counts, so this is
     :func:`_ordered_rounds`' numbering and nothing re-derived from ``seq``. ``None`` when that
     numbering is not trustworthy (a dropped or non-increasing ``seq`` anywhere in the label), and
@@ -274,8 +274,8 @@ def ordinal_of(history: Sequence[Mapping[str, object]], label: str, seq: int) ->
     answer does not rest on that. ``history`` should already be narrowed to one
     ``activation_generation``, as for :func:`reversals`.
 
-    Read-only, and neither signal calls it. Its callers are ``commands.clarify``, which records a
-    clarify's retraction only against a proved ordinal, and ``reviewer._prior_rounds_section``,
+    Read-only, and neither signal calls it. Its callers are the clarify command, which records a
+    clarify's retraction only against a proved ordinal, and ``bundle._prior_rounds_section``,
     which renders one only under the same proof -- so the two cannot disagree about which round a
     ``SUPERSEDES`` line names.
     """
@@ -547,13 +547,13 @@ def render(points: Sequence[OscillationPoint], *, max_points: int | None = None,
     by a reader; it is not something a tampered ``round_history`` can turn into smuggled text
     (see the module docstring).
 
-    Bounded the same way ``reviewer._prior_rounds_section`` bounds its own findings, and for
+    Bounded the same way ``bundle._prior_rounds_section`` bounds its own findings, and for
     the same reason: a phase with enough rounds (a non-converging one raises a fresh finding
     every round, by design -- see phase 5) can have an unbounded number of anchors, and this
-    text is appended, unbounded, straight into a hook's JSON response
-    (``report.reason`` -> ``pretool``/``stop``). ``max_points`` and ``max_bytes`` are both
+    text is appended, unbounded, straight into the message Claude is shown
+    (``report.reason``). ``max_points`` and ``max_bytes`` are both
     optional and independent; either left ``None`` leaves that dimension unbounded, and a
-    caller composing this into an already-bounded document (:func:`arl.reviewer` composes
+    caller composing this into an already-bounded document (:mod:`arl.bundle` composes
     both callers with the same ``max_findings`` / ``max_findings_bytes`` config) should pass
     both.
 
@@ -598,9 +598,8 @@ def render_persisting(points: Sequence[PersistingPoint], *, max_points: int | No
     """One block per point, in the order given -- the file, the severity, and every matching
     round's verbatim ``FINDING`` line. ``""`` for an empty sequence.
 
-    Bounded exactly like :func:`render`, for the same reason: ``review.error`` (composed by
-    ``reviewer._stall_review``, this function's only caller) is appended, unbounded, straight
-    into a hook's JSON response. See :func:`render`'s own docstring for what ``max_points`` /
+    Bounded exactly like :func:`render`, for the same reason: the stall report it composes is
+    shown to the implementer and the user whole. See :func:`render`'s own docstring for what ``max_points`` /
     ``max_bytes`` mean and how the degenerate small-budget case is handled -- this mirrors it
     exactly, capping whole *points* (one point can render several lines) rather than
     individual lines.

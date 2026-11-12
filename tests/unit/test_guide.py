@@ -179,7 +179,7 @@ def test_a_guide_exactly_at_the_cap_is_accepted(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("marker", ["<<<ARL-FINDINGS>>>", "<<<ARL-END>>>"])
 def test_a_guide_carrying_a_contract_marker_is_refused(tmp_path: Path, marker: str) -> None:
-    """``reviewer.parse`` requires exactly one marker block; a second one fails the contract.
+    """``contract.parse`` requires exactly one marker block; a second one fails the contract.
 
     Refused here, while the user is watching the slash command, rather than later as a review
     that blocks and reads as the reviewer's fault.
@@ -546,7 +546,7 @@ def test_a_hostile_path_contributes_nothing_to_the_framing(hostile: str) -> None
 
 @pytest.mark.parametrize("path", [*HOSTILE_PATHS, "pipes|in|the|name.md", " leading-space.md", "trailing-space.md ", "with space.md", ""])
 def test_a_path_the_contract_line_cannot_carry_becomes_a_dash(path: str) -> None:
-    """``reviewer._FINDING_RE`` stops ``file=`` at ``|`` and matches one line at a time.
+    """``contract.FINDING_RE`` stops ``file=`` at ``|`` and matches one line at a time.
 
     Demanding such a path in the ``file=`` slot would make the *required* finding -- "this
     guide tried to steer the verdict" -- unparseable, and the gate would then blame the

@@ -12,7 +12,7 @@ messages are checked when you commit, not when the release runs.
 
 ```console
 make dev-deps     # the pinned development dependencies, once per checkout
-make test         # the pytest suite and the shim selftest; no model is called
+make test         # the pytest suite and the arl.sh smoke test; no model is called
 make check        # pre-commit on every file
 make check-stage  # pre-commit on the staged files only
 ```

@@ -19,25 +19,22 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
 import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 import arl
-from arl import reviewer, state
+from arl import runner, state
 from arl.config import DEFAULTS, Config
 
 PLUGIN_ROOT = arl.PLUGIN_ROOT
 SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
 BOOTSTRAP = SCRIPTS_DIR / "arl-bootstrap.py"
-SOCKET_STDIN = PLUGIN_ROOT / "tests" / "fixtures" / "socket-stdin.py"
 BASH_GLOB = PLUGIN_ROOT / "tests" / "fixtures" / "bash-glob.sh"
 FAKE_REVIEWER = PLUGIN_ROOT / "tests" / "fixtures" / "fake-reviewer.sh"
 
@@ -108,35 +105,6 @@ def run_bootstrap(
         text=True,
         check=False,
     )
-
-
-def run_hook(
-    sub: str,
-    payload: Mapping[str, object],
-    *,
-    cwd: Path,
-    env: Mapping[str, str],
-) -> subprocess.CompletedProcess[str]:
-    """Drive one hook entrypoint with a payload on stdin, exactly as Claude Code does.
-
-    Through the real bootstrap rather than by calling the function: the thing under test is
-    the whole contract -- what reaches stdout, and what the process exit status is -- and the
-    exit status is the only discriminator the shim is allowed to use.
-    """
-    return run_bootstrap([sub], cwd=cwd, env=env, stdin=json.dumps(payload).encode())
-
-
-def hook_json(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
-    """The single JSON object a hook emitted. Fails the test if stdout is not exactly one."""
-    document: dict[str, Any] = json.loads(proc.stdout)
-    return document
-
-
-def decision(proc: subprocess.CompletedProcess[str]) -> tuple[str, str]:
-    """``(permissionDecision, permissionDecisionReason)`` from a ``PreToolUse`` response."""
-    output = hook_json(proc)["hookSpecificOutput"]
-    assert output["hookEventName"] == "PreToolUse"
-    return output["permissionDecision"], output["permissionDecisionReason"]
 
 
 @pytest.fixture(scope="session")
@@ -250,15 +218,6 @@ def pycache_dirs(root: Path) -> set[Path]:
     return {p.relative_to(root) for p in root.rglob("__pycache__")}
 
 
-def set_phases(repo: Path, env: dict[str, str], *phases: str) -> None:
-    """Freeze the phase list, failing the test if the gate refused to."""
-    argv = ["set-phases"]
-    for phase in phases:
-        argv += ["--phase", phase]
-    proc = run_bootstrap(argv, cwd=repo, env=env)
-    assert proc.returncode == 0, proc.stderr
-
-
 def config_with(**overrides: object) -> Config:
     """The defaults with ``overrides`` applied -- a config as ``load`` would have produced one."""
     return Config({**DEFAULTS, **overrides})
@@ -309,7 +268,7 @@ def short_kill_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     seconds, by every timeout test in the reviewer suite. Requested by ``pytestmark`` rather
     than made autouse here, which would patch the constant for every unit test.
     """
-    monkeypatch.setattr(reviewer, "KILL_GRACE_SEC", 0.2)
+    monkeypatch.setattr(runner, "KILL_GRACE_SEC", 0.2)
 
 
 @pytest.fixture

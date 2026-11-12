@@ -69,9 +69,6 @@ def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (repo / "mod.js").write_text(_header("//"))
     (repo / "config.yaml").write_text("key: value\n")
     (repo / "README.md").write_text("# Title\n")
-    vendor = repo / "scripts" / "arl" / "_vendor"
-    vendor.mkdir(parents=True)
-    (vendor / "upstream.py").write_text('"""Upstream code."""\n')
     git(repo, "add", "-A")
     return repo
 
@@ -117,7 +114,6 @@ def test_a_missing_or_wrong_header_fails_and_names_the_file(scratch: Path, name:
 @pytest.mark.parametrize(
     "name",
     [
-        "scripts/arl/_vendor/bashlex/parser.py",
         ".claude-plugin/types/claude-code/index.d.ts",
         ".mk/help.mk",
         "scripts/bootstrap-mk-common.sh",

@@ -65,7 +65,6 @@ __all__ = [
     "model",
     "names",
     "selected",
-    "strategies",
 ]
 
 
@@ -100,7 +99,7 @@ class UnknownHarness(Exception):
 
 @dataclass(frozen=True)
 class Command:
-    """One fully-composed reviewer invocation, ready for :func:`arl.reviewer.run_bounded`.
+    """One fully-composed reviewer invocation, ready for :func:`arl.runner.run_bounded`.
 
     ``env`` is *overrides*, not a whole environment, so a harness cannot drop a variable it does
     not know about. ``stdin`` is the bytes to feed the child, or ``None`` for one that reads
@@ -142,7 +141,7 @@ class ReviewSpec:
     """Everything one review invocation needs, in harness-neutral terms.
 
     Deliberately says *what the invocation is*, never how to spell it: the prompt is already-decoded
-    text, ``attachments`` is the exact ordered list :func:`arl.reviewer.stage_invocation` staged
+    text, ``attachments`` is the exact ordered list the caller chose
     (never a directory to glob), and ``cold`` states the intent -- this run must see no
     model-influenced context.
 
@@ -279,7 +278,7 @@ class SessionStrategy(Protocol):
     shared, so only this seam varies.
 
     Everything a strategy produces is a continuity **hint**: nothing here can authorise an
-    approval, and what a verdict must survive in ``reviewer.execute`` consults none of it.
+    approval, and nothing that decides a verdict consults any of it.
     """
 
     @property
@@ -361,7 +360,7 @@ class Harness(Protocol):
 
         The gate parses **one** thing, the ``FINDING``/``VERDICT`` contract, out of prose. A CLI that
         answers in prose returns ``raw`` unchanged; one that wraps the answer unwraps it here, so
-        :func:`arl.reviewer.parse` never learns more than one shape exists.
+        :func:`arl.contract.parse` never learns more than one shape exists.
 
         **This is also where a run that "succeeded" is refused.** Some CLIs report a failed turn, or a
         tool call they denied, in that wrapper while still exiting ``0`` -- measured on Claude Code.
@@ -397,25 +396,14 @@ class Harness(Protocol):
 def _registry() -> dict[str, Harness]:
     # Imported inside the function, not at module scope: an implementation module imports
     # this one for `Command`/`ReviewSpec`, so a module-scope import here would be a cycle.
-    from arl.harness import claudecode, opencode  # noqa: PLC0415 - see comment above
+    from arl.harness import opencode  # noqa: PLC0415 - see comment above
 
-    return {implementation.name: implementation for implementation in (opencode.HARNESS, claudecode.HARNESS)}
+    return {implementation.name: implementation for implementation in (opencode.HARNESS,)}
 
 
 def names() -> list[str]:
     """Every implemented harness name, sorted -- for error messages and `config` output."""
     return sorted(_registry())
-
-
-def strategies() -> list[SessionStrategy]:
-    """Every implemented harness's session strategy.
-
-    For the one thing that has to hold across *all* of them at once rather than for the
-    configured one: ``reviewer._MAX_LEASE_SEC``, the ceiling a stored ``lease_sec`` is
-    validated against. That ceiling has to be the largest lease **any** harness can
-    legitimately produce, or a real lease from a slower harness would read as tampered.
-    """
-    return [implementation.sessions() for implementation in _registry().values()]
 
 
 def get(name: str) -> Harness:

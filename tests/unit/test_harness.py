@@ -26,14 +26,16 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import time
 from pathlib import Path
 
 import pytest
 from conftest import config_with
 
-from arl import harness, reviewer
+from arl import harness, runner
 from arl.config import DEFAULTS
+from arl.harness import opencode
 
 #: Payloads the stdin tests round-trip. Named because ruff counts a bytes literal in a
 #: comparison as a magic value, and because both sides of each assertion must be the one
@@ -95,7 +97,7 @@ def test_stdin_write_is_inside_the_deadline(tmp_path: Path, short_kill_grace: No
 
     started = time.monotonic()
     with out.open("wb") as sink:
-        status = reviewer.run_bounded(sleeper, stdout=sink, timeout_sec=1, stdin=payload)
+        status = runner.run_bounded(sleeper, stdout=sink, timeout_sec=1, stdin=payload)
     elapsed = time.monotonic() - started
 
     assert status == 124, "a child killed at the deadline reports the timeout status"
@@ -103,7 +105,7 @@ def test_stdin_write_is_inside_the_deadline(tmp_path: Path, short_kill_grace: No
     # the child's own 30s sleep, which is what the pre-fix version waited out in full. The
     # grace is the shortened one: what is under test is that the deadline binds at all, and
     # the full 2s was paid in real time by a test that never asserts on it.
-    assert elapsed < 1 + reviewer.KILL_GRACE_SEC + 5, f"the deadline did not bind the stdin write: {elapsed:.1f}s"
+    assert elapsed < 1 + runner.KILL_GRACE_SEC + 5, f"the deadline did not bind the stdin write: {elapsed:.1f}s"
 
 
 def test_stdin_reaches_the_child(tmp_path: Path) -> None:
@@ -111,7 +113,7 @@ def test_stdin_reaches_the_child(tmp_path: Path) -> None:
     out = tmp_path / "out"
     echo = ["python3", "-c", "import sys; sys.stdout.write(sys.stdin.read())"]
     with out.open("wb") as sink:
-        status = reviewer.run_bounded(echo, stdout=sink, timeout_sec=60, stdin=_STDIN_MARKER)
+        status = runner.run_bounded(echo, stdout=sink, timeout_sec=60, stdin=_STDIN_MARKER)
     assert status == 0
     assert out.read_bytes() == _STDIN_MARKER
 
@@ -120,7 +122,7 @@ def test_stdin_none_leaves_the_child_reading_nothing_from_us(tmp_path: Path) -> 
     """``stdin=None`` keeps the pre-existing path: no pipe is created at all."""
     out = tmp_path / "out"
     with out.open("wb") as sink:
-        status = reviewer.run_bounded(["python3", "-c", "print('ok')"], stdout=sink, timeout_sec=60)
+        status = runner.run_bounded(["python3", "-c", "print('ok')"], stdout=sink, timeout_sec=60)
     assert status == 0
     assert out.read_bytes() == _NO_STDIN_OUTPUT
 
@@ -129,7 +131,7 @@ def test_a_child_that_exits_early_is_not_an_error(tmp_path: Path) -> None:
     """EPIPE while writing is swallowed; the child's own status is what counts."""
     out = tmp_path / "out"
     with out.open("wb") as sink:
-        status = reviewer.run_bounded(["python3", "-c", "raise SystemExit(3)"], stdout=sink, timeout_sec=60, stdin=b"y" * (1024 * 1024))
+        status = runner.run_bounded(["python3", "-c", "raise SystemExit(3)"], stdout=sink, timeout_sec=60, stdin=b"y" * (1024 * 1024))
     assert status == 3
 
 
@@ -146,19 +148,19 @@ def test_every_harness_satisfies_the_protocol(implementation: harness.Harness) -
 
 @pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
 def test_a_command_can_name_its_working_directory(implementation: harness.Harness, tmp_path: Path) -> None:
-    """``Command`` carries ``cwd``, and :func:`reviewer._capture_to_file` honours it.
+    """``Command`` carries ``cwd``, and :func:`runner._capture_to_file` honours it.
 
     **Fails on a ``Command`` that has only argv/env/stdin.** Where a reviewer runs is not a
     detail the gate can decide for every CLI: some persist their sessions under the working
     directory, so a harness must be able to move that off the repository under review without
-    further surgery in ``reviewer.py``. Asserted on the seam rather than on one harness --
+    further surgery in the runner. Asserted on the seam rather than on one harness --
     OpenCode names the repository with ``--dir`` and correctly leaves ``cwd`` unset.
     """
     built = implementation.review_command(spec_for(implementation, tmp_path))
     assert hasattr(built, "cwd")
 
     out = tmp_path / "cwd-out"
-    status = reviewer._capture_to_file(["pwd"], {}, out, 60, None, str(tmp_path))
+    status = runner._capture_to_file(["pwd"], {}, out, 60, None, str(tmp_path))
     assert status == 0
     assert out.read_text().strip() == str(Path(str(tmp_path)).resolve()), "cwd was not honoured"
 
@@ -265,24 +267,6 @@ def test_is_session_id_refuses_a_trailing_newline_and_a_non_string(implementatio
     assert not strategy.is_session_id("")
 
 
-@pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
-def test_no_harness_can_compute_a_lease_above_the_ceiling(implementation: harness.Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_MAX_LEASE_SEC`` is what a stored ``lease_sec`` is validated against, so it has to
-    bound the largest lease **every** registered harness can legitimately compute.
-
-    Asserted by running the real budget function under each harness at the largest
-    ``timeout_sec`` the clamp allows, rather than by restating the ceiling's own formula --
-    a restatement passes however wrong that formula is. A ceiling derived from the
-    *configured* harness instead would read a slower harness's perfectly legitimate lease as
-    tampered, fall back to the observer's own window, and make the claim observer-relative
-    again, which is the whole thing recording it was meant to stop.
-    """
-    monkeypatch.setattr(reviewer, "_sessions", lambda _config: implementation.sessions())
-    largest = reviewer._active_review_reclaim_after(config_with(timeout_sec=reviewer.MAX_TIMEOUT_SEC))
-
-    assert largest <= reviewer._MAX_LEASE_SEC, f"{implementation.name} computes a lease its own ceiling rejects"
-
-
 # --------------------------------------------------------------------------
 # selection and model resolution
 # --------------------------------------------------------------------------
@@ -348,25 +332,19 @@ def test_display_model_renders_an_unimplemented_harness_instead_of_raising() -> 
 
 @pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
 def test_the_review_path_binds_to_the_configured_harness(implementation: harness.Harness) -> None:
-    """``reviewer._harness`` is the one reader on the review path, so the harness a command is
+    """``runner._harness`` is the one reader on the review path, so the harness a command is
     built from, the harness a message names and the harness a lease is sized for agree."""
     config = config_with(harness=implementation.name)
 
-    assert reviewer._harness(config) is implementation
-    assert reviewer._sessions(config) is implementation.sessions()
+    assert runner._harness(config) is implementation
 
 
 def test_the_review_path_refuses_an_unimplemented_harness_rather_than_defaulting() -> None:
-    """Not caught anywhere on the review path: it unwinds to ``hookio.Hook.run``'s fail-closed
-    guard and denies (Rule 1). A gate that cannot tell which reviewer it is talking to has
-    nothing to say except "no" -- and must never say it with the default harness instead.
-    """
+    """A configuration naming no implemented reviewer is refused, never served by the default."""
     config = config_with(harness="not-a-harness")
 
     with pytest.raises(harness.UnknownHarness):
-        reviewer._harness(config)
-    with pytest.raises(harness.UnknownHarness):
-        reviewer._sessions(config)
+        runner._harness(config)
 
 
 @pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
@@ -391,3 +369,37 @@ def test_every_harness_delivers_the_working_guidance_somewhere(implementation: h
 
     delivered = marker in " ".join(built.argv) or (built.stdin is not None and marker.encode() in built.stdin)
     assert delivered, f"{implementation.name} dropped the working guidance"
+
+
+# --------------------------------------------------------------------------
+# What the runner keeps from v3
+# --------------------------------------------------------------------------
+
+
+def test_a_cold_permission_narrows_to_the_single_bundle(tmp_path: Path) -> None:
+    """A continued reviewer may re-open earlier rounds' bundles; a session-less call -- a
+    contract repair, a clarify -- is scoped to the one bundle it was handed."""
+    bundle_dir = tmp_path / "bundles" / "007"
+    continued = json.loads(opencode.permission(bundle_dir))
+    cold = json.loads(opencode.permission(bundle_dir, cold=True))
+    assert continued["external_directory"] == {"*": "deny", f"{bundle_dir.parent}/**": "allow"}
+    assert cold["external_directory"] == {"*": "deny", f"{bundle_dir}/**": "allow"}
+
+
+def test_a_huge_configured_timeout_is_clamped_to_the_ceiling() -> None:
+    assert runner._timeout_sec(config_with(timeout_sec=100_000)) == runner.MAX_TIMEOUT_SEC
+    assert runner._timeout_sec(config_with(timeout_sec=60)) == 60
+
+
+def test_a_harness_that_needs_no_reduction_leaves_no_envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenCode writes the answer and nothing around it, so nothing is rewritten."""
+    answer = b"Fine.\n\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>\n"
+    monkeypatch.setattr(runner, "state_root", lambda: tmp_path)
+    out = tmp_path / "raw" / "001-phase.out"
+    out.parent.mkdir()
+    out.write_bytes(answer)
+
+    runner._reduce_transcript(harness.get("opencode"), out)
+
+    assert out.read_bytes() == answer
+    assert not (tmp_path / "raw" / "001-phase.out.envelope").exists()

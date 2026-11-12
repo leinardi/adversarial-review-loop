@@ -63,17 +63,15 @@ __all__ = [
 #: ``arl.harness.model``, the one reader every command shares. An empty ``model`` therefore
 #: means "whatever this harness calls its default", never "no model".
 #:
-#: ``harness`` defaults to ``claude-code``: the gate runs as a Claude Code plugin, so that is
-#: the one reviewer CLI every user of it already has installed. ``opencode`` -- which the
-#: project was originally named after and which is still fully supported -- is one config key
-#: away, and the name never falls back: see ``arl.harness.UnknownHarness``.
+#: ``harness`` defaults to ``opencode``, the one reviewer CLI the engine runs itself. The name
+#: never falls back: see ``arl.harness.UnknownHarness``.
 #:
 #: ``review_guide`` defaults to ``""`` (off). It is the one key whose value names a file whose
 #: *content becomes instruction* rather than data, so it is resolved and frozen once, at arm --
 #: a later edit to the key, or to the file it named, changes nothing about a running
 #: activation. See ``arl.guide`` for what the framing around it allows and forbids.
 DEFAULTS: Final[dict[str, Any]] = {
-    "harness": "claude-code",
+    "harness": "opencode",
     "model": "",
     "variant": "",
     "block_severity": "medium",
@@ -81,8 +79,6 @@ DEFAULTS: Final[dict[str, Any]] = {
     "timeout_sec": 900,
     "max_failures": 2,
     "max_transient_failures": 5,
-    "max_stop_blocks": 3,
-    "max_defers": 3,
     "verify_cmd": "",
     "pure": True,
     "disable_project_config": False,
@@ -94,7 +90,6 @@ DEFAULTS: Final[dict[str, Any]] = {
     "max_findings_bytes": 65536,
     "max_clarifications": 2,
     "stall_rounds": 3,
-    "max_session_rounds": 3,
     "allow_dirty": False,
     "ttl_hours": 24,
     "ignore_globs": [],
@@ -108,8 +103,6 @@ INT_KEYS: Final = (
     "timeout_sec",
     "max_failures",
     "max_transient_failures",
-    "max_stop_blocks",
-    "max_defers",
     "chunk_diff_bytes",
     "hard_diff_ceiling",
     "max_file_bytes",
@@ -118,7 +111,6 @@ INT_KEYS: Final = (
     "max_findings_bytes",
     "max_clarifications",
     "stall_rounds",
-    "max_session_rounds",
     "ttl_hours",
 )
 
@@ -139,7 +131,7 @@ REPO_CONFIG_NAME: Final = ".adversarial-review-loop.json"
 #: Every label ``severity_rank``/``threshold_rank`` recognise, with its rank. The single
 #: source both functions read from, so a label added to one can never drift from the other.
 #: ``critical`` is a real, fifth tier -- the reviewer contract's own ``FINDING`` regex
-#: (``reviewer.py``, ``severity=(?P<severity>info|low|medium|high|critical)``) accepts
+#: (``contract.py``, ``severity=(?P<severity>info|low|medium|high|critical)``) accepts
 #: exactly these five words and no others, so this dict has to agree with that regex, not
 #: invent its own vocabulary.
 _SEVERITY_RANK: Final[dict[str, int]] = {
@@ -328,7 +320,7 @@ def late_threshold_rank(config: Config) -> int:
 
     From the second review round of a phase on, a finding that is new *and* outside the paths
     changed since the previous round blocks only when it reaches this rank
-    (``reviewer.parse``). It can only ever **defer** a finding that ``block_severity`` would
+    (``contract.parse``). It can only ever **defer** a finding that ``block_severity`` would
     have blocked, never widen the blocking set: a ``late_block_severity`` set below
     ``block_severity`` is meaningless in that direction, so it is read as ``block_severity``
     itself. Both labels rank through :func:`threshold_rank`, so an unrecognised value ranks at

@@ -33,10 +33,12 @@ from pathlib import Path
 
 import pytest
 from conftest import config_with, git, git_status_ignored
-from reviewer_common import _intact_bundle, build, build_final, execute_fake, target_for
+from reviewer_common import build, build_final, dirty, execute_fake, target_for
 
-from arl import gitsnap, reviewer, state
-from arl.reviewer import BundleError, BundleTooLarge, Target
+from arl import bundle, gitsnap, state
+from arl.bundle import BundleError, BundleTooLarge
+from arl.contract import Target
+from arl.harness import opencode
 from arl.util import now as arl_now
 
 #: Shortens the SIGTERM-to-SIGKILL grace for this module. Requested by mark rather than
@@ -50,7 +52,7 @@ pytestmark = pytest.mark.usefixtures("short_kill_grace")
 
 def test_the_permission_document_denies_everything_but_reading(tmp_path: Path) -> None:
     bundle_dir = tmp_path / "bundles" / "003"
-    document = json.loads(reviewer.permission(bundle_dir))
+    document = json.loads(opencode.permission(bundle_dir))
 
     assert document["*"] == "deny"
     assert document["read"] == "allow"
@@ -67,7 +69,7 @@ def test_permission_denies_the_activation_dir_and_state_json(tmp_path: Path) -> 
     ``plan.frozen.md`` and the reports -- is what a continued reviewer may read."""
     act_dir = tmp_path / "activation"
     bundle_dir = act_dir / "bundles" / "003"
-    document = json.loads(reviewer.permission(bundle_dir))
+    document = json.loads(opencode.permission(bundle_dir))
 
     external = document["external_directory"]
     assert f"{bundle_dir.parent}/**" in external
@@ -78,7 +80,7 @@ def test_permission_denies_the_activation_dir_and_state_json(tmp_path: Path) -> 
 def test_the_broad_external_deny_is_written_before_the_bundle_allow(tmp_path: Path) -> None:
     """Patterns are last-match-wins, so the order of these two keys is the policy."""
     bundle_dir = tmp_path / "bundles" / "003"
-    external = reviewer.permission(bundle_dir).split('"external_directory":', 1)[1]
+    external = opencode.permission(bundle_dir).split('"external_directory":', 1)[1]
     assert external.index('"*":"deny"') < external.index(f'"{bundle_dir.parent}/**":"allow"')
 
 
@@ -91,7 +93,7 @@ def test_argv_carries_exactly_the_attachments_it_is_given(tmp_path: Path) -> Non
     """``review_argv`` selects nothing itself -- see `bundle_manifest`, which does."""
     given = [tmp_path / "range.txt", tmp_path / "changes.00.diff", tmp_path / "changes.01.diff"]
 
-    argv = reviewer.review_argv("/repo", "a title", config=config_with(), attachments=given)
+    argv = opencode.review_argv("/repo", "a title", config=config_with(), attachments=given)
 
     assert argv[:2] == ["--pure", "--dir"]
     assert argv[2] == "/repo"
@@ -101,58 +103,17 @@ def test_argv_carries_exactly_the_attachments_it_is_given(tmp_path: Path) -> Non
 
 def test_argv_never_contains_the_prompt(tmp_path: Path) -> None:
     """``-f`` is a yargs array option: a trailing prompt would be read as an attachment."""
-    argv = reviewer.review_argv("/repo", "review-loop phase 1", config=config_with(), attachments=[tmp_path / "range.txt"])
+    argv = opencode.review_argv("/repo", "review-loop phase 1", config=config_with(), attachments=[tmp_path / "range.txt"])
     assert argv[-2] == "-f"
 
 
 def test_argv_honours_pure_and_variant(tmp_path: Path) -> None:
-    plain = reviewer.review_argv("/repo", "t", config=config_with(pure=False))
+    plain = opencode.review_argv("/repo", "t", config=config_with(pure=False))
     assert "--pure" not in plain
 
-    varied = reviewer.review_argv("/repo", "t", config=config_with(variant="thinking"))
+    varied = opencode.review_argv("/repo", "t", config=config_with(variant="thinking"))
     assert varied[varied.index("--variant") + 1] == "thinking"
     assert "--variant" not in plain
-
-
-def test_verify_output_is_attached_last(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`verify.txt` is kept out of `bundle_manifest` precisely so it can stay last, after the
-    `context/` files -- `stage_invocation` is what puts it there."""
-    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
-    bundle, digest = _intact_bundle(tmp_path, chunks=1, context=True, verify=True)
-
-    staged, context = reviewer.stage_invocation(bundle, tmp_path, digest, tmp_path / "staged", include_context=True)
-
-    assert staged[-1][0].name == "verify.txt"
-    assert context and staged[-2][0] == context[0], "context sits between the evidence and verify.txt"
-
-
-def test_plan_revisions_are_attached_in_ascending_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
-    bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=3)
-
-    entries = reviewer.bundle_manifest(bundle, tmp_path, digest, include_context=True)
-
-    assert entries is not None
-    assert [path for path, _ in entries] == [
-        bundle / "range.txt",
-        bundle / "changes.00.diff",
-        bundle / "plan.rev0.md",
-        bundle / "plan.rev1.md",
-        bundle / "plan.rev2.md",
-    ]
-
-
-def test_plan_revisions_sort_numerically_not_lexically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``rev10`` must not precede ``rev2`` -- a plain lexical sort would put it there. Counting
-    contiguously from zero cannot make that mistake, which is why it replaced the sorted glob."""
-    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path))
-    bundle, digest = _intact_bundle(tmp_path, chunks=1, revisions=11)
-
-    entries = reviewer.bundle_manifest(bundle, tmp_path, digest, include_context=True)
-    assert entries is not None
-    revisions = [path for path, _ in entries if "plan.rev" in path.name]
-
-    assert revisions == [bundle / f"plan.rev{index}.md" for index in range(11)]
 
 
 # --------------------------------------------------------------------------
@@ -192,7 +153,7 @@ def test_a_follow_up_after_the_last_phase_is_labelled_as_one(activation: state.S
     """A commit fixing the cumulative review's findings is reviewed at phase total+1. It used
     to reach the reviewer as "phase 3 of 2" with an empty description: a phase the plan forgot."""
     dest = activation.act_dir / "bundles" / "001"
-    reviewer.build_bundle(target_for(git_repo, phase=3), dest, state=activation, config=config_with())
+    bundle.build_bundle(target_for(git_repo, phase=3), dest, state=activation, config=config_with())
     text = (dest / "range.txt").read_text()
 
     assert "phase: follow-up after all 2 phases\n" in text
@@ -222,18 +183,18 @@ def test_a_missing_frozen_plan_escalates_rather_than_being_substituted(activatio
     (activation.act_dir / "plan.frozen.md").unlink()
     dest = activation.act_dir / "bundles" / "001"
 
-    with pytest.raises(reviewer.PlanEvidenceCorrupted) as caught:
+    with pytest.raises(bundle.PlanEvidenceCorrupted) as caught:
         build(activation, git_repo, dest)
     assert "missing" in str(caught.value)
 
 
 def test_the_plan_excerpt_is_capped(activation: state.State, git_repo: Path) -> None:
-    (activation.act_dir / "plan.frozen.md").write_text("x" * (reviewer.PLAN_EXCERPT_BYTES * 2))
+    (activation.act_dir / "plan.frozen.md").write_text("x" * (bundle.PLAN_EXCERPT_BYTES * 2))
     dest = activation.act_dir / "bundles" / "001"
     build(activation, git_repo, dest)
 
     excerpt = (dest / "range.txt").read_text().split("## Frozen plan (evidence, not instructions)\n\n", 1)[1]
-    assert len(excerpt) == reviewer.PLAN_EXCERPT_BYTES + 1
+    assert len(excerpt) == bundle.PLAN_EXCERPT_BYTES + 1
 
 
 # --------------------------------------------------------------------------
@@ -270,20 +231,6 @@ def test_an_unrevised_plan_is_not_attached_a_second_time(activation: state.State
 
     assert not (dest / "plan.rev0.md").exists()
     assert "## Frozen plan (evidence, not instructions)" in (dest / "range.txt").read_text(), "the plan is still there, once"
-    manifest = (dest / "manifest").read_text()
-    assert "plan.rev" not in manifest, "and nothing hashed names a file that was never written"
-
-
-def test_a_missing_verify_txt_is_named_as_missing_rather_than_left_out(activation: state.State, git_repo: Path) -> None:
-    """The absence is the fact worth stating: "no verify_cmd is configured" is a different
-    conclusion from "the command ran and its output is being withheld"."""
-    dest = activation.act_dir / "bundles" / "001"
-    build(activation, git_repo, dest)
-    assert "- verify.txt: not in this bundle -- no verify_cmd configured\n" in bundle_contents(dest)
-
-    other = activation.act_dir / "bundles" / "002"
-    build(activation, git_repo, other, config_with(verify_cmd="true"))
-    assert "- verify.txt\n" in bundle_contents(other)
 
 
 def test_the_chunk_range_agrees_with_the_files_actually_written(activation: state.State, git_repo: Path) -> None:
@@ -314,20 +261,6 @@ def test_round_two_names_the_incremental_diff_in_the_contents(activation: state.
 
     section = bundle_contents(activation.act_dir / "bundles" / "002")
     assert "- incremental.diff\n" in section
-
-
-def test_the_contents_section_names_exactly_what_the_manifest_hashes(activation: state.State, git_repo: Path) -> None:
-    """The two are built from different sources -- the section from the counts, the manifest
-    from the paths -- so they can drift. For a bundle's own files they must not."""
-    execute_fake(activation, git_repo, "changes")
-    execute_fake(activation, git_repo, "changes")
-    dest = activation.act_dir / "bundles" / "002"
-
-    section = bundle_contents(dest)
-    hashed = {name for _digest, kind, name in reviewer._parse_manifest((dest / "manifest").read_bytes()) if kind == "bundle"}
-    for name in hashed:
-        assert name in section, f"{name} is hashed into the manifest but not named in Bundle contents"
-    assert hashed == {path.name for path in dest.iterdir() if path.name not in ("manifest", "chunks")}
 
 
 # --------------------------------------------------------------------------
@@ -377,7 +310,7 @@ def test_a_truncated_revision_attachment_is_disclosed_not_claimed_complete(activ
     """``build_bundle`` caps each attachment at ``PLAN_EXCERPT_BYTES`` -- the disclosure must
     say so and mark the revision it actually cut, never claim every attachment is "in full"
     while one of them was silently truncated."""
-    oversized = "x" * (reviewer.PLAN_EXCERPT_BYTES + 100)
+    oversized = "x" * (bundle.PLAN_EXCERPT_BYTES + 100)
     add_revision(activation, 0, "revision zero\n")
     add_revision(activation, 1, oversized)
     dest = activation.act_dir / "bundles" / "001"
@@ -385,12 +318,12 @@ def test_a_truncated_revision_attachment_is_disclosed_not_claimed_complete(activ
 
     text = (dest / "range.txt").read_text()
     assert "attached in full" not in text
-    assert f"capped at {reviewer.PLAN_EXCERPT_BYTES} bytes" in text
+    assert f"capped at {bundle.PLAN_EXCERPT_BYTES} bytes" in text
     # revision 0 fits and is not marked; revision 1 does not and must be.
     assert "see plan.rev0.md\n" in text
-    assert f"see plan.rev1.md -- TRUNCATED at {reviewer.PLAN_EXCERPT_BYTES} bytes" in text
+    assert f"see plan.rev1.md -- TRUNCATED at {bundle.PLAN_EXCERPT_BYTES} bytes" in text
 
-    assert (dest / "plan.rev1.md").stat().st_size == reviewer.PLAN_EXCERPT_BYTES
+    assert (dest / "plan.rev1.md").stat().st_size == bundle.PLAN_EXCERPT_BYTES
 
 
 def test_the_first_revision_hop_diff_is_not_off_by_one(activation: state.State, git_repo: Path) -> None:
@@ -410,13 +343,13 @@ def test_the_first_revision_hop_diff_is_not_off_by_one(activation: state.State, 
 def test_revision_attachments_are_capped(activation: state.State, git_repo: Path) -> None:
     """Two revisions, because one is not attached at all -- `range.txt` carries it. The cap is
     what stops an oversized revision from blowing out the bundle once it *is* attached."""
-    oversized = "x" * (reviewer.PLAN_EXCERPT_BYTES * 2)
+    oversized = "x" * (bundle.PLAN_EXCERPT_BYTES * 2)
     add_revision(activation, 0, oversized)
     add_revision(activation, 1, "the revision that made revision 0 history\n")
     dest = activation.act_dir / "bundles" / "001"
     build(activation, git_repo, dest)
 
-    assert (dest / "plan.rev0.md").stat().st_size == reviewer.PLAN_EXCERPT_BYTES
+    assert (dest / "plan.rev0.md").stat().st_size == bundle.PLAN_EXCERPT_BYTES
 
 
 def test_an_oversized_revision_diff_is_omitted_not_truncated(activation: state.State, git_repo: Path) -> None:
@@ -427,7 +360,7 @@ def test_an_oversized_revision_diff_is_omitted_not_truncated(activation: state.S
 
     text = (dest / "range.txt").read_text()
     assert "diff omitted" in text
-    assert f"past {reviewer.PLAN_REVISION_DIFF_BYTES} bytes" in text
+    assert f"past {bundle.PLAN_REVISION_DIFF_BYTES} bytes" in text
     assert "for the full text" not in text
     # The full text is still the attachment's job, not range.txt's.
     assert (dest / "plan.rev0.md").read_text() == "a\n" * 20000
@@ -448,11 +381,11 @@ def test_the_diff_omitted_message_does_not_claim_the_attachments_are_complete(ac
     text = (dest / "range.txt").read_text()
     assert "diff omitted" in text
     assert "for the full text" not in text
-    assert f"capped at {reviewer.PLAN_EXCERPT_BYTES} bytes" in text
+    assert f"capped at {bundle.PLAN_EXCERPT_BYTES} bytes" in text
     # Both attachments really are truncated here, so the marked revision list and the diff
     # message's disclaimer agree with what is actually on disk.
-    assert (dest / "plan.rev0.md").stat().st_size == reviewer.PLAN_EXCERPT_BYTES
-    assert (dest / "plan.rev1.md").stat().st_size == reviewer.PLAN_EXCERPT_BYTES
+    assert (dest / "plan.rev0.md").stat().st_size == bundle.PLAN_EXCERPT_BYTES
+    assert (dest / "plan.rev1.md").stat().st_size == bundle.PLAN_EXCERPT_BYTES
     assert "see plan.rev0.md -- TRUNCATED" in text
     assert "see plan.rev1.md -- TRUNCATED" in text
 
@@ -463,10 +396,10 @@ def test_a_modest_edit_in_a_sizeable_plan_still_produces_a_diff(activation: stat
     precisely so a small, useful diff still gets through."""
     lines = [f"line {n}\n" for n in range(3000)]
     before = "".join(lines)
-    assert reviewer.PLAN_REVISION_DIFF_BYTES < len(before.encode()) < reviewer.PLAN_REVISION_DIFF_INPUT_CEILING
+    assert bundle.PLAN_REVISION_DIFF_BYTES < len(before.encode()) < bundle.PLAN_REVISION_DIFF_INPUT_CEILING
     lines[1500] = "line 1500, edited\n"
     after = "".join(lines)
-    assert len(after.encode()) < reviewer.PLAN_REVISION_DIFF_INPUT_CEILING
+    assert len(after.encode()) < bundle.PLAN_REVISION_DIFF_INPUT_CEILING
 
     add_revision(activation, 0, before)
     add_revision(activation, 1, after)
@@ -484,7 +417,7 @@ def test_a_tampered_revision_escalates_rather_than_being_used(activation: state.
     (activation.act_dir / "plan.frozen.md").write_text("tampered\n")
     dest = activation.act_dir / "bundles" / "001"
 
-    with pytest.raises(reviewer.PlanEvidenceCorrupted) as caught:
+    with pytest.raises(bundle.PlanEvidenceCorrupted) as caught:
         build(activation, git_repo, dest)
     assert "no longer matches the hash" in str(caught.value)
 
@@ -506,7 +439,7 @@ def test_a_non_object_plan_revisions_entry_escalates_rather_than_crashing(activa
     activation.save()
     dest = activation.act_dir / "bundles" / "001"
 
-    with pytest.raises(reviewer.PlanEvidenceCorrupted) as caught:
+    with pytest.raises(bundle.PlanEvidenceCorrupted) as caught:
         build(activation, git_repo, dest)
     assert "not an object" in str(caught.value)
 
@@ -515,7 +448,7 @@ def test_an_empty_diff_is_still_an_attachment(activation: state.State, git_repo:
     """A missing attachment would read as a lost file; an explicit statement does not."""
     dest = activation.act_dir / "bundles" / "001"
     head = git(git_repo, "rev-parse", "HEAD^{tree}")
-    reviewer.build_bundle(Target(str(git_repo), head, head, "phase", 1), dest, state=activation, config=config_with())
+    bundle.build_bundle(Target(str(git_repo), head, head, "phase", 1), dest, state=activation, config=config_with())
 
     assert (dest / "changes.00.diff").read_text() == "(the diff between these two trees is empty)\n"
     assert (dest / "chunks").read_text() == "1"
@@ -540,7 +473,7 @@ def test_a_broken_record_does_not_pack_its_tail_with_the_next_one(tmp_path: Path
     measured against real ``split``.
     """
     data = b"A" * 32 + b"\n" + b"B" * 17
-    assert [len(chunk) for chunk in reviewer.split_lines_by_size(data, 25)] == [25, 8, 17]
+    assert [len(chunk) for chunk in bundle.split_lines_by_size(data, 25)] == [25, 8, 17]
     assert_split_agrees(tmp_path, data, 25)
 
 
@@ -549,7 +482,7 @@ def test_chunking_reassembles_to_the_original_diff(activation: state.State, git_
     target = target_for(git_repo)
     base, head = target.base, target.head
     dest = activation.act_dir / "bundles" / "001"
-    reviewer.build_bundle(target, dest, state=activation, config=config_with(chunk_diff_bytes=4096))
+    bundle.build_bundle(target, dest, state=activation, config=config_with(chunk_diff_bytes=4096))
 
     rejoined = b"".join(chunk.read_bytes() for chunk in sorted(dest.glob("changes.*.diff")))
     expected = subprocess.run(["git", "-C", str(git_repo), "diff", "-M", base, head], capture_output=True, check=True).stdout
@@ -606,7 +539,7 @@ def assert_split_agrees(tmp_path: Path, data: bytes, limit: int) -> None:
         check=True,
     )
     expected = [path.read_bytes() for path in sorted(tmp_path.glob("changes.*.diff"))]
-    assert reviewer.split_lines_by_size(data, limit) == expected
+    assert bundle.split_lines_by_size(data, limit) == expected
     assert b"".join(expected) == data
 
 
@@ -651,7 +584,7 @@ def test_the_incremental_diff_is_omitted_not_truncated_past_the_ceiling(activati
 
     target = Target(repo=str(git_repo), base=head, head=head, scope="phase", phase=1)
     dest = activation.act_dir / "bundles" / "002"
-    reviewer.build_bundle(target, dest, state=activation, config=config_with(hard_diff_ceiling=1024), round_number=2)
+    bundle.build_bundle(target, dest, state=activation, config=config_with(hard_diff_ceiling=1024), round_number=2)
 
     incremental = (dest / "incremental.diff").read_text()
     assert "incremental diff content omitted" in incremental
@@ -669,7 +602,7 @@ def test_a_failed_path_enumeration_does_not_claim_no_change(activation: state.St
     claim depends on actually having obtained the path list."""
     target = target_for(git_repo)
     bogus_tree = "f" * 40  # well-formed, but not an object this repo has
-    text = reviewer._range_text(
+    text = bundle._range_text(
         target,
         state=activation,
         config=config_with(),
@@ -686,47 +619,139 @@ def test_a_failed_path_enumeration_does_not_claim_no_change(activation: state.St
 def test_an_unresolvable_range_is_an_error_not_an_empty_diff(activation: state.State, git_repo: Path) -> None:
     dest = activation.act_dir / "bundles" / "001"
     with pytest.raises(BundleError) as caught:
-        reviewer.build_bundle(Target(str(git_repo), "deadbeef", "HEAD", "phase", 1), dest, state=activation, config=config_with())
+        bundle.build_bundle(Target(str(git_repo), "deadbeef", "HEAD", "phase", 1), dest, state=activation, config=config_with())
     # ``deadbeef`` is not a full-length object id, so it is refused before it can reach
     # ``git diff`` at all -- see the hostile-base tests further down.
     assert "not a usable git object id" in str(caught.value)
 
 
-def test_verify_output_records_the_exit_status(activation: state.State, git_repo: Path) -> None:
-    dest = activation.act_dir / "bundles" / "001"
-    build(activation, git_repo, dest, config_with(verify_cmd="echo hello; exit 3"))
-
-    text = (dest / "verify.txt").read_text()
-    assert text.startswith("$ echo hello; exit 3\n\n")
-    assert "hello\n" in text
-    assert text.endswith("[exit status: 3]\n")
-
-
-def test_verify_output_keeps_both_streams_in_order(activation: state.State, git_repo: Path) -> None:
-    """A build's errors are only legible next to the output they interrupted."""
-    dest = activation.act_dir / "bundles" / "001"
-    build(activation, git_repo, dest, config_with(verify_cmd="echo first; echo oops >&2; echo third"))
-
-    body = (dest / "verify.txt").read_text()
-    assert body.index("first") < body.index("oops") < body.index("third")
-    assert not (dest / "verify.raw").exists()
-
-
 def test_the_bundle_directory_is_rebuilt_from_scratch(activation: state.State, git_repo: Path) -> None:
     dest = activation.act_dir / "bundles" / "001"
-    build(activation, git_repo, dest, config_with(verify_cmd="true"))
-    assert (dest / "verify.txt").is_file()
+    build(activation, git_repo, dest)
+    (dest / "stale.txt").write_text("left over from an earlier build")
 
     build(activation, git_repo, dest)
-    assert not (dest / "verify.txt").exists(), "a stale attachment would be shown as this review's evidence"
+    assert not (dest / "stale.txt").exists(), "a stale attachment would be shown as this review's evidence"
     assert not (dest / "full.diff").exists()
 
 
 def test_the_bundle_is_private_and_outside_the_repository(activation: state.State, git_repo: Path) -> None:
     dest = activation.act_dir / "bundles" / "001"
-    build(activation, git_repo, dest, config_with(verify_cmd="true"))
+    build(activation, git_repo, dest)
 
     assert stat.S_IMODE(dest.stat().st_mode) == 0o700
     for path in dest.iterdir():
         assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
     assert git_status_ignored(git_repo) == "?? a.txt\n"
+
+
+# --------------------------------------------------------------------------
+# Attachments and the base tree
+# --------------------------------------------------------------------------
+
+
+def test_a_context_attachment_below_a_symlinked_directory_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``-f`` uploads what the path *resolves to*, so containment has to be proved before the
+    path reaches the argv. ``is_file()`` follows symlinks, so a ``context/`` planted as a link
+    elsewhere leaves an ordinary regular file at the end of the path."""
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path / "state"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "002-prior-rounds.txt").write_text("id_rsa")
+
+    root = tmp_path / "state"
+    bundle_dir = root / "bundles" / "002"
+    bundle_dir.mkdir(parents=True)
+    (root / "context").symlink_to(elsewhere, target_is_directory=True)
+
+    assert (root / "context" / "002-prior-rounds.txt").is_file(), "the naive check passes -- that is the point"
+    assert bundle.context_attachments(bundle_dir) == []
+
+
+def test_a_context_attachment_that_is_itself_a_symlink_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ARL_STATE_DIR", str(tmp_path / "state"))
+    secret = tmp_path / "id_rsa"
+    secret.write_text("PRIVATE KEY")
+
+    root = tmp_path / "state"
+    bundle_dir = root / "bundles" / "002"
+    bundle_dir.mkdir(parents=True)
+    (root / "context").mkdir()
+    (root / "context" / "002-prior-rounds.txt").symlink_to(secret)
+
+    assert bundle.context_attachments(bundle_dir) == []
+
+
+def test_a_hostile_base_tree_in_state_never_reaches_git_diff(git_repo: Path, tmp_path: Path) -> None:
+    pwned = git_repo / "PWNED"
+    hostile = Target(repo=str(git_repo), base=f"--output={pwned}", head=dirty(git_repo), scope="phase", phase=1)
+
+    with pytest.raises(BundleError, match="not a usable git object id"):
+        bundle._write_diff(hostile, tmp_path / "diff.txt")
+    assert not pwned.exists(), "git must never have been asked to write this file"
+
+
+def test_a_well_formed_but_unknown_base_tree_is_refused_not_diffed(git_repo: Path, tmp_path: Path) -> None:
+    hostile = Target(repo=str(git_repo), base="0" * 40, head=dirty(git_repo), scope="phase", phase=1)
+    with pytest.raises(BundleError, match="not a usable git object id"):
+        bundle._write_diff(hostile, tmp_path / "diff.txt")
+
+
+def test_a_real_base_tree_still_diffs_normally(git_repo: Path, tmp_path: Path) -> None:
+    """The ``--`` terminator did not break the ordinary path."""
+    size = bundle._write_diff(target_for(git_repo), tmp_path / "diff.txt")
+    assert size > 0
+    assert "a.txt" in (tmp_path / "diff.txt").read_text()
+
+
+# --------------------------------------------------------------------------
+# What range.txt discloses
+# --------------------------------------------------------------------------
+
+
+def test_the_range_text_discloses_the_round(activation: state.State, git_repo: Path) -> None:
+    execute_fake(activation, git_repo, "changes")
+    assert "round: 1\n" in (activation.act_dir / "bundles" / "001" / "range.txt").read_text()
+
+    execute_fake(activation, git_repo, "changes")
+    assert "round: 2\n" in (activation.act_dir / "bundles" / "002" / "range.txt").read_text()
+
+
+def test_the_range_text_discloses_the_active_block_severity(activation: state.State, git_repo: Path) -> None:
+    """The prompt's VERDICT rule reads this line rather than a number the reviewer has no other
+    way to know."""
+    execute_fake(activation, git_repo, "changes", config=config_with(block_severity="critical"))
+    assert "block_severity: critical\n" in (activation.act_dir / "bundles" / "001" / "range.txt").read_text()
+
+
+def _named_in_contents(range_text: str) -> set[str]:
+    """The file names ``## Bundle contents`` lists, its ``changes.00.diff through changes.NN.diff``
+    range expanded. Plan revisions are not expanded: these bundles carry one plan revision."""
+    section = range_text.split("\n## Bundle contents\n", 1)[1].split("\n## ", 1)[0]
+    names: set[str] = set()
+    for line in section.splitlines():
+        if not line.startswith("- "):
+            continue
+        first, *rest = line[2:].split(" ")
+        if rest[:1] == ["through"]:
+            last = int(rest[1].split(".")[1])
+            names |= {f"changes.{n:02d}.diff" for n in range(last + 1)}
+        else:
+            names.add(first)
+    return names
+
+
+@pytest.mark.parametrize("chunk_bytes", [0, 64])
+def test_the_contents_section_names_exactly_what_the_bundle_holds(activation: state.State, git_repo: Path, chunk_bytes: int) -> None:
+    """Every file in the bundle directory is named in ``## Bundle contents`` and nothing else is:
+    a file left out is evidence the reviewer is told does not exist, and a name with no file
+    sends it looking for a path it is denied."""
+    (git_repo / "big.txt").write_text("".join(f"line {n}\n" for n in range(200)))
+    overrides = {"chunk_diff_bytes": chunk_bytes} if chunk_bytes else {}
+    for seq in ("001", "002"):
+        execute_fake(activation, git_repo, "changes", config=config_with(**overrides))
+        bundle_dir = activation.act_dir / "bundles" / seq
+        # `chunks` is the engine's own count, never handed to the reviewer.
+        held = {path.name for path in bundle_dir.iterdir() if path.name != "chunks"}
+        assert _named_in_contents((bundle_dir / "range.txt").read_text()) == held
+        (git_repo / "big.txt").write_text((git_repo / "big.txt").read_text() + "more\n")

@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with adversarial-review-loop.  If not, see <http://www.gnu.org/licenses/>.
 
-// ESLint for the display module and its tests -- the only JavaScript in the repository.
+// ESLint for the mod and its tests -- the only JavaScript in the repository.
 //
 // Run by the `eslint` hook in .pre-commit-config.yaml, from the node environment pre-commit
 // builds out of that hook's pinned `additional_dependencies`. There is no package.json: the

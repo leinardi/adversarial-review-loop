@@ -230,7 +230,7 @@ def new_state_document() -> dict[str, Any]:
         #: ``SUPERSEDES`` lines that each name exactly one finding of the round ``round_seq``
         #: names, and only under the fingerprint guard. It touches no verdict, no
         #: ``round_history`` entry and neither stall signal: its one reader,
-        #: ``reviewer._prior_rounds_section``, shows the retraction to the next round and
+        #: ``bundle._prior_rounds_section``, shows the retraction to the next round and
         #: re-validates every field first. Degrades safely like ``active_review`` (a legacy
         #: document simply has none), so it needs no migration arm of its own.
         "clarify_history": [],

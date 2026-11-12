@@ -579,7 +579,7 @@ class ChangedPathsUnavailable(OcrlError):
     Distinct from :func:`changed_paths`'s silent ``[]`` on purpose: that one feeds
     :func:`all_paths_ignored`, where an empty list already means "do not skip the review", so
     failing quietly there is the safe direction. Here the set decides which findings may be
-    *deferred* (``reviewer.LateScope``), and an empty or partial set would defer more than the
+    *deferred* (``contract.LateScope``), and an empty or partial set would defer more than the
     truth allows -- so the caller has to hear about it and refuse to build the scope.
     """
 
@@ -593,7 +593,7 @@ def _strict_path(raw: bytes) -> str:
     """Decode one ``-z`` path record and refuse any the ``FINDING`` grammar could not spell.
 
     A path holding a newline or ``|`` can never appear in a ``FINDING`` line's ``file=``
-    field, and neither can one with leading or trailing whitespace (``reviewer._FINDING_RE``
+    field, and neither can one with leading or trailing whitespace (``contract.FINDING_RE``
     forbids both ends). A changed file with such a name can therefore never be matched by a
     finding, which means no scope built from it would be honest -- the finding the reviewer
     raised about it would look "outside the changed paths" and be deferred. Refuse instead.

@@ -82,9 +82,8 @@ SESSION_LIST_TIMEOUT_SEC: Final = 60
 SESSION_LIST_MAX: Final = 50
 
 #: A canonical OpenCode session id. Matched before a stored or listed id is ever compared,
-#: joined, or shown to a reviewer -- see ``reviewer._pointer_structurally_usable``,
-#: ``reviewer.capture_session`` and ``reviewer.continuity_summary``, all of which reach it
-#: through :meth:`DiscoveredSessions.is_session_id`.
+#: joined, or shown to a reviewer; every caller reaches it through
+#: :meth:`DiscoveredSessions.is_session_id`.
 #:
 #: **Anchored with ``\\Z``, not ``$``, and that is the whole point of the anchor.** Python's ``$``
 #: also matches immediately before a single trailing newline, so ``"ses_abcdefgh\\n"`` satisfied
@@ -127,20 +126,19 @@ def review_argv(repo: str, title: str, *, config: Config, session_id: str = "", 
     ``--title`` and ``-s`` are mutually exclusive: ``-s <session_id>`` continues a remembered
     session and is passed alone; a fresh run passes ``--title`` instead, and only a fresh run
     -- re-passing a newer-sequence title on a continuation would rename the row the stored id
-    was matched against. See ``session_ref``.
+    was matched against.
 
     ``attachments`` is the complete, ordered ``-f`` list, passed in and **never derived here**
     -- not by glob, not by existence check. Two separate reasons, and both were live bugs:
 
     - a glob attaches whatever happens to be sitting in the directory, so a planted
-      ``changes.99.diff`` symlink rode into the provider prompt. The list now comes from
-      ``bundle_manifest``, which is driven by the bundle's own ``chunks`` count and
-      rejects extras;
+      ``changes.99.diff`` symlink rode into the provider prompt. The caller must build the
+      list from the bundle's own ``chunks`` count (in v4, the phase 3 review command);
     - "what was attached" must be **one** value, decided once. It is the round's record of
       the model-derived context it was shown, and a second, later derivation from the
       filesystem could disagree with the first.
 
-    See ``reviewer.Invocation``, which carries both this list and the subset of it that is
+    See ``runner.Invocation``, which carries both this list and the subset of it that is
     model-derived.
     """
     argv: list[str] = [*isolation_argv(config)]
@@ -167,14 +165,12 @@ def clarify_argv(repo: str, attachments: Sequence[Path], question_file: Path, ti
     bundle's ``range.txt`` then its ``changes.NN.diff`` chunks, **as a caller-supplied list,
     never a directory glob here** -- then the one question file. No plan revisions, no
     ``prior-rounds.txt``, no ``verify.txt``, and above all **no ``-s``**. A clarify never
-    continues a session (see ``commands/clarify.py`` for why binding it to the continuity
-    pointer would be wrong) and never captures one, so ``--title`` is passed purely because
+    continues a session and never captures one, so ``--title`` is passed purely because
     ``opencode run`` wants one -- the row it names is never matched against later.
 
-    The attachment list comes from ``commands.clarify._bundle_attachments``, which builds it
-    from the bundle's own ``chunks`` manifest and refuses any extra or symlinked
-    ``changes.*.diff`` -- so a file dropped into ``bundles/<seq>/`` cannot be inlined to the
-    provider through ``-f`` by riding a glob.
+    The caller must build the attachment list from the bundle's own ``chunks`` count and refuse
+    any extra or symlinked ``changes.*.diff``, so a file dropped into ``bundles/<seq>/`` cannot be
+    inlined to the provider through ``-f`` by riding a glob.
     """
     argv: list[str] = [*isolation_argv(config)]
     argv += ["--dir", repo]
@@ -238,7 +234,7 @@ def _list_sessions(*, repo: str, config: Config, act_dir: Path, seq: str) -> lis
     is not, the call is skipped entirely rather than reaching a real ``opencode`` -- exactly
     like every other reviewer-adjacent call under that seam.
     """
-    from arl.reviewer import run_bounded  # noqa: PLC0415 - the gate imports this module at module scope; a top-level import back would be a cycle
+    from arl.runner import run_bounded  # noqa: PLC0415 - the runner imports this package at module scope; a top-level import back would be a cycle
 
     reviewer_cmd = os.environ.get("ARL_REVIEWER_CMD", "")
     session_list_cmd = os.environ.get("ARL_SESSION_LIST_CMD", "")
@@ -395,10 +391,8 @@ class OpenCodeHarness:
                 self.binary,
                 "run",
                 _with_system_prompt(spec.prompt_text, spec.system_prompt),
-                # Paths only: ``-f`` hands OpenCode a pathname it opens for itself, so the
-                # digests are the staging check's and there is nothing here that could act on
-                # them -- see :class:`arl.harness.Attachment`, and `reviewer.invoke`'s
-                # launch-time re-check, which is as close to that open as this process gets.
+                # Paths only: ``-f`` hands OpenCode a pathname it opens for itself, so there is
+                # nothing here that could act on the digests -- see :class:`arl.harness.Attachment`.
                 *review_argv(
                     spec.repo,
                     spec.title,
@@ -441,7 +435,7 @@ class OpenCodeHarness:
 
         There is no wrapper to unwrap and no second channel of failure to inspect -- what this
         CLI reports about the run, it reports through its exit status, which
-        :func:`arl.reviewer.invoke` has already checked by the time this is called.
+        :func:`arl.runner.invoke` has already checked by the time this is called.
         """
         return raw
 

@@ -1,8 +1,8 @@
-"""Exceptions the gate raises when it cannot safely continue.
+"""Exceptions the engine raises when it cannot safely continue.
 
-None of these are caught by the entrypoints. They propagate to the fail-closed guard in
-``hookio.Hook.run``, which denies (Rule 1): a gate that cannot prove where it is writing, or
-what state it is enforcing, has nothing to say except "no".
+An engine command that cannot prove where it is writing, or which state it is reading, stops
+with one of these rather than guessing. The command exits non-zero, and whoever ran it treats
+that as a failure, never as an approval.
 """
 
 #  This file is part of adversarial-review-loop.

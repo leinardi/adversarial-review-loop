@@ -51,13 +51,11 @@ def write_repo_config(repo: Path, values: object) -> None:
 
 def test_defaults_stand_when_nothing_else_exists(layers: dict[str, str], tmp_path: Path) -> None:
     cfg = config.load(str(tmp_path / "repo"), layers)
-    # The gate ships as a Claude Code plugin, so the reviewer every user already has installed
-    # is the one it defaults to; `opencode` stays one config key away.
-    assert cfg.as_str("harness") == "claude-code"
+    assert cfg.as_str("harness") == "opencode"
     # Empty, not a model name: `model`'s real default is the selected harness's own, resolved
     # through `harness.model` -- see `test_harness.py` for that half of the contract.
     assert cfg.as_str("model") == ""
-    assert harness.model(cfg) == "opus"
+    assert harness.model(cfg) == harness.get("opencode").default_model
     assert cfg.as_int("ttl_hours") == 24
     assert cfg.as_bool("pure") is True
     assert cfg.as_bool("final_review") is False
@@ -182,12 +180,6 @@ def test_a_non_numeric_integer_override_is_skipped_not_zeroed(layers: dict[str, 
     assert config.load("", layers).as_int("timeout_sec") == 111
 
 
-def test_max_session_rounds_defaults_to_three_and_takes_an_integer_override(layers: dict[str, str]) -> None:
-    assert config.load("", layers).as_int("max_session_rounds") == 3
-    layers["ARL_MAX_SESSION_ROUNDS"] = "0"
-    assert config.load("", layers).as_int("max_session_rounds") == 0, "0 disables the cap; it must not be read as unset"
-
-
 def test_ignore_globs_is_comma_separated_in_the_environment(layers: dict[str, str]) -> None:
     layers["ARL_IGNORE_GLOBS"] = "a/*,,b/**,"
     assert config.load("", layers).as_list("ignore_globs") == ["a/*", "b/**"]
@@ -307,11 +299,9 @@ def test_an_unrecognised_late_block_severity_falls_back_to_block_severity(layers
 
 def test_the_harness_is_settable_from_the_environment(layers: dict[str, str], tmp_path: Path) -> None:
     """``harness`` is a plain string key, so `ARL_HARNESS` reaches it through `from_env`'s
-    string branch like any other -- which is what makes `ARL_HARNESS=claude-code make dry-run`
-    work without a config file."""
-    layers["ARL_HARNESS"] = "claude-code"
+    string branch like any other, with no config file."""
+    layers["ARL_HARNESS"] = "some-other-harness"
 
     cfg = config.load(str(tmp_path / "repo"), layers)
 
-    assert cfg.as_str("harness") == "claude-code"
-    assert harness.model(cfg) == harness.get("claude-code").default_model
+    assert cfg.as_str("harness") == "some-other-harness"
