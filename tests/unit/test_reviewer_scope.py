@@ -30,8 +30,9 @@ import pytest
 from conftest import config_with
 from reviewer_common import execute_fake, target_for
 
-from arl import bundle, contract, gitsnap, state
+from arl import bundle, contract, gitsnap
 from arl import config as arl_config
+from arl import v3state as state
 from arl.bundle import BundleError
 
 #: Shortens the SIGTERM-to-SIGKILL grace for this module. Requested by mark rather than

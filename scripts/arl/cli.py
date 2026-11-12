@@ -1,9 +1,8 @@
-"""Subcommand dispatch, reached only through ``scripts/arl-bootstrap.py``.
+"""Subcommand dispatch: parse the argv, run the command, print its one JSON answer.
 
-The engine is a command-line program the mod runs: each subcommand reads its arguments, does
-one job and writes its answer to stdout. Diagnostics go to stderr through :func:`arl.util.log`.
-Every subcommand module is imported inside its own branch, so a call pays only for the code it
-runs.
+Rule 3: stdout carries only the answer. A refusal is still an answer -- ``{"ok": false,
+"code": ..., "error": ...}`` with exit status 1 -- so the mod reads every outcome the same way;
+a usage error goes to stderr with status 2.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -25,20 +24,108 @@ runs.
 
 from __future__ import annotations
 
+import argparse
+import json
 import sys
+from pathlib import Path
+from typing import Any, NoReturn
+
+from arl.commands import COMMANDS
+from arl.errors import OcrlError, StateLoadError
+from arl.state import RunError, run_paths
+from arl.util import log, log_exception
 
 __all__ = ["USAGE", "main"]
 
-USAGE = """usage: arl.sh <subcommand> [args]
+USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
 
-  (no subcommands yet: the v4 engine commands arrive in the next phases)
+  init --plan FILE [--root DIR]... [--new]   start a run (--new archives the current one)
+  resume [--session ID]                      continue the run in this session
+  set-phases [--replan]                      read a JSON array of phase descriptions on stdin
+  root-add PATH                              register a root before changing it
+  root-baseline ALIAS (--commit REV | --empty | --current)
+  status [--json]                            the run summary
+  pause | stop | finish | accept             user decisions
+  next-action                                whether the loop continues after a turn
+
+Every subcommand prints one JSON object on stdout.
 """
 
 
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        sys.stderr.write(f"arl: {message}\n{USAGE}")
+        raise SystemExit(2)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = _Parser(prog="arl.sh", add_help=False)
+    parser.add_argument("--dir", default=".")
+    sub = parser.add_subparsers(dest="command", parser_class=_Parser)
+    init = sub.add_parser("init", add_help=False)
+    init.add_argument("--plan", required=True)
+    init.add_argument("--root", action="append", dest="roots", default=[])
+    init.add_argument("--new", action="store_true")
+    phases = sub.add_parser("set-phases", add_help=False)
+    phases.add_argument("--replan", action="store_true")
+    root_add = sub.add_parser("root-add", add_help=False)
+    root_add.add_argument("path")
+    baseline = sub.add_parser("root-baseline", add_help=False)
+    baseline.add_argument("alias")
+    choice = baseline.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--commit", default=None)
+    choice.add_argument("--empty", action="store_const", const="empty", dest="choice")
+    choice.add_argument("--current", action="store_const", const="current", dest="choice")
+    status = sub.add_parser("status", add_help=False)
+    # Accepted and ignored: every answer is JSON already, and the plan's spelling is `status --json`.
+    status.add_argument("--json", action="store_true", dest="_json")
+    resume = sub.add_parser("resume", add_help=False)
+    resume.add_argument("--session", default="")
+    for name in ("pause", "stop", "finish", "accept", "next-action"):
+        sub.add_parser(name, add_help=False)
+    return parser
+
+
+def _answer(payload: dict[str, Any], status: int) -> int:
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return status
+
+
 def main(argv: list[str]) -> int:
-    sub = argv[0] if argv else ""
-    if sub in ("-h", "--help", "help", ""):
+    if not argv or argv[0] in ("-h", "--help", "help"):
         sys.stdout.write(USAGE)
         return 0
-    sys.stderr.write(f"arl: unknown subcommand {sub!r}\n{USAGE}")
-    return 2
+    if argv[0] not in COMMANDS and not argv[0].startswith("-"):
+        sys.stderr.write(f"arl: unknown subcommand {argv[0]!r}\n{USAGE}")
+        return 2
+    parsed = vars(_parser().parse_args(argv))
+    name = parsed.pop("command", None)
+    parsed.pop("_json", None)
+    if name is None:
+        sys.stderr.write(USAGE)
+        return 2
+    if name == "root-baseline" and parsed.get("commit") is not None:
+        parsed["choice"] = "commit"
+    if name == "set-phases":
+        try:
+            parsed["phases"] = json.loads(sys.stdin.read())
+        except ValueError:  # UnicodeDecodeError included
+            parsed["phases"] = None
+    return _run(name, parsed)
+
+
+def _run(name: str, parsed: dict[str, Any]) -> int:
+    """Run one command and print its answer, a refusal or failure included."""
+    try:
+        return _answer(COMMANDS[name](run_paths(Path(parsed.pop("dir"))), parsed), 0)
+    except RunError as exc:
+        return _answer({"ok": False, "code": exc.code, "error": str(exc)}, 1)
+    except StateLoadError as exc:
+        log(f"{name}: {exc}")
+        return _answer({"ok": False, "code": "state-corrupt", "error": f"{exc}; start over with /implement --new <plan>"}, 1)
+    except OcrlError as exc:
+        log(f"{name}: {exc}")
+        return _answer({"ok": False, "code": "error", "error": str(exc)}, 1)
+    except Exception as exc:  # noqa: BLE001 - the mod must get an answer, never a bare traceback
+        log_exception()
+        return _answer({"ok": False, "code": "internal", "error": f"{type(exc).__name__}: {exc}"}, 1)

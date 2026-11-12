@@ -57,12 +57,15 @@ Target architecture (the phases build it):
 | --- | --- |
 | `scripts/arl.sh` | launcher: finds a Python 3.12 or newer and runs the bootstrap |
 | `scripts/arl-bootstrap.py` | trusted absolute entrypoint; establishes `sys.path` and `sys.pycache_prefix` before `arl` is imported |
-| `scripts/arl/cli.py` | subcommand dispatch (the v4 commands arrive in phase 2) |
+| `scripts/arl/cli.py` | subcommand dispatch: argv in, one JSON answer on stdout |
+| `scripts/arl/commands.py` | the run commands: `init`, `resume`, `set-phases`, `root-add`, `root-baseline`, `status`, `pause`, `stop`, `finish`, `accept`, `next-action` |
+| `scripts/arl/state.py` | the run state in `<launch dir>/.arl/state.json`: stages, approvals, tickets, `next_action` |
+| `scripts/arl/workspace.py` | workspace roots: git and shadow snapshots, nested-repository discovery, late baselines |
 | `scripts/arl/contract.py` | the reviewer output contract: `FINDING`/`SUPERSEDES` grammar, `parse`, the recomputed verdict, the late-round scope type, `parse_clarify` |
 | `scripts/arl/bundle.py` | the review bundle: diff chunks, `range.txt`, plan and guide evidence, prior rounds, prompt composition |
 | `scripts/arl/runner.py` | running the reviewer: the bounded runner, transcript reduction, failure classification |
 | `scripts/arl/harness/` | the reviewer-CLI seam; `opencode.py` is the one external harness |
-| `scripts/arl/state.py`, `paths.py` | v3's activation state, kept until phase 2 replaces it with the run state |
+| `scripts/arl/v3state.py`, `paths.py` | v3's activation state, still read by `bundle.py`; removed in phase 3 |
 | `scripts/arl/gitsnap.py` | temp-index snapshot, oversized guard, submodule detection |
 | `scripts/arl/oscillation.py` | stall detection across rounds |
 | `scripts/arl/guide.py`, `planrev.py` | the repo-supplied review guide, plan revisions |

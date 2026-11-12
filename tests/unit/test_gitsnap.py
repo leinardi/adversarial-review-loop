@@ -747,3 +747,55 @@ def test_an_excluded_file_is_invisible_to_every_tree_this_module_builds(git_repo
     assert gitsnap.worktree_clean(str(git_repo)), "the evasion: git reports the worktree clean"
     assert gitsnap.snapshot(str(git_repo)).tree == baseline, "and the tree falls back to the baseline"
     assert (git_repo / "backdoor.py").read_text() == "payload\n", "while the file is still there"
+
+
+# --------------------------------------------------------------------------
+# Excluding paths from a snapshot
+# --------------------------------------------------------------------------
+
+
+def test_an_excluded_path_keeps_what_the_index_holds(git_repo: Path) -> None:
+    """A nested root is left out of its container: its changes neither appear nor vanish."""
+    (git_repo / "inner").mkdir()
+    (git_repo / "inner" / "tracked.txt").write_text("committed\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-qm", "inner")
+    (git_repo / "inner" / "tracked.txt").write_text("changed\n")
+    (git_repo / "inner" / "new.txt").write_text("new\n")
+    (git_repo / "outer.txt").write_text("outer\n")
+
+    tree = gitsnap.snapshot(str(git_repo), exclude=["inner"]).tree
+
+    listed = git(git_repo, "ls-tree", "-r", "--name-only", tree).splitlines()
+    assert "outer.txt" in listed
+    assert "inner/new.txt" not in listed
+    assert git(git_repo, "show", f"{tree}:inner/tracked.txt") == "committed"
+
+
+def test_an_unborn_nested_repository_can_be_excluded(git_repo: Path) -> None:
+    """``add -A`` refuses an embedded repository with no commit; excluded, it is never asked."""
+    nested = git_repo / "nested"
+    nested.mkdir()
+    git(nested, "init", "-q")
+    (nested / "x.txt").write_text("x\n")
+    with pytest.raises(gitsnap.SnapshotError):
+        gitsnap.snapshot(str(git_repo))
+    assert gitsnap.snapshot(str(git_repo), exclude=["nested"]).tree
+
+
+def test_an_excluded_path_git_already_ignores_does_not_fail_the_snapshot(git_repo: Path) -> None:
+    (git_repo / ".git" / "info" / "exclude").write_text("/.arl/\n")
+    (git_repo / ".arl").mkdir()
+    (git_repo / ".arl" / "state.json").write_text("{}\n")
+    tree = gitsnap.snapshot(str(git_repo), exclude=[".arl"]).tree
+    assert ".arl/state.json" not in git(git_repo, "ls-tree", "-r", "--name-only", tree)
+
+
+def test_an_excluded_name_is_never_read_as_a_glob(git_repo: Path) -> None:
+    (git_repo / "a*").mkdir()
+    (git_repo / "a*" / "x.txt").write_text("x\n")
+    (git_repo / "abc.txt").write_text("abc\n")
+    tree = gitsnap.snapshot(str(git_repo), exclude=["a*"]).tree
+    listed = git(git_repo, "ls-tree", "-r", "--name-only", tree).splitlines()
+    assert "abc.txt" in listed
+    assert "a*/x.txt" not in listed

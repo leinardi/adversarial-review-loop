@@ -29,7 +29,8 @@ from pathlib import Path
 import pytest
 
 import arl
-from arl import runner, state
+from arl import runner
+from arl import v3state as state
 from arl.config import DEFAULTS, Config
 
 PLUGIN_ROOT = arl.PLUGIN_ROOT

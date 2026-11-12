@@ -31,7 +31,8 @@ from pathlib import Path
 
 from conftest import FAKE_REVIEWER, config_with, git
 
-from arl import bundle, gitsnap, report, state
+from arl import bundle, gitsnap, report
+from arl import v3state as state
 from arl.config import Config
 from arl.contract import END_MARKER, FINDINGS_MARKER, Review, Target, records
 from arl.runner import Invocation, run_invocation

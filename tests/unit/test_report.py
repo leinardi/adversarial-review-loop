@@ -33,7 +33,8 @@ from pathlib import Path
 import pytest
 from conftest import config_with, git
 
-from arl import harness, report, state
+from arl import harness, report
+from arl import v3state as state
 from arl.contract import Review, Target
 from arl.util import TRUNCATION_MARKER
 

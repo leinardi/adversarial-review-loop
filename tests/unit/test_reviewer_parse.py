@@ -44,7 +44,8 @@ from reviewer_common import (
     target_for,
 )
 
-from arl import contract, harness, report, runner, state
+from arl import contract, harness, report, runner
+from arl import v3state as state
 from arl.config import Config
 from arl.contract import Review, Target
 from arl.runner import Invocation, ReviewerFailed

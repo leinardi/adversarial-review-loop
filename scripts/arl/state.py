@@ -1,16 +1,26 @@
-"""Activation state: the session pointer, ``state.json`` and the derived status.
+"""The run state: one ``state.json`` under ``<launch dir>/.arl/``, and every transition on it.
 
-Layout under ``$XDG_STATE_HOME/adversarial-review-loop``::
+Layout::
 
-    sessions/<session_id>              -> worktree path of the armed activation
-    worktrees/<sha256(worktree)>/<session_id>/
-        state.json
-        plan.frozen.md
-        phases.frozen                  (one phase description per line)
-        reports/NNN-*.md
-        bundles/NNN/
+    <launch dir>/.arl/
+        state.json          the document below
+        lock                held across every read-modify-write
+        plan.md             the plan as it was handed to ``init``
+        shadow/<alias>.git  the snapshot repository of each non-git root
+        runs/<run id>/      an earlier run, archived by ``init --new``
 
-Nothing is ever written inside the repository under review (Rule 3).
+The document holds the run id, the plan, the phases and their revision, the roots, the
+approvals, the round counter of the current stage, the pending review ticket and whatever the
+run is waiting on the user for. It is the one source :func:`next_action` answers from, so the
+mod never decides on its own whether the loop goes on.
+
+**Stages.** A run with no phases is in ``plan``; with an unapproved phase, in ``phase``; after the
+last phase approval it is in ``final`` when a final review is required (``final_review`` frozen
+at ``init``, or ``/finish``), and ``done`` otherwise. ``status`` turns ``complete`` only on the
+approval that leaves nothing in front of the run, so a required final review is never skipped.
+
+v4 enforces nothing, and this file is not a trust boundary: an agent can edit it. What the
+document must get right is that no transition reports an approval nobody gave (AGENTS.md rule 1).
 """
 
 #  This file is part of adversarial-review-loop.
@@ -32,815 +42,473 @@ Nothing is ever written inside the repository under review (Rule 3).
 
 from __future__ import annotations
 
-import contextlib
-import hashlib
 import json
-import os
-import re
-from collections.abc import Iterator, Mapping
+import secrets
+import time
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
-from arl import paths
 from arl.atomic import locked, write_private_atomic
-from arl.config import Config
-from arl.errors import StateLoadError
-from arl.util import log, now
+from arl.errors import OcrlError, StateLoadError
 
 __all__ = [
-    "ENDED_EVIDENCE_STATUSES",
+    "RUN_DIR_NAME",
     "STATE_VERSION",
-    "State",
-    "new_state_document",
-    "pointer_clear",
-    "pointer_read",
-    "pointer_write",
+    "STATUSES",
+    "WAIT_KINDS",
+    "RunError",
+    "RunPaths",
+    "RunState",
+    "locked_run_dir",
+    "locked_state",
+    "new_document",
+    "next_action",
+    "run_paths",
 ]
 
-#: The stored statuses a terminal transition writes -- ``session.deactivate``,
-#: ``completion.Completion.commit`` and ``resume``'s retirement, the only three production
-#: writes of a terminal status, all of which fold ``commands.hooks.ended_evidence`` into the
-#: same ``state.update``. A document carrying one of these therefore **must** carry an
-#: ``ended_*`` record unless it ended before the record existed. Lives here rather than beside
-#: its reader in ``commands.hooks`` because ``_migrate``'s 4 -> 5 arm needs it too, and
-#: ``hooks`` imports ``state``, not the other way round.
-#:
-#: ``ARM_FAILED`` and ``NEEDS_HUMAN`` are deliberately absent: no writer records evidence for
-#: them, so an empty record there is correct rather than suspicious.
-ENDED_EVIDENCE_STATUSES: Final = frozenset({"DISARMED", "COMPLETE", "RESUMED"})
+RUN_DIR_NAME: Final = ".arl"
+STATE_VERSION: Final = 4
 
-#: Statuses that are terminal enough that the TTL no longer applies to them. ``RESUMED``
-#: marks a retired activation -- it already denies everything on its own, and letting the
-#: TTL turn it into ``STALE`` instead would replace a message naming the successor session
-#: with a generic re-arm prompt.
-#:
-#: **``DISARMED`` belongs here for a stronger reason than tidiness.** The TTL exists to catch
-#: an activation nobody ever ended; one the user *did* end is the case it was never about, and
-#: expiring it does three separate kinds of damage. ``pretool._gate_terminal_status`` passes
-#: ``DISARMED`` and **denies** ``STALE``, so a worktree the user deliberately stopped starts
-#: refusing every mutation ``ttl_hours`` after it was armed. The Stop gate then tells them to
-#: ``resume`` a mode they chose to leave. And ``STALE`` is not in ``commands.posttool._ENDED``,
-#: so the document routes back onto the live current-HEAD branch and the ungated-commit report
-#: this change exists to scope comes back -- one day late.
-#:
-#: ``resume`` is unaffected: it reads the *stored* status against ``_RESUMABLE``, so a stale
-#: ``DISARMED`` activation was always resumable and still is.
-_TTL_EXEMPT: Final = frozenset({"COMPLETE", "DISARMED", "ARM_FAILED", "NEEDS_HUMAN", "RESUMED"})
+#: ``active`` runs; ``paused`` waits for ``resume``; ``stopped`` and ``complete`` are final.
+STATUSES: Final = ("active", "paused", "stopped", "complete")
 
-#: Version 2 adds resume, pause, plan revision and the config overlay's fields. Version 3
-#: adds ``round_history`` and the convergence counters. Version 4 adds the repo-supplied
-#: review guide's fields (``guide_path``, ``guide_revisions``). Version 5 adds the end-state
-#: record (``ended_capture`` and friends). See ``State._migrate`` for the upgrade from any
-#: earlier (or unversioned) document -- a version-1 document reaches the current version in
-#: one pass.
-#:
-#: **The 5 bump is not bookkeeping**, unlike the fields ``manual_accepts`` / ``reviewer_session``
-#: were allowed to add without one. Those degraded safely because a missing value simply read
-#: as an empty default. ``ended_capture``'s *absence* is a load-bearing signal instead -- it is
-#: what tells a document that ended before the record existed apart from one whose ``status``
-#: was edited straight into ``state.json``, the documented Rule 4 bypass. Without the bump
-#: those two shapes are the same bytes, and the second is silent.
-STATE_VERSION: Final = 5
+#: The decisions a run can be waiting on the user for, besides a root's baseline (which is read
+#: off the roots themselves, so it cannot go stale).
+WAIT_KINDS: Final = ("stall", "failures", "oversized")
 
-#: The name ``arm`` freezes the plan under, and the name revision 0 always carries.
-_PLAN_FROZEN_NAME: Final = "plan.frozen.md"
+Stage = Literal["plan", "phase", "final", "done"]
 
 
-def new_state_document() -> dict[str, Any]:
-    """A fresh activation record. Key order matches the shell's, for readable diffs."""
-    return {
-        "version": STATE_VERSION,
-        "status": "ARMED",
-        "reason": "",
-        "session_id": "",
-        "worktree": "",
-        "plan_path": "",
-        "baseline_tree": "",
-        "activation_commit": "",
-        "armed_at": 0,
-        "allow_dirty": False,
-        #: ``gitsnap.exclude_digest`` as it stood when this activation was armed. The gate's
-        #: snapshot stages with ``git add -A``, which obeys ``.git/info/exclude`` -- a file
-        #: that lives outside the worktree, so nothing reviews it and no commit carries it.
-        #: One line written there makes a real file read as a clean worktree, which defeats
-        #: the dirty check and the turn-end unreviewed-work sweep at once. Comparing against
-        #: this baseline is what turns that from silent into reported.
-        #:
-        #: **Absence is not a change.** A document armed before this field existed has no
-        #: baseline to compare against, and treating that as "the file moved" would fire on
-        #: every activation already on disk -- the same permanent-alarm failure the end-state
-        #: record was added to fix. It degrades exactly as ``active_review`` does, so it needs
-        #: no migration arm. ``resume`` deliberately does *not* reset it: the successor keeps
-        #: the predecessor's baseline, or a resume would launder an edit made under the
-        #: predecessor into the successor's starting state.
-        "exclude_digest": "",
-        "phases": [],
-        "phase": 1,
-        "last_approved_tree": "",
-        "approved_trees": [],
-        #: One ``{"phase": n, "commit": sha}`` per phase confirmed by ``posttool``. Evidence of
-        #: phase *progression*, which ``phase`` alone cannot prove -- see
-        #: ``completion.phase_progress_proven``.
-        "phase_commits": [],
-        "pending_approved_tree": "",
-        "pending_head": "",
-        "pending_command": "",
-        "bad_commit": "",
-        "bad_commit_parent": "",
-        "failures": 0,
-        "stop_blocks": 0,
-        "stop_marker": "",
-        "defers": 0,
-        "defer_pending": False,
-        "final_done_tree": "",
-        #: What the gate could see about the repository at the moment enforcement stopped,
-        #: written **only** inside the transaction that performs a terminal transition, and
-        #: **write-once** -- the first terminal transition wins. The two reporting channels
-        #: (``stop._ended``, ``posttool._guard_ended_head``) read these instead of current
-        #: HEAD, so a commit made *after* the mode ended is silent while the documented
-        #: ``git commit && arl.sh deactivate`` escape is still reported, from evidence
-        #: recorded at that moment. See ``commands.hooks.ended_evidence`` / ``end_state``.
-        #:
-        #: ``ended_capture`` is the discriminator, not ``ended_at``: a freshly armed document
-        #: already carries ``ended_at: 0``. It is one of ``"recorded"`` (HEAD and its tree
-        #: were read), ``"unborn"`` (git answered, HEAD does not exist) or ``"unreadable"``
-        #: (git could not answer), so a capture that *failed* stays reportable instead of
-        #: degrading into "nothing to see".
-        #:
-        #: **Its absence is load-bearing**: it marks a document that ended *before* this check
-        #: existed, which both readers treat as silence, and it is the only shape that does.
-        #: Present-and-empty on a document whose status a terminal transition writes is
-        #: reported as tampering instead -- see ``commands.hooks.end_state``. Only the 4 -> 5
-        #: migration arm may write these, only for a document that has **not** already ended,
-        #: and only the empty defaults; backfilling an ended one would hand that silence to the
-        #: Rule 4 state-edit bypass, and backfilling any *value* would invent evidence.
-        "ended_capture": "",
-        "ended_head": "",
-        "ended_tree": "",
-        "ended_at": 0,
-        "report_seq": 0,
-        "stop_after_phase": 0,
-        "resumed_from": "",
-        "resumed_into": "",
-        "resume_count": 0,
-        "plan_revisions": [],
-        #: The ``review_guide`` path this activation resolved at arm (or at the last
-        #: ``resume --guide``), for disclosure only -- the source file is never read again.
-        #: Empty when no guide is in force.
-        "guide_path": "",
-        #: One ``{"at", "phase", "sha256", "file"}`` per frozen review guide, mirroring
-        #: ``plan_revisions``: revision 0 is ``guide.frozen.md``, every later one a
-        #: ``guide.rev<n>.md`` a ``resume --guide`` wrote. The **last** entry is the active
-        #: guide. Unlike ``plan_revisions`` there is no revision-0 backfill: an empty list
-        #: means "no guide", not "synthesize one from whatever is on disk" -- see
-        #: ``arl.guide.verified_active``.
-        "guide_revisions": [],
-        "replan_pending": False,
-        "overrides": {},
-        "abandoned_pending_tree": "",
-        "abandoned_pending_head": "",
-        "activation_generation": 0,
-        "finish_requested": False,
-        #: One entry per *parsed* review (``APPROVED`` / ``CHANGES_REQUIRED`` only), appended
-        #: by ``reviewer.execute``: ``{seq, label, phase, generation, round, verdict, tree,
-        #: base, at, findings: [line, ...], supersedes: [line, ...]}``. Evidence, not a
-        #: counter -- carried across a resume, never reset, like ``manual_accepts`` and the
-        #: reports. ``state.json`` is not a trust boundary: every consumer re-validates each
-        #: stored finding line before rendering it, and any git command built from ``tree``
-        #: runs it through ``gitsnap.checked_tree`` first.
-        "round_history": [],
-        #: Infra-failure retry pacing (phase 6: ``transient_failures``, ``retry_not_before``)
-        #: and the clarify allowance (phase 3: ``clarifications``). Counters, so ``resume``
-        #: resets all three -- see ``commands.resume._build_successor_document``.
-        "transient_failures": 0,
-        "retry_not_before": 0,
-        "clarifications": 0,
-        #: The sequence a ``commands.clarify`` run numbers its ``context/<n>-question.txt``
-        #: with. Not ``report_seq`` -- a clarify writes neither a bundle nor a report -- and
-        #: **not a counter**: like ``report_seq`` it is carried across a resume, never reset,
-        #: so a post-resume clarify cannot overwrite a question file copied forward from the
-        #: predecessor's ``context/``.
-        "clarify_seq": 0,
-        #: One entry per clarification whose reviewer retracted a finding of the round it
-        #: answered: ``{seq, label, phase, generation, round_seq, at, supersedes: [line, ...]}``.
-        #: Evidence, not a counter -- like ``round_history`` it is carried across a resume, never
-        #: reset. Appended only by ``commands.clarify``, only with grammar-validated
-        #: ``SUPERSEDES`` lines that each name exactly one finding of the round ``round_seq``
-        #: names, and only under the fingerprint guard. It touches no verdict, no
-        #: ``round_history`` entry and neither stall signal: its one reader,
-        #: ``bundle._prior_rounds_section``, shows the retraction to the next round and
-        #: re-validates every field first. Degrades safely like ``active_review`` (a legacy
-        #: document simply has none), so it needs no migration arm of its own.
-        "clarify_history": [],
-        #: One entry per ``accept``: ``{"at", "phase", "tree", "base", "reason", "reviews",
-        #: "report"}``. Never trimmed -- it is the audit trail for every phase a human approved
-        #: without an approving review.
-        "manual_accepts": [],
-        #: The reviewer session continuity pointer, or ``{}`` when none is held. A pure
-        #: optimisation hint -- see ``arl.reviewer``'s module docstring for why it is never
-        #: trusted to authorize anything -- holding ``{"label", "id", "title", "created",
-        #: "revisions", "generation", "round", "claimed_at", "claim_id"}`` once populated.
-        "reviewer_session": {},
-        #: Phase 5's per-label mutual-exclusion claims: ``{label: {"generation", "claimed_at",
-        #: "claim_id"}}``, one entry per label that currently holds (or recently held) a
-        #: claim -- a *dict* of claims, not a single shared record, so an unrelated label's
-        #: claim (a concurrent "final" review while a "phase1" sweep is still running) cannot
-        #: silently overwrite another label's still-live entry. Unrelated to
-        #: ``reviewer_session`` (which is advisory and never authorizes anything): this one
-        #: genuinely prevents two reviews of the same ``(label, generation)`` from running at
-        #: the same time, which is what makes the stall check's evidence trustworthy -- see
-        #: ``arl.reviewer._claim_active_review``. Degrades safely like ``reviewer_session``
-        #: (a legacy document simply has none), so it needs no migration arm of its own.
-        "active_review": {},
-        #: ``label -> {"generation", "seq"}``: the newest ``report_seq`` any review *attempt*
-        #: of that label reserved, whatever became of it. Distinct from ``round_history``,
-        #: which records only attempts that produced a parsed verdict: an attempt that timed
-        #: out, hit a rate limit, failed its contract or escalated appears **here and nowhere
-        #: else**. That is exactly why it exists -- ``reviewer.approval_is_current`` requires
-        #: an approving review to still be the newest attempt, and a check that consulted only
-        #: recorded rounds would let a review whose successor merely *failed* approve on
-        #: evidence that is no longer the latest word on the label. Written under the same
-        #: lock, and in the same step, as the ``report_seq`` reservation it mirrors
-        #: (``reviewer._reserve_round``). Degrades safely like ``active_review`` (a legacy
-        #: document simply has none), so it needs no migration arm of its own.
-        "review_attempts": {},
-    }
+class RunError(OcrlError):
+    """A command refused on the state it found. ``code`` is the stable token the mod branches on."""
 
-
-# --------------------------------------------------------------------------
-# Session pointer
-# --------------------------------------------------------------------------
-
-
-#: An intent token: what ``intent`` mints per arming prompt and the pointer acknowledges.
-INTENT_TOKEN_RE: Final = re.compile(r"\A[0-9a-f]{16}\Z")
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
-class IntentMarker:
-    """One parsed intent marker. ``problem`` is empty when the marker can be trusted.
+class RunPaths:
+    """Where one launch directory keeps its run."""
 
-    A marker with a ``problem`` may still carry a ``token`` (a corrupt worktree line, say);
-    that token is what lets a later ``pointer_write`` acknowledge it. It never carries a
-    usable ``worktree`` -- that is what "cannot be scoped" means.
+    launch_dir: Path
+    run_dir: Path
+
+    @property
+    def state_file(self) -> Path:
+        return self.run_dir / "state.json"
+
+    @property
+    def lock_file(self) -> Path:
+        return self.run_dir / "lock"
+
+    @property
+    def plan_file(self) -> Path:
+        return self.run_dir / "plan.md"
+
+    @property
+    def shadow_dir(self) -> Path:
+        return self.run_dir / "shadow"
+
+    @property
+    def runs_dir(self) -> Path:
+        return self.run_dir / "runs"
+
+
+def run_paths(launch_dir: Path) -> RunPaths:
+    """The run layout under ``launch_dir``, which is resolved so every stored path is absolute."""
+    resolved = launch_dir.resolve()
+    return RunPaths(launch_dir=resolved, run_dir=resolved / RUN_DIR_NAME)
+
+
+def new_document(*, plan_source: str, final_review: bool) -> dict[str, Any]:
+    """A fresh run: no phases, no roots yet (``init`` adds them), ``active``."""
+    return {
+        "version": STATE_VERSION,
+        "run_id": secrets.token_hex(6),
+        "created_at_ns": time.time_ns(),
+        "status": "active",
+        "plan": {"file": "plan.md", "source": plan_source},
+        "phases": [],
+        "phases_revision": 0,
+        "roots": [],
+        "approvals": [],
+        "rounds": 0,
+        "round_history": [],
+        "final_review": final_review,
+        "final_requested": False,
+        "final_approved": False,
+        "pending_ticket": None,
+        "last_ticket": None,
+        "waiting": None,
+        "last_continuation": "",
+    }
+
+
+#: Every key and the type it must hold. A document missing one, or holding the wrong type, is
+#: refused as a whole rather than half-read: a run whose approvals cannot be read must not
+#: continue as if it had none.
+_SCHEMA: Final[Mapping[str, type | tuple[type, ...]]] = {
+    "version": int,
+    "run_id": str,
+    "created_at_ns": int,
+    "status": str,
+    "plan": dict,
+    "phases": list,
+    "phases_revision": int,
+    "roots": list,
+    "approvals": list,
+    "rounds": int,
+    "round_history": list,
+    "final_review": bool,
+    "final_requested": bool,
+    "final_approved": bool,
+    "pending_ticket": (dict, type(None)),
+    "last_ticket": (dict, type(None)),
+    "waiting": (dict, type(None)),
+    "last_continuation": str,
+}
+
+
+def _validated(document: object) -> dict[str, Any]:
+    if not isinstance(document, dict):
+        raise StateLoadError("state.json does not hold an object")
+    if document.get("version") != STATE_VERSION:
+        raise StateLoadError(f"state.json is version {document.get('version')!r}, this engine reads {STATE_VERSION}")
+    for key, kind in _SCHEMA.items():
+        if not isinstance(document.get(key), kind) or (kind is int and isinstance(document.get(key), bool)):
+            raise StateLoadError(f"state.json field {key!r} is missing or malformed")
+    if document["status"] not in STATUSES:
+        raise StateLoadError(f"state.json has an unknown status {document['status']!r}")
+    if not all(isinstance(phase, str) for phase in document["phases"]):
+        raise StateLoadError("state.json phases are not all text")
+    for root in document["roots"]:
+        if (
+            not isinstance(root, dict)
+            or not all(isinstance(root.get(key), str) for key in ("alias", "path", "kind", "baseline", "start_tree", "approved_tree"))
+            or root["kind"] not in ("git", "dir")
+            or root["baseline"] not in ("set", "unknown")
+            or (root["baseline"] == "set" and not (root["start_tree"] and root["approved_tree"]))
+        ):
+            raise StateLoadError("state.json holds a malformed root")
+    return document
+
+
+class RunState:
+    """The loaded document, with the transitions every command applies to it.
+
+    Never constructed directly by a command: :func:`locked_state` loads it under the lock, and
+    only a command holding that lock may call :meth:`save`.
     """
 
-    worktree: str
-    token: str
-    problem: str
+    def __init__(self, paths: RunPaths, data: dict[str, Any]) -> None:
+        self.paths = paths
+        self.data = data
 
+    # -- persistence --------------------------------------------------------
 
-def intent_read(session: str) -> IntentMarker | None:
-    """The session's intent marker, parsed; ``None`` only when it is provably absent.
-
-    Format: line 1 the worktree the arming prompt was submitted from, line 2 ``intent=<token>``.
-    Anything else -- unreadable, empty, a relative worktree, a missing or malformed token --
-    comes back with ``problem`` set rather than as ``None``: an arming request the gate cannot
-    scope is still an arming request.
-    """
-    path = paths.intent_path(session)
-    try:
-        with path.open(encoding="utf-8", errors="surrogateescape") as handle:
-            lines = handle.read().split("\n")
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        return IntentMarker(worktree="", token="", problem=f"cannot be read: {exc}")
-    worktree = lines[0] if lines else ""
-    token = ""
-    if len(lines) > 1 and lines[1].startswith("intent="):
-        candidate = lines[1].removeprefix("intent=")
-        if INTENT_TOKEN_RE.match(candidate):
-            token = candidate
-    problems = []
-    if not worktree or not os.path.isabs(worktree) or "\0" in worktree:
-        problems.append(f"names no worktree ({worktree!r})")
-    if not token:
-        problems.append("carries no valid token")
-    return IntentMarker(worktree=worktree if not problems else "", token=token, problem="; ".join(problems))
-
-
-def pointer_write(session: str, worktree: str) -> None:
-    """Record which worktree a session armed, acknowledging the intent that asked for it.
-
-    Written atomically for the same reason ``state.json`` is: an interrupted redirect left an
-    empty pointer, which Rule 0 reads as "arming never executed".
-
-    **The pointer is the acknowledgement, and it is published first.** The intent marker outranks
-    the pointer, so the two are bound rather than ordered: the pointer carries the marker's token
-    on its second line, and a marker whose token the pointer already carries is *answered*. That
-    closes both crash windows. Die after this write and the marker is inert litter; die before it
-    and the next mutation records ``ARM_FAILED``. Unlinking first would open a window with nothing
-    on disk at all -- no marker, no pointer, no ``latest`` -- in which a saved ``ACTIVE``
-    activation went ungated.
-
-    The unlink afterwards is best-effort cleanup. See ``docs/design/rule-0-intent.md``.
-    """
-    root = paths.state_root()
-    marker = intent_read(session)
-    token = marker.token if marker is not None else ""
-    text = f"{worktree}\n" + (f"intent={token}\n" if token else "")
-    write_private_atomic(paths.session_pointer_path(session), text, root=root)
-    if token:
-        with contextlib.suppress(OSError):
-            paths.intent_path(session).unlink()
-
-
-def pointer_ack(session: str) -> str:
-    """The intent token the session pointer acknowledges, or ``""``."""
-    if not paths.is_safe_component(session):
-        return ""
-    try:
-        with (paths.sessions_dir() / session).open(encoding="utf-8") as handle:
-            lines = handle.read().split("\n")
-    except OSError:
-        return ""
-    if len(lines) > 1 and lines[1].startswith("intent="):
-        return lines[1].removeprefix("intent=")
-    return ""
-
-
-def pointer_read(session: str) -> str | None:
-    """First line of the session pointer, or ``None`` if there is no usable pointer.
-
-    On the hot path -- every single tool call reaches this -- so it is a plain read with no
-    directory creation and no permission work.
-    """
-    if not paths.is_safe_component(session):
-        # Not an exception: this is the hot path, and a session id that cannot name a
-        # pointer simply has no pointer. The caller then takes the Rule 0 branch and
-        # denies. Logged, because a traversal attempt is worth seeing.
-        if session:
-            log(f"refusing to read a pointer for an unsafe session id: {session!r}")
-        return None
-    pointer = paths.sessions_dir() / session
-    try:
-        with pointer.open(encoding="utf-8") as handle:
-            line = handle.readline()
-    except OSError:
-        return None
-    return line.rstrip("\n")
-
-
-def pointer_clear(session: str) -> None:
-    """Remove a session pointer.
-
-    Validated rather than composed: this unlinks, so an absolute or traversing session id
-    would be an arbitrary-file-delete primitive.
-    """
-    paths.session_pointer_path(session).unlink(missing_ok=True)
-
-
-# --------------------------------------------------------------------------
-# state.json
-# --------------------------------------------------------------------------
-
-
-def _document_version(document: Mapping[str, Any]) -> int | None:
-    """The document's version as a small int, or ``None`` if it cannot be trusted.
-
-    A genuinely **absent** key is the one legacy case: documents ``arm`` wrote before this
-    field existed. Answers ``1`` for it, matching the version those documents would have
-    declared had the field existed. Every other malformed value -- an explicit ``null``, a
-    boolean (``bool`` is a subclass of ``int`` in Python, so it must be excluded explicitly),
-    a non-numeric string, a float -- answers ``None`` rather than being folded into "legacy":
-    collapsing anything the document might contain into a trusted version 1 is how malformed
-    state would get migrated and trusted instead of refused.
-    """
-    if "version" not in document:
-        return 1
-    value = document["version"]
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return int(value)
-
-
-def _usable_version(document: Mapping[str, Any]) -> bool:
-    """Whether ``document["version"]`` is safe for this build to interpret at all.
-
-    Used by :meth:`State.load` itself, so that a document from a build newer than this one
-    -- or one carrying a malformed version -- is treated exactly like unparseable JSON:
-    unusable, on every path, not merely on the write path ``_migrate`` guards. A hook that
-    only checked ``status`` would otherwise read a future schema's status value at face
-    value and gate on it as if it understood what that value meant.
-    """
-    version = _document_version(document)
-    return version is not None and 1 <= version <= STATE_VERSION
-
-
-def _is_future_version(document: Mapping[str, Any]) -> bool:
-    """Whether ``version`` is a real, positive integer this build merely does not go up to.
-
-    Deliberately **not** the negation of :func:`_usable_version`, which also covers ``0``,
-    negatives and every malformed value -- none of which any build has written, so there is
-    nothing plausibly "newer" about them. :meth:`State.load` uses this to decide whether a
-    document is worth preserving untouched or is ordinary corrupt state; conflating the two would
-    let one stray ``null`` permanently refuse every escalation and re-arm.
-    """
-    version = _document_version(document)
-    return version is not None and version > STATE_VERSION
-
-
-class State:
-    """One activation's state document, bound to a (worktree, session) pair."""
-
-    def __init__(self, worktree: str, session: str) -> None:
-        self.worktree = worktree
-        self.session = session
-        self.act_dir: Path = paths.activation_dir(worktree, session)
-        self.state_file: Path = self.act_dir / "state.json"
-        self.lock_file: Path = self.act_dir / "lock"
-        self.data: dict[str, Any] = {}
-        #: Set by :meth:`load` when the document is well-formed JSON -- a real, readable
-        #: object -- and declares a ``version`` that is a real, positive integer greater
-        #: than :data:`STATE_VERSION`: the shape an actual newer build's document would
-        #: have. Distinct from every other way ``load`` can fail (missing, unparseable, not
-        #: an object, or a malformed non-integer ``version`` like ``null``) -- those mean
-        #: there is nothing to preserve, which is what makes ``transaction(create=True)``
-        #: safe to overwrite with a fresh document. A version conflict means the opposite --
-        #: the document is real, and overwriting it is exactly the "cannot know what its
-        #: fields mean" case the version check exists to refuse, not a fresh start to build
-        #: on. See :func:`_is_future_version` for why the boundary is drawn there and not at
-        #: "any unusable version".
-        self.version_conflict: bool = False
-        #: The offending integer when :attr:`version_conflict` is set, for messages that
-        #: want to name it. ``None`` otherwise.
-        self.version_conflict_value: int | None = None
-
-    # -- persistence -----------------------------------------------------
-
-    def exists(self) -> bool:
-        return self.state_file.is_file()
-
-    def load(self) -> bool:
-        """Read the document. False -- and an empty document -- if it is not usable.
-
-        Callers treat False as "the gate cannot tell what has been reviewed" and deny; it is
-        never an opt-out. A document whose ``version`` this build cannot trust -- newer than
-        :data:`STATE_VERSION`, or malformed -- is unusable for exactly the same reason
-        unparseable JSON is: every other field, ``status`` included, might mean something
-        this build does not know about. Only the genuinely-newer case also sets
-        :attr:`version_conflict`; see there for why.
-        """
-        self.version_conflict = False
-        self.version_conflict_value = None
+    @classmethod
+    def load(cls, paths: RunPaths) -> RunState | None:
+        """The run under ``paths``, ``None`` when there is none, or :class:`StateLoadError`."""
         try:
-            document = json.loads(self.state_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError):
-            self.data = {}
-            return False
-        if not isinstance(document, dict):
-            self.data = {}
-            return False
-        if not _usable_version(document):
-            self.data = {}
-            if _is_future_version(document):
-                self.version_conflict = True
-                self.version_conflict_value = _document_version(document)
-            return False
-        self.data = document
-        return True
+            raw = paths.state_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StateLoadError(f"cannot read {paths.state_file}: {exc}") from exc
+        try:
+            document = json.loads(raw)
+        except ValueError as exc:
+            raise StateLoadError(f"{paths.state_file} is not JSON: {exc}") from exc
+        return cls(paths, _validated(document))
 
     def save(self) -> None:
-        write_private_atomic(self.state_file, self.serialise(), root=paths.state_root())
+        text = json.dumps(self.data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+        write_private_atomic(self.paths.state_file, text, root=self.paths.run_dir)
 
-    def serialise(self) -> str:
-        return json.dumps(self.data, indent=2, ensure_ascii=False) + "\n"
+    # -- reading ------------------------------------------------------------
 
-    def new(self) -> None:
-        self.data = new_state_document()
+    @property
+    def run_id(self) -> str:
+        return str(self.data["run_id"])
 
-    def _migrate(self) -> None:
-        """Upgrade a document written by an older build, lock already held.
+    @property
+    def status(self) -> str:
+        return str(self.data["status"])
 
-        Ordered arms, so a version-1 (or unversioned) document reaches the current version in one
-        pass:
+    @property
+    def phases(self) -> list[str]:
+        return list(self.data["phases"])
 
-        * **1 -> 2** synthesizes ``plan_revisions`` revision 0 from ``plan.frozen.md`` as found *now*
-          -- no earlier hash was ever recorded -- and defaults the resume/overlay fields. Later code
-          indexes the last entry, and an empty list turns that into an ``IndexError`` inside a hook.
-          A missing, unreadable or symlinked plan fails closed as ``ARM_FAILED``.
-        * **2 -> 3** adds ``round_history``, the convergence counters and ``clarify_seq``: a plain
-          ``setdefault``, since each degrades correctly through the typed accessors.
-        * **3 -> 4** adds ``guide_path``/``guide_revisions``, also a ``setdefault`` -- and an empty
-          ``guide_revisions`` is the *correct* answer for a document written before the guide
-          existed, so inventing a revision 0 would attach a guide to an activation that never ran
-          under one.
-        * **4 -> 5** adds the end-state record and is the one arm that is not a ``setdefault``:
-          ``ended_capture``'s absence is a load-bearing signal, not a default. See
-          :meth:`_migrate_4_to_5`.
+    @property
+    def roots(self) -> list[dict[str, Any]]:
+        return list(self.data["roots"])
 
-        Must not call back into :meth:`transaction` or :meth:`_escalate`: both take the activation
-        lock, and ``flock`` does not nest across two descriptors on the same file, so a second
-        acquisition would block forever. Failure is written straight into ``self.data`` and saved, and
-        a :class:`StateLoadError` raised.
+    @property
+    def approved_phases(self) -> int:
+        return sum(1 for entry in self.data["approvals"] if isinstance(entry, dict) and entry.get("stage") == "phase")
 
-        ``version`` is re-validated here even though :meth:`load` already refused what it could not
-        trust, in case a future caller reaches this method with data that did not come through
-        ``load``. See ``docs/design/state-fields.md``.
+    @property
+    def final_required(self) -> bool:
+        return bool(self.data["final_review"] or self.data["final_requested"])
+
+    def stage(self) -> Stage:
+        if not self.data["phases"]:
+            return "plan"
+        if self.approved_phases < len(self.data["phases"]):
+            return "phase"
+        if self.final_required and not self.data["final_approved"]:
+            return "final"
+        return "done"
+
+    def current_phase(self) -> int:
+        """The 1-based phase under work, or ``0`` outside the ``phase`` stage."""
+        return self.approved_phases + 1 if self.stage() == "phase" else 0
+
+    def unknown_baselines(self) -> list[dict[str, Any]]:
+        return [root for root in self.data["roots"] if root.get("baseline") == "unknown"]
+
+    def root(self, alias: str) -> dict[str, Any] | None:
+        return next((root for root in self.data["roots"] if root.get("alias") == alias), None)
+
+    # -- transitions --------------------------------------------------------
+
+    def require_status(self, *allowed: str) -> None:
+        if self.status not in allowed:
+            raise RunError(f"run-{self.status}", f"the run is {self.status}")
+
+    def set_phases(self, phases: Sequence[str], *, replan: bool) -> None:
+        """Replace the phase list.
+
+        Before any approval the whole list is replaced. After one, only ``replan`` may change
+        it, and then ``phases`` is the **remaining** list: the approved phases are kept as they
+        were reviewed, and the new entries follow them. Either way the revision moves and any
+        pending ticket is invalidated, since a review prepared against the old list would be
+        recorded against a phase that no longer exists.
         """
-        version = _document_version(self.data)
-        if version is None or not (1 <= version <= STATE_VERSION):
-            # Either newer than this build understands, or a value that is not a version this
-            # build has ever written. Neither is safe to interpret, so nothing is written --
-            # the previous, unparsed document is left exactly as it was found.
-            raise StateLoadError(f"{self.state_file} declares version {self.data.get('version')!r}, which this build does not know how to read")
-        if version == STATE_VERSION:
-            return
+        self.require_status("active", "paused")
+        cleaned = [phase.strip() for phase in phases]
+        if not cleaned or any(not phase for phase in cleaned):
+            raise RunError("bad-phases", "set_phases needs a non-empty list of non-empty phase descriptions")
+        approved = self.approved_phases
+        if approved and not replan:
+            raise RunError("phases-approved", f"{approved} phase(s) are already approved; changing the list needs --replan")
+        self.data["phases"] = [*self.data["phases"][:approved], *cleaned]
+        self.data["phases_revision"] += 1
+        self.data["rounds"] = 0
+        self.invalidate_ticket("replanned")
 
-        defaults = new_state_document()
-        if version < 2:
-            self._migrate_1_to_2(defaults)
-        if version < 3:
-            for key in ("round_history", "transient_failures", "retry_not_before", "clarifications", "clarify_seq"):
-                self.data.setdefault(key, defaults[key])
-            self.data["version"] = 3
-        if version < 4:
-            for key in ("guide_path", "guide_revisions"):
-                self.data.setdefault(key, defaults[key])
-            self.data["version"] = 4
-        if version < 5:
-            self._migrate_4_to_5(defaults)
+    def approve(self, trees: Mapping[str, str], *, by: Literal["review", "user"]) -> None:
+        """Approve the current phase, or the final review, at ``trees`` (alias to snapshot tree).
 
-    def _migrate_1_to_2(self, defaults: dict[str, Any]) -> None:
-        """The 1 -> 2 arm of :meth:`_migrate`: synthesize revision 0, default the resume fields."""
-        # `os.path.realpath` on both the activation directory and the plan file, then a
-        # containment check by exact parent-directory equality -- the same shape
-        # ``pretool._guard_state_root`` uses -- so a symlink planted at either level is
-        # refused rather than followed: reading and hashing whatever it points at would
-        # publish that content as revision 0 of a plan nobody ever froze.
-        plan_path = self.act_dir / _PLAN_FROZEN_NAME
-        act_dir_real = os.path.realpath(self.act_dir)
-        plan_real = os.path.realpath(plan_path)
-        usable = os.path.dirname(plan_real) == act_dir_real and os.path.isfile(plan_real)
-        plan_bytes = b""
-        if usable:
-            try:
-                plan_bytes = Path(plan_real).read_bytes()
-            except OSError:
-                usable = False
-        if not usable:
-            # A migration that invents a plan is worse than a refusal. This is honest about
-            # what is and is not known: the document is real, but the evidence every review
-            # was run against is gone, so nothing more can be verified against it.
-            self.data["status"] = "ARM_FAILED"
-            self.data["reason"] = (
-                f"legacy activation predates resume and {_PLAN_FROZEN_NAME} is missing, unreadable, or not a "
-                "plain file inside the activation directory; the frozen plan can no longer be verified"
-            )
-            self.save()
-            raise StateLoadError(self.data["reason"]) from None
-
-        for key in (
-            "stop_after_phase",
-            "resumed_from",
-            "resumed_into",
-            "resume_count",
-            "replan_pending",
-            "overrides",
-            "abandoned_pending_tree",
-            "abandoned_pending_head",
-            "activation_generation",
-            "finish_requested",
-        ):
-            self.data.setdefault(key, defaults[key])
-
-        # Revision 0 is synthesized from the plan as found *at migration time*: no earlier
-        # hash was ever recorded to check it against, so this attests only that the file
-        # existed with this content when the document was upgraded, not that it is unchanged
-        # since arming. Every later revision is verified normally, against a hash recorded
-        # when it was written.
-        self.data["plan_revisions"] = [
-            {
-                "at": self.data.get("armed_at") or 0,
-                "phase": 1,
-                "sha256": hashlib.sha256(plan_bytes).hexdigest(),
-                "file": _PLAN_FROZEN_NAME,
-            }
-        ]
-        self.data["version"] = 2
-
-    def _migrate_4_to_5(self, defaults: dict[str, Any]) -> None:
-        """The 4 -> 5 arm: resolve what an absent ``ended_capture`` means, while it still can be.
-
-        The other arms default a field because its absence carries no information. Here absence is
-        what the two reporting channels read as "this ended before the record existed, so there is
-        nothing to report" -- correct only for a document that *had already ended*. For a live one,
-        absence would mean silence forever, and the documented Rule 4 bypass (writing ``status``
-        straight into ``state.json``) would inherit it.
-
-        So the arm backfills only when the stored status is not one a terminal transition writes.
-        Already terminal: the fields stay **absent** and both channels stay silent, because inventing
-        evidence is worse than refusing. Still live (or ``ARM_FAILED``/``NEEDS_HUMAN``, which no
-        writer records evidence for): it gets the current schema's empty record, so a later
-        hand-edited status is a document that has the field and never filled it, which
-        ``commands.hooks.end_state`` reports as tampering.
-
-        **What this does not close**: a legacy activation that is live at upgrade and whose status is
-        edited before any write path takes a transaction is still absent-and-terminal, hence silent.
-        Reading the stored status is the earliest moment the question has an answer at all.
+        Every root's ``approved_tree`` moves to the tree given for it, so the next phase is
+        diffed from exactly what was approved. A root without a tree in ``trees`` is refused: an
+        approval that leaves one root's baseline behind would put this phase's changes in front
+        of the next phase's reviewer as if they were new.
         """
-        if self.data.get("status") not in ENDED_EVIDENCE_STATUSES:
-            for key in ("ended_capture", "ended_head", "ended_tree", "ended_at"):
-                self.data.setdefault(key, defaults[key])
-        self.data["version"] = 5
+        stage = self.stage()
+        if stage not in ("phase", "final"):
+            raise RunError("nothing-to-approve", f"the run has nothing to approve in stage {stage!r}")
+        missing = [root["alias"] for root in self.data["roots"] if not trees.get(root["alias"])]
+        if missing:
+            raise RunError("missing-tree", f"no snapshot for root(s): {', '.join(missing)}")
+        for root in self.data["roots"]:
+            root["approved_tree"] = trees[root["alias"]]
+        self.data["approvals"].append(
+            {"stage": stage, "phase": self.current_phase(), "by": by, "at": int(time.time()), "rounds": self.data["rounds"]},
+        )
+        if stage == "final":
+            self.data["final_approved"] = True
+        self.data["rounds"] = 0
+        self.data["waiting"] = None
+        self.invalidate_ticket("approved")
+        if self.stage() == "done":
+            self.data["status"] = "complete"
 
-    @contextmanager
-    def transaction(self, *, create: bool = False) -> Iterator[State]:
-        """Hold the activation lock across load -> mutate -> save.
+    def record_changes_required(self) -> None:
+        """One more round of the current stage ended with findings to fix."""
+        self.data["rounds"] += 1
 
-        Without the lock a ``PostToolUse`` hook overlapping a user-run ``defer`` is a
-        read-modify-write race: the atomic rename keeps the file well-formed, but the loser's update
-        is simply gone.
+    def wait_for_user(self, kind: str, detail: str) -> None:
+        if kind not in WAIT_KINDS:
+            raise ValueError(f"unknown wait kind {kind!r}")
+        self.data["waiting"] = {"kind": kind, "detail": detail}
 
-        **A failed load raises rather than yielding.** Mutating missing or unparseable state would
-        manufacture an activation nobody armed -- a caller setting ``status="ACTIVE"`` turns
-        unreadable state into a running loop, the failure-into-approval Rule 1 forbids.
+    def request_final(self) -> None:
+        """``/finish``: require the cumulative review, before or after the last phase approval.
 
-        ``create=True`` is the deliberate exception, only for transitions that can never grant
-        anything: arming and the two escalations, all of which write a document whose effect is to
-        deny. **It does not cover a version conflict**: ``self.new()`` is a fresh document, and
-        overwriting a document this build can read but refuses to interpret destroys what a newer
-        build recorded. So this still raises, the escalations raise too, and that propagates to the
-        fail-closed guard in ``hookio.Hook.run``.
-
-        **The save happens only if the block completes**, so raising out of it abandons the mutation.
-        That is the supported way to decline: any decision about *whether* to write must be taken
-        inside the block, against the document reloaded here.
+        On a run that completed without one, this reopens it into the ``final`` stage: the
+        cumulative review diffs every root from its ``start_tree``, so nothing is lost by asking
+        for it late. A run whose final review is already approved has nothing left to finish.
         """
-        with locked(self.lock_file, root=paths.state_root()):
-            if not self.load():
-                if self.version_conflict:
-                    raise StateLoadError(f"{self.state_file} declares a version this build does not trust; refusing to touch it")
-                if not create:
-                    raise StateLoadError(f"no usable activation state at {self.state_file}")
-                self.new()
-            else:
-                self._migrate()
-            yield self
-            self.save()
+        self.require_status("active", "paused", "complete")
+        if self.data["final_approved"]:
+            raise RunError("final-done", "the final review is already approved")
+        self.data["final_requested"] = True
+        if self.status == "complete":
+            self.data["status"] = "active"
 
-    # -- accessors -------------------------------------------------------
+    def issue_ticket(self, ticket: Mapping[str, Any]) -> None:
+        """Make ``ticket`` the pending review; a ticket still pending is superseded by it.
 
-    def get(self, key: str) -> str:
-        """Value as text, empty when absent or null.
-
-        Note the absence of a ``//`` fallback, which is what the shell needed a comment for:
-        in jq ``false // ""`` yields ``""``, so the alternative operator silently blanks
-        every boolean field. Presence is tested instead, so ``False`` renders as ``"false"``.
+        ``ticket["session"]``, when present, is the session that runs the review; :meth:`resume`
+        keeps a ticket from its own session and abandons any other.
         """
-        value = self.data.get(key)
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        if isinstance(value, bool):
-            return "true" if value else "false"
-        if isinstance(value, (list, dict)):
-            return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
-        return str(value)
+        self.invalidate_ticket("superseded")
+        self.data["pending_ticket"] = dict(ticket)
 
-    def get_int(self, key: str, default: int = 0) -> int:
-        try:
-            return int(self.data.get(key))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return default
+    def invalidate_ticket(self, why: str) -> None:
+        """Retire the pending ticket, if any, so a result prepared for it can no longer land."""
+        ticket = self.data["pending_ticket"]
+        if ticket is not None:
+            self.data["last_ticket"] = {"review_id": ticket.get("review_id", ""), "status": why}
+            self.data["pending_ticket"] = None
 
-    def get_array(self, key: str) -> list[str]:
-        value = self.data.get(key)
-        if isinstance(value, list):
-            return [str(item) for item in value]
-        return []
+    def pause(self) -> None:
+        self.require_status("active")
+        self.data["status"] = "paused"
 
-    def get_array_of_dicts(self, key: str) -> list[dict[str, Any]]:
-        """List-of-objects value, with anything that is not an object dropped.
+    def resume(self, *, session: str = "") -> dict[str, Any]:
+        """Continue in this session: unpause, abandon a dead review, clear a waiting decision.
 
-        Separate from :meth:`get_array`, which stringifies: the callers of this one need the
-        objects back as objects. Non-object members are dropped rather than coerced, so a
-        malformed document degrades to a *shorter* list -- which every caller then fails a
-        length check against, rather than reading a placeholder as a real entry.
+        A pending ticket issued by another session (or by no recorded session, or when the caller
+        names none) belongs to a review nothing will finish, so it is abandoned and Claude is told
+        to ask for the review again. A ticket this same ``session`` issued is still running --
+        ``/pause`` then ``/resume`` mid-review -- and is kept. A decision the run was waiting on (a stall, the failure budget) is
+        cleared: ``resume`` is the user's "keep going". The continuation token is reset, so this
+        session is prompted even if the state is otherwise unchanged.
         """
-        value = self.data.get(key)
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-        return []
+        self.require_status("active", "paused")
+        ticket = self.data["pending_ticket"]
+        abandoned = ticket is not None and not (session and ticket.get("session") == session)
+        if abandoned:
+            self.invalidate_ticket("abandoned")
+        self.data["status"] = "active"
+        self.data["waiting"] = None
+        self.data["last_continuation"] = ""
+        return {"abandoned_review": abandoned, "pending_review": self.data["pending_ticket"] is not None}
 
-    def update(self, values: Mapping[str, Any] | None = None, /, **kwargs: Any) -> None:
-        """Set keys to native Python values.
+    def stop(self) -> None:
+        self.require_status("active", "paused")
+        self.invalidate_ticket("stopped")
+        self.data["status"] = "stopped"
 
-        The shell needed two setters -- ``arl_set`` for strings and ``arl_setj`` for raw
-        JSON -- because every write went through ``jq``. Here the value's own type carries
-        that distinction, so a boolean cannot accidentally be stored as the string "true".
-        """
-        if values:
-            self.data.update(values)
-        if kwargs:
-            self.data.update(kwargs)
+    # -- reporting ----------------------------------------------------------
 
-    # -- derived ---------------------------------------------------------
+    def summary(self) -> dict[str, Any]:
+        """What ``status`` prints and the mod draws: no tree ids, no history."""
+        return {
+            "run_id": self.run_id,
+            "status": self.status,
+            "stage": self.stage(),
+            "phase": self.current_phase(),
+            "phase_count": len(self.data["phases"]),
+            "phases": self.phases,
+            "phases_revision": self.data["phases_revision"],
+            "approved_phases": self.approved_phases,
+            "rounds": self.data["rounds"],
+            "final_required": self.final_required,
+            "pending_review": self.data["pending_ticket"] is not None,
+            "waiting": self.data["waiting"],
+            "roots": [{key: root.get(key, "") for key in ("alias", "path", "kind", "baseline", "proposed")} for root in self.data["roots"]],
+        }
 
-    def effective_status(self, config: Config) -> str:
-        """Stored status, with the TTL applied.
 
-        An expired activation becomes ``STALE``, and ``STALE`` still blocks. The loop never
-        silently disarms itself on a timer -- that would be a failure converted into
-        permission (Rule 1).
-        """
-        status = self.get("status")
-        if status in _TTL_EXEMPT:
-            return status
-        try:
-            armed_at = int(self.data.get("armed_at") or 0)
-            ttl_hours = int(config.values.get("ttl_hours") or 24)
-        except (TypeError, ValueError):
-            return status
-        if armed_at > 0 and ttl_hours > 0 and (now() - armed_at) > ttl_hours * 3600:
-            return "STALE"
-        return status
+@contextmanager
+def locked_state(paths: RunPaths) -> Iterator[RunState | None]:
+    """Hold the run lock and yield the loaded run (``None`` when there is none).
 
-    def phase_count(self) -> int:
-        return len(self.get_array("phases"))
+    The caller saves explicitly; leaving the block without :meth:`RunState.save` changes nothing
+    on disk. Only ``init`` makes ``.arl/`` (through :func:`locked_run_dir`); every other command
+    finds no ``.arl/`` and answers "no run" without writing anything, so a project the plugin
+    merely looks at never gains an untracked directory. The launch directory itself is never
+    touched.
+    """
+    if not paths.run_dir.is_dir():
+        yield None
+        return
+    with locked_run_dir(paths):
+        yield RunState.load(paths)
 
-    def phases_match_frozen(self) -> bool:
-        r"""True when this document's ``phases`` still equals the frozen evidence on disk.
 
-        ``phases.frozen`` is written once by ``set-phases`` and handed to every review as evidence;
-        ``phases`` in the document is the working copy every other check reads. Where they disagree,
-        something that was not ``set-phases`` edited the document and no count derived from it means
-        anything.
+@contextmanager
+def locked_run_dir(paths: RunPaths) -> Iterator[None]:
+    """Make ``.arl/`` and hold its lock, loading nothing: ``init`` decides what to do with a
+    document that does not load."""
+    # `.arl/` is made here, by hand, and every private write is rooted *at* it: the atomic
+    # helpers tighten their root to 0700, and rooting them at the launch directory would chmod
+    # the user's own project directory.
+    paths.run_dir.mkdir(mode=0o700, exist_ok=True)
+    # `.arl/` ignores itself, so a repository created around it later -- a run started in an
+    # empty folder whose first phase is `git init` -- never stages the run's state. The
+    # `info/exclude` entry covers only repositories that already exist when a root registers.
+    ignore = paths.run_dir / ".gitignore"
+    if not ignore.exists():
+        write_private_atomic(ignore, "*\n", root=paths.run_dir)
+    with locked(paths.lock_file, root=paths.run_dir):
+        yield
 
-        This exists because ``phase == phase_count() + 1`` is only as trustworthy as ``phases``
-        itself: truncating ``phases`` from two entries to one after the first phase lands satisfies
-        that equality with the second phase never implemented.
 
-        Compared as the **exact bytes** ``set-phases`` writes rather than by splitting the file into
-        lines, because a description legitimately containing a newline is accepted and frozen, and
-        parsing lines back would never reconstruct it -- that activation would be refused here
-        permanently. Read with :meth:`Path.read_bytes` for the same reason at one remove: text mode's
-        universal-newline translation turns a frozen ``\r\n`` into ``\n`` and fails the comparison.
+def _token(run: RunState) -> str:
+    """Changes whenever the run moves: a new phase list, an approval, a finished round."""
+    return ":".join(str(part) for part in (run.run_id, run.stage(), run.data["phases_revision"], len(run.data["approvals"]), run.data["rounds"]))
 
-        Fails closed on an unreadable file.
-        """
-        try:
-            frozen = (self.act_dir / "phases.frozen").read_bytes()
-        except OSError:
-            return False
-        return frozen == "".join(f"{phase}\n" for phase in self.get_array("phases")).encode("utf-8")
 
-    def phase_desc(self, n: int) -> str:
-        """Description of phase ``n``, 1-based. Empty when out of range."""
-        phases = self.get_array("phases")
-        index = n - 1
-        if index < 0 or index >= len(phases):
-            return ""
-        return phases[index]
+def _prompt(run: RunState) -> str:
+    stage = run.stage()
+    if stage == "plan":
+        return "The plan has no phases yet. Call set_phases with the plan's phases, then implement phase 1."
+    if stage == "final":
+        if run.data["rounds"]:
+            return "The final review asked for changes. Fix the cumulative findings, run the gates, then call review again."
+        return (
+            "Every phase is approved. Commit the approved phase by each repository's conventions, "
+            "then run the final review: call review for the whole run."
+        )
+    phase = run.current_phase()
+    count = len(run.data["phases"])
+    description = run.data["phases"][phase - 1]
+    if run.data["rounds"]:
+        return f"The review of phase {phase} of {count} asked for changes. Fix the findings, run the gates, then call review again."
+    lead = "Commit the approved phase by each repository's conventions, then implement" if run.approved_phases else "Implement"
+    return f"{lead} phase {phase} of {count}: {description}\nRun the project's gates, then call review."
 
-    def pause_target_display(self) -> str:
-        """``stop_after_phase`` as a human reads it -- including whether it is already spent.
 
-        The Stop gate's check is ``phase <= target`` and ``phase`` only increases, so once the pointer
-        moves past the target it can never fire again. Rendering a spent target identically to a
-        pending one ("pause target: 3 of 9" under a phase line saying 4) reads as "the loop will stop
-        at 3", the one thing it can no longer do.
+def _blocker(run: RunState) -> dict[str, Any] | None:
+    """Why the run must yield to the user whatever the token says, or ``None``."""
+    if run.status != "active":
+        return {"reason": run.status}
+    if run.data["pending_ticket"] is not None:
+        return {"reason": "review-pending"}
+    if run.data["waiting"] is not None:
+        return {"reason": "waiting", "waiting": run.data["waiting"]}
+    unknown = run.unknown_baselines()
+    if unknown:
+        return {"reason": "baseline-unknown", "roots": [root["alias"] for root in unknown]}
+    if run.stage() == "done":
+        return {"reason": "complete"}
+    return None
 
-        Naming the flag here rather than only in the Stop gate's message is deliberate: ``status`` and
-        the resume banner are what a human reads a day later.
-        """
-        target = self.get_int("stop_after_phase")
-        if not target:
-            return "none"
-        shown = f"{target} of {self.phase_count()}"
-        if self.get_int("phase") > target:
-            return f"{shown} (already reached -- the next resume clears it, or --until M sets a further target)"
-        return shown
 
-    def tree_approved(self, tree: str) -> bool:
-        return tree in self.get_array("approved_trees")
+def next_action(run: RunState | None) -> dict[str, Any]:
+    """Whether the loop goes on after a main-loop turn, and the prompt that continues it.
 
-    def mark_tree_approved(self, tree: str) -> None:
-        # Sorted and deduplicated, matching jq's `unique`.
-        self.data["approved_trees"] = sorted(set(self.get_array("approved_trees")) | {tree})
-
-    # -- escalation ------------------------------------------------------
-
-    def _escalate(self, status: str, reason: str) -> None:
-        """Record a terminal, denying status under the lock, applied to a *freshly reloaded* document.
-
-        Mutating a stale in-memory copy lets a concurrent ``defer`` or post-hook save land afterwards
-        and overwrite the escalation, turning it back into ordinary operation.
-
-        ``create=True`` because an escalation must not be dropped just because state is missing; both
-        statuses deny, so materialising them is always safe. Callers holding other unsaved mutations
-        must save them first -- the reload is what makes the escalation win, and it discards anything
-        held only in memory.
-        """
-        with self.transaction(create=True):
-            self.update(status=status, reason=reason)
-
-    def needs_human(self, reason: str) -> None:
-        self._escalate("NEEDS_HUMAN", reason)
-
-    def arm_failed(self, reason: str) -> None:
-        self._escalate("ARM_FAILED", reason)
+    ``continue`` only when the run is active, no review is pending, no decision is waiting on the
+    user (a stall, the failure budget, an oversized diff, a root's baseline), work remains, and
+    the run has moved since the last continuation. The token is recorded on ``continue`` so the
+    same state is never prompted twice: a turn that ends without changing anything yields.
+    Every other answer is ``yield``, and the caller saves the run only when it continued.
+    """
+    if run is None:
+        return {"action": "yield", "reason": "no-run"}
+    blocked = _blocker(run)
+    if blocked is not None:
+        return {"action": "yield", **blocked}
+    token = _token(run)
+    if token == run.data["last_continuation"]:
+        return {"action": "yield", "reason": "unchanged", "token": token}
+    run.data["last_continuation"] = token
+    return {"action": "continue", "stage": run.stage(), "phase": run.current_phase(), "prompt": _prompt(run), "token": token}

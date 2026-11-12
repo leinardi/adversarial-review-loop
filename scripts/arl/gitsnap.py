@@ -74,6 +74,7 @@ __all__ = [
     "is_ancestor",
     "is_ancestor_checked",
     "looks_like_object_id",
+    "not_ignored",
     "oversized",
     "rev_parse",
     "rev_parse_checked",
@@ -500,17 +501,54 @@ def _seed(repo: str, index: str, env: Mapping[str, str]) -> None:
         raise SnapshotError("could not seed the temporary index from HEAD")
 
 
-def snapshot(repo: str) -> Snapshot:
+def not_ignored(repo: str, paths: Sequence[str], *, git_args: Sequence[str] = (), env: Mapping[str, str] | None = None) -> list[str]:
+    """``paths`` less those git already ignores.
+
+    ``add -A`` fails outright when any pathspec, an exclude included, names an ignored path
+    ("The following paths are ignored by one of your .gitignore files"), and ``.arl/`` is
+    ignored through ``info/exclude`` in every repository that holds it. An ignored path is
+    never staged anyway, so dropping it from the excludes changes nothing in the tree. A
+    ``check-ignore`` that cannot answer keeps every path, and the snapshot then fails loudly.
+    ``git_args`` go before the subcommand (a shadow repository's ``--git-dir``/``--work-tree``).
+    """
+    if not paths:
+        return []
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo, *git_args, "check-ignore", "-z", "--stdin"],
+            input=b"".join(os.fsencode(path) + b"\0" for path in paths),
+            capture_output=True,
+            check=False,
+            timeout=GIT_TIMEOUT_SEC,
+            env=dict(env) if env is not None else None,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return list(paths)
+    if proc.returncode not in (0, 1):
+        return list(paths)
+    ignored = {os.fsdecode(name) for name in proc.stdout.split(b"\0") if name}
+    return [path for path in paths if path not in ignored]
+
+
+def snapshot(repo: str, *, exclude: Sequence[str] = ()) -> Snapshot:
     """Turn the current working state into a tree id.
 
-    Raises ``SnapshotError`` with the reason the shell put in ``ARL_SNAP_ERROR``. There is
-    no "best effort" result: a tree that does not represent the working state would be
-    reviewed instead of the code about to be committed.
+    Raises ``SnapshotError``. There is no "best effort" result: a tree that does not represent
+    the working state would be reviewed instead of the code about to be committed.
+
+    ``exclude`` names repository-relative paths ``add -A`` must not touch: a nested repository
+    that is its own root (which ``add -A`` would otherwise stage as an embedded gitlink, or refuse
+    outright when it has no commit yet) and the run's own ``.arl/`` directory. An excluded path
+    keeps whatever the real index holds for it, so a tracked submodule stays at its recorded
+    commit. The paths are passed as ``:(exclude,literal)`` pathspecs, so no character in them is
+    read as a glob.
     """
+    exclude = not_ignored(repo, exclude)
+    pathspecs = ["--", ".", *(f":(exclude,literal){path}" for path in exclude)] if exclude else []
     with _temp_index() as index:
         env = {**os.environ, "GIT_INDEX_FILE": index}
         _seed(repo, index, env)
-        if git_run(repo, ["-c", "core.splitIndex=false", "add", "-A"], env=env).returncode != 0:
+        if git_run(repo, ["-c", "core.splitIndex=false", "add", "-A", *pathspecs], env=env).returncode != 0:
             raise SnapshotError("git add -A failed against the temporary index")
         write = git_run(repo, ["write-tree"], env=env)
         tree = _first_line_output(write) if write.returncode == 0 else ""

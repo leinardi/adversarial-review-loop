@@ -35,7 +35,8 @@ import pytest
 from conftest import config_with, git, git_status_ignored
 from reviewer_common import build, build_final, dirty, execute_fake, target_for
 
-from arl import bundle, gitsnap, state
+from arl import bundle, gitsnap
+from arl import v3state as state
 from arl.bundle import BundleError, BundleTooLarge
 from arl.contract import Target
 from arl.harness import opencode

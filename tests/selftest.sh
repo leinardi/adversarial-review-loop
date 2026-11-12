@@ -42,7 +42,7 @@ check() {
 }
 
 usage_runs() {
-    (cd "$work" && "$shim" >"$work/out" 2>"$work/err") && head -n 1 "$work/out" | cmp -s - <(printf 'usage: arl.sh <subcommand> [args]\n')
+    (cd "$work" && "$shim" >"$work/out" 2>"$work/err") && head -n 1 "$work/out" | cmp -s - <(printf 'usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]\n')
 }
 
 unknown_fails() {

@@ -38,7 +38,8 @@ from reviewer_common import (
     target_for,
 )
 
-from arl import bundle, contract, state
+from arl import bundle, contract
+from arl import v3state as state
 
 #: Shortens the SIGTERM-to-SIGKILL grace for this module. Requested by mark rather than
 #: made autouse in ``conftest.py``, which would change the constant for every unit test.

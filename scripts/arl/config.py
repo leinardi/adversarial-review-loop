@@ -70,6 +70,8 @@ __all__ = [
 #: *content becomes instruction* rather than data, so it is resolved and frozen once, at arm --
 #: a later edit to the key, or to the file it named, changes nothing about a running
 #: activation. See ``arl.guide`` for what the framing around it allows and forbids.
+#: ``roots`` lists extra workspace roots every run in this directory starts with, besides the
+#: launch directory, ``--root`` arguments and the paths the plan names (``arl init``).
 DEFAULTS: Final[dict[str, Any]] = {
     "harness": "opencode",
     "model": "",
@@ -95,6 +97,7 @@ DEFAULTS: Final[dict[str, Any]] = {
     "ignore_globs": [],
     "final_review": False,
     "review_guide": "",
+    "roots": [],
 }
 
 BOOL_KEYS: Final = ("pure", "disable_project_config", "allow_dirty", "final_review")
@@ -114,7 +117,7 @@ INT_KEYS: Final = (
     "ttl_hours",
 )
 
-LIST_KEYS: Final = ("ignore_globs",)
+LIST_KEYS: Final = ("ignore_globs", "roots")
 
 #: The keys whose value is a severity label, validated and ranked through ``threshold_rank``.
 SEVERITY_KEYS: Final = ("block_severity", "late_block_severity")

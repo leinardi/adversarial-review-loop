@@ -39,7 +39,7 @@ def test_hostile_repo_cannot_shadow_the_gate(hostile_repo: Path, clean_env: dict
     assert not (hostile_repo / "HIJACKED").exists(), "a shadowed module executed as the gate"
     assert "HOSTILE" not in proc.stderr
     assert proc.returncode == 0
-    assert "usage: arl.sh <subcommand>" in proc.stdout
+    assert "usage: arl.sh [--dir LAUNCH_DIR] <subcommand>" in proc.stdout
 
 
 def test_naive_invocation_is_the_thing_being_defended_against(hostile_repo: Path, clean_env: dict[str, str]) -> None:
@@ -183,7 +183,7 @@ def test_unknown_subcommand_exits_two(hostile_repo: Path, clean_env: dict[str, s
     proc = run_bootstrap(["no-such-subcommand"], cwd=hostile_repo, env=clean_env)
     assert proc.returncode == 2
     assert proc.stdout == ""
-    assert "usage: arl.sh <subcommand>" in proc.stderr
+    assert "usage: arl.sh [--dir LAUNCH_DIR] <subcommand>" in proc.stderr
 
 
 def test_the_shim_passes_a_subcommand_through_unchanged(git_repo: Path, clean_env: dict[str, str]) -> None:

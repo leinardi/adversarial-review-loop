@@ -30,7 +30,8 @@ from conftest import config_with
 from reviewer_common import build, build_final, target_for
 
 import arl
-from arl import bundle, guide, harness, paths, runner, state
+from arl import bundle, guide, harness, paths, runner
+from arl import v3state as state
 from arl.atomic import ensure_private_dir
 from arl.runner import Invocation, ReviewerFailed
 

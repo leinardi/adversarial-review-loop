@@ -43,8 +43,8 @@ from arl.errors import OcrlError
 from arl.gitsnap import ChangedPathsUnavailable, changed_paths_strict, checked_tree, git_run, looks_like_object_id
 from arl.paths import state_root
 from arl.runner import kill_group
-from arl.state import State
 from arl.util import decode, encode, format_at, log
+from arl.v3state import State
 
 __all__ = [
     "PLAN_HEADING",
