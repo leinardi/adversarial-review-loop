@@ -813,6 +813,187 @@ interactively:
 
 ---
 
+## Session J — the v4 mod surface, measured 2026-11-12
+
+v4 moves the loop into a mod (a hooks module) and keeps Python as the engine. These are the host
+behaviours that design depends on, settled before any v4 code was written. Measured on Claude Code
+2.1.321 with throwaway probe plugins loaded through `--plugin-dir`, from a scratch directory that is
+not a git repository. The headless runs used `claude -p --model haiku`. J2, J4 and J5 also passed
+`--permission-mode default`, and J2, J4 and the 1020 s run of J5 passed
+`--settings '{"sandbox":{"enabled":true}}'`. The user's settings default to `auto`, and earlier
+exploratory runs used that mode, so each item names its configuration. The interactive runs used
+`claude --plugin-dir <probe>` on Opus: the first in `auto` mode, the second (J3's "Chat about this",
+J4's prompt, J5's interrupt, J6's chain) in `--permission-mode default`.
+
+The user's other plugins stayed enabled. They include the installed adversarial-review-loop (its
+PreToolUse hooks and display module) and caveman (a SessionStart hook), and none of them answers
+`allow` for `mcp__*` tools. That install reports version 3.0.1 from the GitHub marketplace, but at
+commit `4be9d68`, which is on `main` after the release tag `adversarial-review-loop--v3.0.1`
+(`e86592d`) and already carries the display module. With this install, this checkout is no longer
+the code that every session runs.
+
+### J1. Relative imports between mod files: pass
+
+`hooks/register.ts` imported a constant with `import { TAG } from './lib'`, and the tool result
+carried it. The types header documents the same, and adds (not probed) that a module holding a
+dynamic `import()` does not load.
+
+### J2. `$.ui.log` is not sent to the model: pass, with one caveat
+
+- **Headless, `default` mode, sandbox on (`arlprobe-nocheck`).** The probe tool emitted a secret
+  word only through `$.ui.log`. Asked in the same turn whether one was in its context, and told to
+  read no files, the model answered "NONE".
+- **Interactive (`arlprobe-ui`).** `/arlprobe-log` logged `PROBE-LOG-LINE-7731`. The session
+  `.jsonl` stores the row as `"type":"system","subtype":"informational"`, which is shown to the
+  person and not sent to the model. The types say the same thing. The model's own "no" in that
+  session is no evidence: before answering, it searched the transcript file and found the row.
+- **Caveat: the line is not secret.** It is kept in the session transcript on disk, which the model
+  can read. Every compaction summary even points it at that file. "Invisible" means "not in the
+  model's context". v4 uses `$.ui.log` for output that Claude should not have to relay, never for
+  anything Claude must not learn. Under `-p` the line is not written to the transcript at all (the
+  secret word is in no headless `.jsonl`, not even in its `api-request-blob` rows, the request
+  bodies sent to the API, which is stronger evidence than the model's "NONE"); the types say a `-p`
+  or SDK host receives it as a `ui_log` event, so a host that feeds that stream to a model passes it
+  on.
+- **Length.** The terminal draws only the first 2000 characters of a log line
+  (`$.ui.log: a text (2797 characters) is drawn up to its first 2000 on the terminal`). The types
+  give 10000 on a remote surface.
+
+### J3. The pane and `$.ui.ask` render: pass
+
+- `$.ui.open({ id, title })` resolved `{"isPlaced":true}`. The `ui.render` hook on
+  `{ component: 'Pane', requestId }` drew bold, red and dim `Text` rows in a framed pane with a
+  close button.
+- `$.ui.ask(question, ['Accept', 'Keep going', 'Stop'])` opened the engine's question dialog with a
+  "Plugin" chip. The dialog also offers "Type something." and "Chat about this", so the answer may
+  be free text and must be compared with the labels exactly. The types document that it rejects when
+  dismissed, and always under `-p`. Picking "Chat about this" **rejects** it: "$.ui.ask: no answer
+  (The user doesn't want to proceed with this tool use. The tool use was rejected …". v4 treats a
+  rejection, and any answer that is not exactly one of its labels, as "no decision": the loop yields
+  to the person instead of choosing for them. The question leaves only a trace for the model: the
+  transcript records `{"type":"tools-used","tools":["AskUserQuestion"]}` without the question text,
+  and the next compaction summary lists `AskUserQuestion` among the tools used. v4 tells Claude the
+  outcome of an ask through the tool result.
+
+### J4. The mod's own tools need no permission prompt: pass, headless and interactive
+
+Headless, in `default` permission mode with the sandbox on, Claude called the probe's registered
+tool, `mcp__arlprobe__probe`, and printed its result (`The probe returned: RELIMPORT-OK`). That ran
+twice: once with a `tool.check` hook answering `allow` for the plugin's own tools, and once with
+that hook disabled, which is the decisive run. Control: in the same configuration, with the
+hook-less probe, Claude was asked to call WebFetch, which was denied: "Claude requested permissions
+to use WebFetch, but you haven't granted it yet." So a call that needs permission is refused there,
+and the probe's tool did not need permission. Interactively, in `--permission-mode default` with no
+`tool.check` hook, Claude called the registered `mcp__arlprobeui__sleeper` tool and no prompt
+appeared. The `allow` hook stays in v4 anyway, as insurance against a host that prompts.
+
+The same configuration's Bash control (`touch` under `/tmp`) failed with a sandbox setup error, not
+a permission denial. That matters to the plan's "sandbox on, no prompt" end-to-end check, not to
+this item.
+
+### J5. `$.process.spawn` beyond ten minutes: pass, measured to 1020 s with the sandbox on
+
+A registered tool's `tool.call` hook ran
+`$.process.spawn({ argv: ['sh', '-c', 'sleep <n>; echo finished'] })` and drained the stream,
+headless in `default` mode, twice:
+
+- `n = 630`, sandbox off: the hook logged 630006 ms and `{"code":0,"signal":null}`, and Claude
+  received `longrun finished after 630008 ms`.
+- `n = 1020`, sandbox on: the hook returned after 1020005 ms with the same result, and Claude
+  received `longrun finished after 1020008 ms`. 1020 s covers v3's default `timeout_sec` (900 s)
+  plus a two-minute repair call.
+
+`$.process.run`, by contrast, is capped at ten minutes.
+
+Why the hook survives: its own budget (`HookBudget.ms`, 10 s) counts only the hook's own time, and
+the clock stops while any `$` call is in flight. No tool-call ceiling showed up up to 1020 s, and
+the types document none; a run longer than that rests on the documentation alone.
+
+An interrupt kills the spawned child, the direct child only. The types say a spawned child is killed
+when the loop is left or `next.signal` aborts, and `HookBudget.lingerMs` documents that a person's
+interrupt aborts `next.signal`. Measured interactively: a registered tool's `tool.call` hook spawned
+`sleep 121` directly and pulled the stream. Esc after 41967 ms made the pull throw
+`$.process.spawn(sleep) aborted`, with `next.signal.aborted` true, and `pgrep -af "sleep 121"` then
+printed nothing. When `pgrep` ran relative to the spawn was not recorded, and `sleep 121` ends by
+itself after 121 s, so this shows the kill only if `pgrep` ran within that window.
+
+What this does **not** show, and v4 must handle as open requirements:
+
+- **Grandchildren.** The types say nothing about descendants, process groups or the signal sent. In
+  v4 the mod spawns the Python engine, and the engine starts opencode through `run_bounded` in a new
+  session (`start_new_session=True`). Killing the engine with an untrapped SIGTERM, or with SIGKILL,
+  would orphan opencode. The engine must trap SIGTERM and kill its reviewer's process group, and
+  since a SIGKILL defeats that, the pending review ticket's abandonment must cover a reviewer that
+  outlives it.
+- **Recording the failure.** After the interrupt the tool result was replaced by the host's own
+  "doesn't want to proceed" text, and the hook gets only `lingerMs` after the abort. Whether a
+  `$.process.run` to the engine still runs once `next.signal` has aborted was not measured. v4 must
+  not depend on it: an interrupted review leaves its ticket pending, and the next `review` call or
+  `/resume` treats it as abandoned. Either way an interrupt is never an approval.
+
+### J6. `$.session.compact` between phases: pass interactively, refused headless
+
+- **Headless: refused.** "$.session.compact: not available in a headless (-p / SDK) session yet:
+  compaction here runs inside a turn (a /compact prompt); catch it and carry on".
+- **Interactive: compact, then submit, works.** In a main-loop `turn.complete` hook, after
+  `next(e)`, the probe awaited `$.session.compact({ instructions })` and then
+  `$.prompt.submit({ text })`. The conversation compacted (`{ messages }`, with `instructions`
+  honoured), and then the submitted prompt started a new turn, which Claude answered. This is the
+  order `auto_compact` uses, and it must be this order: compact rejects while a turn runs.
+- A call from a slash command's `command.run` hook was not recorded and counts as unmeasured.
+- A compaction can also resolve `{ skip }` when a hook or a classic `PreCompact` hook vetoes it.
+  `auto_compact` catches the rejection, treats `{ skip }` as not compacted, and carries on.
+
+### J7. API constraints found while probing
+
+- A hook may pass `$` only to a function declared at the top of the file, or imported from one of
+  the module's own files. `claude plugin validate` refuses a closure such as
+  `const note = async ($) => …` defined inside `register` ("$ is passed to "note", which is not a
+  function declared at the top of this file"). Neither the types nor `reference.md` states this
+  rule; only the validator does.
+- `$.process.run(argv, { cwd, env, stdin, timeoutMs })` takes the argv positionally. Its timeout is
+  30 s by default and ten minutes at most. Each stream keeps only its first 4194304 bytes, so the
+  engine must keep its stdout JSON small and write large results to files.
+- `$.process.spawn({ argv, cwd, env, input })` has no timeout and takes `input`, not `stdin`.
+  Whatever v4 spawns must bound itself, which the engine does with `run_bounded`.
+- A registered tool's name on the wire is `mcp__<plugin-name>__<name>`, which `$.tool.register`
+  returns. A probe once matched `mcp__plugin_<name>` instead, which never matches. v4's `tool.check`
+  allow hook is insurance that live use never exercises, since no prompt occurs, so a unit test must
+  pin its matcher (a `$.tool.check` query from a test).
+- A registered tool's `tool.call` hook answers `{ result }`. A call that no hook answers fails with
+  "registered the tool … but no tool.call hook answered this call".
+- `$.prompt.submit` from `turn.complete` started the next turn under `-p` too.
+
+### How the probes were built
+
+Each probe was a plugin folder holding `.claude-plugin/plugin.json`, `hooks/hooks.json` with
+`{ "modules": ["./register.ts"] }` (`.tsx` for the one that draws), and the module. They are not
+kept in the repository, but the hooks that decided each item are short:
+
+```ts
+// J4, J5: a registered tool, served by a tool.call hook
+await $.tool.register({ name: 'longrun', description: '…', inputSchema: { type: 'object' } })
+on('tool.call', { tool: 'mcp__arlprobe__longrun' }, async ($, e, next) => {
+  const st = $.process.spawn({ argv: ['sh', '-c', `sleep ${e.seconds}; echo finished`] })
+  let out = ''
+  while (true) { const r = await st.next(); if (r.done) break; out += r.value.text }
+  return { result: out }
+})
+// J6: after the main loop's turn, compact first, then submit
+on('turn.complete', async ($, e, next) => {
+  const r = await next(e)
+  if (e.agentId === undefined && armed) {
+    await $.session.compact({ instructions: 'keep the word ZEBRA' })
+    await $.prompt.submit({ text: 'Reply with exactly: CHAIN-OK' })
+  }
+  return r
+})
+```
+
+The headless prompts asked Claude to call the tool once and report what it returned. J2 also asked
+whether a secret word was in its context, with no files to be read, and J4's control asked it to
+call WebFetch once on `https://example.com`.
+
 ## If A1 fails
 
 Expansion not running in skill bodies is the only outcome that forces a redesign. The fallback:
