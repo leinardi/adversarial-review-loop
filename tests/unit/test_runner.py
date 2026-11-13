@@ -234,7 +234,7 @@ def test_a_timeout_carries_its_own_exit_status(tmp_path: Path) -> None:
     ],
 )
 def test_classify_op_failure_is_an_allow_list_not_a_catch_all(tmp_path: Path, status: int, kind: str) -> None:
-    """A bad ``--model``/``--variant`` and an expired credential all exit non-zero the same
+    """A bad ``-m model#variant`` and an expired credential all exit non-zero the same
 
     way ``126``/``127`` do -- five attempts against any of them must burn the ordinary
     ``failures`` budget, not the transient one, or a missing binary alone would exhaust

@@ -1,9 +1,16 @@
 """The OpenCode harness: how the engine spells a review for ``opencode run``.
 
 The reviewer reads the bundle by path: the composed prompt names every file in it, and the
-``OPENCODE_PERMISSION`` document allows reads of the bundle directory and denies every other
-directory outside the repository. Every round is a fresh run with its own ``--title``; nothing
-is continued.
+permission document, passed in ``OPENCODE_CONFIG_CONTENT``, allows reads of the bundle and the
+roots and denies everything else. Every round is a fresh run with its own ``--title``, started in
+the repository (``cwd``); nothing is continued.
+
+Written against OpenCode 2.2.7, the first release this harness supports. Since 2.x, ``opencode
+run`` hands the message to a shared background service by default, which reads its own
+environment and config, not the run's: **without** ``--standalone`` the permission document is
+never seen and the reviewer gets the user's permissions (measured: it wrote a file and ran a
+shell command). 2.x also dropped ``--pure``, ``--dir``, ``--variant`` and
+``OPENCODE_PERMISSION``.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -32,12 +39,14 @@ from typing import Final
 
 from arl import reviewer_probe
 from arl.config import Config
-from arl.harness import ClarifySpec, Command, ReviewSpec, Usage, model
+from arl.harness import ClarifySpec, Command, PayloadError, ReviewSpec, Usage, model
 
 __all__ = [
+    "AGENT",
     "DEFAULT_MODEL",
     "HARNESS",
     "OpenCodeHarness",
+    "config_content",
     "isolation_argv",
     "isolation_env",
     "permission",
@@ -49,9 +58,12 @@ DEFAULT_MODEL: Final = "openai/gpt-5.6-sol"
 
 
 def isolation_argv(config: Config) -> list[str]:
-    """``--pure``: the reviewer runs without the repository's own OpenCode plugins and config."""
+    """``--standalone``: a private server, so the run's ``OPENCODE_CONFIG_CONTENT`` applies.
+
+    The shared background service would ignore it; see the module docstring.
+    """
     del config
-    return ["--pure"]
+    return ["--standalone"]
 
 
 def isolation_env(config: Config, base: dict[str, str]) -> dict[str, str]:
@@ -62,22 +74,27 @@ def isolation_env(config: Config, base: dict[str, str]) -> dict[str, str]:
     return env
 
 
-def review_argv(repo: str, title: str, *, config: Config) -> list[str]:
-    """The flags that follow the prompt, which goes immediately after ``run``."""
+def review_argv(title: str, *, config: Config) -> list[str]:
+    """The flags that follow the prompt, which goes immediately after ``run``.
+
+    The repository is the run's working directory (``Command.cwd``): 2.x has no ``--dir``. A
+    ``variant`` is spelled into the model, ``provider/model#variant``.
+    """
     argv: list[str] = [*isolation_argv(config)]
-    argv += ["--dir", repo]
     # `HARNESS`, not the configured harness: an OpenCode argv carries OpenCode's default model
     # even when this is called directly.
-    argv += ["-m", model(config, HARNESS)]
+    chosen = model(config, HARNESS)
     variant = config.as_str("variant")
-    if variant:
-        argv += ["--variant", variant]
-    argv += ["--title", title]
+    if variant and "#" in chosen:
+        raise PayloadError(f"model {chosen!r} already names a variant; unset variant ({variant!r}) or drop it from model")
+    argv += ["-m", f"{chosen}#{variant}" if variant else chosen]
+    # `--archived`: a review is not a session the person goes back to, so it stays out of their list.
+    argv += ["--agent", AGENT, "--title", title, "--archived"]
     return argv
 
 
 def permission(bundle_dir: Path, roots: Sequence[str] = ()) -> str:
-    """``OPENCODE_PERMISSION`` for a read-only reviewer of one bundle.
+    """The permission document for a read-only reviewer of one bundle.
 
     Reading, grepping, globbing and listing are allowed; everything else (edits, shell) is
     denied. Outside the launch directory only ``bundle_dir`` and the run's ``roots`` may be read.
@@ -95,6 +112,25 @@ def permission(bundle_dir: Path, roots: Sequence[str] = ()) -> str:
         "external_directory": external,
     }
     return json.dumps(document, separators=(",", ":"), ensure_ascii=False)
+
+
+#: The agent every review runs as, named with ``--agent`` so a project's ``default_agent`` cannot
+#: pick another one.
+AGENT: Final = "build"
+
+
+def config_content(bundle_dir: Path, roots: Sequence[str] = ()) -> str:
+    """``OPENCODE_CONFIG_CONTENT``: :func:`permission`'s document, top level and on :data:`AGENT`.
+
+    The inline config is resolved after the user's and the project's, so its top-level rules come
+    after theirs. **That alone is not enough**: 2.2.7 appends an agent's own permission rules after
+    the top-level ones, last match wins, so a project's ``agent.build.permission`` allowing edits
+    would widen the reviewer again. The same document on the agent comes after those too (measured
+    with ``opencode debug agents --standalone``).
+    """
+    document = json.loads(permission(bundle_dir, roots))
+    content = {"permission": document, "agent": {AGENT: {"permission": document}}}
+    return json.dumps(content, separators=(",", ":"), ensure_ascii=False)
 
 
 def _with_system_prompt(prompt_text: str, system_prompt: str) -> str:
@@ -125,9 +161,10 @@ class OpenCodeHarness:
                 self.binary,
                 "run",
                 _with_system_prompt(spec.prompt_text, spec.system_prompt),
-                *review_argv(spec.repo, spec.title, config=spec.config),
+                *review_argv(spec.title, config=spec.config),
             ],
-            env=isolation_env(spec.config, {"OPENCODE_PERMISSION": permission(spec.bundle_dir, spec.roots)}),
+            env=isolation_env(spec.config, {"OPENCODE_CONFIG_CONTENT": config_content(spec.bundle_dir, spec.roots)}),
+            cwd=spec.repo,
         )
 
     def clarify_command(self, spec: ClarifySpec) -> Command:
@@ -137,9 +174,10 @@ class OpenCodeHarness:
                 self.binary,
                 "run",
                 _with_system_prompt(spec.prompt_text, spec.system_prompt),
-                *review_argv(spec.repo, spec.title, config=spec.config),
+                *review_argv(spec.title, config=spec.config),
             ],
-            env=isolation_env(spec.config, {"OPENCODE_PERMISSION": permission(spec.bundle_dir, spec.roots)}),
+            env=isolation_env(spec.config, {"OPENCODE_CONFIG_CONTENT": config_content(spec.bundle_dir, spec.roots)}),
+            cwd=spec.repo,
         )
 
     def probe_models(self, timeout: float) -> list[str] | None:

@@ -1014,6 +1014,75 @@ The headless prompts asked Claude to call the tool once and report what it retur
 whether a secret word was in its context, with no files to be read, and J4's control asked it to
 call WebFetch once on `https://example.com`.
 
+## Session K — v4 end to end, measured 2026-11-13
+
+Phase 7 of the v4 plan: the whole loop, headless, from this checkout. Each run used
+`claude -p "/arl-implement plan.md" --plugin-dir <checkout> --model haiku --permission-mode
+acceptEdits` with Bash limited to `git`, `python3`, `cat`, `ls` and `echo`, in a scratch folder.
+The checks that need a person (the sandbox, the band and the pane, immediate commands, compaction,
+interrupts, auto mode) are not here.
+
+### K1. A three-phase plan over two git roots and a plain folder: pass
+
+All three phases were reviewed, approved and committed in order, and the run ended `complete`. A
+root's own review skill reached only that root's bundle. `verification.txt` held what Claude
+reported running.
+
+### K2. Findings, a fix, a second round: pass
+
+A defect the root's review skill forbids drew `CHANGES_REQUIRED`. Claude fixed it, and round 2's
+bundle carried `prior-rounds.txt` and `incremental.diff`. Round 2 approved. A first attempt, whose
+plan dictated the defective line, was approved: the reviewer judged the change against the plan,
+which is the intended reading.
+
+### K3. The final review: pass
+
+With `ARL_FINAL_REVIEW=1` the final review ran after the last phase and before the run completed.
+
+### K4. A second `/arl-implement` over an active run: pass
+
+It is refused with `run-exists`, naming `/arl-resume` and `/arl-implement --new <plan>`.
+`/arl-status` answered.
+
+### K5. A repository cloned inside the launch folder through Bash: pass
+
+`git clone` into `vendor/lib` with no `add_root`. At the next `review` the clone was discovered as
+root `lib` with an unknown baseline, `review` refused with `baseline-unknown for lib`, and Claude
+stopped and asked. When `vendor/` was in the launch folder's `.gitignore`, the clone was not
+discovered and the approval covered none of it, the documented limitation. The reviewer said so in
+an `info` finding.
+
+### K6. `harness: opencode`: fail on the 1.x spelling, pass after the fix
+
+OpenCode here was 2.2.7. `opencode run` refused `--pure` and `--dir` ("Unrecognized flag") and
+exited 1. All three rounds were `OP_FAILURE` (correct, no approval), but their reports' raw output
+was empty, so the reason showed nowhere. 2.x also has no `--variant` (the variant is
+`-m provider/model#variant`), and no `OPENCODE_PERMISSION` anywhere in the binary.
+
+Then the permission document was probed directly. The probe asked the reviewer to write a file, run
+`touch`, read a file outside the bundle and read one inside it. The repository held an
+`opencode.json` allowing everything.
+
+- `OPENCODE_CONFIG_CONTENT='{"permission": …}'` alone: **every step succeeded.** `opencode run`
+  hands the message to the shared background service, which never sees the run's environment. The
+  same happened with `OPENCODE_DISABLE_PROJECT_CONFIG=1`.
+- The same with `--standalone` (a private server): no write or shell tool was offered, the read
+  outside the bundle was denied (`external_directory`), and the bundle read worked. The project's
+  allow-everything config did not widen it.
+
+`opencode debug agents --standalone` then showed a gap: 2.2.7 appends an agent's own permission
+rules after the top-level ones, and the last match wins. A project `opencode.json` with
+`agent.build.permission` allowing `edit` and `bash` resolved to the inline deny block followed by
+those allows. With the same document also under `agent.build` in the inline config, it resolved
+last, after the project's agent rules, and `default_agent: plan` in the project was beaten by
+`--agent build`.
+
+The harness now runs `opencode run <prompt> --standalone -m <model>[#<variant>] --agent build
+--title <t> --archived` in the launch folder, with the permission in `OPENCODE_CONFIG_CONTENT` at the
+top level and on `build`. A failed run's output is kept in its report. The same plan then ran end
+to end: reviewed by OpenCode, approved with three low findings, committed. It ran again in a
+repository whose `opencode.json` allowed everything on `agent.build`: approved, committed.
+
 ## If A1 fails
 
 Expansion not running in skill bodies is the only outcome that forces a redesign. The fallback:

@@ -481,7 +481,7 @@ def run_clarify(  # noqa: PLR0913 - one knob per argument, as `run_bounded` note
 
 def classify_op_failure(exc: ReviewerFailed, out_path: Path) -> str:
     """ "transient" for a timeout or a matched rate/usage-limit signal, "operational" for
-    every other non-zero exit -- ``126``/``127``, a bad ``--model``, a rejected ``--variant``
+    every other non-zero exit -- ``126``/``127``, a bad ``--model``, a rejected ``-m model#variant``
     and an expired credential all included. See ``Review.kind`` for why the split matters.
     """
     if exc.status in _TIMEOUT_STATUSES:

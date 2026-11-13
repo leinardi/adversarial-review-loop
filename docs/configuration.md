@@ -29,7 +29,7 @@ again when `/arl-config` sets it.
 | `harness` | `subagent` | who reviews: `subagent`, a hidden Claude Code subagent the plugin registers, or `opencode`, which the engine runs itself. An unknown name is refused, never replaced by the default |
 | `model` | empty: the session's subagent default, or `openai/gpt-5.6-sol` for `opencode` | the reviewer's model |
 | `effort` | empty: the agent's default | the subagent reviewer's effort: `low`, `medium`, `high`, `xhigh` or `max`. A value that is no level is ignored, and said at session start |
-| `variant` | empty | OpenCode's `--variant` |
+| `variant` | empty | OpenCode only: the model variant, passed as `-m <model>#<variant>`. A `model` containing `#` and a `variant` together are refused |
 | `disable_project_config` | `false` | OpenCode only: ignore the repository's own OpenCode config (`OPENCODE_DISABLE_PROJECT_CONFIG`) |
 | `verify_cmd` | empty | the command Claude is told to run before each review, named in the start prompt and every continuation prompt. The engine never runs it: what Claude reports reaches the reviewer as `verification.txt`, labelled as the implementer's report |
 | `block_severity` | `medium` | an actionable finding at or above this blocks the approval, whatever verdict the reviewer gave |

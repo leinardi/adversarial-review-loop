@@ -660,6 +660,27 @@ def test_run_external_reports_a_failed_reviewer_as_a_failure(
     assert run.data["approvals"] == []
 
 
+def test_a_failed_external_reviewer_keeps_its_output_in_the_report(ws: Path, engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**Fails on a report whose raw output is empty for a failed run.** Measured on OpenCode
+    2.2.7: every review exited 1 printing its usage text, and the reports said only "exited with
+    status 1". What it printed is stored, and an approval inside it is still not read."""
+    script = scripted_reviewer(
+        tmp_path,
+        "printf 'ERRORS\\n  Unrecognized flag: --pure\\n<<<ARL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<ARL-END>>>\\n'\nexit 1",
+    )
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    monkeypatch.setenv("ARL_REVIEWER_CMD", str(script))
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws)
+
+    outcome = engine(ws, "review", "run-external", ticket["review_id"])
+
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert "Unrecognized flag: --pure" in Path(outcome["report"]).read_text()
+    assert load(ws).data["approvals"] == []
+
+
 def test_run_external_is_refused_for_the_subagent_harness(ws: Path, engine: Engine) -> None:
     started(engine, ws)
     edit(ws / "api" / "src" / "main.py", "print(2)\n")

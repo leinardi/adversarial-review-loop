@@ -11,7 +11,10 @@ folder joins with `--root`, the `roots` setting, or when Claude writes into it.
 ### Do I need OpenCode?
 
 No. The default reviewer is a Claude Code subagent. Set `harness` to `opencode` to have the engine
-run OpenCode instead.
+run OpenCode instead (2.2.7 or newer). Each review runs a private OpenCode server
+(`--standalone`) as the `build` agent, with read-only permissions placed after the user's and the
+repository's own. The repository's OpenCode plugins still load unless `disable_project_config` is
+set.
 
 ### Does it write anything into my repository?
 

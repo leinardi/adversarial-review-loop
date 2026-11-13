@@ -481,7 +481,15 @@ def _record_answer(  # noqa: PLR0913 - the pieces `record` already validated
     review_dir = _review_dir(run.paths, run.run_id, int(ticket["seq"]))
     usage = reported_usage(str(args.get("usage") or ""))
     if failed:
-        review = Review(verdict="OP_FAILURE", kind=failed, error=str(args.get("error") or f"the reviewer did not answer ({failed})"), usage=usage)
+        # Whatever a failed run printed (a CLI's usage text, an auth error) is kept in the report:
+        # it is how the person finds out why, and it is never read for a verdict.
+        review = Review(
+            verdict="OP_FAILURE",
+            kind=failed,
+            raw=str(args.get("answer") or ""),
+            error=str(args.get("error") or f"the reviewer did not answer ({failed})"),
+            usage=usage,
+        )
     else:
         answer = Path(str(args["answer"])).expanduser()
         if not ticket.get("repair") and not _has_output(answer):
@@ -573,7 +581,8 @@ def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         except runner.LaunchError as exc:
             return record(paths, {"review_id": review_id, "failed": "operational", "error": str(exc)})
         except runner.ReviewerFailed as exc:
-            return record(paths, {"review_id": review_id, "failed": runner.classify_op_failure(exc, answer), "error": str(exc)})
+            failure = runner.classify_op_failure(exc, answer)
+            return record(paths, {"review_id": review_id, "failed": failure, "error": str(exc), "answer": str(answer)})
         outcome = record(paths, {"review_id": review_id, "answer": str(answer)})
         if outcome.get("status") != "repair":
             return outcome

@@ -35,7 +35,8 @@ tag.
 - `python3` 3.12 or newer, which runs the engine with the standard library alone. **On macOS the
   bundled `/usr/bin/python3` is 3.9 and will not do**; install one from Homebrew or python.org.
 - `git`.
-- Only for `harness: opencode`: [`opencode`](https://opencode.ai) on `PATH`, authenticated.
+- Only for `harness: opencode`: [`opencode`](https://opencode.ai) 2.2.7 or newer on `PATH`,
+  authenticated. Earlier releases take flags 2.x removed, so every review there fails.
 
 Claude Code's sandbox needs no exception: the mod and the engine run outside it.
 

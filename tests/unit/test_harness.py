@@ -135,8 +135,7 @@ def test_a_command_can_name_its_working_directory(implementation: harness.Harnes
     **Fails on a ``Command`` that has only argv/env/stdin.** Where a reviewer runs is not a
     detail the gate can decide for every CLI: some persist their sessions under the working
     directory, so a harness must be able to move that off the repository under review without
-    further surgery in the runner. Asserted on the seam rather than on one harness --
-    OpenCode names the repository with ``--dir`` and correctly leaves ``cwd`` unset.
+    further surgery in the runner. Asserted on the seam rather than on one harness.
     """
     built = implementation.review_command(spec_for(implementation, tmp_path))
     assert hasattr(built, "cwd")
@@ -314,6 +313,58 @@ def test_both_opencode_commands_carry_the_roots_in_their_permission(which: str, 
         built = opencode.HARNESS.clarify_command(
             harness.ClarifySpec(repo=spec.repo, prompt_text="why?", title="t", bundle_dir=spec.bundle_dir, roots=spec.roots, config=spec.config)
         )
-    allowed = json.loads(built.env["OPENCODE_PERMISSION"])["external_directory"]
+    allowed = json.loads(built.env["OPENCODE_CONFIG_CONTENT"])["permission"]["external_directory"]
     assert "/elsewhere/web/**" in allowed
     assert "-s" not in built.argv, "every round is a fresh reviewer; nothing continues a session"
+
+
+@pytest.mark.parametrize("variant", ["", "high"])
+def test_an_opencode_review_is_spelled_for_opencode_2(variant: str, tmp_path: Path) -> None:
+    """OpenCode 2.x: ``--standalone``, the repository as ``cwd``, the variant inside ``-m``.
+
+    **Fails on the 1.x spelling.** 2.2.7 rejects ``--pure``, ``--dir`` and ``--variant`` (every
+    review exited 1), and without ``--standalone`` the run is handed to a shared background service
+    that never sees ``OPENCODE_CONFIG_CONTENT``: measured, that reviewer wrote a file and ran a shell
+    command. ``OPENCODE_PERMISSION`` no longer exists, so the permission travels in the config.
+    """
+    base = spec_for(opencode.HARNESS, tmp_path)
+    spec = harness.ReviewSpec(
+        repo=base.repo,
+        prompt_text=base.prompt_text,
+        system_prompt=base.system_prompt,
+        title=base.title,
+        bundle_dir=base.bundle_dir,
+        roots=base.roots,
+        config=config_with(variant=variant),
+    )
+    built = opencode.HARNESS.review_command(spec)
+    assert "--standalone" in built.argv
+    assert not {"--pure", "--dir", "--variant"} & set(built.argv)
+    assert built.cwd == spec.repo
+    chosen = built.argv[built.argv.index("-m") + 1]
+    assert chosen == (f"{opencode.DEFAULT_MODEL}#high" if variant else opencode.DEFAULT_MODEL)
+    assert "OPENCODE_PERMISSION" not in built.env
+    content = json.loads(built.env["OPENCODE_CONFIG_CONTENT"])
+    expected = json.loads(opencode.permission(spec.bundle_dir, spec.roots))
+    assert content["permission"] == expected
+    # A project's `agent.build.permission` is appended after the top-level rules (last match
+    # wins), so the document must sit on the agent too, and the agent must be named.
+    assert content["agent"][opencode.AGENT]["permission"] == expected
+    assert built.argv[built.argv.index("--agent") + 1] == opencode.AGENT
+    assert "--archived" in built.argv
+
+
+def test_a_variant_in_both_model_and_variant_is_refused(tmp_path: Path) -> None:
+    """``provider/model#a`` plus ``variant=b`` would be spelled ``#a#b``: refused, not guessed."""
+    base = spec_for(opencode.HARNESS, tmp_path)
+    spec = harness.ReviewSpec(
+        repo=base.repo,
+        prompt_text=base.prompt_text,
+        system_prompt=base.system_prompt,
+        title=base.title,
+        bundle_dir=base.bundle_dir,
+        roots=base.roots,
+        config=config_with(model="openai/x#low", variant="high"),
+    )
+    with pytest.raises(harness.PayloadError):
+        opencode.HARNESS.review_command(spec)
