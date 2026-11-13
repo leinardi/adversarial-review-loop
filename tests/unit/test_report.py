@@ -174,7 +174,7 @@ def test_the_full_set_is_not_repeated_when_it_is_the_blocking_set() -> None:
 
 def test_the_engine_note_is_carried_back() -> None:
     text = report.reason(a_review(error="the reviewer produced no output"), "h", config=config_with())
-    assert "\nGate note: the reviewer produced no output\n" in text
+    assert "\nReview note: the reviewer produced no output\n" in text
 
 
 def test_prose_truncates_but_findings_never_do() -> None:

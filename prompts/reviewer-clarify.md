@@ -15,7 +15,7 @@ The bundle of that review, listed by absolute path at the end of this message.
 
 You did not write that review: you are a fresh reviewer with its record. Answer as its author would, from its evidence.
 
-You cannot run tests, builds, or any command. Do not claim you did.
+You cannot run tests or builds, or change any file. Do not claim you did.
 
 ## What to do
 

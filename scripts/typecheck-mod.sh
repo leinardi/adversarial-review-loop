@@ -28,10 +28,6 @@ set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
 
-if [ -z "$(git -C "$root" ls-files 'hooks/*.js' 'hooks/*.ts' 'hooks/*.tsx' 'tests/mod/*.ts' 'tests/mod/*.tsx')" ]; then
-    printf 'typecheck-mod: no mod sources yet; nothing to check.\n'
-    exit 0
-fi
 types="$root/.claude-plugin/types/claude-code/index.d.ts"
 
 if [ ! -f "$types" ]; then

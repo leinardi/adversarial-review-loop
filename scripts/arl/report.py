@@ -222,10 +222,10 @@ def reason(review: Review, headline: str, *, config: Config) -> str:
     """
     out: list[str] = [f"{headline}\n"]
     if review.error:
-        out.append(f"\nGate note: {review.error}\n")
+        out.append(f"\nReview note: {review.error}\n")
     if review.repaired:
         out.append(
-            "\nGate note: the reviewer's findings block was malformed, so the findings below were re-emitted by a "
+            "\nReview note: the reviewer's findings block was malformed, so the findings below were re-emitted by a "
             f"repair call against the same transcript. The review itself is at {review.repaired}.\n"
         )
     if review.findings:

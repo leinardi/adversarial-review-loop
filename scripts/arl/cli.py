@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
@@ -35,7 +36,7 @@ from arl.errors import OcrlError, StateLoadError
 from arl.state import RunError, run_paths
 from arl.util import log, log_exception
 
-__all__ = ["USAGE", "main"]
+__all__ = ["USAGE", "end_on_sigterm", "main"]
 
 USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
 
@@ -50,7 +51,9 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
   review prepare [--session ID]              prepare the current stage's review; optional JSON
                                              {"verification": [...]} on stdin
   review record ID (--answer FILE | --failed transient|operational [--error TEXT])
+                   [--usage JSON]            what the subagent round cost, for the report
   review run-external ID                     run the opencode reviewer and record its answer
+  review abandon ID                          retire an interrupted review; no failure is counted
   clarify prepare                            one question (stdin) about the latest round
   clarify record SEQ N --answer FILE [--run-id ID]
   clarify run-external                       ask the opencode reviewer (question on stdin)
@@ -99,7 +102,9 @@ def _parser() -> argparse.ArgumentParser:
     outcome.add_argument("--answer")
     outcome.add_argument("--failed", choices=("transient", "operational"))
     record.add_argument("--error", default="")
+    record.add_argument("--usage", default="")
     review.add_parser("run-external", add_help=False).add_argument("review_id")
+    review.add_parser("abandon", add_help=False).add_argument("review_id")
     clarify = sub.add_parser("clarify", add_help=False).add_subparsers(dest="action", parser_class=_Parser)
     clarify.add_parser("prepare", add_help=False)
     clarify.add_parser("run-external", add_help=False)
@@ -145,6 +150,21 @@ def _read_stdin(name: str) -> Any:
 def _answer(payload: dict[str, Any], status: int) -> int:
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     return status
+
+
+def _terminated(signum: int, _frame: object) -> None:
+    """End on ``SIGTERM`` by unwinding, so a running reviewer's process group is killed on the
+    way out (:func:`arl.runner.run_bounded`) and the state lock is released.
+
+    The mod kills the engine when the person interrupts a review it streams; the reviewer runs in
+    a session of its own and would otherwise outlive it.
+    """
+    raise SystemExit(128 + signum)
+
+
+def end_on_sigterm() -> None:
+    """Make ``SIGTERM`` unwind the engine (:func:`_terminated`); the bootstrap calls it once."""
+    signal.signal(signal.SIGTERM, _terminated)
 
 
 def main(argv: list[str]) -> int:

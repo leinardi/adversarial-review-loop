@@ -1058,3 +1058,92 @@ def test_a_root_registered_while_the_review_ran_makes_the_answer_stale(ws: Path,
     assert record(engine, ws, ticket["review_id"], write_answer(answers, *APPROVE))["code"] == "stale-review"
     assert load(ws).data["pending_ticket"] is None
     assert "review_id" in prepare(engine, ws)
+
+
+# --------------------------------------------------------------------------
+# What the mod needs to run the subagent, and what it reports back
+# --------------------------------------------------------------------------
+
+
+def test_prepare_tells_the_mod_how_to_run_the_subagent(ws: Path, engine: Engine) -> None:
+    (ws / ".adversarial-review-loop.json").write_text(json.dumps({"model": "haiku", "timeout_sec": 120}))
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
+    ticket = prepare(engine, ws)
+    assert (ticket["reviewer_model"], ticket["timeout_sec"]) == ("haiku", 120)
+
+
+def test_an_unset_model_is_passed_on_empty_not_as_its_display_text(ws: Path, engine: Engine) -> None:
+    """``model`` is what the band shows ("the session's default"); the spawn must get nothing."""
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
+    ticket = prepare(engine, ws)
+    assert ticket["reviewer_model"] == ""
+    assert ticket["model"] != ""
+
+
+def test_the_usage_the_mod_reports_reaches_the_report(ws: Path, engine: Engine, answers: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
+    ticket = prepare(engine, ws)
+    usage = json.dumps({"input_tokens": 10, "output_tokens": 2600, "cache_read_tokens": 40000, "cache_creation_tokens": 3000, "duration_ms": 61000})
+    result = engine(ws, "review", "record", ticket["review_id"], "--answer", str(write_answer(answers, *APPROVE)), "--usage", usage)
+    assert result["verdict"] == "APPROVED"
+    assert "- cost: 3k new + 40k cached input — 3k output — 61s" in Path(result["report"]).read_text()
+
+
+@pytest.mark.parametrize("usage", ["not json", "[1, 2]", '{"output_tokens": -1, "turns": true}', '{"output_tokens": "many"}'])
+def test_usage_the_engine_cannot_read_is_dropped_never_a_failure(ws: Path, engine: Engine, answers: Path, usage: str) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
+    ticket = prepare(engine, ws)
+    result = engine(ws, "review", "record", ticket["review_id"], "--answer", str(write_answer(answers, *APPROVE)), "--usage", usage)
+    assert result["verdict"] == "APPROVED"
+    assert "- cost:" not in Path(result["report"]).read_text()
+
+
+def test_a_failed_round_keeps_what_it_cost(ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
+    ticket = prepare(engine, ws)
+    result = engine(ws, "review", "record", ticket["review_id"], "--failed", "transient", "--usage", '{"output_tokens": 900}')
+    assert result["verdict"] == "OP_FAILURE"
+    assert "900 output" in Path(result["report"]).read_text()
+
+
+def test_clarify_prepare_tells_the_mod_how_to_run_the_subagent(ws: Path, engine: Engine, answers: Path) -> None:
+    (ws / ".adversarial-review-loop.json").write_text(json.dumps({"model": "sonnet"}))
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
+    review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
+    asked = engine(ws, "clarify", "prepare", stdin="Why?")
+    assert (asked["reviewer_model"], asked["timeout_sec"]) == ("sonnet", 900)
+
+
+def test_an_interrupted_review_is_abandoned_without_counting_a_failure(ws: Path, engine: Engine, answers: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
+    ticket = prepare(engine, ws, session="s1")
+    assert engine(ws, "review", "abandon", ticket["review_id"])["abandoned"] is True
+    run = load(ws)
+    assert run.data["pending_ticket"] is None
+    assert (run.data["failures"], run.data["transient_failures"]) == (0, 0)
+    assert engine(ws, "next-action")["action"] == "continue", "the loop is no longer held on a review nobody runs"
+    late = record(engine, ws, ticket["review_id"], write_answer(answers, *APPROVE))
+    assert late["code"] == "stale-review"
+
+
+def test_abandoning_a_review_that_is_not_pending_changes_nothing(ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
+    ticket = prepare(engine, ws)
+    assert engine(ws, "review", "abandon", "someone-else")["abandoned"] is False
+    assert load(ws).data["pending_ticket"]["review_id"] == ticket["review_id"]
+
+
+def test_an_unknown_harness_is_refused_before_any_ticket_is_issued(ws: Path, engine: Engine) -> None:
+    (ws / ".adversarial-review-loop.json").write_text(json.dumps({"harness": "claude-code"}))
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
+    assert prepare(engine, ws)["code"] == "unknown-harness"
+    assert load(ws).data["pending_ticket"] is None

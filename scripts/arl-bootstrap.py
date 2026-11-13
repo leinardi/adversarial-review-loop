@@ -144,8 +144,10 @@ def main(argv: list[str]) -> int:
     # Deliberately not at module scope: importing arl before sys.path is established
     # would resolve it against whatever the interpreter starts with. This import is the
     # first moment the package may be trusted, and PLC0415 must not "fix" it upward.
+    from arl.cli import end_on_sigterm  # noqa: PLC0415
     from arl.cli import main as cli_main  # noqa: PLC0415
 
+    end_on_sigterm()
     return cli_main(argv)
 
 

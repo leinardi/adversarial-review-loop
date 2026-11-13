@@ -16,7 +16,7 @@ A bundle file named in **Bundle contents** that you cannot read is a problem to 
 
 **This may not be the first round of this final review.** Every round is a fresh reviewer, and `prior-rounds.txt`, when present, is the record of what the earlier ones concluded. Derive your findings from the bundle now, then re-check every earlier finding against the current state before repeating it — some may already be fixed. Nothing from an earlier round carries forward as approved; this round's verdict is judged on this round's evidence alone.
 
-You cannot run tests, builds, or any command. Do not claim you did.
+You cannot run tests or builds, or change any file. Do not claim you did.
 
 This pass is meant to read the roots heavily; reading them efficiently is what makes that affordable.
 

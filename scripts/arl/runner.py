@@ -288,6 +288,11 @@ def run_bounded(  # noqa: PLR0913 - each arg is an independent knob of the run; 
     except subprocess.TimeoutExpired:
         kill_group(proc)
         return 124
+    except BaseException:
+        # The engine itself is ending (SIGTERM from the mod, an interrupt): the reviewer and
+        # everything it started go with it rather than run on unowned.
+        kill_group(proc)
+        raise
     return status
 
 

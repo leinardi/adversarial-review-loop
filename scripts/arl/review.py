@@ -33,6 +33,7 @@ budget, the run waits for the user.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
@@ -43,15 +44,17 @@ from arl.bundle import BundleError, BundleTooLarge
 from arl.contract import Review, Target
 from arl.errors import OcrlError
 from arl.state import RunError, RunPaths, RunState, locked_state
-from arl.util import decode, encode
+from arl.util import decode, encode, log
 
 __all__ = [
     "REPAIR_TAIL_BYTES",
+    "abandon",
     "clarify_prepare",
     "clarify_record",
     "clarify_run_external",
     "prepare",
     "record",
+    "reported_usage",
     "run_external",
 ]
 
@@ -85,6 +88,12 @@ def _load_config(paths: RunPaths) -> config.Config:
 # --------------------------------------------------------------------------
 # prepare
 # --------------------------------------------------------------------------
+
+
+def _subagent_settings(cfg: config.Config) -> dict[str, Any]:
+    """What the mod spawns the reviewer subagent with: the configured model, empty for the
+    session's own subagent default, and how long it waits for the answer."""
+    return {"reviewer_model": cfg.as_str("model"), "timeout_sec": cfg.as_int("timeout_sec")}
 
 
 def _validated_verification(raw: object) -> list[dict[str, Any]]:
@@ -146,6 +155,9 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         if decision is not None:
             # Another review would end it by approving: only the user ends a stall or a call for them.
             raise RunError("waiting", f"the run waits for the user ({decision['kind']}): {decision.get('detail', '')}; /resume or /accept first")
+        if cfg.as_str("harness") != harness.SUBAGENT:
+            # Before any ticket: a review no reviewer can run would hold the loop on it.
+            _external_harness(cfg)
         stage = run.stage()
         if stage not in ("phase", "final"):
             raise RunError("nothing-to-review", "set the phases first" if stage == "plan" else "the run is complete")
@@ -198,6 +210,7 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             "round": built.round_number,
             "harness": cfg.as_str("harness"),
             "model": harness.display_model(cfg),
+            **_subagent_settings(cfg),
             "prompt_file": str(review_dir / "prompt.md"),
             "bundle_dir": str(built.dir),
             # Every directory the reviewer reads besides the bundle: a root need not sit under
@@ -453,18 +466,62 @@ def _record_answer(  # noqa: PLR0913 - the pieces `record` already validated
     run: RunState, ticket: dict[str, Any], target: Target, args: Mapping[str, Any], cfg: config.Config, *, failed: str
 ) -> dict[str, Any]:
     review_dir = _review_dir(run.paths, run.run_id, int(ticket["seq"]))
+    usage = reported_usage(str(args.get("usage") or ""))
     if failed:
-        review = Review(verdict="OP_FAILURE", kind=failed, error=str(args.get("error") or f"the reviewer did not answer ({failed})"))
+        review = Review(verdict="OP_FAILURE", kind=failed, error=str(args.get("error") or f"the reviewer did not answer ({failed})"), usage=usage)
     else:
         answer = Path(str(args["answer"])).expanduser()
         if not ticket.get("repair") and not _has_output(answer):
             # A reviewer that said nothing has nothing to repair: it failed, and the budget counts it.
-            review = Review(verdict="OP_FAILURE", kind="operational", raw=str(answer), error="the reviewer produced no output")
+            review = Review(verdict="OP_FAILURE", kind="operational", raw=str(answer), error="the reviewer produced no output", usage=usage)
             return _apply(run, ticket, target, review, cfg)
         review = _parsed(run, ticket, target, answer, cfg)
         if review.verdict == "OP_FAILURE" and review.kind == "contract" and not ticket.get("repair"):
             return _repair(run, ticket, answer, review_dir)
+        if usage is not None:
+            review.usage = usage
     return _apply(run, ticket, target, review, cfg)
+
+
+#: The figures ``record --usage`` reads, each a :class:`arl.harness.Usage` field.
+_USAGE_FIELDS: Final = ("turns", "input_tokens", "cache_creation_tokens", "cache_read_tokens", "output_tokens", "duration_ms")
+
+
+def reported_usage(raw: str) -> harness.Usage | None:
+    """What the mod says a subagent round cost (``record --usage``), for the report only.
+
+    Observability, never a decision: anything unreadable is dropped, and a figure that is not a
+    whole non-negative number is left missing rather than guessed.
+    """
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        log(f"record: --usage is not JSON and is ignored: {raw[:200]!r}")
+        return None
+    if not isinstance(value, dict):
+        return None
+    figures = {key: value[key] for key in _USAGE_FIELDS if isinstance(value.get(key), int) and not isinstance(value[key], bool) and value[key] >= 0}
+    return harness.Usage(**figures) if figures else None
+
+
+def abandon(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
+    """Retire the pending review ``args["review_id"]`` that the person interrupted.
+
+    Nothing judged anything, so no failure is counted and nothing is recorded: the ticket only
+    stops being pending, so the loop is not held on a review no reviewer is running. A review that
+    is not the pending one is left alone and said to be so.
+    """
+    review_id = str(args["review_id"])
+    with locked_state(paths) as loaded:
+        run = _require(loaded)
+        ticket = run.data["pending_ticket"]
+        if ticket is None or ticket.get("review_id") != review_id:
+            return {"ok": True, "abandoned": False, "run": run.summary()}
+        run.invalidate_ticket("abandoned")
+        run.save()
+        return {"ok": True, "abandoned": True, "run": run.summary()}
 
 
 def _external_harness(cfg: config.Config) -> None:
@@ -556,6 +613,7 @@ def clarify_prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             "run_id": run.run_id,
             "round_seq": seq,
             "question": number,
+            **_subagent_settings(cfg),
             "prompt_file": str(prompt),
             "bundle_dir": str(bundle_dir),
             "roots": [str(root["path"]) for root in run.roots],

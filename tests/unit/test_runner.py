@@ -23,6 +23,7 @@ No reviewer output and no operational failure produces ``APPROVED``.
 from __future__ import annotations
 
 import os
+import signal
 import stat
 import time
 from pathlib import Path
@@ -31,7 +32,7 @@ import pytest
 from conftest import FAKE_REVIEWER, config_with
 from reviewer_common import PLAIN_VERDICT, assert_descendant_never_ran, bundle_with_diff, invocation, spawner
 
-from arl import contract, harness, runner
+from arl import cli, contract, harness, runner
 from arl.config import Config
 from arl.contract import Target
 from arl.runner import Invocation, ReviewerFailed
@@ -165,6 +166,44 @@ def test_a_timeout_kills_a_descendant_that_ignores_sigterm(tmp_path: Path, deaf:
             environ={**os.environ, "ARL_REVIEWER_CMD": str(spawner(tmp_path, marker, deaf=deaf, name=f"deaf-{deaf}.sh"))},
         )
     assert_descendant_never_ran(marker, started=started)
+
+
+def test_an_engine_that_is_terminated_takes_its_reviewer_with_it(tmp_path: Path) -> None:
+    """The mod kills the engine with SIGTERM when the person interrupts an external review; the
+    reviewer runs in a session of its own and must not outlive the engine that owns it."""
+    marker = tmp_path / "orphan"
+
+    def terminated(signum: int, _frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    previous = signal.signal(signal.SIGALRM, terminated)
+    started = time.monotonic()
+    signal.alarm(1)
+    try:
+        with pytest.raises(SystemExit):
+            runner.invoke(
+                TARGET,
+                Invocation(bundle_dir=bundle_with_diff(tmp_path), prompt_file=Path("prompt.md"), title="t", out_path=tmp_path / "reviewer.out"),
+                config=config_with(timeout_sec=30),
+                environ={**os.environ, "ARL_REVIEWER_CMD": str(spawner(tmp_path, marker))},
+            )
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert_descendant_never_ran(marker, started=started)
+
+
+def test_the_bootstrap_makes_sigterm_unwind_the_engine(tmp_path: Path) -> None:
+    """Default SIGTERM ends Python without unwinding, which would skip the kill above."""
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        cli.end_on_sigterm()
+        with pytest.raises(SystemExit) as ended:
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert ended.value.code == 128 + signal.SIGTERM
 
 
 # --------------------------------------------------------------------------

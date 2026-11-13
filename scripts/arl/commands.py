@@ -274,6 +274,7 @@ COMMANDS: Final[Mapping[str, Command]] = {
     "review-prepare": review.prepare,
     "review-record": review.record,
     "review-run-external": review.run_external,
+    "review-abandon": review.abandon,
     "clarify-prepare": review.clarify_prepare,
     "clarify-record": review.clarify_record,
     "clarify-run-external": review.clarify_run_external,

@@ -55,6 +55,9 @@ Target architecture (the phases build it):
 
 | Path | What lives there |
 | --- | --- |
+| `hooks/mod.ts` | the mod: registers the tools, the reviewer agent and every hook; `hooks/hooks.json` names it |
+| `hooks/flow.ts` | the loop: each tool's flow, a review round on either harness, asking the user, root registration, continuation |
+| `hooks/reviewer.ts`, `engine.ts`, `text.ts` | the reviewer subagent (spawn, wait, permissions), running the engine, and the text Claude and the reviewer read |
 | `scripts/arl.sh` | launcher: finds a Python 3.12 or newer and runs the bootstrap |
 | `scripts/arl-bootstrap.py` | trusted absolute entrypoint; establishes `sys.path` and `sys.pycache_prefix` before `arl` is imported |
 | `scripts/arl/cli.py` | subcommand dispatch: argv in, one JSON answer on stdout |
@@ -73,6 +76,7 @@ Target architecture (the phases build it):
 | `scripts/arl/atomic.py`, `config.py`, `globmatch.py`, `util.py`, `errors.py` | shared plumbing |
 | `prompts/*.md` | the reviewer prompts |
 | `tests/unit/` | pytest unit tests; shared fixtures in `conftest.py`, run fixtures in `run_common.py`, reviewer stand-ins in `reviewer_common.py` |
+| `tests/mod/` | the mod's tests under `claude plugin test`; the scripted engine and user in `world.ts` |
 | `tests/selftest.sh` | smoke test for `scripts/arl.sh` |
 | `tests/STEP0.md` | live-session measurements of the Claude Code host; Session J covers the v4 mod surface |
 
