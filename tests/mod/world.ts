@@ -116,6 +116,10 @@ export type World = {
   registered: { tools: Record<string, unknown>[]; agents: Record<string, unknown>[]; commands: Record<string, unknown>[] }
   /** Panes the mod opened, by id. */
   opened: string[]
+  /** Panes the mod closed, by id. */
+  closed: string[]
+  /** What each pane was opened with, by id. */
+  openArgs: Map<string, Record<string, unknown>>
   /** Toasts the mod showed. */
   toasts: string[]
   /** Notifications the mod raised. */
@@ -173,6 +177,8 @@ function scripted(options: WorldOptions): { state: World; answer: (argv: readonl
     logged: [],
     registered: { tools: [], agents: [], commands: [] },
     opened: [],
+    closed: [],
+    openArgs: new Map(),
     toasts: [],
     notified: [],
     compacted: [],
@@ -353,10 +359,16 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
       log: (text: string) => {
         state.logged.push(text)
       },
-      open: async ({ id }: { id: string }) => {
-        state.opened.push(id)
+      open: async (args: { id: string } & Record<string, unknown>) => {
+        state.opened.push(args.id)
+        state.openArgs.set(args.id, args)
         return { isPlaced: true }
       },
+      close: async ({ id }: { id: string }) => {
+        state.closed.push(id)
+      },
+      // Open: opened since it was last closed.
+      panes: async () => [...new Set(state.opened)].filter(id => state.opened.lastIndexOf(id) > state.closed.lastIndexOf(id) || !state.closed.includes(id)).map(id => ({ id, title: id, isShown: true, isFocused: false, isPlaced: true })),
     },
     clock: {
       after: (_ms: number, fn: () => void) => {

@@ -42,6 +42,12 @@ let roots: string[] | null = null
 /** The state file's modification time when the engine last said no run is active here. */
 let closedAt: number | undefined
 
+/**
+ * Whether Claude wrote a file since the latest review or acceptance: a turn that ends then ends in
+ * the middle of a stage, and is not compacted.
+ */
+let worked = false
+
 /** Remember the run an answer describes, and show it. */
 export async function track($: EngineInterface, answer: Answer): Promise<void> {
   const run = answer.run as RunSummary | null | undefined
@@ -121,6 +127,10 @@ export async function decide($: EngineInterface, waiting: { kind: string; detail
   if (choice === ACCEPT) {
     const accepted = await run($, ['accept'])
     if (!accepted.ok) return `\n\nThe user chose to accept, but accepting failed: ${accepted.error ?? ''}${handOver}`
+    worked = false
+    // The engine's word on the rest of the turn when it has one: stop when paused, end the turn
+    // for the compaction under auto_compact.
+    if (typeof accepted.next === 'string' && accepted.next.trim() !== '') return `\n\nThe user accepted this stage as it stands. ${accepted.next.trim()}`
     const after = accepted.run as RunSummary | undefined
     const next =
       after?.stage === 'done'
@@ -130,7 +140,8 @@ export async function decide($: EngineInterface, waiting: { kind: string; detail
           : after?.stage === 'final'
             ? ', then call review for the final review.'
             : ', then go on with the next phase.'
-    return `\n\nThe user accepted this stage as it stands. Commit each changed git repository by its own conventions${next}`
+    const repos = typeof accepted.repositories === 'string' ? accepted.repositories : ''
+    return `\n\nThe user accepted this stage as it stands. Commit each changed git repository by its own conventions${repos}${next}`
   }
   if (choice === KEEP_GOING) {
     // Resuming clears the decision and would also undo a pause the user set: keep that.
@@ -201,6 +212,12 @@ export async function addRoot($: EngineInterface, input: Record<string, unknown>
   if (!answer.ok) return refused(answer)
   // `root-add` answers no run summary: refresh the cached roots.
   await run($, ['status'])
+  // Named on purpose: a root a refused write left behind, or one a running write registered, is
+  // the run's now, not taken back.
+  if (typeof answer.alias === 'string') {
+    named.add(answer.alias)
+    retry.delete(answer.alias)
+  }
   if (answer.status !== 'added') {
     if (answer.baseline !== 'unknown') return `${input.path} is already covered by root ${String(answer.alias)}.`
     // A root with no baseline yet reviews nothing: settle it now rather than at the next review.
@@ -356,6 +373,9 @@ export async function reviewWith($: EngineInterface, input: Record<string, unkno
 export async function announce($: EngineInterface, recorded: Answer, message: string): Promise<void> {
   const label = String(recorded.label ?? 'review')
   const verdict = String(recorded.verdict ?? '')
+  // Writes from here on are the next stage's, or fixes: what the compaction after an approval
+  // must not cut through.
+  worked = false
   await showLast($, { label, verdict, message, report: String(recorded.report ?? '') }).catch(() => undefined)
   // A toast is not seen in the terminal (STEP0 I5); a log line is.
   $.ui.log(`${label} ${verdict}`)
@@ -428,7 +448,7 @@ export function parentOf(path: string): string {
 }
 
 /** What registering a folder came to: the note Claude is told, and the root it added. */
-export type Registration = { note?: string; added?: string }
+export type Registration = { note?: string; added?: string; path?: string }
 
 /**
  * Before a file is written, make sure the directory it lives in is a root of the active run, so
@@ -455,10 +475,11 @@ export async function ensureRoot($: EngineInterface, directory: string, { explic
   if (answer.baseline === 'unknown') {
     return {
       added: alias,
+      path: target,
       note: `adversarial-review-loop registered ${target} as root ${alias}, but it already holds changes: its baseline is unknown, and the next review asks the user for one.`,
     }
   }
-  return { added: alias, note: `adversarial-review-loop registered ${target} as root ${alias}; its content before this change is the baseline.` }
+  return { added: alias, path: target, note: `adversarial-review-loop registered ${target} as root ${alias}; its content before this change is the baseline.` }
 }
 
 /**
@@ -468,12 +489,99 @@ export async function ensureRoot($: EngineInterface, directory: string, { explic
  * measured live, a write the person refused aborts its dispatch, and the hook's next engine call
  * with it.
  */
-export async function dropRoot($: EngineInterface, alias: string): Promise<'dropped' | 'kept' | 'unknown'> {
-  const answer = await run($, ['root-remove', alias, '--undo']).catch(() => undefined)
+export async function dropRoot($: EngineInterface, root: string): Promise<'dropped' | 'kept' | 'unknown'> {
+  const answer = await run($, ['root-remove', root, '--undo']).catch(() => undefined)
   if (answer === undefined || (!answer.ok && answer.code === 'engine')) return 'unknown'
   if (!answer.ok) return 'kept'
   await run($, ['status']).catch(() => undefined)
   return 'dropped'
+}
+
+/** The folder of each Edit, Write or NotebookEdit between its start and its end, once per write. */
+const writing: string[] = []
+
+/**
+ * Roots a write registered, by alias, to their path, still to be offered back: the undo got no
+ * engine answer (measured live, a write the person refused aborts its dispatch, and the undo's
+ * engine call with it), or another write into the root was still running.
+ */
+const retry = new Map<string, string>()
+
+/** Roots `add_root` named on purpose: the run's, never taken back for a write that did not happen. */
+const named = new Set<string>()
+
+/**
+ * Forget what this module remembers of the session's writes: at a session's start, and when a
+ * new run starts, whose aliases may be the old run's. Writes still running stay counted.
+ */
+export function resetWrites(): void {
+  worked = false
+  retry.clear()
+  named.clear()
+}
+
+/** Whether a write into `path` is still running. */
+function busyIn(path: string): boolean {
+  return writing.some(folder => within(folder, path))
+}
+
+/**
+ * Run a write into `folder`: `register` registers the folder first, and the root it added is
+ * offered back once the write is over, whatever became of it: the engine keeps it whenever
+ * anything in it changed, which a write that ran always did. Answers the registration, and
+ * whether its root was dropped, so its note no longer holds.
+ */
+export async function writeIn<T>(
+  $: EngineInterface,
+  folder: string,
+  register: () => Promise<Registration>,
+  write: () => Promise<T>,
+  wrote: (result: T) => boolean = () => true,
+): Promise<{ result: T; registration: Registration; dropped: boolean }> {
+  // Counted from before the registration: a write still registering is one a root it relies on
+  // must not be taken back from under.
+  writing.push(folder)
+  let registration: Registration = {}
+  let result: T
+  let dropped = false
+  try {
+    registration = await register()
+    result = await write()
+  } finally {
+    writing.splice(writing.indexOf(folder), 1)
+    const { added, path } = registration
+    if (added !== undefined && path !== undefined && named.has(added)) {
+      // add_root named it while this write ran: keep it.
+    } else if (added !== undefined && path !== undefined) {
+      // Another write into the root still waits (in its dialog, say): taking the root back now
+      // would leave that write unreviewed. The turn's end offers it again.
+      if (busyIn(path)) retry.set(added, path)
+      else {
+        // By path, as the sweep does: the alias names the folder only while its root lasts.
+        const outcome = await dropRoot($, path)
+        if (outcome === 'unknown') retry.set(added, path)
+        dropped = outcome === 'dropped'
+      }
+    }
+  }
+  // A write that landed in the run is the next stage's work, or a fix: a compaction at this
+  // turn's end would cut through it. A scratch file (the plan, memory), a write outside every
+  // root and a refused one are none of that.
+  if (!dropped && wrote(result) && (roots ?? []).some(root => within(folder, root))) worked = true
+  return { result, registration, dropped }
+}
+
+/** At a turn's end, offer those roots back again; the engine keeps one whose content changed. */
+export async function sweepRoots($: EngineInterface): Promise<void> {
+  for (const [alias, path] of [...retry]) {
+    if (named.has(alias)) {
+      retry.delete(alias)
+      continue
+    }
+    if (busyIn(path)) continue
+    // By path, not alias: an undone alias may be given again, to another folder, since.
+    if ((await dropRoot($, path)) !== 'unknown') retry.delete(alias)
+  }
 }
 
 /**
@@ -507,6 +615,11 @@ export function unregistered(directory: string, why: string): string {
   return `adversarial-review-loop could not register ${directory} as a root of the run (${why}). Nothing written there is reviewed: call add_root for it, or tell the user.`
 }
 
+/** A review or an acceptance just ended a stage's work: writes from here on are the next stage's. */
+export function stageEnded(): void {
+  worked = false
+}
+
 /** After a main-loop turn: continue the run when the engine says so. */
 export async function continueRun($: EngineInterface): Promise<void> {
   if (!(await hasRun($))) return
@@ -514,7 +627,7 @@ export async function continueRun($: EngineInterface): Promise<void> {
   if (next.ok && next.action === 'continue' && typeof next.prompt === 'string') {
     // After `next(e)`, compact then submit, awaited here: the order STEP0 J6 measured. Headless,
     // compaction is refused, and the prompt is submitted uncompacted.
-    if (next.compact === true && session.isInteractive) {
+    if (next.compact === true && session.isInteractive && !worked) {
       await compactThenSubmit($, next.prompt)
       return
     }

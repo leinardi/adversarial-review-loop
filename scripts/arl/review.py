@@ -43,7 +43,7 @@ from arl.atomic import write_private_file
 from arl.bundle import BundleError, BundleTooLarge
 from arl.contract import Review, Target
 from arl.errors import OcrlError
-from arl.state import RunError, RunPaths, RunState, locked_state
+from arl.state import RunError, RunPaths, RunState, locked_state, repositories
 from arl.util import decode, encode, log
 
 __all__ = [
@@ -52,6 +52,7 @@ __all__ = [
     "clarify_prepare",
     "clarify_record",
     "clarify_run_external",
+    "next_turn",
     "prepare",
     "record",
     "reported_usage",
@@ -139,7 +140,7 @@ def _only_ignored(run: RunState, trees: Mapping[str, str], cfg: config.Config) -
     return bool(changed) and all(any(globmatch.matches(path, glob) for glob in globs) for path in changed)
 
 
-def _next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
+def next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
     """What Claude is told about the rest of its turn after a recorded round, or nothing.
 
     A run waiting for the user says nothing here: the mod puts the decision to them, and their
@@ -150,7 +151,9 @@ def _next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
     if run.status == "paused":
         # Measured live: a paused run's approval read as "go on", and Claude implemented every
         # remaining phase in the same turn. Pausing is the user's stop.
-        first = "Commit each changed git repository by its own conventions, then stop: " if verdict == "APPROVED" else "Stop here: "
+        first = (
+            f"Commit each changed git repository by its own conventions{repositories(run)}, then stop: " if verdict == "APPROVED" else "Stop here: "
+        )
         return (
             f"\nThe user paused the run. {first}do not start the next phase or fix anything more until the user resumes "
             "it with /arl-resume. Tell the user where the run stands.\n"
@@ -159,7 +162,7 @@ def _next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
         # The loop compacts only between turns: a next phase started in this turn would be
         # summarised away mid-work, so the compaction never comes.
         return (
-            "\nCommit each changed git repository by its own conventions, then end your turn without starting the "
+            f"\nCommit each changed git repository by its own conventions{repositories(run)}, then end your turn without starting the "
             "next stage: the loop compacts the conversation and prompts it.\n"
         )
     return ""
@@ -170,7 +173,7 @@ def _skip(run: RunState, trees: Mapping[str, str], cfg: config.Config) -> dict[s
     run.approve(trees, by="ignored")
     run.save()
     message = f"Every change of {what} matches ignore_globs ({', '.join(cfg.as_list('ignore_globs'))}), so it was approved without a review.\n"
-    message += _next_turn(run, cfg, "APPROVED")
+    message += next_turn(run, cfg, "APPROVED")
     return {"ok": True, "status": "skipped", "verdict": "APPROVED", "message": message, "run": run.summary()}
 
 
@@ -445,8 +448,8 @@ def _apply(run: RunState, ticket: Mapping[str, Any], target: Target, review: Rev
     if review.verdict == "APPROVED":
         message = f"{_headline(target, review.verdict)}\n\n{report.deferred_text(review, what='approval')}Full report: {review.report}\n"
     else:
-        message = report.reason(review, _headline(target, review.verdict), config=cfg) + note
-    message += _next_turn(run, cfg, review.verdict)
+        message = report.reason(review, _headline(target, review.verdict), config=cfg, waiting=run.data["waiting"] is not None) + note
+    message += next_turn(run, cfg, review.verdict)
     run.save()
     return {
         "ok": True,

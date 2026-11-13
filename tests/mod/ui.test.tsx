@@ -172,6 +172,26 @@ test('the pane draws the run on every surface', async ($, on) => {
   }
 })
 
+test('the report pane has a Close that closes it', async ($, on) => {
+  seed(on, { report: '# Report 1\nVERDICT APPROVED' })
+  const closed: string[] = []
+  on('ui.close', (_, e) => {
+    closed.push(e.id)
+    return { value: undefined } as never
+  })
+  const ui = await $.ui.mount({
+    plugin: PLUGIN,
+    component: 'Pane',
+    requestId: 'arl-report',
+    surface: 'terminal',
+    props: { title: 'Review report', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  } as never)
+  expect((await ui.find({ type: 'Text', text: /^# Report 1$/ }))?.text).toBe('# Report 1')
+  await ui.press({ key: 'close' })
+  expect(closed).toEqual(['arl-report'])
+  await ui.unmount()
+})
+
 test('a run stored by an earlier version is declined: the pane says there is none', async ($, on) => {
   on('state.get', () => ({ value: { value: { shape: 'run-0', value: { status: 'active' } }, version: 1 } }))
   const ui = await $.ui.mount({

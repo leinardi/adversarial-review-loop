@@ -23,9 +23,9 @@
 import type { CommandSpec, EngineInterface } from 'claude-code'
 import type { RunView } from '../types'
 import { type Answer } from './engine'
-import { announce, proceed, refused, run, session } from './flow'
+import { announce, proceed, refused, resetWrites, run, session, stageEnded } from './flow'
 import { registerReviewer } from './reviewer'
-import { briefly, PANE, PANE_TITLE, phasesText, REPORT_PANE, REPORT_TITLE, showLast, showReport, statusText } from './ui'
+import { briefly, pane, PANE, PANE_TITLE, phasesText, REPORT_PANE, REPORT_TITLE, showLast, showReport, statusText } from './ui'
 
 export const COMMANDS: readonly CommandSpec[] = [
   { name: 'arl-implement', description: 'Implement a plan phase by phase, each phase reviewed before the next', argumentHint: '[--new] [--root DIR]... <plan.md>' },
@@ -33,6 +33,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   { name: 'arl-status', description: 'Show the adversarial-review-loop run and open its pane', immediate: true },
   { name: 'arl-report', description: 'Show the newest review report, or the N-th', argumentHint: '[N]', immediate: true },
   { name: 'arl-phases', description: 'List every phase of the adversarial-review-loop run', immediate: true },
+  { name: 'arl-pane', description: 'Open or close the adversarial-review-loop review pane', immediate: true },
   { name: 'arl-pause', description: 'Pause the run: Claude is not prompted again until /arl-resume', immediate: true },
   { name: 'arl-accept', description: 'Approve the current phase (or the final review) as it stands' },
   { name: 'arl-finish', description: 'Require a final review of the whole run before it completes' },
@@ -54,10 +55,28 @@ function summaryOf(answer: Answer): RunView | null {
   return (answer.run as RunView | null | undefined) ?? null
 }
 
-/** Open the review pane where a person can see it; nothing headless. */
-async function openPane($: EngineInterface): Promise<void> {
+/**
+ * Open the review pane where a person can see it; nothing headless. Opened by the loop itself
+ * (`asked` false), it stays shut once the person closed it this session.
+ */
+export async function openPane($: EngineInterface, asked = false): Promise<void> {
   if (!session.isInteractive) return
+  if (asked) pane.dismissed = false
+  else if (pane.dismissed) return
   await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
+}
+
+/** `/arl-pane`: close the review pane when it is open, else open it. */
+async function togglePane($: EngineInterface): Promise<string> {
+  if (!session.isInteractive) return 'There is no pane in a headless session: /arl-status shows the run.'
+  const isOpen = (await $.ui.panes().catch(() => [])).some(open => open.id === PANE)
+  if (isOpen) {
+    pane.dismissed = true
+    await $.ui.close({ id: PANE }).catch(() => undefined)
+    return 'The review pane is closed, and the loop leaves it closed: /arl-pane opens it again.'
+  }
+  await openPane($, true)
+  return 'The review pane is open.'
 }
 
 /** Split arguments as a shell would for words and quotes: `"my plan.md"` is one word. */
@@ -99,8 +118,12 @@ async function implement($: EngineInterface, args: string): Promise<string> {
   const answer = await run($, ['init', '--plan', parsed.plan, ...(parsed.isNew ? ['--new'] : []), ...parsed.roots.flatMap(root => ['--root', root])])
   if (!answer.ok) return refused(answer)
   const view = summaryOf(answer)
-  // The pane's latest review was the old run's.
+  // Roots the old run's writes left to offer back are not this run's, whatever their aliases.
+  resetWrites()
+  // The pane's latest review, and any report shown, were the old run's.
   await showLast($, null).catch(() => undefined)
+  await showReport($, '').catch(() => undefined)
+  await $.ui.close({ id: REPORT_PANE }).catch(() => undefined)
   const prompt = String(answer.prompt ?? '')
   $.clock.after(0, () => {
     void $.prompt.submit({ text: prompt }).catch((error: unknown) => {
@@ -123,6 +146,8 @@ async function resume($: EngineInterface): Promise<string> {
   // This session may not be the one that started the run: it is told what the run is.
   const lead = typeof answer.context === 'string' && answer.context ? `${resumes}\n\n${answer.context}` : resumes
   const view = summaryOf(answer)
+  // A conversation brought back from the background starts no session: nothing else shows the run.
+  await openPane($)
   const where = view === null ? '' : ` at ${briefly(view)}`
   return `Resumed run ${view?.run_id ?? ''}${where}${abandoned ? ' (the pending review was abandoned)' : ''}. ${await proceed($, lead)}`
 }
@@ -130,7 +155,8 @@ async function resume($: EngineInterface): Promise<string> {
 async function status($: EngineInterface): Promise<string> {
   const answer = await run($, ['status'])
   if (!answer.ok) return refused(answer)
-  await openPane($)
+  // Asked for: it opens even after the person closed it.
+  await openPane($, true)
   const view = summaryOf(answer)
   // The command's own text: a log line is one line (measured: its newlines drew as stray
   // characters). A short text costs little in the requests it goes into.
@@ -153,7 +179,8 @@ async function report($: EngineInterface, args: string): Promise<string> {
   // A report holds the reviewer's raw output, too long for Claude's context and for a log line:
   // it gets a pane of its own, which scrolls.
   await showReport($, text).catch(() => undefined)
-  await $.ui.open({ id: REPORT_PANE, title: REPORT_TITLE }).catch(() => undefined)
+  // Read, then put away: it takes the keys, scrolls under them, and Escape (or its Close) closes it.
+  await $.ui.open({ id: REPORT_PANE, title: REPORT_TITLE, focus: true, closeOnEscape: true }).catch(() => undefined)
   return `Report ${number || '(newest)'} is in the report pane.`
 }
 
@@ -166,12 +193,15 @@ async function transition($: EngineInterface, command: 'pause' | 'stop'): Promis
 async function accept($: EngineInterface): Promise<string> {
   const answer = await run($, ['accept'])
   if (!answer.ok) return refused(answer)
+  // What Claude wrote before is the accepted stage's: the compaction after it still comes.
+  stageEnded()
   const stage = summaryOf(answer)?.stage
   if (stage === 'done') {
     await announce($, { ...answer, label: 'run', verdict: 'APPROVED' }, 'The user accepted the last stage: the run is complete.')
     return 'Accepted. The run is complete.'
   }
-  return `Accepted. ${await proceed($, 'The user accepted the stage as it stands. Commit each changed git repository by its own conventions.')}`
+  const repos = typeof answer.repositories === 'string' ? answer.repositories : ''
+  return `Accepted. ${await proceed($, `The user accepted the stage as it stands. Commit each changed git repository by its own conventions${repos}.`)}`
 }
 
 async function finish($: EngineInterface): Promise<string> {
@@ -219,6 +249,8 @@ export async function runCommand($: EngineInterface, name: string, args: string)
       return report($, args)
     case 'arl-phases':
       return phases($)
+    case 'arl-pane':
+      return togglePane($)
     case 'arl-pause':
       return transition($, 'pause')
     case 'arl-stop':

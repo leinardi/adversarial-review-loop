@@ -21,12 +21,12 @@
 // Every decision about the run is the engine's (`scripts/arl/`); see flow.ts.
 
 import type { EngineInterface, Register } from 'claude-code'
-import { COMMANDS, registerCommands, runCommand } from './commands'
+import { COMMANDS, openPane, registerCommands, runCommand } from './commands'
 import { engine } from './engine'
-import { addRoot, clarify, continueRun, dropRoot, ensureRoot, parentOf, type Registration, review, session, setPhases, track, unregistered } from './flow'
+import { addRoot, clarify, continueRun, ensureRoot, parentOf, type Registration, review, session, resetWrites, setPhases, sweepRoots, track, unregistered, writeIn } from './flow'
 import { deliver, registerReviewer, REVIEWER, reviewerDecision } from './reviewer'
 import { TOOLS, type ToolName } from './text'
-import { PANE, PANE_TITLE, registerUi, showBusy } from './ui'
+import { pane, registerUi, showBusy } from './ui'
 
 /** Serve one of the plugin's tools; `undefined` for a name it does not register. */
 async function serve($: EngineInterface, name: string, input: Record<string, unknown>, signal: AbortSignal): Promise<string | undefined> {
@@ -73,10 +73,8 @@ async function attach($: EngineInterface): Promise<string> {
   }
   await track($, answer)
   const found = answer.run as { status?: string } | null | undefined
-  if (session.isInteractive && (found?.status === 'active' || found?.status === 'paused')) {
-    // A session that starts on a run shows it: nothing else would say a run is here.
-    await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
-  }
+  // A session that starts on a run shows it: nothing else would say a run is here.
+  if (found?.status === 'active' || found?.status === 'paused') await openPane($)
   if (answer.foreign_review === true) {
     $.ui.log('A review another session started is pending. If that session is gone, /arl-resume abandons it and continues the run here.')
   }
@@ -91,28 +89,16 @@ function writtenFile(e: { tool: string } & Record<string, unknown>): string | un
   return undefined
 }
 
-/**
- * Roots whose write is over but whose undo got no engine answer: measured live, a write the person
- * refused aborts its dispatch, and the undo's engine call with it. Only a write that has ended is
- * listed, so the sweep never drops the folder of the write that registered it while that write is
- * in flight. Another write into the same folder still waiting in its dialog at the turn's end is
- * not tracked: that narrow case can still lose its root.
- */
-const retry = new Set<string>()
-
-/** Offer those roots back again; the engine keeps one whose content changed. */
-async function sweepRoots($: EngineInterface): Promise<void> {
-  for (const alias of [...retry]) {
-    if ((await dropRoot($, alias)) !== 'unknown') retry.delete(alias)
-  }
-}
-
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     session.dir = e.cwd
     session.isInteractive = e.isInteractive
     session.id = await $.session.id()
+    // A reload starts the session's hooks again: what an earlier session wrote is not this one's.
+    resetWrites()
+    // A pane the person closed stays closed for their session, not for the next one (`/clear`).
+    pane.dismissed = false
     // A session that ended mid-turn left the flag set; this one has run no turn yet.
     await showBusy($, false).catch(() => undefined)
     await registerTools($)
@@ -143,26 +129,18 @@ export const register: Register = on => {
     // person) registers its folder first, so the baseline is the content before the change.
     const check = await $.tool.check({ tool: call.tool, input: argumentsOf(call) } as never).catch(() => undefined)
     if (check?.decision === 'deny') return next(e)
-    // A registration that fails is said, never dropped: the write would land unreviewed.
-    const registered: Registration = await ensureRoot($, parentOf(file)).catch((error: unknown) => ({ note: unregistered(parentOf(file), String(error)) }))
-    // A folder this write registered is offered back once the write is over, whatever became of
-    // it: the engine keeps it whenever anything in it changed, which a write that ran always did.
-    let result: Awaited<ReturnType<typeof next>>
-    let dropped = false
-    try {
-      result = await next(e)
-    } finally {
-      if (registered.added !== undefined) {
-        const outcome = await dropRoot($, registered.added)
-        // No answer: the refusal that aborted the write took the engine call with it, so the
-        // turn's end asks again.
-        if (outcome === 'unknown') retry.add(registered.added)
-        dropped = outcome === 'dropped'
-      }
-    }
+    const folder = parentOf(file)
+    const { result, registration, dropped } = await writeIn(
+      $,
+      folder,
+      // A registration that fails is said, never dropped: the write would land unreviewed.
+      () => ensureRoot($, folder).catch((error: unknown): Registration => ({ note: unregistered(folder, String(error)) })),
+      () => next(e),
+      written => written.deny === undefined && written.isError !== true,
+    )
     if (dropped) return result
     if (result.deny !== undefined || result.isError === true) return result
-    return registered.note === undefined ? result : { ...result, context: [...(result.context ?? []), registered.note] }
+    return registration.note === undefined ? result : { ...result, context: [...(result.context ?? []), registration.note] }
   })
 
   on('tool.check', async ($, e, next) => {

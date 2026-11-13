@@ -29,6 +29,12 @@ export const PANE_TITLE = 'Adversarial review'
 export const REPORT_PANE = 'arl-report'
 export const REPORT_TITLE = 'Review report'
 
+/**
+ * Whether the person closed the review pane in this session: the loop then stops opening it by
+ * itself, until they ask for it (`/arl-pane`, `/arl-status`).
+ */
+export const pane = { dismissed: false }
+
 /** Blocking findings the pane lists; the rest are counted. */
 const PANE_FINDINGS = 3
 
@@ -263,12 +269,24 @@ export function registerUi(on: On): void {
     )
   })
 
+  // The person's own close (its mark, ctrl+x x, or Escape) is their choice: kept for the session.
+  on('ui.close', ($, e, next) => {
+    if (e.id === PANE && e.origin.kind === 'person') pane.dismissed = true
+    return next(e)
+  })
+
   on('ui.render', { component: 'Pane', requestId: REPORT_PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     const report = await read($, reportAtom)
     const rows = report === '' ? ['No report shown: /arl-report [N] shows one.'] : report.trimEnd().split('\n')
     return (
       <Box flexDirection="column">
+        <Box flexDirection="row" gap={1}>
+          <Button key="close" role="dismiss" onPress={() => void $.ui.close({ id: REPORT_PANE }).catch(() => undefined)}>
+            Close
+          </Button>
+          <Text color={QUIET}>Esc closes it · ctrl+x tab focuses it</Text>
+        </Box>
         {rows.map(row => (
           <Text>{row === '' ? ' ' : row}</Text>
         ))}
