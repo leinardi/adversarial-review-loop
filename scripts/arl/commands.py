@@ -32,10 +32,12 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Final
 
-from arl import config, review, workspace
+from arl import config, configcmd, report, review, workspace
 from arl.atomic import ensure_private_dir, write_private_atomic
+from arl.configcmd import cmd_config
 from arl.errors import StateLoadError
-from arl.state import RunError, RunPaths, RunState, locked_run_dir, locked_state, new_document, next_action
+from arl.gitsnap import SnapshotError
+from arl.state import RunError, RunPaths, RunState, locked_run_dir, locked_state, new_document, next_action, start_prompt
 
 __all__ = ["COMMANDS", "plan_named_paths"]
 
@@ -51,7 +53,7 @@ Command = Callable[[RunPaths, Mapping[str, Any]], dict[str, Any]]
 
 def _require(run: RunState | None) -> RunState:
     if run is None:
-        raise RunError("no-run", "there is no run here; start one with /implement")
+        raise RunError("no-run", "there is no run here; start one with /arl-implement")
     return run
 
 
@@ -125,7 +127,7 @@ def cmd_init(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             archived = _archive(paths, f"corrupt-{time.time_ns()}")
         if existing is not None:
             if existing.status in ("active", "paused") and not args.get("new"):
-                raise RunError("run-exists", f"run {existing.run_id} is {existing.status}: use /resume, or /implement --new <plan>")
+                raise RunError("run-exists", f"run {existing.run_id} is {existing.status}: use /arl-resume, or /arl-implement --new <plan>")
             archived = _archive(paths, existing.run_id)
         try:
             run = _start(paths, plan_source, plan_text, args, cfg)
@@ -135,7 +137,7 @@ def cmd_init(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             if archived:
                 _unarchive(paths, archived)
             raise
-        return {"ok": True, "run": run.summary(), "archived": archived}
+        return {"ok": True, "run": run.summary(), "archived": archived, "prompt": start_prompt(run, cfg.as_str("verify_cmd"))}
 
 
 def _start(paths: RunPaths, plan_source: Path, plan_text: str, args: Mapping[str, Any], cfg: config.Config) -> RunState:
@@ -201,6 +203,63 @@ def cmd_root_add(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         return {"ok": True, **outcome}
 
 
+def cmd_root_remove(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop a root registered by mistake: nothing in it is reviewed from now on.
+
+    A repository inside another root is refused: its container's snapshot leaves it out only
+    while it is a root, so dropping it would pour its whole content into the container's diff,
+    and the next scan would find it again. The pending ticket is retired, since the set of
+    roots it was prepared for no longer exists, and the loop may prompt again: the person moved
+    the run. Its alias is retired, never given to another root.
+
+    ``undo`` is the mod taking back a registration whose write did not happen: it drops the root
+    only while nothing in it changed since it joined (and no review is pending), and moves
+    nothing else, so a refused write does not prompt the loop again.
+    """
+    with locked_state(paths) as loaded:
+        run = _require(loaded)
+        run.require_status("active", "paused")
+        wanted = str(args["root"])
+        target = Path(wanted).expanduser()
+        target = (target if target.is_absolute() else paths.launch_dir / target).resolve()
+        root = run.root(wanted) or next((entry for entry in run.roots if Path(entry["path"]) == target), None)
+        if root is None:
+            raise RunError("unknown-root", f"no root named or at {wanted!r}")
+        here = Path(root["path"])
+        container = next((other for other in run.roots if other is not root and here.is_relative_to(Path(other["path"]))), None)
+        if container is not None:
+            raise RunError("nested-root", f"root {root['alias']!r} lies inside root {container['alias']!r}: it is part of that root's review")
+        if len(run.roots) == 1:
+            raise RunError("last-root", f"root {root['alias']!r} is the run's only root; a run with none reviews nothing")
+        if args.get("undo"):
+            _require_untouched(run, root)
+        run.data["roots"] = [entry for entry in run.data["roots"] if entry is not root]
+        if not args.get("undo"):
+            # An undone root is in no round history, so its alias may be given again.
+            run.data["retired_aliases"] = [*run.data.get("retired_aliases", []), root["alias"]]
+            run.invalidate_ticket("root-removed")
+            # The folder may be what held every review on `oversized`; the next prepare checks again.
+            run.clear_wait("oversized")
+            run.data["last_continuation"] = ""
+        run.save()
+        return {"ok": True, "alias": root["alias"], "path": root["path"], "run": run.summary()}
+
+
+def _require_untouched(run: RunState, root: dict[str, Any]) -> None:
+    """Refuse to undo a registration when the root may hold a change: a write that ran after all."""
+    if run.data["pending_ticket"] is not None:
+        raise RunError("kept", "a review is pending; the root stays")
+    if root["baseline"] != "set":
+        raise RunError("kept", f"root {root['alias']!r} held changes when it joined; it stays")
+    here = Path(root["path"])
+    try:
+        now = workspace.snapshot(root, run.roots, run.paths) if here.exists() else workspace.empty_tree(root, run.paths)
+    except SnapshotError as exc:
+        raise RunError("kept", f"root {root['alias']!r} cannot be compared ({exc}); it stays") from exc
+    if now != root["start_tree"]:
+        raise RunError("kept", f"root {root['alias']!r} changed since it joined; it stays")
+
+
 def cmd_root_baseline(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     with locked_state(paths) as loaded:
         run = _require(loaded)
@@ -211,6 +270,33 @@ def cmd_root_baseline(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any
         run.data["last_continuation"] = ""
         run.save()
         return {"ok": True, "alias": args["alias"], "tree": tree, "run": run.summary()}
+
+
+def cmd_attach(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
+    """A session starts here: the run it finds, and the settings the mod registers with.
+
+    Nothing is changed. A review ticket another session issued is reported, not abandoned: that
+    session may still be running its reviewer, and nothing here can tell. ``/arl-resume``, which
+    the person runs knowingly, abandons it. An ``effort`` that is no level is dropped, and said.
+    """
+    effort = config.load(str(paths.launch_dir)).as_str("effort")
+    settings: dict[str, Any] = {"effort": configcmd.effort_level(effort)}
+    if effort and effort not in config.EFFORT_LEVELS:
+        settings["effort_note"] = f"effort {effort!r} is no level ({', '.join(config.EFFORT_LEVELS)}); the reviewer uses its default"
+    with locked_state(paths) as run:
+        if run is None:
+            return {"ok": True, "run": None, "foreign_review": False, **settings}
+        ticket = run.data["pending_ticket"]
+        session = str(args.get("session") or "")
+        foreign = ticket is not None and not (session and ticket.get("session") == session)
+        return {"ok": True, "run": run.summary(), "foreign_review": foreign, **settings}
+
+
+def cmd_report(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
+    """One stored report of this run in full, the newest by default, and the list of them."""
+    reports_dir = paths.run_dir / "reports"
+    number = args.get("number")
+    return {"ok": True, "text": report.render(reports_dir, number if isinstance(number, int) else None), "reports": report.list_reports(reports_dir)}
 
 
 def cmd_status(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
@@ -230,7 +316,7 @@ def _transition(name: str) -> Command:
 
 
 def cmd_accept(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
-    """``/accept``: the user approves the current phase, or the final review, as it stands now."""
+    """``/arl-accept``: the user approves the current phase, or the final review, as it stands now."""
     with locked_state(paths) as loaded:
         run = _require(loaded)
         run.require_status("active", "paused")
@@ -255,7 +341,13 @@ def cmd_next_action(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]
     with locked_state(paths) as run:
         answer = next_action(run)
         if run is not None and answer["action"] == "continue":
+            # A new stage after an approval starts on a compacted conversation when asked: what
+            # the earlier phases said is in the commits and the reports. Once per approval: a
+            # resume, a replan or a removed root also continues, in the middle of a phase.
+            fresh = bool(run.data.get("compact_due"))
+            run.data["compact_due"] = False
             run.save()
+            answer["compact"] = fresh and config.load(str(paths.launch_dir)).as_bool("auto_compact")
         return {"ok": True, **answer}
 
 
@@ -265,6 +357,10 @@ COMMANDS: Final[Mapping[str, Command]] = {
     "set-phases": cmd_set_phases,
     "root-add": cmd_root_add,
     "root-baseline": cmd_root_baseline,
+    "root-remove": cmd_root_remove,
+    "attach": cmd_attach,
+    "report": cmd_report,
+    "config": cmd_config,
     "status": cmd_status,
     "pause": _transition("pause"),
     "stop": _transition("stop"),

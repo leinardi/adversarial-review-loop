@@ -16,7 +16,7 @@ mod never decides on its own whether the loop goes on.
 
 **Stages.** A run with no phases is in ``plan``; with an unapproved phase, in ``phase``; after the
 last phase approval it is in ``final`` when a final review is required (``final_review`` frozen
-at ``init``, or ``/finish``), and ``done`` otherwise. ``status`` turns ``complete`` only on the
+at ``init``, or ``/arl-finish``), and ``done`` otherwise. ``status`` turns ``complete`` only on the
 approval that leaves nothing in front of the run, so a required final review is never skipped.
 
 v4 enforces nothing, and this file is not a trust boundary: an agent can edit it. What the
@@ -67,6 +67,7 @@ __all__ = [
     "new_document",
     "next_action",
     "run_paths",
+    "start_prompt",
 ]
 
 RUN_DIR_NAME: Final = ".arl"
@@ -153,6 +154,9 @@ def new_document(*, plan_source: str, final_review: bool) -> dict[str, Any]:
         "last_ticket": None,
         "waiting": None,
         "last_continuation": "",
+        # Aliases of removed roots: never given again, since round history and stall anchors
+        # still name them.
+        "retired_aliases": [],
     }
 
 
@@ -333,6 +337,7 @@ class RunState:
         self.data["phases"] = [*self.data["phases"][:approved], *cleaned]
         self.data["phases_revision"] += 1
         self.data["rounds"] = 0
+        self.data["compact_due"] = False
         self.invalidate_ticket("replanned")
 
     def approve(self, trees: Mapping[str, str], *, by: Literal["review", "user", "ignored"]) -> None:
@@ -360,6 +365,8 @@ class RunState:
         self.data["waiting"] = None
         self.data["failures"] = self.data["transient_failures"] = 0
         self.invalidate_ticket("approved")
+        # The next stage may start on a compacted conversation (`auto_compact`).
+        self.data["compact_due"] = True
         if self.stage() == "done":
             self.data["status"] = "complete"
 
@@ -390,7 +397,7 @@ class RunState:
             self.data["waiting"] = None
 
     def request_final(self) -> None:
-        """``/finish``: require the cumulative review, before or after the last phase approval.
+        """``/arl-finish``: require the cumulative review, before or after the last phase approval.
 
         On a run that completed without one, this reopens it into the ``final`` stage: the
         cumulative review diffs every root from its ``start_tree``, so nothing is lost by asking
@@ -428,8 +435,10 @@ class RunState:
 
         A pending ticket issued by another session (or by no recorded session, or when the caller
         names none) belongs to a review nothing will finish, so it is abandoned and Claude is told
-        to ask for the review again. A ticket this same ``session`` issued is still running --
-        ``/pause`` then ``/resume`` mid-review -- and is kept. A decision the run was waiting on (a stall, the failure budget) is
+        to ask for the review again. A ticket this same ``session`` issued is kept: the mod's "keep
+        going" answer passes its session while its own review tool call is the one asking.
+        ``/arl-resume`` names no session (a command runs between turns, so no review of its session
+        is in flight) and always abandons it. A decision the run was waiting on (a stall, the failure budget) is
         cleared: ``resume`` is the user's "keep going". The continuation token is reset, so this
         session is prompted even if the state is otherwise unchanged.
         """
@@ -532,6 +541,23 @@ def _prompt(run: RunState) -> str:
         return f"The review of phase {phase} of {count} asked for changes. Fix the findings, run the gates, then call review again."
     lead = "Commit the approved phase by each repository's conventions, then implement" if run.approved_phases else "Implement"
     return f"{lead} phase {phase} of {count}: {description}\nRun the project's gates, then call review."
+
+
+def start_prompt(run: RunState, verify_cmd: str) -> str:
+    """What ``/arl-implement`` submits to start Claude on a new run: the loop, once."""
+    roots = "; ".join(f"{root['alias']} = {root['path']}" for root in run.roots)
+    checks = f"run the project's checks (`{verify_cmd}`)" if verify_cmd else "run the project's checks (tests, linters, type checks)"
+    return (
+        f"Implement the plan {run.data['plan']['source']} under adversarial-review-loop (run {run.run_id}); "
+        f"a copy is at {run.paths.plan_file}.\n\n"
+        "1. Read the plan, then call set_phases with its phases in order, one short title each, before changing any file.\n"
+        "2. Implement one phase at a time. Edit and Write register the folders they write to; before you change "
+        f"anything through Bash outside the workspace roots ({roots}), call add_root for that directory.\n"
+        f"3. When a phase is implemented, {checks}, then call review with what they reported.\n"
+        "4. Fix what the review finds and call review again. On approval, commit each changed git repository by "
+        "its own conventions and go on with the next phase.\n\n"
+        "The loop prompts you after each turn while work remains. When a review hands a decision to the user, stop and tell them."
+    )
 
 
 def _blocker(run: RunState) -> dict[str, Any] | None:

@@ -94,8 +94,10 @@ function commandOf(args: readonly string[]): string {
 }
 
 export type World = {
-  /** Every engine command run, in order. */
+  /** Every engine command run, in order, but the session start's `attach`. */
   calls: Call[]
+  /** The session start's `attach` calls. */
+  attached: Call[]
   /** Files the mod wrote. */
   written: Map<string, string>
   /** Prompts the mod submitted. */
@@ -110,8 +112,18 @@ export type World = {
   expired: number
   /** Lines the mod logged for the person. */
   logged: string[]
-  /** What the mod registered: tools and agent types, as specified. */
-  registered: { tools: Record<string, unknown>[]; agents: Record<string, unknown>[] }
+  /** What the mod registered: tools, agent types and commands, as specified. */
+  registered: { tools: Record<string, unknown>[]; agents: Record<string, unknown>[]; commands: Record<string, unknown>[] }
+  /** Panes the mod opened, by id. */
+  opened: string[]
+  /** Toasts the mod showed. */
+  toasts: string[]
+  /** Notifications the mod raised. */
+  notified: string[]
+  /** Compactions the mod asked for, by their instructions. */
+  compacted: string[]
+  /** The session state the hand-made `$` holds, by `plugin/key`. */
+  state: Map<string, unknown>
 }
 
 export type WorldOptions = {
@@ -139,12 +151,19 @@ export type WorldOptions = {
   agents?: (Completion | undefined | 'deny' | 'throw')[]
   /** Called with each spawned agent's id before it answers, as its tool calls would come. */
   whileRunning?: (agentId: string) => Promise<void>
+  /** The session's permission verdict for a write (`$.tool.check`); left out, no stand-in answers. */
+  check?: 'allow' | 'ask' | 'deny'
+  /** What the write itself comes to: `'deny'` as when the person refuses it in the dialog. */
+  writeOutcome?: 'run' | 'deny'
+  /** Make `$.session.compact` reject, as a headless session does. */
+  compactFails?: boolean
 }
 
 /** The scripted engine and the user, shared by the kit's stand-ins and the hand-made `$`. */
 function scripted(options: WorldOptions): { state: World; answer: (argv: readonly string[], stdin: string) => string; choose: (question: string, labels: string[]) => string | undefined } {
   const state: World = {
     calls: [],
+    attached: [],
     written: new Map(),
     submitted: [],
     asked: [],
@@ -152,11 +171,21 @@ function scripted(options: WorldOptions): { state: World; answer: (argv: readonl
     commands: () => state.calls.map(call => commandOf(call.args)),
     expired: 0,
     logged: [],
-    registered: { tools: [], agents: [] },
+    registered: { tools: [], agents: [], commands: [] },
+    opened: [],
+    toasts: [],
+    notified: [],
+    compacted: [],
+    state: new Map(),
   }
   const answer = (argv: readonly string[], stdin: string): string => {
     if (argv[0] !== '--dir' || argv[1] !== LAUNCH) throw new Error(`the engine runs for ${LAUNCH}: ${argv.join(' ')}`)
     const call = { args: argv.slice(2), stdin }
+    // The session's start asks once (`attach`); the calls a test reads are those after it.
+    if (call.args[0] === 'attach') {
+      state.attached.push(call)
+      return `${JSON.stringify(options.engine.attach ?? { ok: true, run: null, foreign_review: false, effort: '' })}\n`
+    }
     state.calls.push(call)
     const scripted = options.engine[commandOf(call.args)]
     const value = typeof scripted === 'function' ? (scripted as (call: Call) => unknown)(call) : (scripted ?? { ok: false, code: 'unscripted', error: commandOf(call.args) })
@@ -243,7 +272,26 @@ export function world(on: On, options: WorldOptions): World {
     if (choice === undefined) return { deny: 'The user dismissed the question.' }
     return { result: { questions, answers: { [first?.question ?? '']: choice } } } as never
   })
-  on('ui.notify', () => ({ value: { isSent: false, reason: 'no-surface' } }))
+  on('ui.notify', (_, e) => {
+    state.notified.push(e.text)
+    return { value: { isSent: false, reason: 'no-surface' } }
+  })
+  on('command.register', (_, e) => {
+    state.registered.commands.push(e as Record<string, unknown>)
+    return { value: { command: e.name } }
+  })
+  on('ui.open', (_, e) => {
+    state.opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  if (options.check !== undefined) {
+    const decision = options.check
+    on('tool.check', () => ({ decision, reason: 'the session decides' }))
+  }
+  if (options.writeOutcome !== undefined) {
+    const outcome = options.writeOutcome
+    on('tool.call', { tool: /^(Edit|Write|NotebookEdit)$/ }, () => (outcome === 'deny' ? { deny: 'The user refused the write.' } : { result: 'written' }) as never)
+  }
   on('prompt.submit', (_, e) => {
     state.submitted.push(e.text)
     return { text: e.text }
@@ -292,7 +340,49 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
         if (choice === undefined) throw new Error('$.ui.ask: no answer')
         return choice
       },
-      notify: async () => ({ isSent: false, reason: 'no-surface' }),
+      notify: async (text: string) => {
+        state.notified.push(text)
+        return { isSent: false, reason: 'no-surface' }
+      },
+      toast: (text: string) => {
+        state.toasts.push(text)
+      },
+      log: (text: string) => {
+        state.logged.push(text)
+      },
+      open: async ({ id }: { id: string }) => {
+        state.opened.push(id)
+        return { isPlaced: true }
+      },
+    },
+    clock: {
+      after: (_ms: number, fn: () => void) => {
+        setTimeout(fn, 0)
+        return { cancel: () => undefined }
+      },
+    },
+    session: {
+      compact: async ({ instructions }: { instructions?: string } = {}) => {
+        if (options.compactFails) throw new Error('not available in a headless session')
+        state.compacted.push(instructions ?? '')
+        return {}
+      },
+    },
+    state: {
+      get: async (ref: { plugin: string; key: string }) => {
+        const key = `${ref.plugin}/${ref.key}`
+        return { value: state.state.get(key), version: state.state.has(key) ? 1 : 0 }
+      },
+      set: async (ref: { plugin: string; key: string }, value: unknown) => {
+        state.state.set(`${ref.plugin}/${ref.key}`, value)
+        return { isSet: true, version: 1 }
+      },
+    },
+    command: {
+      register: async (spec: Record<string, unknown>) => {
+        state.registered.commands.push(spec)
+        return { command: spec.name }
+      },
     },
     prompt: {
       submit: async ({ text }: { text: string }) => {
@@ -302,6 +392,10 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
     },
     env: { get: async (name: string) => ENV[name] },
     agent: {
+      register: async (spec: Record<string, unknown>) => {
+        state.registered.agents.push(spec)
+        return { agent: `${PLUGIN}:${String(spec.name)}` }
+      },
       spawn: async (args: { prompt: string; subagentType?: string; model?: string }) => {
         state.spawns.push({ prompt: args.prompt, type: args.subagentType ?? '', model: args.model })
         const end = agents.shift()
@@ -319,6 +413,11 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
     },
   }
   return { $: fake as unknown as EngineInterface, w: state }
+}
+
+/** Let the timers the mod set (`$.clock.after`) and what they started run. */
+export async function settle(): Promise<void> {
+  for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setTimeout(() => resolve(undefined), 0))
 }
 
 export async function start($: Engine, isInteractive = false): Promise<void> {

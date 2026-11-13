@@ -363,18 +363,20 @@ def valid_retractions(entry: dict[str, Any], lines: Sequence[object], *, ordinal
     return kept
 
 
-def unknown_alias(review: Review, aliases: frozenset[str]) -> str:
+def unknown_alias(review: Review, aliases: frozenset[str], *, retired: frozenset[str] = frozenset()) -> str:
     """The first ``file=`` value of ``review`` that names no root, or ``""``.
 
     Every location in a multi-root review is ``<alias>/<path>`` (``range.txt`` maps each alias to
     its folder), so a finding can never be confused between two roots' ``src/main.py``. A path
     with no known alias cannot be attributed, which is a contract error, not a finding to drop.
+    A ``SUPERSEDES`` line may also name a ``retired`` root (one the person removed): it retracts
+    an earlier round's finding there, which the contract asks for.
     """
-    for block in (review.all_findings, review.supersedes):
+    for block, known in ((review.all_findings, aliases), (review.supersedes, aliases | retired)):
         for line in records(block):
             match = FINDING_RE.match(line) or _SUPERSEDES_RE.match(line)
             file = normalized_file(match.group("file")) if match else "-"
-            if file != "-" and file.split("/", 1)[0] not in aliases:
+            if file != "-" and file.split("/", 1)[0] not in known:
                 return file
     return ""
 

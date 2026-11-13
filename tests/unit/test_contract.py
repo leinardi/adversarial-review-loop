@@ -743,3 +743,16 @@ def test_a_finding_detail_with_a_unicode_line_separator_stays_one_record(tmp_pat
     assert review.verdict == "CHANGES_REQUIRED"
     assert len(contract.records(review.findings)) == 1, f"the U+2028 must not have split the record: {review.findings!r}"
     assert "\u2028second line" in review.findings
+
+
+def test_unknown_alias_lets_supersedes_name_a_removed_root() -> None:
+    # The person removed root `web` after round 1 raised a finding there; the contract asks the
+    # next round to retract it, which must not read as a path that names no root.
+    review = Review(verdict="CHANGES_REQUIRED", supersedes="SUPERSEDES round=1 file=web/x.ts | the root is gone\n")
+    assert contract.unknown_alias(review, frozenset({"api"})) == "web/x.ts"
+    assert contract.unknown_alias(review, frozenset({"api"}), retired=frozenset({"web"})) == ""
+
+
+def test_unknown_alias_never_lets_a_finding_name_a_removed_root() -> None:
+    review = Review(verdict="CHANGES_REQUIRED", all_findings="FINDING severity=high actionable=yes file=web/x.ts | bug\n")
+    assert contract.unknown_alias(review, frozenset({"api"}), retired=frozenset({"web"})) == "web/x.ts"

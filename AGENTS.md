@@ -58,10 +58,13 @@ Target architecture (the phases build it):
 | `hooks/mod.ts` | the mod: registers the tools, the reviewer agent and every hook; `hooks/hooks.json` names it |
 | `hooks/flow.ts` | the loop: each tool's flow, a review round on either harness, asking the user, root registration, continuation |
 | `hooks/reviewer.ts`, `engine.ts`, `text.ts` | the reviewer subagent (spawn, wait, permissions), running the engine, and the text Claude and the reviewer read |
+| `hooks/commands.ts` | the person's slash commands, all prefixed `arl-` (Claude Code ships `/status`, `/resume` and `/config`) |
+| `hooks/ui.tsx`, `types/index.d.ts` | the band and the review pane, and the session state they draw (its contract) |
 | `scripts/arl.sh` | launcher: finds a Python 3.12 or newer and runs the bootstrap |
 | `scripts/arl-bootstrap.py` | trusted absolute entrypoint; establishes `sys.path` and `sys.pycache_prefix` before `arl` is imported |
 | `scripts/arl/cli.py` | subcommand dispatch: argv in, one JSON answer on stdout |
-| `scripts/arl/commands.py` | the command table: `init`, `resume`, `set-phases`, `root-add`, `root-baseline`, `status`, `pause`, `stop`, `finish`, `accept`, `next-action`, and the `review`/`clarify` subcommands |
+| `scripts/arl/commands.py` | the command table: `init`, `resume`, `set-phases`, `root-add`, `root-remove`, `root-baseline`, `attach`, `status`, `report`, `config`, `pause`, `stop`, `finish`, `accept`, `next-action`, and the `review`/`clarify` subcommands |
+| `scripts/arl/configcmd.py` | `config`: every key with its layer, or set or unset one key |
 | `scripts/arl/state.py` | the run state in `<launch dir>/.arl/state.json`: stages, approvals, tickets, `next_action` |
 | `scripts/arl/workspace.py` | workspace roots: git and shadow snapshots, nested-repository discovery, late baselines |
 | `scripts/arl/contract.py` | the reviewer output contract: `FINDING`/`SUPERSEDES` grammar, `parse`, the recomputed verdict, the late-round scope type, `parse_clarify` |

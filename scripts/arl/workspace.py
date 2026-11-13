@@ -86,6 +86,7 @@ __all__ = [
     "set_baseline",
     "snapshot",
     "snapshot_all",
+    "taken_aliases",
     "touched_since",
 ]
 
@@ -178,6 +179,12 @@ def resolve(path: Path) -> tuple[Path, str]:
 
 def _within(inner: Path, outer: Path) -> bool:
     return inner == outer or outer in inner.parents
+
+
+def taken_aliases(run: RunState) -> list[str]:
+    """Every alias a new root may not take: the current roots', and those of removed roots."""
+    retired = run.data.get("retired_aliases")
+    return [root["alias"] for root in run.data["roots"]] + [alias for alias in retired or [] if isinstance(alias, str)]
 
 
 def alias_for(path: Path, taken: Sequence[str]) -> str:
@@ -499,7 +506,7 @@ def _exclude_run_dir(root: dict[str, Any], paths: RunPaths) -> None:
 def _add(run: RunState, path: Path, kind: str, *, late: bool) -> dict[str, Any]:
     roots = run.data["roots"]
     root: dict[str, Any] = {
-        "alias": alias_for(path, [other["alias"] for other in roots]),
+        "alias": alias_for(path, taken_aliases(run)),
         "path": str(path),
         "kind": kind,
         "baseline": "set",
@@ -569,7 +576,7 @@ def discover(run: RunState, *, late: bool) -> list[str]:
                 continue
             if late:
                 entry: dict[str, Any] = {
-                    "alias": alias_for(nested, [other["alias"] for other in run.data["roots"]]),
+                    "alias": alias_for(nested, taken_aliases(run)),
                     "path": str(nested),
                     "kind": "git",
                     "baseline": "unknown",

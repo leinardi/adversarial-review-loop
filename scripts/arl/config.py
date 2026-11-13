@@ -41,6 +41,7 @@ __all__ = [
     "BOOL_KEYS",
     "CONFIG_KEYS",
     "DEFAULTS",
+    "EFFORT_LEVELS",
     "INT_KEYS",
     "LIST_KEYS",
     "REPO_CONFIG_NAME",
@@ -98,9 +99,15 @@ DEFAULTS: Final[dict[str, Any]] = {
     "review_guide": "",
     "review_skill": "auto",
     "roots": [],
+    # The subagent reviewer's effort (`low` to `max`); empty for the agent default. opencode's
+    # counterpart is `variant`.
+    "effort": "",
+    # Compact the conversation before each phase after an approval, so a long plan's later
+    # phases do not run on a full context.
+    "auto_compact": False,
 }
 
-BOOL_KEYS: Final = ("disable_project_config", "final_review")
+BOOL_KEYS: Final = ("disable_project_config", "final_review", "auto_compact")
 
 INT_KEYS: Final = (
     "timeout_sec",
@@ -120,6 +127,9 @@ LIST_KEYS: Final = ("ignore_globs", "roots")
 
 #: The keys whose value is a severity label, validated and ranked through ``threshold_rank``.
 SEVERITY_KEYS: Final = ("block_severity", "late_block_severity")
+
+#: The levels ``effort`` may name, besides empty (the agent default).
+EFFORT_LEVELS: Final = ("low", "medium", "high", "xhigh", "max")
 
 #: The keys the environment may override, in the shell's order.
 CONFIG_KEYS: Final = tuple(DEFAULTS)

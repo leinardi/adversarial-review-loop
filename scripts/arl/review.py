@@ -71,7 +71,7 @@ FAILURE_KINDS: Final = ("transient", "operational")
 
 def _require(run: RunState | None) -> RunState:
     if run is None:
-        raise RunError("no-run", "there is no run here; start one with /implement")
+        raise RunError("no-run", "there is no run here; start one with /arl-implement")
     return run
 
 
@@ -154,13 +154,22 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         decision = run.pending_decision()
         if decision is not None:
             # Another review would end it by approving: only the user ends a stall or a call for them.
-            raise RunError("waiting", f"the run waits for the user ({decision['kind']}): {decision.get('detail', '')}; /resume or /accept first")
+            raise RunError(
+                "waiting", f"the run waits for the user ({decision['kind']}): {decision.get('detail', '')}: /arl-resume or /arl-accept first"
+            )
         if cfg.as_str("harness") != harness.SUBAGENT:
             # Before any ticket: a review no reviewer can run would hold the loop on it.
             _external_harness(cfg)
         stage = run.stage()
         if stage not in ("phase", "final"):
             raise RunError("nothing-to-review", "set the phases first" if stage == "plan" else "the run is complete")
+        if not run.roots:
+            # An empty bundle would show the reviewer nothing, and its approval would cover changes
+            # no one saw.
+            raise RunError("no-roots", "the run has no workspace root left: call add_root for the folder the phase changed")
+        # Work on the next stage has begun in the turn that got the approval: compacting now would
+        # summarise away what this review is about to say.
+        run.data["compact_due"] = False
         # A repository created since the last look becomes a root before anything is snapshotted;
         # its unknown baseline then refuses below, naming it.
         if workspace.discover(run, late=True):
@@ -286,7 +295,8 @@ def _parsed(run: RunState, ticket: Mapping[str, Any], target: Target, answer: Pa
     scope = bundle.late_scope(run, target)
     review = contract.parse(answer, config=cfg, allow_supersedes=target.is_phase and not repairing, scope=scope)
     review.raw = str(answer)
-    stray = contract.unknown_alias(review, target.aliases) if review.verdict in ("APPROVED", "CHANGES_REQUIRED") else ""
+    retired = frozenset(alias for alias in run.data.get("retired_aliases", []) if isinstance(alias, str))
+    stray = contract.unknown_alias(review, target.aliases, retired=retired) if review.verdict in ("APPROVED", "CHANGES_REQUIRED") else ""
     if stray:
         review = Review(verdict="OP_FAILURE", kind="contract", raw=str(answer), error=f"file={stray} names no root; every location is <alias>/<path>")
     if repairing:
@@ -537,7 +547,7 @@ def _external_harness(cfg: config.Config) -> None:
 def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     """Run the configured external reviewer for the pending review, then record its answer.
 
-    The state lock is not held while the reviewer runs: ``/stop`` or a replan meanwhile retires
+    The state lock is not held while the reviewer runs: ``/arl-stop`` or a replan meanwhile retires
     the ticket, and the late answer is then refused by :func:`record`.
     """
     cfg = _load_config(paths)

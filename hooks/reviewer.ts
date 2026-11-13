@@ -79,13 +79,15 @@ export function reviewerType($: EngineInterface): string {
   return `${$.plugin.name}:${REVIEWER}`
 }
 
-export async function registerReviewer($: EngineInterface): Promise<void> {
+/** Register the reviewer agent type; `effort` is the configured level, empty for the default. */
+export async function registerReviewer($: EngineInterface, effort = ''): Promise<void> {
   await $.agent.register({
     name: REVIEWER,
     description: REVIEWER_DESCRIPTION,
     prompt: REVIEWER_SYSTEM_PROMPT,
     tools: REVIEWER_TOOLS,
     omitClaudeMd: true,
+    ...(effort ? { effort } : {}),
   })
 }
 

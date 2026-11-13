@@ -20,9 +20,11 @@
 // is state; this file only runs things in order and reports what the engine answered.
 
 import type { EngineInterface, TurnUsage } from 'claude-code'
+import type { RunView } from '../types'
 import { type Answer, engine, engineStream } from './engine'
 import { Interrupted, normalize, type Ran, runReviewer, type Task, within } from './reviewer'
 import { ACCEPT, KEEP_GOING, STOP } from './text'
+import { showActivity, showLast, showReport, showRun } from './ui'
 
 /** What the session told the mod at its start. */
 export const session = {
@@ -33,25 +35,20 @@ export const session = {
   id: '',
 }
 
-/** A run summary, as the engine prints it (`RunState.summary`). */
-type RunSummary = {
-  run_id: string
-  status: string
-  stage: string
-  waiting: { kind: string; detail?: string } | null
-  roots: { alias: string; path: string; kind: string; baseline: string; proposed: string }[]
-}
+type RunSummary = RunView
 
 /** The active run's root paths, or `null` when no active run is known. Refreshed from answers. */
 let roots: string[] | null = null
 /** The state file's modification time when the engine last said no run is active here. */
 let closedAt: number | undefined
 
-/** Remember the run an answer describes. */
-export function track(answer: Answer): void {
+/** Remember the run an answer describes, and show it. */
+export async function track($: EngineInterface, answer: Answer): Promise<void> {
   const run = answer.run as RunSummary | null | undefined
   if (run === undefined) return
   roots = run !== null && (run.status === 'active' || run.status === 'paused') ? run.roots.map(root => root.path) : null
+  // What the person sees must never stop the loop.
+  await showRun($, run).catch(() => undefined)
 }
 
 /**
@@ -68,7 +65,7 @@ async function runHere($: EngineInterface): Promise<'yes' | 'no' | { unknown: st
   if (mtime !== undefined && mtime === closedAt) return 'no'
   const status = await engine($, session.dir, ['status'])
   if (!status.ok) return { unknown: status.error ?? 'the engine could not read the run' }
-  track(status)
+  await track($, status)
   closedAt = roots === null ? mtime : undefined
   return roots !== null ? 'yes' : 'no'
 }
@@ -77,20 +74,21 @@ async function hasRun($: EngineInterface): Promise<boolean> {
   return (await runHere($)) === 'yes'
 }
 
-async function run($: EngineInterface, args: readonly string[], stdin = ''): Promise<Answer> {
+/** Run an engine command for this session's launch directory, and track the run it answers. */
+export async function run($: EngineInterface, args: readonly string[], stdin = ''): Promise<Answer> {
   const answer = await engine($, session.dir, args, stdin)
-  track(answer)
+  await track($, answer)
   return answer
 }
 
 /** `run`, for a command that runs a reviewer and may outlast ten minutes. */
 async function runStream($: EngineInterface, args: readonly string[], input = ''): Promise<Answer> {
   const answer = await engineStream($, session.dir, args, input)
-  track(answer)
+  await track($, answer)
   return answer
 }
 
-function refused(answer: Answer): string {
+export function refused(answer: Answer): string {
   return `adversarial-review-loop refused (${answer.code ?? 'error'}): ${answer.error ?? 'no reason given'}`
 }
 
@@ -150,7 +148,7 @@ async function waitingDecision($: EngineInterface): Promise<string> {
 }
 
 /** Ask the user for the baseline of each root that has none; false when any is left unchosen. */
-async function chooseBaselines($: EngineInterface): Promise<boolean> {
+export async function chooseBaselines($: EngineInterface): Promise<boolean> {
   const status = await run($, ['status'])
   const summary = status.run as RunSummary | null | undefined
   const unknown = summary?.roots.filter(root => root.baseline === 'unknown') ?? []
@@ -312,8 +310,13 @@ export async function reviewWith($: EngineInterface, input: Record<string, unkno
     // a run that now waits for the user is put to them.
     return refused(prepared) + (await waitingDecision($))
   }
-  if (prepared.status === 'skipped') return String(prepared.message)
+  if (prepared.status === 'skipped') {
+    // An approval no reviewer gave (every change ignored) is still shown, and may complete the run.
+    await announce($, prepared, String(prepared.message))
+    return String(prepared.message)
+  }
   let recorded: Answer
+  await showActivity($, `reviewing ${String(prepared.label)}, round ${String(prepared.round)}`).catch(() => undefined)
   try {
     recorded =
       prepared.harness === 'subagent'
@@ -328,11 +331,27 @@ export async function reviewWith($: EngineInterface, input: Record<string, unkno
     // dispatch is ending, and a ticket left pending is abandoned by the next review.
     await run($, ['review', 'abandon', String(prepared.review_id)]).catch(() => undefined)
     return INTERRUPTED
+  } finally {
+    await showActivity($, '').catch(() => undefined)
   }
   if (!recorded.ok) return refused(recorded) + (await waitingDecision($))
   const message = String(recorded.message ?? '')
+  await announce($, recorded, message)
   const waiting = (recorded.run as RunSummary | undefined)?.waiting
   return waiting ? message + (await decide($, waiting)) : message
+}
+
+/** Show a recorded review in the pane, and say its verdict; a run it completed is notified. */
+export async function announce($: EngineInterface, recorded: Answer, message: string): Promise<void> {
+  const label = String(recorded.label ?? 'review')
+  const verdict = String(recorded.verdict ?? '')
+  await showLast($, { label, verdict, message, report: String(recorded.report ?? '') }).catch(() => undefined)
+  await showReport($, '').catch(() => undefined)
+  // A toast is not seen in the terminal (STEP0 I5); a log line is.
+  $.ui.log(`adversarial-review-loop: ${label} ${verdict}`)
+  if ((recorded.run as RunSummary | undefined)?.status === 'complete') {
+    void $.ui.notify('adversarial-review-loop: the run is complete, every stage approved.').catch(() => undefined)
+  }
 }
 
 
@@ -398,32 +417,47 @@ export function parentOf(path: string): string {
   return cut <= 0 ? '/' : path.slice(0, cut)
 }
 
+/** What registering a folder came to: the note Claude is told, and the root it added. */
+export type Registration = { note?: string; added?: string }
+
 /**
  * Before a file is written, make sure the directory it lives in is a root of the active run, so
  * its baseline is taken before the change. Answers a note for Claude when a root was added.
  */
-export async function ensureRoot($: EngineInterface, directory: string, { explicit = false } = {}): Promise<string | undefined> {
-  if (!directory.startsWith('/')) return undefined
+export async function ensureRoot($: EngineInterface, directory: string, { explicit = false } = {}): Promise<Registration> {
+  if (!directory.startsWith('/')) return {}
   const here = await runHere($)
-  if (here === 'no') return undefined
-  if (here !== 'yes') return unregistered(directory, here.unknown)
-  if ((roots ?? []).some(root => within(directory, root))) return undefined
+  if (here === 'no') return {}
+  if (here !== 'yes') return { note: unregistered(directory, here.unknown) }
+  if ((roots ?? []).some(root => within(directory, root))) return {}
   // A folder the person added to the session is meant to be worked in, wherever it is.
-  if (!explicit && (await isScratch($, directory))) return undefined
+  if (!explicit && (await isScratch($, directory))) return {}
   // A folder being created registers as the folder, not as its deepest new subfolder: a later
   // file beside that subfolder would otherwise join late, with an unknown baseline.
   let target = directory
   while (parentOf(target) !== target && !(await $.fs.exists(parentOf(target)))) target = parentOf(target)
   const answer = await run($, ['root-add', target])
-  if (!answer.ok) return unregistered(target, answer.error ?? answer.code ?? 'no reason given')
+  if (!answer.ok) return { note: unregistered(target, answer.error ?? answer.code ?? 'no reason given') }
   // `root-add` answers no run summary: refresh the cached roots.
   await run($, ['status'])
-  if (answer.status !== 'added') return undefined
-  directory = target
+  if (answer.status !== 'added') return {}
+  const alias = String(answer.alias)
   if (answer.baseline === 'unknown') {
-    return `adversarial-review-loop registered ${directory} as root ${String(answer.alias)}, but it already holds changes: its baseline is unknown, and the next review asks the user for one.`
+    return {
+      added: alias,
+      note: `adversarial-review-loop registered ${target} as root ${alias}, but it already holds changes: its baseline is unknown, and the next review asks the user for one.`,
+    }
   }
-  return `adversarial-review-loop registered ${directory} as root ${String(answer.alias)}; its content before this change is the baseline.`
+  return { added: alias, note: `adversarial-review-loop registered ${target} as root ${alias}; its content before this change is the baseline.` }
+}
+
+/**
+ * Take back a root this session registered for a write that then did not happen. The engine
+ * keeps it when anything in it changed, and moves nothing else: the loop is not prompted again.
+ */
+export async function dropRoot($: EngineInterface, alias: string): Promise<void> {
+  const answer = await run($, ['root-remove', alias, '--undo'])
+  if (answer.ok) await run($, ['status'])
 }
 
 /**
@@ -462,6 +496,58 @@ export async function continueRun($: EngineInterface): Promise<void> {
   if (!(await hasRun($))) return
   const next = await engine($, session.dir, ['next-action'])
   if (next.ok && next.action === 'continue' && typeof next.prompt === 'string') {
+    // After `next(e)`, compact then submit, awaited here: the order STEP0 J6 measured. Headless,
+    // compaction is refused, and the prompt is submitted uncompacted.
+    if (next.compact === true && session.isInteractive) {
+      await compactThenSubmit($, next.prompt)
+      return
+    }
     await $.prompt.submit({ text: next.prompt })
   }
+}
+
+/**
+ * From a command: compact the conversation, then submit `prompt`, once the command has ended.
+ * A compaction that fails is said and the run goes on uncompacted.
+ */
+function later($: EngineInterface, prompt: string): void {
+  $.clock.after(0, () => {
+    void compactThenSubmit($, prompt)
+  })
+}
+
+async function compactThenSubmit($: EngineInterface, prompt: string): Promise<void> {
+  try {
+    await $.session.compact({ instructions: 'Keep the plan, the phases and which are approved, and the workspace roots.' })
+  } catch (error) {
+    $.ui.log(`adversarial-review-loop could not compact before the next phase (${String(error)}); continuing without.`)
+  }
+  await $.prompt.submit({ text: prompt }).catch((error: unknown) => {
+    $.ui.log(`adversarial-review-loop could not continue the run (${String(error)}): /arl-resume continues it.`)
+  })
+}
+
+/**
+ * After the person moved the run on (`/arl-accept`, `/arl-finish`, `/arl-resume`): continue it
+ * once the command has ended, when the engine says so. Answers what the person is told.
+ */
+export async function proceed($: EngineInterface, lead = ''): Promise<string> {
+  let next = await engine($, session.dir, ['next-action'])
+  if (next.ok && next.action === 'yield' && next.reason === 'baseline-unknown' && (await chooseBaselines($))) {
+    next = await engine($, session.dir, ['next-action'])
+  }
+  if (!next.ok) return refused(next)
+  if (next.action !== 'continue' || typeof next.prompt !== 'string') return `The loop does not continue now (${String(next.reason ?? 'no reason given')}).`
+  const prompt = lead ? `${lead}\n\n${next.prompt}` : next.prompt
+  if (next.compact === true && session.isInteractive) {
+    later($, prompt)
+  } else {
+    // A prompt submitted from a command starts its turn once the command has ended.
+    $.clock.after(0, () => {
+      void $.prompt.submit({ text: prompt }).catch((error: unknown) => {
+        $.ui.log(`adversarial-review-loop could not continue the run (${String(error)}): /arl-resume continues it.`)
+      })
+    })
+  }
+  return 'Claude continues the run.'
 }

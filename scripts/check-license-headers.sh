@@ -84,7 +84,7 @@ is_governed() {
     local path="$1"
 
     case "${path}" in
-    *.py | *.sh | *.ts | *.mts | *.cts | *.js | *.mjs | *.cjs | .mk/*.mk | Makefile)
+    *.py | *.sh | *.ts | *.tsx | *.mts | *.cts | *.js | *.jsx | *.mjs | *.cjs | .mk/*.mk | Makefile)
         return 0
         ;;
     esac

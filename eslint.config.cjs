@@ -43,7 +43,7 @@ module.exports = tseslint.config(
     ignores: ['.claude-plugin/types/', 'scripts/', '.mk/'],
   },
   {
-    files: ['hooks/**/*.ts', 'tests/mod/**/*.ts'],
+    files: ['hooks/**/*.{ts,tsx}', 'tests/mod/**/*.{ts,tsx}'],
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     languageOptions: { globals: MODULE_GLOBALS },
     rules: STYLE,

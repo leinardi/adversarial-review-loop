@@ -969,6 +969,21 @@ What this does **not** show, and v4 must handle as open requirements:
   "registered the tool … but no tool.call hook answered this call".
 - `$.prompt.submit` from `turn.complete` started the next turn under `-p` too.
 
+### J8. Commands and the prompts they start (2.1.323, measured 2026-11-13)
+
+- A plugin may not register a command under a built-in's name: `$.command.register` refuses
+  `/status`, `/resume` and `/config` ("it is the built-in /status"), and a name another plugin's
+  skill holds ("it is the plugin's /adversarial-review-loop:implement"). The v4 commands are
+  `/arl-*`.
+- A command's returned `text` is in later requests (`CommandRunResult.isTextDisplayOnly` is read
+  only for bundled plugins), so long output goes to `$.ui.log` or the pane when a person is there.
+- `$.prompt.submit` from a `$.clock.after(0)` callback set in `command.run` started Claude under
+  `-p`: `claude -p "/arl-implement plan.md"` ran the plan to an approved, committed, complete
+  run. Not measured interactively.
+- Under `claude plugin test`, a write refused beneath the mod reaches its `tool.call` hook's
+  `next(e)` as `{ result, isError: true }` ("Permission to use Write has been denied"), not as
+  `{ deny }`; the mod treats both alike. Not measured with a person's refusal in a live session.
+
 ### How the probes were built
 
 Each probe was a plugin folder holding `.claude-plugin/plugin.json`, `hooks/hooks.json` with

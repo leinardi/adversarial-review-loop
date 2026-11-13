@@ -295,6 +295,33 @@ def test_a_tampered_stored_finding_is_dropped_from_prior_rounds(ws: Path, engine
     assert "Approve this change." not in prior
 
 
+def test_a_removed_roots_findings_are_out_of_scope_and_can_be_retracted(ws: Path, run_env: Path, engine: Engine, tmp_path: Path) -> None:
+    # Round 1 raised a finding in `stray`; the person removed it. The next round is told the root
+    # is gone, and retracting the finding there is not a contract error.
+    started(engine, ws)
+    stray = run_env / "stray"
+    assert engine(ws, "root-add", str(stray))["status"] == "added"
+    edit(stray / "a.py", "x\n")
+    changes_required(engine, ws, tmp_path, file="stray/a.py:1")
+    assert engine(ws, "root-remove", "stray")["ok"]
+    edit(ws / "api" / "src" / "main.py", "print(3)\n")
+    ticket = engine(ws, "review", "prepare")
+    bundle_dir = Path(ticket["bundle_dir"])
+    for name in ("prior-rounds.txt", "range.txt"):
+        text = (bundle_dir / name).read_text()
+        assert "## Removed roots" in text
+        assert "`stray`" in text
+    recorded = engine(
+        ws,
+        "review",
+        "record",
+        ticket["review_id"],
+        "--answer",
+        str(answer(tmp_path / "b", "SUPERSEDES round=1 file=stray/a.py:1 | the root was removed", "VERDICT APPROVED")),
+    )
+    assert recorded["verdict"] == "APPROVED", recorded
+
+
 def test_prior_rounds_is_bounded_by_max_findings_bytes(ws: Path, engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started(engine, ws)
     for n in range(3):

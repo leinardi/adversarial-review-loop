@@ -114,7 +114,7 @@ repos:
         language: node
         additional_dependencies: ["eslint@10.11.0", "@eslint/js@10.0.1", "typescript-eslint@8.71.0", "typescript@6.0.3"]
         pass_filenames: false
-        files: ^(hooks/.*\.ts|tests/mod/.*\.ts|eslint\.config\.cjs)$
+        files: ^(hooks/.*\.tsx?|tests/mod/.*\.tsx?|types/.*\.d\.ts|eslint\.config\.cjs)$
       # Checks against the API types Claude Code lays in .claude-plugin/types/ when it loads the
       # plugin. They are not committed, so where they are absent this fails and says how to get
       # them, rather than passing on code it never read. CI never has them, which is why this hook
@@ -125,7 +125,7 @@ repos:
         language: node
         additional_dependencies: ["typescript@6.0.3"]
         pass_filenames: false
-        files: ^(hooks/.*\.ts|tests/mod/.*\.ts|tsconfig\.json)$
+        files: ^(hooks/.*\.tsx?|tests/mod/.*\.tsx?|types/.*\.d\.ts|tsconfig\.json)$
   - repo: https://github.com/adrienverge/yamllint
     rev: v1.38.0
     hooks:

@@ -479,6 +479,19 @@ def _round_chunk(  # noqa: PLR0913 - the round's place in the section plus the r
     return "".join(chunk), used, len(kept) < len(lines)
 
 
+def _removed_roots(run: RunState) -> str:
+    """What the reviewer is told of roots the person removed: out of scope, never to be raised."""
+    retired = [alias for alias in run.data.get("retired_aliases", []) if isinstance(alias, str)]
+    if not retired:
+        return ""
+    names = ", ".join(f"`{alias}`" for alias in retired)
+    return (
+        f"\n## Removed roots\n\nThe user removed root(s) {names} from the run. Nothing in them is reviewed, this "
+        "review included. An earlier finding there is out of scope: do not raise it again (a FINDING naming a "
+        "removed root breaks the contract); a SUPERSEDES line may retract it.\n"
+    )
+
+
 def _prior_rounds(run: RunState, target: Target, config: Config) -> str:
     """``prior-rounds.txt``: every earlier round of this phase's review, empty on round 1.
 
@@ -506,7 +519,9 @@ def _prior_rounds(run: RunState, target: Target, config: Config) -> str:
                 if target.is_phase
                 else ""
             )
-            + "\n\n"
+            + "\n"
+            + _removed_roots(run)
+            + "\n"
         )
     ]
     # Findings first, newest round first: when the caps bite, the oldest rounds go. Reasoning gets
@@ -609,7 +624,7 @@ def _phase_section(run: RunState, target: Target) -> str:
 
 
 def _user_accepted(run: RunState) -> str:
-    """Every approval no review gave: the user's ``/accept``, and a stage whose changes all
+    """Every approval no review gave: the user's ``/arl-accept``, and a stage whose changes all
     matched ``ignore_globs``. The final review reads those phases as closely as a first round."""
     unreviewed = [entry for entry in run.data["approvals"] if isinstance(entry, dict) and entry.get("by") in ("user", "ignored")]
     if not unreviewed:
@@ -742,6 +757,7 @@ def build(  # noqa: PLR0912, PLR0913, PLR0915 - one independently meaningful pie
 
     out = ["# Review range\n\n", f"scope: {target.scope}\n", f"round: {round_number}\n", f"block_severity: {config.as_str('block_severity')}\n"]
     out.append(_roots_section(target, gone))
+    out.append(_removed_roots(run))
     out.append("\n## Bundle contents\n\nRead every file listed here; each is in the bundle directory.\n\n")
     out.extend(f"- {name}\n" for name in files)
     out.append(_blocking_rules(target, config, round_number=round_number, scope=scope))

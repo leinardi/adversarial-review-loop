@@ -45,6 +45,11 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
   set-phases [--replan]                      read a JSON array of phase descriptions on stdin
   root-add PATH                              register a root before changing it
   root-baseline ALIAS (--commit REV | --empty | --current)
+  root-remove ALIAS|PATH [--undo]            drop a root registered by mistake (--undo: only
+                                             while unchanged, for a write that did not run)
+  attach [--session ID]                      a session starts: the run, and another session's review
+  report [N]                                 the newest stored report, or the N-th
+  config                                     show, set or unset a key; arguments as text on stdin
   status [--json]                            the run summary
   pause | stop | finish | accept             user decisions
   next-action                                whether the loop continues after a turn
@@ -86,6 +91,12 @@ def _parser() -> argparse.ArgumentParser:
     choice.add_argument("--commit", default=None)
     choice.add_argument("--empty", action="store_const", const="empty", dest="choice")
     choice.add_argument("--current", action="store_const", const="current", dest="choice")
+    remove = sub.add_parser("root-remove", add_help=False)
+    remove.add_argument("root")
+    remove.add_argument("--undo", action="store_true")
+    sub.add_parser("attach", add_help=False).add_argument("--session", default="")
+    sub.add_parser("report", add_help=False).add_argument("number", nargs="?", type=int, default=None)
+    sub.add_parser("config", add_help=False)
     status = sub.add_parser("status", add_help=False)
     # Accepted and ignored: every answer is JSON already, and the plan's spelling is `status --json`.
     status.add_argument("--json", action="store_true", dest="_json")
@@ -120,7 +131,13 @@ def _parser() -> argparse.ArgumentParser:
 _TOP_LEVEL: frozenset[str] = frozenset(name.split("-", 1)[0] if name.startswith(("review-", "clarify-")) else name for name in COMMANDS)
 
 #: Subcommands whose stdin is read, and the key it lands under.
-_STDIN: dict[str, str] = {"set-phases": "phases", "review-prepare": "verification", "clarify-prepare": "question", "clarify-run-external": "question"}
+_STDIN: dict[str, str] = {
+    "config": "args",
+    "set-phases": "phases",
+    "review-prepare": "verification",
+    "clarify-prepare": "question",
+    "clarify-run-external": "question",
+}
 
 
 def _read_stdin(name: str) -> Any:
@@ -132,7 +149,7 @@ def _read_stdin(name: str) -> Any:
         raw = sys.stdin.read()
     except ValueError:  # UnicodeDecodeError included
         return None
-    if name.startswith("clarify-"):
+    if name.startswith("clarify-") or name == "config":
         return raw
     if name == "review-prepare" and not raw.strip():
         return None
@@ -201,7 +218,7 @@ def _run(name: str, parsed: dict[str, Any]) -> int:
         return _answer({"ok": False, "code": exc.code, "error": str(exc)}, 1)
     except StateLoadError as exc:
         log(f"{name}: {exc}")
-        return _answer({"ok": False, "code": "state-corrupt", "error": f"{exc}; start over with /implement --new <plan>"}, 1)
+        return _answer({"ok": False, "code": "state-corrupt", "error": f"{exc}; start over with /arl-implement --new <plan>"}, 1)
     except OcrlError as exc:
         log(f"{name}: {exc}")
         return _answer({"ok": False, "code": str(getattr(exc, "code", "error")), "error": str(exc)}, 1)
