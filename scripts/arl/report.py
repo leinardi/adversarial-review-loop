@@ -51,8 +51,9 @@ __all__ = [
 _FOOTER = "Verify and address the findings above, then ask for the review again.\n"
 #: A changes-required verdict that names no finding: its reasons are in the prose.
 _PROSE_FOOTER = "Address what the reviewer's prose above asks for, then ask for the review again.\n"
-#: The reviewer, or a findings ceiling, handed the run to the user: no review runs until they decide.
-_HUMAN_FOOTER = "The run now waits for the user: stop, and tell them what the review says.\n"
+#: The round left the run waiting for the user (the reviewer or a findings ceiling asked for them, a
+#: stall, the failure budget): what follows says what they chose, or that Claude stops for them.
+_WAITING_FOOTER = "The run now waits for the user's decision: do what follows, not what the findings alone would call for.\n"
 #: A review that failed: there is nothing to address.
 _FAILED_FOOTER = "There are no findings to address. Call review again once what stopped it is fixed, or tell the user.\n"
 
@@ -220,10 +221,12 @@ def store(review: Review, target: Target, *, seq: str, reports_dir: Path, config
     return path
 
 
-def _footer(review: Review) -> str:
+def _footer(review: Review, *, waiting: bool) -> str:
     """What Claude is told to do next, by what the round came to."""
-    if review.verdict == "NEEDS_HUMAN":
-        return _HUMAN_FOOTER
+    if waiting:
+        # The mod appends the user's choice, or the hand-over: an instruction here would precede
+        # and contradict it.
+        return _WAITING_FOOTER
     if review.verdict == "OP_FAILURE":
         return _FAILED_FOOTER
     if review.findings or review.all_findings:
@@ -232,7 +235,7 @@ def _footer(review: Review) -> str:
     return _PROSE_FOOTER
 
 
-def reason(review: Review, headline: str, *, config: Config) -> str:
+def reason(review: Review, headline: str, *, config: Config, waiting: bool = False) -> str:
     """The message ``review record`` hands back to Claude when a review did not approve.
 
     Order is the point: the blocking set first, the full set next, prose last, because prose
@@ -270,7 +273,7 @@ def reason(review: Review, headline: str, *, config: Config) -> str:
         out.append("\n")
     if review.report:
         out.append(f"\nFull report: {review.report}\n")
-    out.append(f"\n{_footer(review)}")
+    out.append(f"\n{_footer(review, waiting=waiting)}")
     return "".join(out)
 
 

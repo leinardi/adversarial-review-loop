@@ -1218,6 +1218,53 @@ def test_without_auto_compact_an_approval_says_nothing_about_the_turn(ws: Path, 
     assert "end your turn" not in review(engine, ws, answers, "VERDICT APPROVED")["message"]
 
 
+def test_an_approval_names_the_git_repositories_to_commit(ws: Path, engine: Engine, answers: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**Fails on "commit each changed git repository" alone.** Measured live: Claude, launched in a
+    plain folder, said there was no git repository to commit while a root beside it was one."""
+    monkeypatch.setenv("ARL_AUTO_COMPACT", "true")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+
+    message = review(engine, ws, answers, "VERDICT APPROVED")["message"]
+
+    assert f"the run's git repositories: api at {ws / 'api'}" in message
+    assert f"the run's git repositories: api at {ws / 'api'}" in engine(ws, "next-action")["prompt"]
+
+
+def test_accepting_under_auto_compact_tells_claude_to_end_its_turn(ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**Fails on an accept that answers no next turn.** The user accepts from the stall dialog in
+    the middle of Claude's turn: "go on with the next phase" left the compaction for no turn's end."""
+    monkeypatch.setenv("ARL_AUTO_COMPACT", "true")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+
+    assert "end your turn without starting the next stage" in engine(ws, "accept")["next"]
+
+
+def test_accepting_without_auto_compact_answers_no_next_turn(ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    answer = engine(ws, "accept")
+    assert answer["next"] == ""
+    # The mod's own accept texts name the repositories from this.
+    assert answer["repositories"] == f" (the run's git repositories: api at {ws / 'api'}, web at {ws / 'web'})"
+
+
+def test_a_stalled_round_does_not_tell_claude_to_address_the_findings(
+    ws: Path, engine: Engine, answers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**Fails on the findings footer.** The run waits for the user, whose choice the mod appends:
+    "ask for the review again" before it would contradict a stop."""
+    monkeypatch.setenv("ARL_STALL_ROUNDS", "2")
+    started(engine, ws)
+    for n in range(2):
+        edit(ws / "api" / "src" / "main.py", f"print({n})\n")
+        outcome = review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
+
+    assert "ask for the review again" not in outcome["message"]
+    assert "waits for the user's decision" in outcome["message"]
+
+
 def test_a_failed_review_does_not_ask_claude_to_address_findings_it_does_not_have(ws: Path, engine: Engine) -> None:
     """Measured live: a timed-out review ended "Verify and address the findings above"."""
     started(engine, ws)
@@ -1287,7 +1334,7 @@ def test_a_review_handed_to_the_user_tells_claude_to_stop_not_to_retry(
     outcome = review(engine, ws, answers, finding("api/src/main.py:1"), finding("api/src/main.py:2"), "VERDICT CHANGES_REQUIRED")
     assert outcome["verdict"] == "NEEDS_HUMAN"
     assert "Call review again" not in outcome["message"]
-    assert "stop, and tell them" in outcome["message"]
+    assert "waits for the user's decision" in outcome["message"]
 
 
 def test_a_paused_run_is_told_to_stop_after_an_approval_no_reviewer_gave(ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:

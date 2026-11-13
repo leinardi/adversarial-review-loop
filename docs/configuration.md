@@ -44,7 +44,7 @@ again when `/arl-config` sets it.
 | `review_skill` | `auto` | each root's own review skill, attached as guidance for that root: `auto`, a skill name, or `off`. See below |
 | `review_guide` | empty | one Markdown file (relative to the launch folder) spliced into every review prompt |
 | `roots` | `[]` | folders every run in this launch folder starts with, besides the launch folder, `--root` and the paths the plan names |
-| `auto_compact` | `false` | compact the conversation before the phase that follows an approval. An approval tells Claude to commit and end its turn; the loop then compacts and prompts the next phase. A turn that goes on into the next phase and calls review there cancels it; one that ends mid-phase before its review still compacts. Never headless |
+| `auto_compact` | `false` | compact the conversation before the phase that follows an approval. An approval tells Claude to commit and end its turn; the loop then compacts and prompts the next phase. A turn that goes on into the next phase cancels it: by calling review there, or by writing a file in a root with Edit, Write or NotebookEdit before it ends (a change made only through Bash does not count, and a turn with one still compacts). Never headless |
 | `chunk_diff_bytes` | `400000` | the size of one diff file in the bundle |
 | `hard_diff_ceiling` | `8388608` | a diff larger than this makes the loop ask you rather than review a cut |
 | `max_file_bytes` | `16777216` | one changed file larger than this makes the loop ask you |

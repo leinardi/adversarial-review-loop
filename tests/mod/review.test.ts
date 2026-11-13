@@ -191,6 +191,18 @@ test('the user accepting a stage of a paused run tells Claude to stop after the 
   expect(text).not.toContain('go on with the next phase')
 })
 
+test('the user accepting a stage under auto_compact tells Claude to end its turn, not to go on', async () => {
+  // The compaction comes only at a turn's end: going on with the next phase in this turn would
+  // leave it for none.
+  at(true)
+  const next = '\nCommit each changed git repository by its own conventions, then end your turn without starting the next stage: the loop compacts the conversation and prompts it.\n'
+  const { $ } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': STALLED, accept: { ok: true, run: summary(), next } }, files: PROMPTS, choices: ['Accept'] })
+  const text = await review($, {}, reviewer([APPROVED]).run)
+  expect(text).toContain('The user accepted this stage as it stands. Commit each changed git repository')
+  expect(text).toContain('end your turn without starting the next stage')
+  expect(text).not.toContain('go on with the next phase')
+})
+
 test('keep going on a paused run keeps it paused', async () => {
   at(true)
   const { $, w } = fakeEngine({

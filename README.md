@@ -56,7 +56,7 @@ $ claude
 2. In the folder you want the run to live in, run `/arl-implement plan.md`.
 3. Watch. The band above the prompt shows the phase, the round and what the loop is doing. The
    review pane shows the run in a few lines: the phases around the current one, the roots and
-   the latest review's blocking findings. `/arl-status` opens it.
+   the latest review's blocking findings. `/arl-status` opens it, and `/arl-pane` closes or opens it.
 
 Claude asks for a review after each phase and commits each repository it changed once the review
 approves. When the loop needs you (the same findings keep coming back, the reviewer keeps failing,
@@ -68,10 +68,11 @@ tells Claude to stop and tell you.
 | Command | What it does |
 | --- | --- |
 | `/arl-implement [--new] [--root DIR]... <plan.md>` | start a run. `--root` adds a folder the plan does not name; `--new` archives the active run under `.arl/runs/` |
-| `/arl-resume` | continue the run in this session: unpause, clear a decision the run waited on, abandon a review nothing is running |
+| `/arl-resume` | continue the run in this session: unpause, clear a decision the run waited on, abandon a review nothing is running. It opens the review pane, unless you closed it |
 | `/arl-status` | open the review pane, and show the run with every phase and every root's path |
 | `/arl-phases` | list every phase of the run |
-| `/arl-report [N]` | the newest stored review report, or the N-th, in a pane of its own |
+| `/arl-pane` | close the review pane, or open it again. Closed by you (this, ctrl+x x), it stays closed for the session until you open it |
+| `/arl-report [N]` | the newest stored review report, or the N-th, in a pane of its own that takes the keys to scroll; Esc or its Close closes it |
 | `/arl-pause` | stop the run after the current phase, until `/arl-resume`: the loop prompts nothing, and a review Claude asks for still runs and tells it to stop there |
 | `/arl-accept` | approve the current phase (or the final review) as it stands, without a review |
 | `/arl-finish` | require a final review of the whole run before it completes |

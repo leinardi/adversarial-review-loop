@@ -37,7 +37,18 @@ from arl.atomic import ensure_private_dir, write_private_atomic
 from arl.configcmd import cmd_config
 from arl.errors import StateLoadError
 from arl.gitsnap import SnapshotError
-from arl.state import RunError, RunPaths, RunState, locked_run_dir, locked_state, new_document, next_action, resume_context, start_prompt
+from arl.state import (
+    RunError,
+    RunPaths,
+    RunState,
+    locked_run_dir,
+    locked_state,
+    new_document,
+    next_action,
+    repositories,
+    resume_context,
+    start_prompt,
+)
 
 __all__ = ["COMMANDS", "plan_named_paths"]
 
@@ -335,7 +346,10 @@ def cmd_accept(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
             ) from exc
         run.approve(trees, by="user")
         run.save()
-        return {"ok": True, "run": run.summary()}
+        # What Claude is told when the user accepted from a dialog in the middle of its turn: the
+        # same as after a review's approval (stop when paused, end the turn under auto_compact).
+        cfg = config.load(str(paths.launch_dir))
+        return {"ok": True, "run": run.summary(), "next": review.next_turn(run, cfg, "APPROVED"), "repositories": repositories(run)}
 
 
 def cmd_next_action(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:

@@ -66,6 +66,7 @@ __all__ = [
     "locked_state",
     "new_document",
     "next_action",
+    "repositories",
     "resume_context",
     "run_paths",
     "start_prompt",
@@ -524,6 +525,15 @@ def _token(run: RunState) -> str:
     return ":".join(str(part) for part in (run.run_id, run.stage(), run.data["phases_revision"], len(run.data["approvals"]), run.data["rounds"]))
 
 
+def repositories(run: RunState) -> str:
+    """The run's git repositories, for an instruction to commit: measured live, Claude launched in a
+    plain folder concluded there was "no git repository to commit" when a root beside it was one."""
+    repos = [root for root in run.roots if root["kind"] == "git"]
+    if not repos:
+        return " (no root of the run is a git repository: there is nothing to commit)"
+    return f" (the run's git repositories: {', '.join(f'{root["alias"]} at {root["path"]}' for root in repos)})"
+
+
 def _prompt(run: RunState, verify_cmd: str = "") -> str:
     # The configured checks are named in every prompt: the start prompt may be compacted away, or
     # the setting changed mid-run.
@@ -535,7 +545,7 @@ def _prompt(run: RunState, verify_cmd: str = "") -> str:
         if run.data["rounds"]:
             return f"The final review asked for changes. Fix the cumulative findings, {gates}, then call review again."
         return (
-            "Every phase is approved. Commit the approved phase by each repository's conventions, "
+            f"Every phase is approved. Commit the approved phase by each repository's conventions{repositories(run)}, "
             f"{gates}, then run the final review: call review for the whole run."
         )
     phase = run.current_phase()
@@ -545,7 +555,7 @@ def _prompt(run: RunState, verify_cmd: str = "") -> str:
         return f"The review of phase {phase} of {count} asked for changes. Fix the findings, {gates}, then call review again."
     # The prompt may come after the work did (a resume, an accept): it must not claim either is undone.
     lead = (
-        "Commit the approved phase by each repository's conventions if that is not done yet, then implement (or finish)"
+        f"Commit the approved phase by each repository's conventions{repositories(run)} if that is not done yet, then implement (or finish)"
         if run.approved_phases
         else "Implement (or finish)"
     )
@@ -588,8 +598,8 @@ def resume_context(run: RunState, verify_cmd: str) -> str:
         + f"Workspace roots: {roots}. Edit and Write register the folders they write to; before you change anything "
         "through Bash outside them, call add_root for that directory.\n"
         f"When a phase is implemented, {checks}, then call review with what they reported. Fix what the review finds "
-        "and call review again. On approval, commit each changed git repository by its own conventions. When a review "
-        "hands a decision to the user, stop and tell them."
+        f"and call review again. On approval, commit each changed git repository by its own conventions{repositories(run)}. "
+        "When a review hands a decision to the user, stop and tell them."
     )
 
 
