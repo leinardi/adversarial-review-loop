@@ -1,23 +1,21 @@
 # Documentation
 
-The top-level [`README.md`](../README.md) is the landing page: what this is, how to install
-it, the commands, and the handful of settings most people touch. Everything deeper lives
-here:
+The top-level [`README.md`](../README.md) is the landing page: what this is, how to install it, the
+commands, and the settings most people touch. Everything deeper lives here:
 
 | Page | For | Covers |
 | --- | --- | --- |
-| [how-it-works.md](how-it-works.md) | anyone, no engineering background needed | What problem this solves and why, in plain language |
-| [faq.md](faq.md) | anyone using it day to day | The questions that come up first, answered short |
-| [configuration.md](configuration.md) | anyone running the loop day to day | Every setting, precedence, cost, examples |
-| [architecture.md](architecture.md) | engineers working on or integrating with the plugin | Components, data flow, the state machine, what blocks, on-disk layout |
-| [edge-cases.md](edge-cases.md) | anyone debugging unexpected behaviour | What happens when things go sideways, and why |
-| [security.md](security.md) | anyone assessing whether this is safe to trust | The threat model, what is and is not enforced, and why |
-| [design/](design/) | anyone changing the plugin | The argument behind each invariant in `AGENTS.md` — one note per topic |
+| [how-it-works.md](how-it-works.md) | anyone | what the loop does, step by step, in plain language |
+| [faq.md](faq.md) | anyone using it | the questions that come up first, and what to do when the loop needs you |
+| [configuration.md](configuration.md) | anyone tuning it | every setting, the layers, the project's own review skill, where the run lives |
+| [philosophy.md](philosophy.md) | anyone wondering why it enforces nothing | what v4 must get right, and what it gives up |
+| [architecture.md](architecture.md) | engineers changing it | the mod and the engine, a review round, the snapshots, the tests |
+| [release.md](release.md) | maintainers | cutting a release |
 
-[`AGENTS.md`](../AGENTS.md) in the repository root is the canonical authority for anyone
-*changing* this project — the five non-negotiable rules and a one-line index of every
-invariant a change must not break. Each index line names a note under
-[`design/`](design/) carrying the argument for it: the measurement, the bypass that
-motivated it, and what silently reopens if it is reverted. These docs describe the system
-as it behaves; `AGENTS.md` is the contract a change to it must honour. Where the two
+[`AGENTS.md`](../AGENTS.md) is the authority for anyone changing this project: the rules that hold
+in every change, the layout, and how to work on it. Where these pages and `AGENTS.md` or the code
 disagree, `AGENTS.md` and the code win.
+
+v3, the enforcement gate, its security model and its design notes, are kept at the
+[`adversarial-review-loop--v3.0.1`](https://github.com/leinardi/adversarial-review-loop/tree/adversarial-review-loop--v3.0.1)
+tag.

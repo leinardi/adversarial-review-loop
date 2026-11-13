@@ -25,13 +25,13 @@ import sys
 import time
 import traceback
 
-__all__ = ["TRUNCATION_MARKER", "format_at", "log", "log_exception", "now", "stdin_argument", "truncate"]
+__all__ = ["TRUNCATION_MARKER", "decode", "encode", "format_at", "log", "log_exception", "now", "truncate"]
 
 TRUNCATION_MARKER = "[... truncated at {limit} bytes; the full report is on disk, print it with /adversarial-review-loop:report ...]"
 
 
 def log(message: str) -> None:
-    """Write a diagnostic to stderr, never stdout (Rule 2: hook stdout is protocol).
+    """Write a diagnostic to stderr, never stdout (AGENTS.md rule 3: the engine's stdout is its answer).
 
     **This function never raises.** Diagnostics are best-effort by design, because the
     alternative is far worse than a lost log line: a caller reporting that stdout is broken
@@ -76,34 +76,18 @@ def format_at(at: object) -> str:
         return "(unknown time)"
 
 
-def stdin_argument() -> str:
-    """The slash command's argument string, read whole from stdin.
+def decode(raw: bytes) -> str:
+    """Bytes from git or the reviewer as text, losslessly and without raising.
 
-    The ``--*-stdin`` flags exist because Claude Code substitutes ``$ARGUMENTS`` into a skill
-    body *textually*, with no shell escaping -- the only transform applied to the substituted
-    value is one that neutralises ``!`` shell-exec markers. Whatever the user typed after the
-    slash command is therefore parsed as shell source, so a quote in it ends the argument
-    early and a ``$(...)`` or a ``;`` in it runs. A quoted here-document is the one shell
-    construct whose body is never parsed, which is how the skills now hand the string over;
-    this is the receiving end. See docs/design/argument-channel.md.
-
-    A trailing newline is stripped because the here-document adds one that the user did not
-    type. Nothing else is touched: leading whitespace, embedded newlines, quotes and dollar
-    signs all arrive exactly as typed.
-
-    Reading is skipped when stdin is a terminal, so an operator who types the flag by hand
-    gets an empty argument instead of a process that hangs waiting for a here-document that
-    is never coming. Every read error is likewise an empty argument -- these commands refuse
-    on their own terms when the argument is missing, and none of them is a gate whose silence
-    could be read as approval.
+    ``surrogateescape`` round-trips: whatever is written back out with :func:`encode` is
+    byte-identical to what came in.
     """
-    try:
-        if sys.stdin is None or sys.stdin.isatty():
-            return ""
-        return sys.stdin.read().removesuffix("\n")
-    except (OSError, ValueError, UnicodeDecodeError):
-        log("could not read the argument from stdin; treating it as empty")
-        return ""
+    return raw.decode("utf-8", "surrogateescape")
+
+
+def encode(text: str) -> bytes:
+    """The inverse of :func:`decode`."""
+    return text.encode("utf-8", "surrogateescape")
 
 
 def truncate(text: str, limit: int) -> str:

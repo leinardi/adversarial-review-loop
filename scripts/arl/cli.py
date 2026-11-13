@@ -1,15 +1,8 @@
-"""Subcommand dispatch, reached only through ``scripts/arl-bootstrap.py``.
+"""Subcommand dispatch: parse the argv, run the command, print its one JSON answer.
 
-Every subcommand module is imported **inside** its own branch. ``pretool`` runs on every
-tool call, so importing ``arm``, ``dryrun`` and the reviewer stack to answer a ``Read`` would
-be import cost multiplied by thousands of calls for code that never runs.
-
-The four hook entrypoints return the process exit status their :class:`arl.hookio.Hook`
-reports, and that status is the shim's only discriminator: ``0`` means a response was
-written in full -- including a legitimately empty one -- and anything else means the shim
-must discard what it captured and emit that event's own fail-closed response. Nothing here
-may turn a non-zero into a zero. ``scripts/arl.sh`` is the live gate, a guarded shim over
-this package -- see docs/design/interpreter-and-watchdog.md.
+Rule 3: stdout carries only the answer. A refusal is still an answer -- ``{"ok": false,
+"code": ..., "error": ...}`` with exit status 1 -- so the mod reads every outcome the same way;
+a usage error goes to stderr with status 2.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -31,178 +24,204 @@ this package -- see docs/design/interpreter-and-watchdog.md.
 
 from __future__ import annotations
 
-import os
+import argparse
+import json
+import signal
 import sys
-import time
-from typing import Final
+from pathlib import Path
+from typing import Any, NoReturn
 
-__all__ = ["HOOK_DEADLINE_SEC", "HOOK_STARTED", "USAGE", "main"]
+from arl.commands import COMMANDS
+from arl.errors import OcrlError, StateLoadError
+from arl.state import RunError, run_paths
+from arl.util import log, log_exception
 
-USAGE = """usage: arl.sh <subcommand> [args]
+__all__ = ["USAGE", "end_on_sigterm", "main"]
 
-  arm --session <id> --plan <path> [--allow-dirty] [--until N] [--harness H] [--model X] [--variant V] [--guide <path>]
-  resume --session <id> [--until N] [--plan <path>] [--guide <path>] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]
-  set-phases --phase "…" [--phase "…" …]
-  pretool | confirm-commit | posttool-failure | gate-stop | reorient | intent   (hook entrypoints)
-  status | report [n] | defer --reason "…" | finish | deactivate
-  pause [N | 0 | all]
-  clarify --question "…" [--session <id>]
-  accept [--reason "…"] [--session <id>]
-  config [<key> <value> [--repo] [--force] | <key> --unset [--repo]]
-  dry-run | selftest
+USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
 
-The slash commands pass the user's argument string on stdin rather than on argv, as
-`--args-stdin` (arm, resume, pause, config) or `--reason-stdin` (accept): argv cannot
-carry it intact through Claude Code's unescaped `$ARGUMENTS` substitution. The argv
-spellings above are for a real command line, and for a skill body an older install still
-serves from its cache.
+  init --plan FILE [--root DIR]... [--new]   start a run (--new archives the current one)
+  resume [--session ID]                      continue the run in this session
+  set-phases [--replan]                      read a JSON array of phase descriptions on stdin
+  root-add PATH                              register a root before changing it
+  root-baseline ALIAS (--commit REV | --empty | --current)
+  root-remove ALIAS|PATH [--undo]            drop a root registered by mistake (--undo: only
+                                             while unchanged, for a write that did not run)
+  attach [--session ID]                      a session starts: the run, and another session's review
+  report [N]                                 the newest stored report, or the N-th
+  config                                     show, set or unset a key; arguments as text on stdin
+  status [--json]                            the run summary
+  pause | stop | finish | accept             user decisions
+  next-action                                whether the loop continues after a turn
+  review prepare [--session ID]              prepare the current stage's review; optional JSON
+                                             {"verification": [...]} on stdin
+  review record ID (--answer FILE | --failed transient|operational [--error TEXT])
+                   [--usage JSON]            what the subagent round cost, for the report
+  review run-external ID                     run the opencode reviewer and record its answer
+  review abandon ID                          retire an interrupted review; no failure is counted
+  clarify prepare                            one question (stdin) about the latest round
+  clarify record SEQ N --answer FILE [--run-id ID]
+  clarify run-external                       ask the opencode reviewer (question on stdin)
+
+Every subcommand prints one JSON object on stdout.
 """
 
 
-#: The shim's own ``timeout`` ceiling for each hook entrypoint, in seconds -- the same
-#: numbers ``scripts/arl.sh`` passes to ``timeout`` and a hard maximum here too. They are
-#: duplicated rather than derived because the shim is what actually enforces them: this table
-#: only has to *agree* with it, and disagreeing in the safe direction (a smaller number here)
-#: costs an optional extra call, while trusting the environment for a larger one would let
-#: anything that can set an env var talk the gate into starting work the shim will kill.
-_HOOK_CEILINGS: Final = {"pretool": 1150, "confirm-commit": 50, "posttool-failure": 20, "gate-stop": 1750, "reorient": 25, "intent": 8}
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        sys.stderr.write(f"arl: {message}\n{USAGE}")
+        raise SystemExit(2)
 
 
-#: When this process started, as :func:`time.monotonic` reads it. Re-stamped at the top of
-#: :func:`main` so it measures the run rather than the import, and read together with
-#: :data:`HOOK_DEADLINE_SEC` by ``reviewer.remaining_budget``.
-HOOK_STARTED: float = time.monotonic()
+def _parser() -> argparse.ArgumentParser:
+    parser = _Parser(prog="arl.sh", add_help=False)
+    parser.add_argument("--dir", default=".")
+    sub = parser.add_subparsers(dest="command", parser_class=_Parser)
+    init = sub.add_parser("init", add_help=False)
+    init.add_argument("--plan", required=True)
+    init.add_argument("--root", action="append", dest="roots", default=[])
+    init.add_argument("--new", action="store_true")
+    phases = sub.add_parser("set-phases", add_help=False)
+    phases.add_argument("--replan", action="store_true")
+    root_add = sub.add_parser("root-add", add_help=False)
+    root_add.add_argument("path")
+    baseline = sub.add_parser("root-baseline", add_help=False)
+    baseline.add_argument("alias")
+    choice = baseline.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--commit", default=None)
+    choice.add_argument("--empty", action="store_const", const="empty", dest="choice")
+    choice.add_argument("--current", action="store_const", const="current", dest="choice")
+    remove = sub.add_parser("root-remove", add_help=False)
+    remove.add_argument("root")
+    remove.add_argument("--undo", action="store_true")
+    sub.add_parser("attach", add_help=False).add_argument("--session", default="")
+    sub.add_parser("report", add_help=False).add_argument("number", nargs="?", type=int, default=None)
+    sub.add_parser("config", add_help=False)
+    status = sub.add_parser("status", add_help=False)
+    # Accepted and ignored: every answer is JSON already, and the plan's spelling is `status --json`.
+    status.add_argument("--json", action="store_true", dest="_json")
+    resume = sub.add_parser("resume", add_help=False)
+    resume.add_argument("--session", default="")
+    for name in ("pause", "stop", "finish", "accept", "next-action"):
+        sub.add_parser(name, add_help=False)
+    review = sub.add_parser("review", add_help=False).add_subparsers(dest="action", parser_class=_Parser)
+    prepare = review.add_parser("prepare", add_help=False)
+    prepare.add_argument("--session", default="")
+    record = review.add_parser("record", add_help=False)
+    record.add_argument("review_id")
+    outcome = record.add_mutually_exclusive_group(required=True)
+    outcome.add_argument("--answer")
+    outcome.add_argument("--failed", choices=("transient", "operational"))
+    record.add_argument("--error", default="")
+    record.add_argument("--usage", default="")
+    review.add_parser("run-external", add_help=False).add_argument("review_id")
+    review.add_parser("abandon", add_help=False).add_argument("review_id")
+    clarify = sub.add_parser("clarify", add_help=False).add_subparsers(dest="action", parser_class=_Parser)
+    clarify.add_parser("prepare", add_help=False)
+    clarify.add_parser("run-external", add_help=False)
+    answer = clarify.add_parser("record", add_help=False)
+    answer.add_argument("round_seq", type=int)
+    answer.add_argument("question", type=int)
+    answer.add_argument("--answer", required=True)
+    answer.add_argument("--run-id", dest="run_id", default="")
+    return parser
 
-#: How many seconds this process has in total before ``scripts/arl.sh`` kills it, or ``None``
-#: when it is not one of the four hook entrypoints and no such deadline exists. A *whole-hook*
-#: budget, deliberately, not a per-call one: by the time the reviewer is invoked the hook may
-#: already have spent the bundle build, ``verify_cmd`` and a session listing, and only a
-#: number measured from process entry can say what is left.
-HOOK_DEADLINE_SEC: float | None = None
+
+#: The first word of every subcommand: ``review prepare`` is the ``review-prepare`` command.
+_TOP_LEVEL: frozenset[str] = frozenset(name.split("-", 1)[0] if name.startswith(("review-", "clarify-")) else name for name in COMMANDS)
+
+#: Subcommands whose stdin is read, and the key it lands under.
+_STDIN: dict[str, str] = {
+    "config": "args",
+    "set-phases": "phases",
+    "review-prepare": "verification",
+    "clarify-prepare": "question",
+    "clarify-run-external": "question",
+}
 
 
-def _hook_deadline(sub: str) -> float | None:
-    """This subcommand's whole-hook deadline: ``None`` unless it is a hook entrypoint.
+def _read_stdin(name: str) -> Any:
+    """What a command reads on stdin: JSON, except a clarify question, which is text.
 
-    ``ARL_HOOK_DEADLINE_SEC`` is what the shim passes alongside its own ``timeout``, so a
-    test that shrinks the shim timeout (``ARL_SHIM_TIMEOUT_*``) shrinks this in step and the
-    two never disagree. It is read from the environment, which is not a trust boundary, so it
-    is accepted only as a plain ASCII positive integer **at or below** the subcommand's own
-    ceiling -- exactly the clamp ``arl_bounded_timeout`` applies on the other side. Anything
-    else falls back to the ceiling, which is what the shim uses when the override is refused.
+    Unreadable input becomes ``None``, which the command refuses with its own code.
     """
-    ceiling = _HOOK_CEILINGS.get(sub)
-    if ceiling is None:
+    try:
+        raw = sys.stdin.read()
+    except ValueError:  # UnicodeDecodeError included
         return None
-    raw = os.environ.get("ARL_HOOK_DEADLINE_SEC", "")
-    if raw.isascii() and raw.isdigit():
-        value = int(raw)
-        if 0 < value <= ceiling:
-            return float(value)
-    return float(ceiling)
+    if name.startswith("clarify-") or name == "config":
+        return raw
+    if name == "review-prepare" and not raw.strip():
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        # Verification that cannot be read is refused, not dropped: the reviewer would be told
+        # nothing was reported.
+        return "malformed" if name == "review-prepare" else None
+    if name == "review-prepare":
+        return value.get("verification") if isinstance(value, dict) else "malformed"
+    return value
 
 
-def _start_clock(sub: str) -> None:
-    """Stamp :data:`HOOK_STARTED` and :data:`HOOK_DEADLINE_SEC` for this run."""
-    global HOOK_STARTED, HOOK_DEADLINE_SEC  # noqa: PLW0603 - process-wide facts about this one run, read by reviewer.remaining_budget
-    HOOK_STARTED = time.monotonic()
-    HOOK_DEADLINE_SEC = _hook_deadline(sub)
+def _answer(payload: dict[str, Any], status: int) -> int:
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return status
 
 
-def _selftest(argv: list[str]) -> int:
-    """Hand over to the shim suite, which stays Bash because it tests the launch of Python.
+def _terminated(signum: int, _frame: object) -> None:
+    """End on ``SIGTERM`` by unwinding, so a running reviewer's process group is killed on the
+    way out (:func:`arl.runner.run_bounded`) and the state lock is released.
 
-    Not the whole test suite: everything the gate *decides* is ``tests/unit/``, run with
-    pytest. This is the interpreter probe, the shim contract and the watchdog layers, which a
-    process already running under the interpreter cannot answer for.
+    The mod kills the engine when the person interrupts a review it streams; the reviewer runs in
+    a session of its own and would otherwise outlive it.
     """
-    import arl  # noqa: PLC0415
-
-    script = str(arl.PLUGIN_ROOT / "tests" / "selftest.sh")
-    os.execv(script, [script, *argv])
+    raise SystemExit(128 + signum)
 
 
-def main(argv: list[str]) -> int:  # noqa: PLR0911, PLR0912 - one return per subcommand, which is the table
-    sub = argv[0] if argv else ""
-    rest = argv[1:]
-    _start_clock(sub)
+def end_on_sigterm() -> None:
+    """Make ``SIGTERM`` unwind the engine (:func:`_terminated`); the bootstrap calls it once."""
+    signal.signal(signal.SIGTERM, _terminated)
 
-    if sub in ("-h", "--help", "help", ""):
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help", "help"):
         sys.stdout.write(USAGE)
         return 0
+    if argv[0] not in _TOP_LEVEL and not argv[0].startswith("-"):
+        sys.stderr.write(f"arl: unknown subcommand {argv[0]!r}\n{USAGE}")
+        return 2
+    parsed = vars(_parser().parse_args(argv))
+    name = parsed.pop("command", None)
+    parsed.pop("_json", None)
+    action = parsed.pop("action", None)
+    if name in ("review", "clarify"):
+        if action is None:
+            sys.stderr.write(USAGE)
+            return 2
+        name = f"{name}-{action}"
+    if name is None:
+        sys.stderr.write(USAGE)
+        return 2
+    if name == "root-baseline" and parsed.get("commit") is not None:
+        parsed["choice"] = "commit"
+    if name in _STDIN:
+        parsed[_STDIN[name]] = _read_stdin(name)
+    return _run(name, parsed)
 
-    # The hot path first: `pretool` runs on every single tool call, so it is matched before
-    # the table a user's typing reaches.
-    if sub == "pretool":
-        from arl.commands import pretool  # noqa: PLC0415
 
-        return pretool.run(rest)
-    if sub == "confirm-commit":
-        from arl.commands import posttool  # noqa: PLC0415
-
-        return posttool.confirm_commit(rest)
-    if sub == "posttool-failure":
-        from arl.commands import posttool  # noqa: PLC0415
-
-        return posttool.posttool_failure(rest)
-    if sub == "gate-stop":
-        from arl.commands import stop  # noqa: PLC0415
-
-        return stop.run(rest)
-    if sub == "reorient":
-        from arl.commands import session  # noqa: PLC0415
-
-        return session.reorient(rest)
-    if sub == "intent":
-        from arl.commands import intent  # noqa: PLC0415
-
-        return intent.run(rest)
-
-    if sub == "arm":
-        from arl.commands import arm  # noqa: PLC0415
-
-        return arm.run(rest)
-    if sub == "resume":
-        from arl.commands import resume  # noqa: PLC0415
-
-        return resume.run(rest)
-    if sub == "set-phases":
-        from arl.commands import phases  # noqa: PLC0415
-
-        return phases.run(rest)
-    if sub in ("defer", "status", "report", "finish", "deactivate"):
-        from arl.commands import session  # noqa: PLC0415
-
-        handler = {
-            "defer": session.defer,
-            "status": session.status,
-            "report": session.report_cmd,
-            "finish": session.finish,
-            "deactivate": session.deactivate,
-        }[sub]
-        return handler(rest)
-    if sub == "pause":
-        from arl.commands import pausecmd  # noqa: PLC0415
-
-        return pausecmd.run(rest)
-    if sub == "clarify":
-        from arl.commands import clarify  # noqa: PLC0415
-
-        return clarify.run(rest)
-    if sub == "accept":
-        from arl.commands import accept  # noqa: PLC0415
-
-        return accept.run(rest)
-    if sub == "config":
-        from arl.commands import configcmd  # noqa: PLC0415
-
-        return configcmd.run(rest)
-    if sub == "dry-run":
-        from arl.commands import dryrun  # noqa: PLC0415
-
-        return dryrun.run(rest)
-    if sub == "selftest":
-        return _selftest(rest)
-
-    sys.stderr.write(USAGE)
-    return 2
+def _run(name: str, parsed: dict[str, Any]) -> int:
+    """Run one command and print its answer, a refusal or failure included."""
+    try:
+        return _answer(COMMANDS[name](run_paths(Path(parsed.pop("dir"))), parsed), 0)
+    except RunError as exc:
+        return _answer({"ok": False, "code": exc.code, "error": str(exc)}, 1)
+    except StateLoadError as exc:
+        log(f"{name}: {exc}")
+        return _answer({"ok": False, "code": "state-corrupt", "error": f"{exc}; start over with /arl-implement --new <plan>"}, 1)
+    except OcrlError as exc:
+        log(f"{name}: {exc}")
+        return _answer({"ok": False, "code": str(getattr(exc, "code", "error")), "error": str(exc)}, 1)
+    except Exception as exc:  # noqa: BLE001 - the mod must get an answer, never a bare traceback
+        log_exception()
+        return _answer({"ok": False, "code": "internal", "error": f"{type(exc).__name__}: {exc}"}, 1)

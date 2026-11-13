@@ -1,11 +1,8 @@
-"""Probing OpenCode's model list, shared by ``arm``, ``resume`` and ``config``.
+"""Probing OpenCode's model list (``opencode models``), for the opencode harness.
 
-Only the subprocess call and its parsing live here. Whether an unreachable reviewer is a
-hard refusal or a soft warning is a per-caller decision -- arming refuses outright, because
-an activation whose every commit fails review for an operational reason produces denials
-that look like findings; the ``config`` command only warns, because an unreachable
-``opencode`` at config time is not the same failure as an unreachable one at arm time, and
-arming will refuse anyway if it is still unreachable then.
+Only the subprocess call and its parsing live here. What an unreachable reviewer means is the
+caller's decision; a probe that does not complete raises :class:`ProbeFailed` rather than answer
+a partial list.
 """
 
 #  This file is part of adversarial-review-loop.

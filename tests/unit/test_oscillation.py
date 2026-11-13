@@ -408,7 +408,7 @@ def test_a_multiline_finding_value_is_rejected_whole() -> None:
 
 
 def test_a_crlf_terminated_finding_still_counts_as_one_record() -> None:
-    """``_records`` (``reviewer.py``) splits stored values on ``\\n`` alone, so a
+    """``contract.records`` splits stored values on ``\\n`` alone, so a
     CRLF-terminated reviewer line is stored with its trailing ``\\r`` attached -- one
     legitimate record, not tampering, and it must still be detected as a reappearance."""
     history = [

@@ -6,6 +6,11 @@ This document is the procedure for settling that, once, before the mode is trust
 
 Budget about an hour, plus a handful of real model calls in session A.
 
+**v4 note.** Sessions A to I measured v3, the enforcement gate. The tooling they run
+(`tests/step0-fixture.sh`, `make dry-run`, `arl arm`, the `claude-code` harness) was removed in
+v4, so read them as a record of what was measured, not as a procedure to rerun. Session J
+measures the v4 mod surface and is current.
+
 ## Before you start
 
 - `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` set to `40` in `settings.json`, and Claude Code restarted since.
@@ -291,7 +296,7 @@ the state file would still be forgeable. Treat this as raising the bar, not clos
 
 ## Session E — does `{"decision":"block"}` work on a post-hook (items 13, 14)
 
-The Python port's fail-closed fallback table (see docs/design/interpreter-and-watchdog.md) gives
+The Python port's fail-closed fallback table (docs/design/interpreter-and-watchdog.md, v3 tag) gives
 `confirm-commit` (`PostToolUse`) and `posttool-failure` (`PostToolUseFailure`) weaker fallbacks than
 `pretool` and `gate-stop`, because neither can deny — the tool call has already run by the time
 either fires. `confirm-commit` falls back to `additionalContext`, which is known to work because the
@@ -329,7 +334,7 @@ it.
 `hooks/hooks.json` and registers once at plugin load, so a same-session `resume` registers nothing a
 second time and there is no double firing to measure. See "Plugin-level hooks, 2026-08-30" below for
 the result that moved them, and
-[`docs/design/resume-and-retirement.md`](../docs/design/resume-and-retirement.md) for why neither
+`docs/design/resume-and-retirement.md` (at the v3 tag) for why neither
 skill may grow one back. The rest of this section is kept only as the record of what was asked; do
 not run it.
 
@@ -680,7 +685,7 @@ above is the runbook for both.
 
 ## Session H — session identity across `/clear` and `/resume` (documented ahead of measurement)
 
-`docs/faq.md` ("Picking up where you left off") and `docs/edge-cases.md` now answer the two
+v3's `docs/faq.md` ("Picking up where you left off") and `docs/edge-cases.md` answered the two
 commonest real-world interruptions, and both answers turn on one host behaviour nobody has measured:
 **which session id you come back under.** The plugin binds an activation to
 `(worktree, session id)`, so that single fact decides whether "just continue" is correct or whether
@@ -812,6 +817,322 @@ interactively:
   session, in two attempts. The display therefore uses `$.ui.log` and the band, never a toast.
 
 ---
+
+## Session J — the v4 mod surface, measured 2026-11-12
+
+v4 moves the loop into a mod (a hooks module) and keeps Python as the engine. These are the host
+behaviours that design depends on, settled before any v4 code was written. Measured on Claude Code
+2.1.321 with throwaway probe plugins loaded through `--plugin-dir`, from a scratch directory that is
+not a git repository. The headless runs used `claude -p --model haiku`. J2, J4 and J5 also passed
+`--permission-mode default`, and J2, J4 and the 1020 s run of J5 passed
+`--settings '{"sandbox":{"enabled":true}}'`. The user's settings default to `auto`, and earlier
+exploratory runs used that mode, so each item names its configuration. The interactive runs used
+`claude --plugin-dir <probe>` on Opus: the first in `auto` mode, the second (J3's "Chat about this",
+J4's prompt, J5's interrupt, J6's chain) in `--permission-mode default`.
+
+The user's other plugins stayed enabled. They include the installed adversarial-review-loop (its
+PreToolUse hooks and display module) and caveman (a SessionStart hook), and none of them answers
+`allow` for `mcp__*` tools. That install reports version 3.0.1 from the GitHub marketplace, but at
+commit `4be9d68`, which is on `main` after the release tag `adversarial-review-loop--v3.0.1`
+(`e86592d`) and already carries the display module. With this install, this checkout is no longer
+the code that every session runs.
+
+### J1. Relative imports between mod files: pass
+
+`hooks/register.ts` imported a constant with `import { TAG } from './lib'`, and the tool result
+carried it. The types header documents the same, and adds (not probed) that a module holding a
+dynamic `import()` does not load.
+
+### J2. `$.ui.log` is not sent to the model: pass, with one caveat
+
+- **Headless, `default` mode, sandbox on (`arlprobe-nocheck`).** The probe tool emitted a secret
+  word only through `$.ui.log`. Asked in the same turn whether one was in its context, and told to
+  read no files, the model answered "NONE".
+- **Interactive (`arlprobe-ui`).** `/arlprobe-log` logged `PROBE-LOG-LINE-7731`. The session
+  `.jsonl` stores the row as `"type":"system","subtype":"informational"`, which is shown to the
+  person and not sent to the model. The types say the same thing. The model's own "no" in that
+  session is no evidence: before answering, it searched the transcript file and found the row.
+- **Caveat: the line is not secret.** It is kept in the session transcript on disk, which the model
+  can read. Every compaction summary even points it at that file. "Invisible" means "not in the
+  model's context". v4 uses `$.ui.log` for output that Claude should not have to relay, never for
+  anything Claude must not learn. Under `-p` the line is not written to the transcript at all (the
+  secret word is in no headless `.jsonl`, not even in its `api-request-blob` rows, the request
+  bodies sent to the API, which is stronger evidence than the model's "NONE"); the types say a `-p`
+  or SDK host receives it as a `ui_log` event, so a host that feeds that stream to a model passes it
+  on.
+- **Length.** The terminal draws only the first 2000 characters of a log line
+  (`$.ui.log: a text (2797 characters) is drawn up to its first 2000 on the terminal`). The types
+  give 10000 on a remote surface.
+
+### J3. The pane and `$.ui.ask` render: pass
+
+- `$.ui.open({ id, title })` resolved `{"isPlaced":true}`. The `ui.render` hook on
+  `{ component: 'Pane', requestId }` drew bold, red and dim `Text` rows in a framed pane with a
+  close button.
+- `$.ui.ask(question, ['Accept', 'Keep going', 'Stop'])` opened the engine's question dialog with a
+  "Plugin" chip. The dialog also offers "Type something." and "Chat about this", so the answer may
+  be free text and must be compared with the labels exactly. The types document that it rejects when
+  dismissed, and always under `-p`. Picking "Chat about this" **rejects** it: "$.ui.ask: no answer
+  (The user doesn't want to proceed with this tool use. The tool use was rejected …". v4 treats a
+  rejection, and any answer that is not exactly one of its labels, as "no decision": the loop yields
+  to the person instead of choosing for them. The question leaves only a trace for the model: the
+  transcript records `{"type":"tools-used","tools":["AskUserQuestion"]}` without the question text,
+  and the next compaction summary lists `AskUserQuestion` among the tools used. v4 tells Claude the
+  outcome of an ask through the tool result.
+
+### J4. The mod's own tools need no permission prompt: pass, headless and interactive
+
+Headless, in `default` permission mode with the sandbox on, Claude called the probe's registered
+tool, `mcp__arlprobe__probe`, and printed its result (`The probe returned: RELIMPORT-OK`). That ran
+twice: once with a `tool.check` hook answering `allow` for the plugin's own tools, and once with
+that hook disabled, which is the decisive run. Control: in the same configuration, with the
+hook-less probe, Claude was asked to call WebFetch, which was denied: "Claude requested permissions
+to use WebFetch, but you haven't granted it yet." So a call that needs permission is refused there,
+and the probe's tool did not need permission. Interactively, in `--permission-mode default` with no
+`tool.check` hook, Claude called the registered `mcp__arlprobeui__sleeper` tool and no prompt
+appeared. The `allow` hook stays in v4 anyway, as insurance against a host that prompts.
+
+The same configuration's Bash control (`touch` under `/tmp`) failed with a sandbox setup error, not
+a permission denial. That matters to the plan's "sandbox on, no prompt" end-to-end check, not to
+this item.
+
+### J5. `$.process.spawn` beyond ten minutes: pass, measured to 1020 s with the sandbox on
+
+A registered tool's `tool.call` hook ran
+`$.process.spawn({ argv: ['sh', '-c', 'sleep <n>; echo finished'] })` and drained the stream,
+headless in `default` mode, twice:
+
+- `n = 630`, sandbox off: the hook logged 630006 ms and `{"code":0,"signal":null}`, and Claude
+  received `longrun finished after 630008 ms`.
+- `n = 1020`, sandbox on: the hook returned after 1020005 ms with the same result, and Claude
+  received `longrun finished after 1020008 ms`. 1020 s covers v3's default `timeout_sec` (900 s)
+  plus a two-minute repair call.
+
+`$.process.run`, by contrast, is capped at ten minutes.
+
+Why the hook survives: its own budget (`HookBudget.ms`, 10 s) counts only the hook's own time, and
+the clock stops while any `$` call is in flight. No tool-call ceiling showed up up to 1020 s, and
+the types document none; a run longer than that rests on the documentation alone.
+
+An interrupt kills the spawned child, the direct child only. The types say a spawned child is killed
+when the loop is left or `next.signal` aborts, and `HookBudget.lingerMs` documents that a person's
+interrupt aborts `next.signal`. Measured interactively: a registered tool's `tool.call` hook spawned
+`sleep 121` directly and pulled the stream. Esc after 41967 ms made the pull throw
+`$.process.spawn(sleep) aborted`, with `next.signal.aborted` true, and `pgrep -af "sleep 121"` then
+printed nothing. When `pgrep` ran relative to the spawn was not recorded, and `sleep 121` ends by
+itself after 121 s, so this shows the kill only if `pgrep` ran within that window.
+
+What this does **not** show, and v4 must handle as open requirements:
+
+- **Grandchildren.** The types say nothing about descendants, process groups or the signal sent. In
+  v4 the mod spawns the Python engine, and the engine starts opencode through `run_bounded` in a new
+  session (`start_new_session=True`). Killing the engine with an untrapped SIGTERM, or with SIGKILL,
+  would orphan opencode. The engine must trap SIGTERM and kill its reviewer's process group, and
+  since a SIGKILL defeats that, the pending review ticket's abandonment must cover a reviewer that
+  outlives it.
+- **Recording the failure.** After the interrupt the tool result was replaced by the host's own
+  "doesn't want to proceed" text, and the hook gets only `lingerMs` after the abort. Whether a
+  `$.process.run` to the engine still runs once `next.signal` has aborted was not measured. v4 must
+  not depend on it: an interrupted review leaves its ticket pending, and the next `review` call or
+  `/resume` treats it as abandoned. Either way an interrupt is never an approval.
+
+### J6. `$.session.compact` between phases: pass interactively, refused headless
+
+- **Headless: refused.** "$.session.compact: not available in a headless (-p / SDK) session yet:
+  compaction here runs inside a turn (a /compact prompt); catch it and carry on".
+- **Interactive: compact, then submit, works.** In a main-loop `turn.complete` hook, after
+  `next(e)`, the probe awaited `$.session.compact({ instructions })` and then
+  `$.prompt.submit({ text })`. The conversation compacted (`{ messages }`, with `instructions`
+  honoured), and then the submitted prompt started a new turn, which Claude answered. This is the
+  order `auto_compact` uses, and it must be this order: compact rejects while a turn runs.
+- A call from a slash command's `command.run` hook was not recorded and counts as unmeasured.
+- A compaction can also resolve `{ skip }` when a hook or a classic `PreCompact` hook vetoes it.
+  `auto_compact` catches the rejection, treats `{ skip }` as not compacted, and carries on.
+
+### J7. API constraints found while probing
+
+- A hook may pass `$` only to a function declared at the top of the file, or imported from one of
+  the module's own files. `claude plugin validate` refuses a closure such as
+  `const note = async ($) => …` defined inside `register` ("$ is passed to "note", which is not a
+  function declared at the top of this file"). Neither the types nor `reference.md` states this
+  rule; only the validator does.
+- `$.process.run(argv, { cwd, env, stdin, timeoutMs })` takes the argv positionally. Its timeout is
+  30 s by default and ten minutes at most. Each stream keeps only its first 4194304 bytes, so the
+  engine must keep its stdout JSON small and write large results to files.
+- `$.process.spawn({ argv, cwd, env, input })` has no timeout and takes `input`, not `stdin`.
+  Whatever v4 spawns must bound itself, which the engine does with `run_bounded`.
+- A registered tool's name on the wire is `mcp__<plugin-name>__<name>`, which `$.tool.register`
+  returns. A probe once matched `mcp__plugin_<name>` instead, which never matches. v4's `tool.check`
+  allow hook is insurance that live use never exercises, since no prompt occurs, so a unit test must
+  pin its matcher (a `$.tool.check` query from a test).
+- A registered tool's `tool.call` hook answers `{ result }`. A call that no hook answers fails with
+  "registered the tool … but no tool.call hook answered this call".
+- `$.prompt.submit` from `turn.complete` started the next turn under `-p` too.
+
+### J8. Commands and the prompts they start (2.1.323, measured 2026-11-13)
+
+- A plugin may not register a command under a built-in's name: `$.command.register` refuses
+  `/status`, `/resume` and `/config` ("it is the built-in /status"), and a name another plugin's
+  skill holds ("it is the plugin's /adversarial-review-loop:implement"). The v4 commands are
+  `/arl-*`.
+- A command's returned `text` is in later requests (`CommandRunResult.isTextDisplayOnly` is read
+  only for bundled plugins), so long output goes to `$.ui.log` or the pane when a person is there.
+- `$.prompt.submit` from a `$.clock.after(0)` callback set in `command.run` started Claude under
+  `-p`: `claude -p "/arl-implement plan.md"` ran the plan to an approved, committed, complete
+  run. Not measured interactively.
+- Under `claude plugin test`, a write refused beneath the mod reaches its `tool.call` hook's
+  `next(e)` as `{ result, isError: true }` ("Permission to use Write has been denied"), not as
+  `{ deny }`; the mod treats both alike. Not measured with a person's refusal in a live session.
+
+### How the probes were built
+
+Each probe was a plugin folder holding `.claude-plugin/plugin.json`, `hooks/hooks.json` with
+`{ "modules": ["./register.ts"] }` (`.tsx` for the one that draws), and the module. They are not
+kept in the repository, but the hooks that decided each item are short:
+
+```ts
+// J4, J5: a registered tool, served by a tool.call hook
+await $.tool.register({ name: 'longrun', description: '…', inputSchema: { type: 'object' } })
+on('tool.call', { tool: 'mcp__arlprobe__longrun' }, async ($, e, next) => {
+  const st = $.process.spawn({ argv: ['sh', '-c', `sleep ${e.seconds}; echo finished`] })
+  let out = ''
+  while (true) { const r = await st.next(); if (r.done) break; out += r.value.text }
+  return { result: out }
+})
+// J6: after the main loop's turn, compact first, then submit
+on('turn.complete', async ($, e, next) => {
+  const r = await next(e)
+  if (e.agentId === undefined && armed) {
+    await $.session.compact({ instructions: 'keep the word ZEBRA' })
+    await $.prompt.submit({ text: 'Reply with exactly: CHAIN-OK' })
+  }
+  return r
+})
+```
+
+The headless prompts asked Claude to call the tool once and report what it returned. J2 also asked
+whether a secret word was in its context, with no files to be read, and J4's control asked it to
+call WebFetch once on `https://example.com`.
+
+## Session K — v4 end to end, measured 2026-11-13
+
+Phase 7 of the v4 plan: the whole loop, headless, from this checkout. Each run used
+`claude -p "/arl-implement plan.md" --plugin-dir <checkout> --model haiku --permission-mode
+acceptEdits` with Bash limited to `git`, `python3`, `cat`, `ls` and `echo`, in a scratch folder.
+K1 to K6 are headless; K7 is the checks that need a person (the sandbox, the band and the pane,
+immediate commands, compaction, interrupts, auto mode).
+
+### K1. A three-phase plan over two git roots and a plain folder: pass
+
+All three phases were reviewed, approved and committed in order, and the run ended `complete`. A
+root's own review skill reached only that root's bundle. `verification.txt` held what Claude
+reported running.
+
+### K2. Findings, a fix, a second round: pass
+
+A defect the root's review skill forbids drew `CHANGES_REQUIRED`. Claude fixed it, and round 2's
+bundle carried `prior-rounds.txt` and `incremental.diff`. Round 2 approved. A first attempt, whose
+plan dictated the defective line, was approved: the reviewer judged the change against the plan,
+which is the intended reading.
+
+### K3. The final review: pass
+
+With `ARL_FINAL_REVIEW=1` the final review ran after the last phase and before the run completed.
+
+### K4. A second `/arl-implement` over an active run: pass
+
+It is refused with `run-exists`, naming `/arl-resume` and `/arl-implement --new <plan>`.
+`/arl-status` answered.
+
+### K5. A repository cloned inside the launch folder through Bash: pass
+
+`git clone` into `vendor/lib` with no `add_root`. At the next `review` the clone was discovered as
+root `lib` with an unknown baseline, `review` refused with `baseline-unknown for lib`, and Claude
+stopped and asked. When `vendor/` was in the launch folder's `.gitignore`, the clone was not
+discovered and the approval covered none of it, the documented limitation. The reviewer said so in
+an `info` finding.
+
+### K6. `harness: opencode`: fail on the 1.x spelling, pass after the fix
+
+OpenCode here was 2.2.7. `opencode run` refused `--pure` and `--dir` ("Unrecognized flag") and
+exited 1. All three rounds were `OP_FAILURE` (correct, no approval), but their reports' raw output
+was empty, so the reason showed nowhere. 2.x also has no `--variant` (the variant is
+`-m provider/model#variant`), and no `OPENCODE_PERMISSION` anywhere in the binary.
+
+Then the permission document was probed directly. The probe asked the reviewer to write a file, run
+`touch`, read a file outside the bundle and read one inside it. The repository held an
+`opencode.json` allowing everything.
+
+- `OPENCODE_CONFIG_CONTENT='{"permission": …}'` alone: **every step succeeded.** `opencode run`
+  hands the message to the shared background service, which never sees the run's environment. The
+  same happened with `OPENCODE_DISABLE_PROJECT_CONFIG=1`.
+- The same with `--standalone` (a private server): no write or shell tool was offered, the read
+  outside the bundle was denied (`external_directory`), and the bundle read worked. The project's
+  allow-everything config did not widen it.
+
+`opencode debug agents --standalone` then showed a gap: 2.2.7 appends an agent's own permission
+rules after the top-level ones, and the last match wins. A project `opencode.json` with
+`agent.build.permission` allowing `edit` and `bash` resolved to the inline deny block followed by
+those allows. With the same document also under `agent.build` in the inline config, it resolved
+last, after the project's agent rules, and `default_agent: plan` in the project was beaten by
+`--agent build`.
+
+The harness now runs `opencode run <prompt> --standalone -m <model>[#<variant>] --agent build
+--title <t> --archived` in the launch folder, with the permission in `OPENCODE_CONFIG_CONTENT` at the
+top level and on `build`. A failed run's output is kept in its report. The same plan then ran end
+to end: reviewed by OpenCode, approved with three low findings, committed. It ran again in a
+repository whose `opencode.json` allowed everything on `agent.build`: approved, committed.
+
+### K7. Interactive: the loop in a person's session
+
+Claude Code 2.1.323, `claude --plugin-dir <checkout> --permission-mode default --settings
+'{"sandbox":{"enabled":true}}'`, Sonnet, in a scratch folder with two git repositories and a plain
+folder. Three plans, 13 phases, run by the user and read back here.
+
+- **The sandbox and the plugin's tools: pass.** `set_phases`, `review` and the reviewer subagent
+  asked for nothing. Claude Code's own sandbox could not start on this machine (`apply-seccomp:
+  write /proc/self/setgroups … Permission denied`, nested user namespaces restricted), so every Bash
+  call fell back to an unsandboxed prompt. The plugin was not affected.
+- **Band and pane: pass, with a redesign.** Both updated as reviews landed. On a small terminal the
+  pane was cut after a few lines, so the latest review and a report put in the pane were never
+  seen. The pane is now a few lines (the phases around the current one, root names, up to three
+  blocking findings), and `/arl-status`, `/arl-phases` and `/arl-report` print to the transcript.
+- **Immediate commands: pass.** `/arl-report` and `/arl-pause` acted during Claude's turn. Pause
+  then refused the `review` Claude called in the same turn, which the docs did not say. A paused run
+  now still reviews; the first retest then showed Claude reading the approval as "go on" and
+  finishing the plan while paused. Every review answer on a paused run now tells Claude to commit
+  and stop, and in the next retest it stopped after the phase it was in.
+- **Command output.** `$.ui.log` draws one line: the newlines of a multi-line status came out as
+  stray characters. `/arl-status`, `/arl-phases` and `/arl-config` answer as the command's own text,
+  and `/arl-report` opens a pane of its own.
+- **A prompt from a command's timer: pass.** `/arl-resume` and `/arl-accept` at a phase boundary
+  started Claude.
+- **Compaction: pass through a command, never after a review.** `/arl-accept` compacted (64k to 49k
+  tokens) before the next prompt. After a review's approval Claude went on in the same turn, so the
+  turn never ended at the boundary, and nothing compacted in six phases. An approval now tells Claude
+  to end its turn when `auto_compact` is on. (`next-action` consumes the once-per-approval flag: a
+  probe of it by hand before `/arl-resume` spent it.)
+- **An interrupt hands control back: pass.** Esc right after an approval continued nothing, as
+  designed. Esc on a permission dialog does not count as an interrupt: the loop went on. The band
+  kept saying `working` after an interrupt; it now follows `turn.start` and `turn.complete`.
+- **A refused write: fail, fixed.** "No" in the Write dialog for a file in a new folder outside every
+  root left that folder a root, although nothing was written. A debug log of the retest showed why:
+  the refusal reaches the hook as `isError: true`, but it aborts the write's dispatch, and the
+  undo's engine call, started 26 ms later, died with it. The mod now offers back every root a write
+  registered, and a root whose undo got no answer is offered again at the turn's end; the engine
+  keeps one whose content changed. The third run showed `Roots: sm3, lib` after the refusal.
+- **A new session on a run: pass, with a fix.** The start logged the pending review of the session
+  that had quit, `/arl-implement` refused with `run-exists`, and `/arl-resume` abandoned the review.
+  But its prompt held only "implement phase 2 of 4: title", and the new Claude went looking for the
+  plan in another repository. `resume` now answers the run's context (plan, copy, phases, roots,
+  rules), and the prompt carries it. A session that starts on a run now opens the pane.
+- **A reviewer that times out: pass, with a limit.** `timeout_sec 10` gave `OP_FAILURE` and
+  approved nothing. The subagent ran on ("Waiting for 1 background agent"): nothing in the mod API
+  stops one. Its late answer never reached Claude.
+- **Esc during an OpenCode review: pass.** The `opencode run --standalone` process got SIGTERM,
+  exited, and left no process behind.
+- **Auto mode: pass.** Four phases were reviewed and approved in auto mode with no contract error or
+  host preamble.
 
 ## If A1 fails
 

@@ -18,7 +18,7 @@
 # along with adversarial-review-loop.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-# Type-checks hooks/register.js and tests/mod/ against the API types Claude Code generates.
+# Type-checks the mod under hooks/ and tests/mod/ against the API types Claude Code generates.
 #
 # The types are not committed: Claude Code writes them into .claude-plugin/types/ each time it
 # loads this plugin from a folder, at the version of Claude Code doing the loading. Without them
@@ -27,6 +27,7 @@
 set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
+
 types="$root/.claude-plugin/types/claude-code/index.d.ts"
 
 if [ ! -f "$types" ]; then

@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with adversarial-review-loop.  If not, see <http://www.gnu.org/licenses/>.
 
-// ESLint for the display module and its tests -- the only JavaScript in the repository.
+// ESLint for the mod and its tests -- the only JavaScript in the repository.
 //
 // Run by the `eslint` hook in .pre-commit-config.yaml, from the node environment pre-commit
 // builds out of that hook's pinned `additional_dependencies`. There is no package.json: the
@@ -43,13 +43,7 @@ module.exports = tseslint.config(
     ignores: ['.claude-plugin/types/', 'scripts/', '.mk/'],
   },
   {
-    files: ['hooks/**/*.js'],
-    extends: [js.configs.recommended],
-    languageOptions: { ecmaVersion: 'latest', sourceType: 'module', globals: MODULE_GLOBALS },
-    rules: STYLE,
-  },
-  {
-    files: ['tests/mod/**/*.ts'],
+    files: ['hooks/**/*.{ts,tsx}', 'tests/mod/**/*.{ts,tsx}'],
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     languageOptions: { globals: MODULE_GLOBALS },
     rules: STYLE,

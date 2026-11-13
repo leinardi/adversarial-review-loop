@@ -1,156 +1,62 @@
-# How it works (no engineering background required)
+# How it works
 
 ## The problem
 
-Coding agents like Claude are good at implementing a plan, and bad at knowing when they've
-gotten it subtly wrong. Left alone, an agent will confidently save (commit) work that looks
-right and isn't — a bug it didn't notice, a shortcut that breaks a security assumption, a
-piece of the plan it quietly skipped. By the time a human looks at it, the wrong version is
-already the one everyone is building on top of.
+An agent that writes code and then judges its own work is a poor judge: it knows what it meant, and
+it reads its diff in that light. A second reader catches what the first one missed, but only if it
+sees all of the change, gets no say from the author on what to look at, and is read strictly when
+it answers.
 
-The obvious fix — "ask the agent to review its own work" — doesn't hold up, for the same
-reason it doesn't work for a person: the same blind spots that produced the mistake are
-usually what stops you from seeing it as a mistake.
+This plugin puts that second reader between the phases of a plan. Claude implements one phase; a
+reviewer that did not write it reads the whole change and says what is wrong with it; Claude fixes
+that and asks again; only an approval moves the run to the next phase.
 
-## The fix: a second, independent opinion, with a lock on the door
+## A run, start to finish
 
-This plugin puts a *different* AI reviewer between "Claude thinks this phase is done" and
-"this phase is permanently part of the project." It's not a suggestion box. It's a lock:
-Claude physically cannot save the work until the reviewer has looked at exactly what's
-about to be saved and said yes.
+1. **You start it.** `/arl-implement plan.md` copies the plan into `.arl/plan.md` and takes a
+   snapshot of every workspace root: the launch folder, the git repositories the plan names, any
+   `--root`, and the `roots` setting.
+   Those snapshots are the run's baseline. Then Claude is told what the loop expects of it.
+2. **Claude records the phases** with the `set_phases` tool, one short title each. It may revise
+   the list until a phase is approved, and later only as an explicit replan.
+3. **Claude implements a phase.** When it writes with Edit or Write into a folder outside every
+   root, the plugin registers that folder as a root first, so its content before the change is
+   the baseline. Before it changes anything else through Bash, Claude calls `add_root` itself.
+4. **Claude runs the project's checks and calls `review`** with what they reported.
+5. **The engine builds the bundle.** It snapshots every root again and writes the diff from the
+   last approved snapshot to this one, for every root, untracked files included. Each path is
+   prefixed with its root's name (`api/src/main.py`), so two roots' `src/main.py` never mix. The
+   bundle also holds `range.txt` (what is under review and how it is judged), the checks Claude
+   reported, the earlier rounds of this phase, and the project's own review skill when it has one.
+6. **A fresh reviewer reads it.** By default a subagent the plugin registers and hides from Claude.
+   It may read files and run read-only commands, nothing else. It answers in a strict contract:
+   one `FINDING` line per problem, with severity, whether it is actionable, and the file.
+7. **The engine decides the verdict**, not the reviewer. An actionable finding at or above
+   `block_severity` blocks, whatever the reviewer concluded. An answer that breaks the contract
+   gets one repair attempt, then counts as a failure. A failure is never an approval.
+8. **Claude reads the outcome.** Findings: fix them and call `review` again; the next reviewer is
+   told what this one found. Approval: commit each changed repository by its own conventions.
+9. **The loop continues.** When Claude's turn ends, the plugin asks the engine whether work
+   remains and, if so, prompts Claude with the next phase. After the last approval (and the final
+   review, if one is required) the run is complete.
 
-Think of it like a strict editor at a newspaper who has to sign off on a story before it
-goes to print. The reporter (Claude) can write and rewrite freely. But the presses
-(`git commit`) don't run until the editor — a separate AI, invoked fresh with no memory of the
-conversation — has read the exact copy and approved it. If the editor finds a
-problem, the story is bounced back — not published, not partially published — and the
-reporter tries again.
+## When the loop needs you
 
-## What actually happens, step by step
+The loop stops prompting Claude and asks you (or, headless, tells Claude to stop and tell you) when:
 
-1. **You hand it a plan.** A markdown file describing what should get built. You start it
-   with a command; nothing runs on its own.
-2. **The plan gets frozen and split into phases.** Claude reads it and proposes a sequence
-   of milestones — "phase 1: add the login form," "phase 2: wire it to the API," and so on.
-   Once you've effectively agreed to that split (by letting it freeze), it can't quietly
-   change later to match whatever Claude happened to build.
-3. **Claude implements a phase, then tries to commit it.** The moment it runs
-   `git commit`, the plugin intercepts that exact command *before* it runs.
-4. **A snapshot is taken of everything that would be committed** — not a description of it,
-   the actual content — and handed to the second AI reviewer with no other context except
-   the plan and the diff.
-5. **The reviewer reads it like an adversarial code reviewer would**, looking for bugs,
-   security issues, corners cut, and places the work doesn't actually match what the plan
-   asked for. It cannot run anything or change anything — it can only read and report.
-6. **If it's clean, the commit is allowed to happen and the next phase starts.** If it
-   finds a real problem, the commit is blocked and Claude is told exactly what's wrong, with
-   the same specificity a strict human reviewer would give. Claude fixes it and tries again.
-   This can repeat as many times as it takes. From the second attempt on, the reviewer is
-   told exactly which files changed since it last looked, and a *new* medium-level complaint
-   about a file that didn't change — the kind of thing it could have said the first time —
-   is written down and shown to you but no longer holds the commit up on its own; anything
-   serious still does, wherever it is, and so does anything the reviewer already raised
-   earlier.
-7. **Once every phase is committed, the tool considers itself done and steps out of the
-   way.** You can also ask for one more review first — looking at the *entire* change from
-   start to finish, the way a final sign-off would, rather than phase by phase. That one is
-   off by default because on a long plan it becomes too big to be read properly; turn it on
-   with `final_review true` if you want it every time, or run
-   `/adversarial-review-loop:finish` to get it for a single plan. It has to be *before* the
-   tool steps out, though — once it's done, that review can't be run after the fact.
+- the same blocking findings persist for `stall_rounds` rounds;
+- the reviewer keeps failing (`max_failures`, `max_transient_failures`);
+- the reviewer itself asks for a person;
+- a changed file or the whole diff is too large to review;
+- a folder joined the run with changes already in it, so its baseline cannot be known. You pick:
+  the changes since a proposed commit, everything in it is new, or its current content is the
+  baseline.
 
-## Some things worth knowing
+You can accept the stage as it stands (`/arl-accept`), keep going (`/arl-resume`), or stop
+(`/arl-stop`).
 
-- **You can pause it**, up front (`--until 2`) or halfway through a phase
-  (`/adversarial-review-loop:pause`) — it finishes and commits what it's on, then stops. The
-  loop won't push you into "just one more phase" on its own.
-- **You can pick it back up later**, even days later, in a brand-new conversation, without
-  losing any of the approvals already earned or restarting from scratch. Quitting, rebooting,
-  `/clear`, a crash — none of them undo anything; the work lives on disk, not in the
-  conversation. If you come back to the *same* conversation, you just tell Claude to carry on;
-  in a new one you run `/adversarial-review-loop:resume` first, adding `--allow-dirty` if you
-  left work half-finished. [The FAQ](faq.md#picking-up-where-you-left-off) has the whole table.
-- **You can revise the plan partway through** if you realize phase 3 needs to change —
-  but only for phases that haven't started yet. Whatever's already been built and approved
-  stays exactly as it was reviewed.
-- **While a phase is actively being worked on, it only blocks the commit.** Editing files,
-  running tests, thinking out loud — none of that is touched; it stands between "finished
-  draft" and "permanent record," not in front of the drafting itself. Outside that normal
-  working state, it locks down harder: before phases are even agreed on, right after a
-  pause, or if something's gone wrong and needs a person, *every* change is blocked, not
-  just a commit — because there's nothing current yet for a review to check that change
-  against.
-- **It assumes the agent is trying to cooperate, not trying to cheat.** This is a
-  quality gate for an agent that's making an honest attempt and might get something wrong —
-  not a jail cell for one that's actively trying to escape it. See
-  [security.md](security.md) if you need to know exactly where that line is.
+## What it does not do
 
-## Long plans and the context window
-
-A long plan runs as one very long turn, and Claude's own context fills up as it goes. When it
-does, Claude Code compacts the conversation — the earlier turns are replaced by a summary.
-That summary is written to preserve the work, not the rules: the frozen plan, the phase
-descriptions and the loop's own instructions are exactly the sort of thing it drops.
-
-**The plugin cannot compact or clear the session for you.** No hook or plugin API can trigger
-either — a hook can only be told one happened. What the plugin does instead is notice: a
-`SessionStart` hook fires after every compaction (and after a `claude --resume`), and it
-re-injects the things a compacted session needs to carry on —
-
-- which phase is in progress and its frozen description,
-- the path to the frozen plan, with an instruction to re-read the relevant part,
-- what the last review of this phase concluded, and the report number to read for the
-  findings themselves,
-- the commit rules, and the fact that the gate is still enforced.
-
-It never re-injects the plan itself: re-inserting a 64 KiB document into a context that was
-just compacted for being too large would undo the compaction. It also never quotes a
-reviewer's findings — that is model-authored text, and it stays behind
-`/adversarial-review-loop:report`.
-
-**For a very long plan, pause deliberately rather than relying on compaction.** Compaction is
-lossy no matter what gets re-injected, and the cleanest context is a fresh one:
-
-```console
-$ /adversarial-review-loop:implement plan.md --until 5     # stop after phase 5
-  … phases 1–5 land …
-$ /clear
-$ /adversarial-review-loop:resume --until 10               # fresh context, same activation
-                                                           # (bare resume would run to the end)
-```
-
-`resume` re-arms the hooks, re-prints the plan path and names the next phase, and every
-approval already earned is kept. Nothing is lost by clearing — the activation lives on disk,
-not in the conversation.
-
-**If you decide to stop partway through a phase, decide which kind of stop you want.**
-<kbd>Esc</kbd> on its own stops the turn immediately — fine for a break, but it leaves the
-phase half-written and uncommitted. To stop at a clean boundary instead, so the phase is
-finished and committed first, use the pause command.
-
-Don't ask for that in prose. The pause target is one of the user-only controls, so Claude has
-no way to move it, and asking gets you a Stop gate that reports the remaining phases and sends
-it straight back to work. Interrupt and run the command instead:
-
-```console
-  … Claude is deep in phase 3 of 9 …
-Esc
-$ /adversarial-review-loop:pause
-$ continue
-  … phase 3 is finished, reviewed and committed, then the turn ends paused …
-```
-
-It needs no clean worktree — it approves nothing and denies nothing, so there is no
-half-finished work for it to fold into a review. That is what makes it the right move before
-turning the machine off, and before upgrading the plugin itself: the upgrade lands between
-phases, on a clean tree, rather than mid-phase. Reinstall the plugin and start a fresh
-session afterwards (a running Claude Code holds the old skill bodies cached), then
-`/adversarial-review-loop:resume` to carry on with every approval intact — it clears the
-pause target, so the loop runs to the end of the plan unless you pass `--until N` again.
-
-## Why bother with all this?
-
-Because "I'll just read the diff at the end" doesn't scale, and "trust the agent" isn't a
-policy — it's the absence of one. This turns code review from something that happens
-*after* the fact, when unwinding a bad decision is expensive, into something that has to
-happen *before* anything becomes permanent, when fixing it just means trying again.
+It does not enforce anything. Claude can commit without a review, ignore a finding, or write
+somewhere nobody registered. The plugin's job is to make the review good, not to police the agent;
+[philosophy.md](philosophy.md) explains the choice.

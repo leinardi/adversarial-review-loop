@@ -1,7 +1,7 @@
 # Contributing
 
 Read [`AGENTS.md`](AGENTS.md) before changing anything: it holds the five rules a change must not
-break and the index of invariants behind them. It applies equally to human and AI-assisted
+break, the layout and how to work on it. It applies equally to human and AI-assisted
 contributions.
 
 ## Setup
@@ -12,24 +12,25 @@ messages are checked when you commit, not when the release runs.
 
 ```console
 make dev-deps     # the pinned development dependencies, once per checkout
-make test         # the pytest suite and the shim selftest; no model is called
+make test         # the pytest suite and the arl.sh smoke test; no model is called
+make test-mod     # the mod's tests under `claude plugin test`
 make check        # pre-commit on every file
 make check-stage  # pre-commit on the staged files only
 ```
 
-`make help` lists every target. The tests need `jq`; see [Development](README.md#-development) for
-what each suite covers.
+`make help` lists every target; see [Development](README.md#-development) for what each suite
+covers. Some reviewer stand-ins in `tests/fixtures/` use `jq`.
 
 `make check` only sees files git already knows about, so run `git add -N` on a new file before it.
 
-With the plugin enabled, its hooks run in every Claude Code session. When developing this
-repository, disable it in `.claude/settings.local.json` and load the working tree with
-`claude --plugin-dir .` only when you mean to use the loop.
+To try the working tree, load it with `claude --plugin-dir .`: an installed copy of the plugin is a
+cached copy, not this checkout. The mod's type checks need the API types Claude Code writes into
+`.claude-plugin/types/` when it loads the plugin from a checkout.
 
 ## Pull requests
 
-Every change lands through a pull request against `main` with the required CI checks green. A change
-to the gate needs a test that fails on the old code.
+Every change lands through a pull request against `main` with the required CI checks green. A behaviour
+change needs a test that fails on the old code.
 
 ## Commit messages
 
@@ -43,7 +44,7 @@ Common types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, 
 `revert`. Use a lower-case, imperative description:
 
 ```text
-fix(cmdshape): reject git commit --only
+fix(review): refuse a review with no roots
 feat(harness): add a reviewer harness
 feat(config)!: rename the block_severity key
 ```

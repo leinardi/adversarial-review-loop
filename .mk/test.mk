@@ -30,7 +30,7 @@ PYTEST_WORKERS ?= auto
 # to touch the system interpreter (PEP 668). It is a developer convenience only -- uv is
 # deliberately **not** on the runtime path, because `uv run` reads `pyproject.toml` and
 # `.python-version` from the current directory, which under a hook is the repository under
-# review. See docs/design/interpreter-and-watchdog.md.
+# review (AGENTS.md rule 5).
 #
 # An explicit PYTHON= on the command line wins, and so does ARL_NO_UV=1.
 UV := $(shell command -v uv 2>/dev/null)
@@ -59,7 +59,7 @@ sync-pins: ## Rewrite the .pre-commit-config.yaml pins to match requirements-dev
 	@$(PYTHON) $(REPO_ROOT)/scripts/sync_pins.py
 
 .PHONY: test
-test: test-unit test-accept ## Run the unit tests and the shim selftest (no model is called)
+test: test-unit test-accept ## Run the unit tests and the arl.sh smoke test (no model is called)
 
 .PHONY: test-unit
 test-unit: ## Run the Python unit tests
@@ -81,25 +81,13 @@ else
 endif
 
 .PHONY: test-accept
-# The selftest shards itself across the cores by default; ARL_SELFTEST_JOBS=1 runs it
-# straight through with its output unbuffered, which is what you want when a section fails.
-test-accept: ## Run the shim selftest: interpreter probe, shim contract, watchdog (no model is called)
-	@$(REPO_ROOT)/tests/selftest-parallel.sh
+test-accept: ## Run the scripts/arl.sh smoke test (no model is called)
+	@$(REPO_ROOT)/tests/selftest.sh
 
 .PHONY: test-mod
-# Needs the `claude` binary (2.1.287 or later), which is why it is not part of `make test`:
-# `tests/unit/test_mod_contract.py` is the half of the display module's checks that runs
-# without it.
-test-mod: ## Run the display module's tests (hooks/register.js) under `claude plugin test`
+# Needs the `claude` binary, which is why it is not part of `make test`.
+test-mod: ## Run the mod's tests under `claude plugin test`
 	@command -v claude >/dev/null 2>&1 || { printf 'arl: test-mod needs the claude binary on PATH\n' >&2; exit 1; }
 	@claude plugin test $(REPO_ROOT)
-
-.PHONY: test-filter
-test-filter: ## Run only the shim selftest sections matching FILTER=<substring>, serially
-	@$(REPO_ROOT)/tests/selftest.sh "$(FILTER)"
-
-.PHONY: dry-run
-dry-run: ## Print the exact reviewer invocation for the current worktree, without calling it
-	@$(REPO_ROOT)/scripts/arl.sh dry-run
 
 endif

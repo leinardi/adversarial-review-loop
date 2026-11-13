@@ -1,19 +1,16 @@
-"""The reviewer-harness seam: which CLI the gate actually asks for a review.
+"""The reviewer-harness seam: the external reviewer CLIs the engine itself runs.
 
-Everything that decides an *outcome* -- bundle building, staging and manifest verification, the
-``FINDING``/``VERDICT`` contract, ``round_history`` bookkeeping, the retry classes -- lives in
-:mod:`arl.reviewer` and is harness-agnostic. What varies is narrow and mechanical: how one
-invocation is spelled, how a session is named and continued, and whether the model list can be
-probed at all.
+The default reviewer, ``subagent``, is not here: the mod spawns it, and the engine only
+prepares the bundle and records the answer. An external harness is a CLI the engine runs
+(``review run-external``), and what varies between such CLIs is narrow and mechanical: how one
+invocation is spelled, how its transcript is reduced to the answer, and whether its model list
+can be probed. Every round starts a fresh reviewer, so there is no session to name or continue.
 
-**A harness composes a command; it never decides anything.** Nothing here reads a verdict,
-touches ``state.json``, or may turn a failure into an approval (Rule 1). That is what keeps
-"add a third harness" a new module rather than another pass over the gate.
+**A harness composes a command; it never decides anything.** Nothing here reads a verdict or
+touches ``state.json``, and nothing may turn a failure into an approval (AGENTS.md rule 1).
 
-**The test seam sits above this layer, deliberately.** ``ARL_REVIEWER_CMD`` and
-``ARL_SESSION_LIST_CMD`` short-circuit in :mod:`arl.reviewer` *before* a harness is consulted,
-so a new harness cannot quietly change what those tests measure. See
-``docs/design/adding-a-harness.md``.
+**The test seam sits above this layer, deliberately.** ``ARL_REVIEWER_CMD`` short-circuits in
+:mod:`arl.runner` before a harness is consulted.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -37,26 +34,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 from arl.errors import OcrlError
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
-    from collections.abc import Mapping
-
     from arl.config import Config
 
 __all__ = [
+    "SUBAGENT",
     "UNIMPLEMENTED_MODEL",
-    "Attachment",
-    "CaptureSpec",
-    "Captured",
     "ClarifySpec",
     "Command",
     "Harness",
     "PayloadError",
     "ReviewSpec",
-    "SessionStrategy",
     "TranscriptError",
     "UnknownHarness",
     "Usage",
@@ -65,17 +57,16 @@ __all__ = [
     "model",
     "names",
     "selected",
-    "strategies",
 ]
 
 
 class PayloadError(OcrlError):
     """A command could not be composed, so **nothing ran**.
 
-    Raised while building a :class:`Command` -- an attachment that cannot be read back for
-    inlining, a working directory that cannot be created. :mod:`arl.reviewer` turns it into
-    the same blocking bundle failure as a staged attachment that changed underneath: no
-    reviewer was launched, so there is no transcript to parse and no session to release.
+    Raised while building a :class:`Command` -- a payload that cannot be written, a working
+    directory that cannot be created. :func:`arl.runner.invoke` turns it into a
+    :class:`arl.runner.LaunchError`: no reviewer was launched, so there is no transcript to
+    parse, and the review is an operational failure.
     """
 
 
@@ -85,7 +76,7 @@ class TranscriptError(OcrlError):
     Raised by :meth:`Harness.transcript` for anything the exit status does not already
     report -- a CLI that framed a failed turn as a successful process, a tool call that was
     denied, output that is not the shape the flags promised. Every one of them reaches the
-    gate as an ``OP_FAILURE`` and blocks; none of them may become "no findings".
+    engine as an ``OP_FAILURE`` and blocks; none of them may become "no findings".
     """
 
 
@@ -100,16 +91,16 @@ class UnknownHarness(Exception):
 
 @dataclass(frozen=True)
 class Command:
-    """One fully-composed reviewer invocation, ready for :func:`arl.reviewer.run_bounded`.
+    """One fully-composed reviewer invocation, ready for :func:`arl.runner.run_bounded`.
 
     ``env`` is *overrides*, not a whole environment, so a harness cannot drop a variable it does
     not know about. ``stdin`` is the bytes to feed the child, or ``None`` for one that reads
     nothing.
 
     ``cwd`` is the directory the child runs in, or ``None`` to inherit. It is part of *composing
-    the command* rather than something :mod:`arl.reviewer` decides, because where a reviewer runs
+    the command* rather than something :mod:`arl.runner` decides, because where a reviewer runs
     is also where some CLIs persist their sessions -- a harness must be able to keep that out of
-    the user's own working directory without the gate knowing why.
+    the user's own working directory without the engine knowing why.
     """
 
     argv: list[str]
@@ -118,135 +109,45 @@ class Command:
     cwd: str | None = None
 
 
-@dataclass(frozen=True)
-class Attachment:
-    """One thing the reviewer is given, and the bytes it is required to be.
-
-    **The digest travels with the path because the two delivery styles differ in who opens the
-    file.** A harness that names the attachment in an argv hands the pathname to another process,
-    and the gate's check can only be moved close to that open, never made to cover it. One that
-    *inlines* it reads it in this process, so that gap can be closed outright -- but only if it
-    knows what the bytes were supposed to be. Carrying the path alone would leave the second kind
-    as exposed as the first while looking safer.
-
-    ``digest`` is required rather than defaulted: an attachment nobody vouched for must be
-    impossible to construct by accident.
-    """
-
-    path: Path
-    digest: str
-
-
 @dataclass(frozen=True, kw_only=True)
 class ReviewSpec:
-    """Everything one review invocation needs, in harness-neutral terms.
+    """Everything a harness needs to spell one review (or one contract repair).
 
-    Deliberately says *what the invocation is*, never how to spell it: the prompt is already-decoded
-    text, ``attachments`` is the exact ordered list :func:`arl.reviewer.stage_invocation` staged
-    (never a directory to glob), and ``cold`` states the intent -- this run must see no
-    model-influenced context.
-
-    **The two session fields are never both set.** ``session_id`` is a session that already exists
-    and this run continues, non-empty only when the gate decided continuity holds.
-    ``new_session_id`` is an id :meth:`SessionStrategy.mint` produced for a *fresh* run, empty for a
-    harness that cannot pre-assign.
+    ``prompt_text`` is the composed prompt, already naming every file of the bundle; the
+    reviewer reads them itself. Outside ``repo`` it may read ``bundle_dir`` and every root in
+    ``roots``: a plan's roots need not sit under the launch directory.
     """
 
+    #: Where the reviewer runs: the run's launch directory.
     repo: str
     prompt_text: str
-    #: Plugin-shipped guidance on *how* to work, as opposed to what to review
-    #: (``prompts/reviewer-efficiency.md``). Carried separately from ``prompt_text`` because
-    #: the two CLIs deliver it differently and only one of them has somewhere better than the
-    #: prompt to put it: Claude Code takes it as ``--append-system-prompt``, where an
-    #: instruction about tool use is followed far more reliably than the same words buried in
-    #: a 100 KB user message, while OpenCode has no system-prompt flag and appends it to the
-    #: prompt instead. **Fixed plugin text, never repo- or model-derived**, so it carries no
-    #: evidence-boundary weight -- it has exactly the standing of the prompt file itself.
-    #:
-    #: Defaults to "" and every harness skips it when empty. A review that runs without the
-    #: guidance is an ordinary review -- it costs more turns, not correctness -- so this is one
-    #: of the few fields whose absence is allowed to degrade quietly.
+    #: The plugin's working guidance (``prompts/reviewer-efficiency.md``), for a harness that can
+    #: put it somewhere other than the prompt.
     system_prompt: str = ""
     title: str
     bundle_dir: Path
-    #: The activation directory this review belongs to -- the root of everything the gate
-    #: persists for it. Offered so a harness can put its own scratch or session state
-    #: somewhere outside the repository under review (Rule 3) without deriving paths itself.
-    act_dir: Path
+    roots: tuple[str, ...] = ()
     config: Config
-    attachments: tuple[Attachment, ...] = ()
-    session_id: str = ""
-    new_session_id: str = ""
-    cold: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)
 class ClarifySpec:
-    """One clarify invocation: a question about a review already given.
-
-    Narrower than :class:`ReviewSpec` by construction -- there is no ``session_id``
-    field at all, because a clarify never continues a session and a harness must not be
-    able to be handed one. It is always cold. See ``arl.commands.clarify``.
-    """
+    """One clarify question about a review already given; the same shape as a review."""
 
     repo: str
     prompt_text: str
-    #: See :attr:`ReviewSpec.system_prompt`. A clarify is an agentic run over the same
-    #: repository, so the same guidance applies to it.
     system_prompt: str = ""
     title: str
     bundle_dir: Path
-    #: See :attr:`ReviewSpec.act_dir`.
-    act_dir: Path
+    roots: tuple[str, ...] = ()
     config: Config
-    question_file: Attachment
-    attachments: tuple[Attachment, ...] = ()
-
-
-@dataclass(frozen=True, kw_only=True)
-class CaptureSpec:
-    """What a strategy needs to answer "which session did this fresh run use?".
-
-    ``started_ms`` is the wall clock immediately before the reviewer was launched, in
-    milliseconds: it bounds a discovery search to sessions this run could actually have
-    created. ``seq`` names any scratch file the call writes, so two concurrent reviews cannot
-    collide over one. ``new_session_id`` is what :meth:`SessionStrategy.mint` pre-assigned,
-    which a pre-assigning strategy simply hands back.
-    """
-
-    repo: str
-    title: str
-    act_dir: Path
-    seq: str
-    started_ms: int
-    config: Config
-    new_session_id: str = ""
-
-
-@dataclass(frozen=True)
-class Captured:
-    """The session one fresh run turned out to have used, or nothing.
-
-    Falsy when the session could not be established, which every caller must treat as
-    "this round has no continuity to offer the next one" -- never as an error. Capturing a
-    session is an optimisation; failing to capture one costs tokens, not correctness.
-    """
-
-    session_id: str = ""
-    #: The CLI's own creation timestamp, in milliseconds. Stored beside the id and re-checked
-    #: on every later use, so an id that is reused for a *different* session does not read as
-    #: the same one. ``0`` for a harness that has no such timestamp to offer.
-    created: int = 0
-
-    def __bool__(self) -> bool:
-        return bool(self.session_id)
 
 
 @dataclass(frozen=True)
 class Usage:
     """What one reviewer invocation cost, as its CLI reported it.
 
-    **Observability only. Nothing in the gate reads this to decide anything** -- not a verdict, not
+    **Observability only. Nothing in the engine reads this to decide anything** -- not a verdict, not
     a budget, not a retry. It exists because the cost of a round was otherwise invisible.
 
     Every field is ``None`` when the CLI did not report it or reported a non-number, and the whole
@@ -270,67 +171,10 @@ class Usage:
 
 
 @runtime_checkable
-class SessionStrategy(Protocol):
-    """How one harness's sessions come into existence, and how one is recognised.
-
-    **The two families differ in kind, not detail.** OpenCode *discovers* a session after the fact
-    -- it is created by the run, and the only way to learn its id is to list sessions and match the
-    unique ``--title``. Claude Code *assigns* one up front. Everything else about continuity is
-    shared, so only this seam varies.
-
-    Everything a strategy produces is a continuity **hint**: nothing here can authorise an
-    approval, and what a verdict must survive in ``reviewer.execute`` consults none of it.
-    """
-
-    @property
-    def capture_timeout_sec(self) -> int:
-        """The longest one :meth:`verify` or :meth:`capture` call can take, in seconds.
-
-        The gate's claim leases are sized from this rather than from a constant, because a
-        strategy that runs no subprocess at all genuinely needs none of that window -- and a
-        lease padded for a listing that never happens is a lease an abandoned claim is
-        honoured far past anything real. ``0`` for a strategy that makes no call.
-        """
-
-    def is_session_id(self, value: object) -> bool:
-        """Is ``value`` a well-formed session id for this harness?
-
-        Given ``object``, not ``str``, deliberately: every caller reads its value out of
-        ``state.json`` or a CLI's own output, neither of which is a trust boundary, so the
-        type check belongs here with the shape check rather than being repeated -- and
-        forgotten -- at each call site.
-        """
-
-    def mint(self) -> str:
-        """A fresh session id for a run about to start, or ``""`` for a harness that cannot
-        pre-assign one. See :attr:`ReviewSpec.new_session_id`."""
-
-    def verify(self, pointer: Mapping[str, Any], *, repo: str, config: Config, act_dir: Path, seq: str) -> bool:
-        """Does the remembered ``pointer`` still name a session this harness can continue?
-
-        ``False`` drops continuity for this round -- never an error, and never anything the
-        caller has to distinguish: a fresh review is always a correct review. A strategy that
-        has nothing to check answers ``True`` and lets its CLI refuse the id itself, which is
-        a non-zero exit and therefore an ``OP_FAILURE`` that blocks (Rule 1).
-
-        Any *reason* worth an operator's attention is logged here, by the strategy that knows
-        what it looked at; the caller logs only the consequence.
-        """
-
-    def capture(self, spec: CaptureSpec) -> Captured:
-        """The session this fresh run used, for the next round to continue.
-
-        Must never raise: every failure is a log line and a falsy :class:`Captured`.
-        """
-
-
-@runtime_checkable
 class Harness(Protocol):
-    """What :mod:`arl.reviewer` requires of a reviewer CLI.
+    """What :mod:`arl.runner` requires of an external reviewer CLI.
 
-    ``binary`` is the executable to look for on ``PATH``; ``arm``, ``resume`` and
-    ``config`` all report it by name when it is missing, so it is a property of the
-    harness rather than a string repeated at three call sites. ``default_model`` is what
+    ``binary`` is the executable to look for on ``PATH``. ``default_model`` is what
     ``model`` resolves to when configuration leaves it unset -- per harness, because a
     provider-qualified id that is meaningful to one CLI is meaningless to another.
     """
@@ -353,20 +197,17 @@ class Harness(Protocol):
     def clarify_command(self, spec: ClarifySpec) -> Command:
         """The command that answers one clarify question."""
 
-    def sessions(self) -> SessionStrategy:
-        """How this harness's sessions are named, minted and found again."""
-
     def transcript(self, raw: bytes) -> bytes:
         """The reviewer's answer, extracted from whatever its CLI actually wrote.
 
-        The gate parses **one** thing, the ``FINDING``/``VERDICT`` contract, out of prose. A CLI that
+        The engine parses **one** thing, the ``FINDING``/``VERDICT`` contract, out of prose. A CLI that
         answers in prose returns ``raw`` unchanged; one that wraps the answer unwraps it here, so
-        :func:`arl.reviewer.parse` never learns more than one shape exists.
+        :func:`arl.contract.parse` never learns more than one shape exists.
 
         **This is also where a run that "succeeded" is refused.** Some CLIs report a failed turn, or a
         tool call they denied, in that wrapper while still exiting ``0`` -- measured on Claude Code.
         Anything of that kind raises :class:`TranscriptError`, because a review of less evidence than
-        the gate believes it sent must never reach the parser as a verdict (Rule 1).
+        the engine believes it sent must never reach the parser as a verdict (Rule 1).
         """
 
     def usage(self, raw: bytes) -> Usage | None:
@@ -397,25 +238,14 @@ class Harness(Protocol):
 def _registry() -> dict[str, Harness]:
     # Imported inside the function, not at module scope: an implementation module imports
     # this one for `Command`/`ReviewSpec`, so a module-scope import here would be a cycle.
-    from arl.harness import claudecode, opencode  # noqa: PLC0415 - see comment above
+    from arl.harness import opencode  # noqa: PLC0415 - see comment above
 
-    return {implementation.name: implementation for implementation in (opencode.HARNESS, claudecode.HARNESS)}
+    return {implementation.name: implementation for implementation in (opencode.HARNESS,)}
 
 
 def names() -> list[str]:
     """Every implemented harness name, sorted -- for error messages and `config` output."""
     return sorted(_registry())
-
-
-def strategies() -> list[SessionStrategy]:
-    """Every implemented harness's session strategy.
-
-    For the one thing that has to hold across *all* of them at once rather than for the
-    configured one: ``reviewer._MAX_LEASE_SEC``, the ceiling a stored ``lease_sec`` is
-    validated against. That ceiling has to be the largest lease **any** harness can
-    legitimately produce, or a real lease from a slower harness would read as tampered.
-    """
-    return [implementation.sessions() for implementation in _registry().values()]
 
 
 def get(name: str) -> Harness:
@@ -459,6 +289,11 @@ def model(config: Config, implementation: Harness | None = None) -> str:
 UNIMPLEMENTED_MODEL: Final = "<no harness>"
 
 
+#: The ``harness`` value for the default reviewer, a subagent the mod spawns. Not in the registry:
+#: the engine never runs it.
+SUBAGENT: Final = "subagent"
+
+
 def display_model(config: Config) -> str:
     """:func:`model`, for the two callers that must render rather than raise.
 
@@ -467,6 +302,8 @@ def display_model(config: Config) -> str:
     caller that decides something -- arming, resuming, composing a command -- uses
     :func:`model` and takes the refusal.
     """
+    if config.as_str("harness") == SUBAGENT:
+        return config.as_str("model") or "the session's default"
     try:
         return model(config)
     except UnknownHarness:

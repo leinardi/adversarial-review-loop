@@ -5,13 +5,8 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-merge-conflict
-      # The vendored parser is excluded from the whitespace fixers as well as from the
-      # Python hooks: it is kept diffable against the upstream sdist, and upstream ships
-      # trailing whitespace this repository would otherwise rewrite.
       - id: end-of-file-fixer
-        exclude: ^scripts/arl/_vendor/
       - id: trailing-whitespace
-        exclude: ^scripts/arl/_vendor/
       - id: check-yaml
       - id: check-json
       - id: check-toml
@@ -28,7 +23,6 @@ repos:
           # pytest ships py.typed; without it every @fixture and @parametrize is an
           # untyped decorator and mypy reports the test it decorates as untyped.
           - pytest==9.2.0
-        exclude: ^scripts/arl/_vendor/
       - id: mypy
         alias: mypy-json-output
         name: mypy (json output)
@@ -45,20 +39,16 @@ repos:
             "--ignore-missing-imports",
             "--scripts-are-modules",
           ]
-        exclude: ^scripts/arl/_vendor/
         stages: [manual]
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.3
     hooks:
       - id: ruff-check
         args: ["--fix"]
-        exclude: ^scripts/arl/_vendor/
       - id: ruff-format
-        exclude: ^scripts/arl/_vendor/
       - id: ruff-check
         alias: ruff-check-rdjson
         args: ["--fix", "-q", "--output-format=rdjson"]
-        exclude: ^scripts/arl/_vendor/
         stages: [manual]
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
@@ -114,7 +104,7 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-commit]
-      # The display module and its tests are the only JavaScript here, and pre-commit is the
+      # The mod and its tests are the only JavaScript here, and pre-commit is the
       # only development toolchain: these two hooks run from the node environment pre-commit
       # builds out of their pinned dependencies, with no package.json and no npm step. TypeScript
       # stays below 6.1 because typescript-eslint supports nothing newer.
@@ -124,18 +114,18 @@ repos:
         language: node
         additional_dependencies: ["eslint@10.11.0", "@eslint/js@10.0.1", "typescript-eslint@8.71.0", "typescript@6.0.3"]
         pass_filenames: false
-        files: ^(hooks/.*\.js|tests/mod/.*\.ts|eslint\.config\.cjs)$
+        files: ^(hooks/.*\.tsx?|tests/mod/.*\.tsx?|types/.*\.d\.ts|eslint\.config\.cjs)$
       # Checks against the API types Claude Code lays in .claude-plugin/types/ when it loads the
       # plugin. They are not committed, so where they are absent this fails and says how to get
       # them, rather than passing on code it never read. CI never has them, which is why this hook
       # is not in the CI job's list.
       - id: typecheck-mod
-        name: tsc (display module)
+        name: tsc (mod)
         entry: scripts/typecheck-mod.sh
         language: node
         additional_dependencies: ["typescript@6.0.3"]
         pass_filenames: false
-        files: ^(hooks/.*\.js|tests/mod/.*\.ts|tsconfig\.json)$
+        files: ^(hooks/.*\.tsx?|tests/mod/.*\.tsx?|types/.*\.d\.ts|tsconfig\.json)$
   - repo: https://github.com/adrienverge/yamllint
     rev: v1.38.0
     hooks:

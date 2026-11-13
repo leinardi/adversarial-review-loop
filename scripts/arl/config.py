@@ -9,7 +9,7 @@ may select a model or widen an ignore list, but nothing here can execute code or
 failure into an approval -- every value is read as data by a typed accessor.
 
 ``-I`` implies ``-E``, which suppresses ``PYTHON*`` variables only; ``ARL_*`` is unaffected
-and still reaches the gate.
+and still reaches the engine.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -41,6 +41,7 @@ __all__ = [
     "BOOL_KEYS",
     "CONFIG_KEYS",
     "DEFAULTS",
+    "EFFORT_LEVELS",
     "INT_KEYS",
     "LIST_KEYS",
     "REPO_CONFIG_NAME",
@@ -63,17 +64,17 @@ __all__ = [
 #: ``arl.harness.model``, the one reader every command shares. An empty ``model`` therefore
 #: means "whatever this harness calls its default", never "no model".
 #:
-#: ``harness`` defaults to ``claude-code``: the gate runs as a Claude Code plugin, so that is
-#: the one reviewer CLI every user of it already has installed. ``opencode`` -- which the
-#: project was originally named after and which is still fully supported -- is one config key
-#: away, and the name never falls back: see ``arl.harness.UnknownHarness``.
+#: ``harness`` defaults to ``subagent``: the mod spawns a fresh Claude Code subagent per round, and
+#: the engine only prepares and records. ``opencode`` is the one reviewer CLI the engine runs
+#: itself (``review run-external``). The name never falls back: see ``arl.harness.UnknownHarness``.
 #:
-#: ``review_guide`` defaults to ``""`` (off). It is the one key whose value names a file whose
-#: *content becomes instruction* rather than data, so it is resolved and frozen once, at arm --
-#: a later edit to the key, or to the file it named, changes nothing about a running
-#: activation. See ``arl.guide`` for what the framing around it allows and forbids.
+#: ``review_guide`` names one Markdown file spliced into every review prompt, and ``review_skill``
+#: selects each root's own review skill (``auto``, a skill name, or ``off``). Both are read fresh
+#: for every review; see ``arl.guidance``.
+#: ``roots`` lists extra workspace roots every run in this directory starts with, besides the
+#: launch directory, ``--root`` arguments and the paths the plan names (``arl init``).
 DEFAULTS: Final[dict[str, Any]] = {
-    "harness": "claude-code",
+    "harness": "subagent",
     "model": "",
     "variant": "",
     "block_severity": "medium",
@@ -81,10 +82,9 @@ DEFAULTS: Final[dict[str, Any]] = {
     "timeout_sec": 900,
     "max_failures": 2,
     "max_transient_failures": 5,
-    "max_stop_blocks": 3,
-    "max_defers": 3,
+    # The command Claude is told to run before asking for a review. The engine never runs it:
+    # what it reported reaches the reviewer as `verification.txt`.
     "verify_cmd": "",
-    "pure": True,
     "disable_project_config": False,
     "chunk_diff_bytes": 400000,
     "hard_diff_ceiling": 8388608,
@@ -93,23 +93,26 @@ DEFAULTS: Final[dict[str, Any]] = {
     "max_findings": 200,
     "max_findings_bytes": 65536,
     "max_clarifications": 2,
-    "stall_rounds": 3,
-    "max_session_rounds": 3,
-    "allow_dirty": False,
-    "ttl_hours": 24,
+    "stall_rounds": 5,
     "ignore_globs": [],
     "final_review": False,
     "review_guide": "",
+    "review_skill": "auto",
+    "roots": [],
+    # The subagent reviewer's effort (`low` to `max`); empty for the agent default. opencode's
+    # counterpart is `variant`.
+    "effort": "",
+    # Compact the conversation before each phase after an approval, so a long plan's later
+    # phases do not run on a full context.
+    "auto_compact": False,
 }
 
-BOOL_KEYS: Final = ("pure", "disable_project_config", "allow_dirty", "final_review")
+BOOL_KEYS: Final = ("disable_project_config", "final_review", "auto_compact")
 
 INT_KEYS: Final = (
     "timeout_sec",
     "max_failures",
     "max_transient_failures",
-    "max_stop_blocks",
-    "max_defers",
     "chunk_diff_bytes",
     "hard_diff_ceiling",
     "max_file_bytes",
@@ -118,14 +121,15 @@ INT_KEYS: Final = (
     "max_findings_bytes",
     "max_clarifications",
     "stall_rounds",
-    "max_session_rounds",
-    "ttl_hours",
 )
 
-LIST_KEYS: Final = ("ignore_globs",)
+LIST_KEYS: Final = ("ignore_globs", "roots")
 
 #: The keys whose value is a severity label, validated and ranked through ``threshold_rank``.
 SEVERITY_KEYS: Final = ("block_severity", "late_block_severity")
+
+#: The levels ``effort`` may name, besides empty (the agent default).
+EFFORT_LEVELS: Final = ("low", "medium", "high", "xhigh", "max")
 
 #: The keys the environment may override, in the shell's order.
 CONFIG_KEYS: Final = tuple(DEFAULTS)
@@ -139,7 +143,7 @@ REPO_CONFIG_NAME: Final = ".adversarial-review-loop.json"
 #: Every label ``severity_rank``/``threshold_rank`` recognise, with its rank. The single
 #: source both functions read from, so a label added to one can never drift from the other.
 #: ``critical`` is a real, fifth tier -- the reviewer contract's own ``FINDING`` regex
-#: (``reviewer.py``, ``severity=(?P<severity>info|low|medium|high|critical)``) accepts
+#: (``contract.py``, ``severity=(?P<severity>info|low|medium|high|critical)``) accepts
 #: exactly these five words and no others, so this dict has to agree with that regex, not
 #: invent its own vocabulary.
 _SEVERITY_RANK: Final[dict[str, int]] = {
@@ -257,8 +261,8 @@ def load(
     """Merge every layer into one configuration.
 
     Precedence, lowest to highest: defaults < user config < repo config < ``overrides`` <
-    environment. ``overrides`` is a per-activation overlay (``state.json``'s ``overrides``
-    field, e.g. a ``--model`` given to ``implement`` or ``resume``) -- it beats the config
+    environment. ``overrides`` is a per-run overlay (for example a ``--model`` the user gave
+    for this run) -- it beats the config
     files but not ``ARL_*``, so the environment still has the final word. Only keys already
     in :data:`DEFAULTS` are accepted from it; anything else is dropped, because the overlay
     is written into state and state is not a trust boundary the config layer should widen.
@@ -302,7 +306,7 @@ def severity_rank(label: str) -> int:
 
     An unrecognised label ranks as the most severe (5) -- the highest rank a real label ever
     gets is 4, so this guarantees an unparsable label clears any configured threshold. A
-    severity the gate cannot parse must never be a way to slip past it (Rule 1).
+    severity the engine cannot parse must never be a way to slip past it (Rule 1).
 
     Not the right function for ranking ``block_severity`` itself -- see ``threshold_rank``.
     """
@@ -318,7 +322,7 @@ def threshold_rank(label: str) -> int:
     every real label) would make almost nothing meet it, so a typo'd or unrecognised
     threshold would silently block far less than the default, not more. Rule 1 requires the
     opposite direction here, so an unrecognised threshold ranks at 1 -- the floor a finding's
-    rank clears most easily -- making the gate stricter on bad input, never looser.
+    rank clears most easily -- making the engine stricter on bad input, never looser.
     """
     return _SEVERITY_RANK.get(label.lower(), 1)
 
@@ -328,7 +332,7 @@ def late_threshold_rank(config: Config) -> int:
 
     From the second review round of a phase on, a finding that is new *and* outside the paths
     changed since the previous round blocks only when it reaches this rank
-    (``reviewer.parse``). It can only ever **defer** a finding that ``block_severity`` would
+    (``contract.parse``). It can only ever **defer** a finding that ``block_severity`` would
     have blocked, never widen the blocking set: a ``late_block_severity`` set below
     ``block_severity`` is meaningless in that direction, so it is read as ``block_severity``
     itself. Both labels rank through :func:`threshold_rank`, so an unrecognised value ranks at

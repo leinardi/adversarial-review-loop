@@ -1,8 +1,8 @@
 # Core
 
-Security-shaped Claude Code plugin: external adversarial review gates commits. Primary project rules
-and layout live in root `AGENTS.md`. Gate is Python (`scripts/arl/`, `scripts/arl-bootstrap.py`),
-invoked only via `python3 -I` behind the guarded shim `scripts/arl.sh`; the Bash implementation
-under `scripts/lib/` was removed in Phase 8, so there is no reference implementation or rollback
-path left. State lives only in XDG state; failures must block/escalate, hook stdout is strict JSON
-protocol, snapshot must not touch real index/worktree, user alone controls exits.
+v4 rewrite in progress on the `v4` branch: the plugin moves from an enforcement gate to a
+plan-and-go review loop with no security guarantees. Project rules and layout live in root
+`AGENTS.md`. The engine is Python (`scripts/arl/`, `scripts/arl-bootstrap.py`), run only as
+`python3 -I` through `scripts/arl.sh`; the orchestrator and UI become a Claude Code mod under
+`hooks/`. A failure is never an approval, the reviewer sees the whole phase, and snapshots never
+touch the real index or worktree.

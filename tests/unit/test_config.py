@@ -51,22 +51,18 @@ def write_repo_config(repo: Path, values: object) -> None:
 
 def test_defaults_stand_when_nothing_else_exists(layers: dict[str, str], tmp_path: Path) -> None:
     cfg = config.load(str(tmp_path / "repo"), layers)
-    # The gate ships as a Claude Code plugin, so the reviewer every user already has installed
-    # is the one it defaults to; `opencode` stays one config key away.
-    assert cfg.as_str("harness") == "claude-code"
-    # Empty, not a model name: `model`'s real default is the selected harness's own, resolved
-    # through `harness.model` -- see `test_harness.py` for that half of the contract.
+    assert cfg.as_str("harness") == harness.SUBAGENT
+    # Empty: the subagent runs on the session's model unless one is configured.
     assert cfg.as_str("model") == ""
-    assert harness.model(cfg) == "opus"
-    assert cfg.as_int("ttl_hours") == 24
-    assert cfg.as_bool("pure") is True
+    assert cfg.as_int("stall_rounds") == 5
+    assert cfg.as_str("review_skill") == "auto"
     assert cfg.as_bool("final_review") is False
     assert cfg.as_list("ignore_globs") == []
 
 
 def test_all_four_layers_in_order(layers: dict[str, str], tmp_path: Path) -> None:
     repo = tmp_path / "repo"
-    write_user_config(layers, {"model": "user-model", "block_severity": "high", "ttl_hours": 5})
+    write_user_config(layers, {"model": "user-model", "block_severity": "high", "stall_rounds": 3})
     write_repo_config(repo, {"model": "repo-model", "block_severity": "medium"})
     layers["ARL_MODEL"] = "env-model"
 
@@ -74,7 +70,7 @@ def test_all_four_layers_in_order(layers: dict[str, str], tmp_path: Path) -> Non
 
     assert cfg.as_str("model") == "env-model", "environment must win"
     assert cfg.as_str("block_severity") == "medium", "repo must beat user"
-    assert cfg.as_int("ttl_hours") == 5, "user must beat defaults"
+    assert cfg.as_int("stall_rounds") == 3, "user must beat defaults"
     assert cfg.as_int("timeout_sec") == 900, "defaults must survive underneath"
 
 
@@ -101,7 +97,7 @@ def test_overrides_beat_repo_but_lose_to_environment(layers: dict[str, str], tmp
 
 
 def test_an_unknown_override_key_is_dropped(layers: dict[str, str], tmp_path: Path) -> None:
-    """The overlay is written into ``state.json``, which is not a trust boundary (Rule 3)."""
+    """``overrides`` takes only keys ``DEFAULTS`` knows; anything else is dropped."""
     cfg = config.load(str(tmp_path / "repo"), layers, overrides={"model": "override-model", "totally_not_a_real_key": "x"})
     assert cfg.as_str("model") == "override-model", "a known key from the overlay is still accepted"
     assert "totally_not_a_real_key" not in cfg.values
@@ -145,15 +141,15 @@ def test_a_non_object_file_is_skipped_on_its_own(layers: dict[str, str], tmp_pat
 
 @pytest.mark.parametrize(("raw", "expected"), [("1", True), ("true", True), ("TRUE", True), ("yes", True), ("on", True)])
 def test_truthy_environment_values(raw: str, expected: bool, layers: dict[str, str]) -> None:
-    layers["ARL_PURE"] = raw
-    assert config.load("", layers).as_bool("pure") is expected
+    layers["ARL_FINAL_REVIEW"] = raw
+    assert config.load("", layers).as_bool("final_review") is expected
 
 
 @pytest.mark.parametrize("raw", ["0", "false", "no", "off", "", "True", "YES", "anything"])
 def test_everything_else_is_false(raw: str, layers: dict[str, str]) -> None:
     """Exact matching, so a typo never silently enables something."""
-    layers["ARL_PURE"] = raw
-    assert config.load("", layers).as_bool("pure") is False
+    layers["ARL_FINAL_REVIEW"] = raw
+    assert config.load("", layers).as_bool("final_review") is False
 
 
 def test_final_review_env_override(layers: dict[str, str]) -> None:
@@ -182,12 +178,6 @@ def test_a_non_numeric_integer_override_is_skipped_not_zeroed(layers: dict[str, 
     assert config.load("", layers).as_int("timeout_sec") == 111
 
 
-def test_max_session_rounds_defaults_to_three_and_takes_an_integer_override(layers: dict[str, str]) -> None:
-    assert config.load("", layers).as_int("max_session_rounds") == 3
-    layers["ARL_MAX_SESSION_ROUNDS"] = "0"
-    assert config.load("", layers).as_int("max_session_rounds") == 0, "0 disables the cap; it must not be read as unset"
-
-
 def test_ignore_globs_is_comma_separated_in_the_environment(layers: dict[str, str]) -> None:
     layers["ARL_IGNORE_GLOBS"] = "a/*,,b/**,"
     assert config.load("", layers).as_list("ignore_globs") == ["a/*", "b/**"]
@@ -205,9 +195,9 @@ def test_an_empty_string_override_still_counts_as_set(layers: dict[str, str]) ->
 
 def test_a_false_boolean_renders_as_false_not_empty(layers: dict[str, str]) -> None:
     """The shell's `.[$k] // ""` blanked every false boolean; this does not reproduce it."""
-    assert config.load("", layers).as_str("pure") == "true"
-    layers["ARL_PURE"] = "0"
-    assert config.load("", layers).as_str("pure") == "false"
+    assert config.load("", layers).as_str("final_review") == "false"
+    layers["ARL_FINAL_REVIEW"] = "1"
+    assert config.load("", layers).as_str("final_review") == "true"
 
 
 def test_a_list_renders_comma_joined(layers: dict[str, str]) -> None:
@@ -307,11 +297,9 @@ def test_an_unrecognised_late_block_severity_falls_back_to_block_severity(layers
 
 def test_the_harness_is_settable_from_the_environment(layers: dict[str, str], tmp_path: Path) -> None:
     """``harness`` is a plain string key, so `ARL_HARNESS` reaches it through `from_env`'s
-    string branch like any other -- which is what makes `ARL_HARNESS=claude-code make dry-run`
-    work without a config file."""
-    layers["ARL_HARNESS"] = "claude-code"
+    string branch like any other, with no config file."""
+    layers["ARL_HARNESS"] = "some-other-harness"
 
     cfg = config.load(str(tmp_path / "repo"), layers)
 
-    assert cfg.as_str("harness") == "claude-code"
-    assert harness.model(cfg) == harness.get("claude-code").default_model
+    assert cfg.as_str("harness") == "some-other-harness"

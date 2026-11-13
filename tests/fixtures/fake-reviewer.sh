@@ -306,7 +306,7 @@ case "$mode" in
     echo-prompt)
         # Dumps the prompt file the gate handed over, so a test can assert what the
         # reviewer was actually instructed to do -- including a repo-supplied review guide
-        # spliced in by `arl.guide.compose`. Blocking, so the denial carries the dump back.
+        # spliced in by `arl.guidance.compose`. Blocking, so the denial carries the dump back.
         printf 'Prompt seen by this reviewer:\n'
         # The prompt documents the contract by example, so it contains the markers itself.
         # Echoed verbatim they would be a second block and the round would fail the contract

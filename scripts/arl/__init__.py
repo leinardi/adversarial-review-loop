@@ -1,4 +1,4 @@
-"""Python implementation of the ``adversarial-review-loop`` gate.
+"""Python implementation of the ``adversarial-review-loop`` engine.
 
 The package is never imported with ``python3 -m``: hooks run with the repository under
 review as cwd, and ``-m`` would put that repository at the front of ``sys.path``. The only

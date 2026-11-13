@@ -25,12 +25,23 @@ reviewer does not actually support, or -- for ``config`` -- refuse a model it do
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
-from test_commands_arm import _path_without_opencode
 
 from arl import reviewer_probe
+
+
+def _path_without_opencode(tmp_path: Path) -> str:
+    """A PATH holding ``git`` and ``bash`` and nothing else, so no real ``opencode`` is found."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    for tool in ("git", "bash"):
+        found = shutil.which(tool)
+        assert found, f"{tool} is required to run these tests"
+        (bindir / tool).symlink_to(found)
+    return str(bindir)
 
 
 def _fake_opencode(bindir: Path, script: str) -> None:
@@ -41,7 +52,7 @@ def _fake_opencode(bindir: Path, script: str) -> None:
 
 @pytest.fixture
 def bindir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    # `_path_without_opencode` also symlinks `git` and `bash` in -- without them, the fake
+    # `_path_without_opencode` symlinks `git` and `bash` in -- without them, the fake
     # `opencode` script's own `#!/usr/bin/env bash` shebang cannot resolve, and the process
     # fails with an unrelated "not found" before it ever reaches the behaviour under test.
     path = Path(_path_without_opencode(tmp_path))
