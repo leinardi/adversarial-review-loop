@@ -541,7 +541,7 @@ def _render_one(point: OscillationPoint) -> str:
 def render(points: Sequence[OscillationPoint], *, max_points: int | None = None, max_bytes: int | None = None) -> str:
     """One line per point, in the order given. ``""`` for an empty sequence.
 
-    Purely gate-computed text -- a file path and integers this module derived itself, never
+    Purely engine-computed text -- a file path and integers this module derived itself, never
     reviewer prose -- so unlike a ``FINDING``/``SUPERSEDES`` line this needs no re-validation
     by a reader; it is not something a tampered ``round_history`` can turn into smuggled text
     (see the module docstring).

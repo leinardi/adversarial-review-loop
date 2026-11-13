@@ -77,7 +77,7 @@ def test_bytecode_never_lands_in_either_repository(
     clean_env: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    """Rule 3, applied to ``__pycache__``: neither the reviewed repo nor the plugin repo."""
+    """AGENTS.md rule 4, applied to ``__pycache__``: neither the reviewed repo nor the plugin repo."""
     bootstrap = plugin_copy / "arl-bootstrap.py"
     assert pycache_dirs(plugin_copy) == set()
 

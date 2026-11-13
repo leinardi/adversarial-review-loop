@@ -118,7 +118,7 @@ def shared_pycache(tmp_path_factory: pytest.TempPathFactory) -> Path:
     source path and validated against each source file's mtime and size, so sharing it across
     tests cannot make one test see another's code.
 
-    Tests *about* the cache (Rule 3, unsafe prefixes) override ``XDG_CACHE_HOME`` themselves,
+    Tests *about* the cache (rule 4, unsafe prefixes) override ``XDG_CACHE_HOME`` themselves,
     which is what keeps their assertions about a freshly populated cache honest.
     """
     return tmp_path_factory.mktemp("shared-pycache")

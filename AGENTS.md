@@ -2,13 +2,12 @@
 
 Project authority for `adversarial-review-loop`. Read this before changing anything here.
 
-**Interim, v4 rewrite in progress.** This file describes the `v4` branch, which is being rebuilt
-from v3's enforcement gate into a plan-and-go review loop. The plan is
-`~/.claude/plans/magical-spinning-summit.md`, and its phases are landing one reviewed commit at a
-time. v3's rules, invariant index and design notes describe code that no longer exists; they are
-kept at the `adversarial-review-loop--v3.0.1` tag. Some docstrings still cite v3's rules ("Rule
-1"), `docs/design/` notes or v3 modules; they are rewritten as each module is replaced, and a
-stale reference is not an instruction. `README.md` and `docs/` are rewritten in phase 6.
+v3, the enforcement gate, its rules, invariant index and design notes, are kept at the
+`adversarial-review-loop--v3.0.1` tag; they describe code that no longer exists. A docstring that
+still says "the shell gate" or "the retired Bash gate" is history, kept where it explains why the
+code is shaped as it is. A docstring that still describes v3 machinery (leases, arming, a
+`PreToolUse` denial, a state root under `XDG_STATE_HOME`) is stale, not an instruction: fix it
+when you touch the code.
 
 For **how to review** a change to this repo, use the `adversarial-review` skill in
 `.agents/skills/`.
@@ -24,16 +23,16 @@ and the design does not try to stop it. What it must get right is the review its
 sees exactly the phase's changes, its verdict is parsed strictly, and no failure is ever reported
 as an approval.
 
-Target architecture (the phases build it):
+The architecture ([docs/architecture.md](docs/architecture.md) has the long form):
 
-- **The mod** (`hooks/mod.ts`, phase 4 and 5): the orchestrator and UI. It registers the tools
+- **The mod** (`hooks/mod.ts`): the orchestrator and UI. It registers the tools
   Claude calls (`set_phases`, `add_root`, `review`, `clarify`), the reviewer subagent, the slash
   commands, and the band and review pane.
 - **The engine** (`scripts/arl/`, Python): workspace roots and snapshots, the review bundle,
   prompt composition, contract parsing and the verdict, stall detection, reports, and the run
   state under `<launch dir>/.arl/`. It is a CLI with JSON in and out, run by the mod.
 
-## Rules that hold in every phase
+## Rules that hold in every change
 
 1. **No failure is an approval.** A bundle that cannot be built, a reviewer that times out, exits
    non-zero, says nothing, breaks the output contract or gives an unknown verdict is
@@ -97,7 +96,7 @@ make dev-deps     # install the pinned dev dependencies (once per checkout)
 make test         # unit tests and the arl.sh smoke test; no model is called
 make test-unit    # the pytest half only
 make test-accept  # tests/selftest.sh only
-make test-mod     # the mod under `claude plugin test`; needs the claude binary (from phase 4)
+make test-mod     # the mod under `claude plugin test`; needs the claude binary
 make check        # pre-commit: shellcheck, markdownlint, yamllint, actionlint, ruff, mypy, eslint, tsc, licence headers
 make sync-pins    # propagate requirements-dev.txt into .pre-commit-config.yaml
 ```
@@ -124,7 +123,7 @@ enforces it. A new file takes the year of its first commit. YAML, JSON and Markd
 ### Commits
 
 All commits are Conventional Commits 1.0.0 **with a scope**: `<type>(<scope>)[!]: <description>`,
-enforced by the `commit-msg` hook and CI. A change users receive (`scripts/`, `hooks/`,
+enforced by the `commit-msg` hook and CI. A change users receive (`scripts/`, `hooks/`, `types/`,
 `prompts/`, `.claude-plugin/`) is `feat` or `fix`; anything else (CI, tests, docs, tooling) is
 another type. svu derives the release from these types, so a wrong type ships a wrong version; see
 [`docs/release.md`](docs/release.md). The v4 work lands on the `v4` branch, one reviewed commit per

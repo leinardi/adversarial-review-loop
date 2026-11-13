@@ -76,7 +76,7 @@ class TranscriptError(OcrlError):
     Raised by :meth:`Harness.transcript` for anything the exit status does not already
     report -- a CLI that framed a failed turn as a successful process, a tool call that was
     denied, output that is not the shape the flags promised. Every one of them reaches the
-    gate as an ``OP_FAILURE`` and blocks; none of them may become "no findings".
+    engine as an ``OP_FAILURE`` and blocks; none of them may become "no findings".
     """
 
 

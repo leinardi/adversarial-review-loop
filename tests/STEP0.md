@@ -296,7 +296,7 @@ the state file would still be forgeable. Treat this as raising the bar, not clos
 
 ## Session E — does `{"decision":"block"}` work on a post-hook (items 13, 14)
 
-The Python port's fail-closed fallback table (see docs/design/interpreter-and-watchdog.md) gives
+The Python port's fail-closed fallback table (docs/design/interpreter-and-watchdog.md, v3 tag) gives
 `confirm-commit` (`PostToolUse`) and `posttool-failure` (`PostToolUseFailure`) weaker fallbacks than
 `pretool` and `gate-stop`, because neither can deny — the tool call has already run by the time
 either fires. `confirm-commit` falls back to `additionalContext`, which is known to work because the
@@ -334,7 +334,7 @@ it.
 `hooks/hooks.json` and registers once at plugin load, so a same-session `resume` registers nothing a
 second time and there is no double firing to measure. See "Plugin-level hooks, 2026-08-30" below for
 the result that moved them, and
-[`docs/design/resume-and-retirement.md`](../docs/design/resume-and-retirement.md) for why neither
+`docs/design/resume-and-retirement.md` (at the v3 tag) for why neither
 skill may grow one back. The rest of this section is kept only as the record of what was asked; do
 not run it.
 
@@ -685,7 +685,7 @@ above is the runbook for both.
 
 ## Session H — session identity across `/clear` and `/resume` (documented ahead of measurement)
 
-`docs/faq.md` ("Picking up where you left off") and `docs/edge-cases.md` now answer the two
+v3's `docs/faq.md` ("Picking up where you left off") and `docs/edge-cases.md` answered the two
 commonest real-world interruptions, and both answers turn on one host behaviour nobody has measured:
 **which session id you come back under.** The plugin binds an activation to
 `(worktree, session id)`, so that single fact decides whether "just continue" is correct or whether

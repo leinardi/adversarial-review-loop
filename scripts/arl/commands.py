@@ -339,7 +339,8 @@ def cmd_accept(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
 
 def cmd_next_action(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
     with locked_state(paths) as run:
-        answer = next_action(run)
+        cfg = config.load(str(paths.launch_dir))
+        answer = next_action(run, verify_cmd=cfg.as_str("verify_cmd"))
         if run is not None and answer["action"] == "continue":
             # A new stage after an approval starts on a compacted conversation when asked: what
             # the earlier phases said is in the commits and the reports. Once per approval: a
@@ -347,7 +348,7 @@ def cmd_next_action(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]
             fresh = bool(run.data.get("compact_due"))
             run.data["compact_due"] = False
             run.save()
-            answer["compact"] = fresh and config.load(str(paths.launch_dir)).as_bool("auto_compact")
+            answer["compact"] = fresh and cfg.as_bool("auto_compact")
         return {"ok": True, **answer}
 
 

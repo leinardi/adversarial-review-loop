@@ -2,7 +2,7 @@
 
 A snapshot is committed + staged + unstaged + non-ignored untracked content, captured through
 a **throwaway index**: ``GIT_INDEX_FILE`` points at a temporary *copy* of the repository's
-index, so ``add -A``/``write-tree`` never touch the real one (Rule 3).
+index, so ``add -A``/``write-tree`` never touch the real one (AGENTS.md rule 4).
 
 A copy rather than a fresh index seeded from ``HEAD``, because the tree this produces is the
 tree ``git add -A && git commit`` is about to produce, and those differ whenever the real index
@@ -79,7 +79,7 @@ GIT_TIMEOUT_SEC: Final = 120
 #: is not exactly this shape must never reach a git command line: ``git diff --output=<file>``
 #: and ``git log --output=<file>`` are real options, so a crafted
 #: ``"--output=../../repo/x"`` would have git write *inside* the repository under review,
-#: breaking Rule 3 -- and its empty stdout would then read as "no changes" and approve,
+#: breaking rule 4 -- and its empty stdout would then read as "no changes" and approve,
 #: breaking Rule 1. ``state.json`` is not a trust boundary. A trailing ``--`` on the argv
 #: does **not** help here: the hostile value is a leading option, before the ``--``.
 #:
@@ -91,10 +91,9 @@ _OBJECT_ID_RE: Final = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 class SnapshotError(OcrlError):
     """The working state could not be turned into a tree id.
 
-    Deliberately *not* in ``arl.errors``: unlike the errors there, this one is caught, by
-    the gate, to deny with a message naming the reason (the shell carried that reason in
-    ``ARL_SNAP_ERROR``). Left uncaught it still denies, via the fail-closed guard -- there
-    is no path on which a failed snapshot becomes an approval (Rule 1).
+    Deliberately *not* in ``arl.errors``: unlike the errors there, this one is caught by the
+    engine and answered as a refusal naming the reason. Left uncaught it is still a failure
+    answer -- there is no path on which a failed snapshot becomes an approval (Rule 1).
     """
 
 
@@ -119,11 +118,10 @@ def git_run(repo: str, args: Sequence[str], *, env: Mapping[str, str] | None = N
     -- git missing entirely -- is reported as a non-zero result rather than raised, since every
     caller already treats "no output" as failure.
 
-    **Bounded by :data:`GIT_TIMEOUT_SEC`.** A git command in the gate is metadata and has no
-    legitimate reason to take minutes, and some run *inside* the active-review lease, where an
-    unbounded step lets the lease expire while the call is still legitimately running. An expiry is
-    reported as status ``124``, which reaches callers through the non-zero path they already
-    handle -- for every one of them, denying (Rule 1).
+    **Bounded by :data:`GIT_TIMEOUT_SEC`.** A git command in the engine is metadata and has no
+    legitimate reason to take minutes, and some run under the state lock, which an unbounded step
+    would hold for as long. An expiry is reported as status ``124``, which reaches callers through
+    the non-zero path they already handle -- for every one of them, a failure (Rule 1).
     """
     try:
         return subprocess.run(

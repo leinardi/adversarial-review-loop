@@ -31,7 +31,7 @@ TRUNCATION_MARKER = "[... truncated at {limit} bytes; the full report is on disk
 
 
 def log(message: str) -> None:
-    """Write a diagnostic to stderr, never stdout (Rule 2: hook stdout is protocol).
+    """Write a diagnostic to stderr, never stdout (AGENTS.md rule 3: the engine's stdout is its answer).
 
     **This function never raises.** Diagnostics are best-effort by design, because the
     alternative is far worse than a lost log line: a caller reporting that stdout is broken

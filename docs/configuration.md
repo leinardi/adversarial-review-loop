@@ -2,329 +2,109 @@
 
 ## Precedence
 
-Five layers, lowest to highest priority:
+Lowest to highest:
 
-```text
-defaults  <  user config  <  repo config  <  activation overrides  <  ARL_* environment
-```
+1. the defaults below;
+2. the user config, `$XDG_CONFIG_HOME/adversarial-review-loop/config.json` (by default
+   `~/.config/adversarial-review-loop/config.json`);
+3. the launch folder's `.adversarial-review-loop.json`, the folder you ran `/arl-implement` in;
+4. `ARL_*` environment variables: the upper-cased key with an `ARL_` prefix (`ARL_MODEL`,
+   `ARL_BLOCK_SEVERITY`).
 
-| Layer | Where | Set by |
-| --- | --- | --- |
-| defaults | built into `config.py` | nobody — the fallback |
-| user config | `$XDG_CONFIG_HOME/adversarial-review-loop/config.json` | `/adversarial-review-loop:config <key> <value>` |
-| repo config | `<repo>/.adversarial-review-loop.json` | `/adversarial-review-loop:config <key> <value> --repo`, or hand-edited |
-| activation overrides | inside `state.json`, for the current activation only | `--harness`/`--model`/`--variant` on `implement` or `resume` |
-| environment | the process environment | `ARL_*` variables |
+A config file that cannot be parsed discards the whole file layer, not just itself, so a broken
+file leaves the defaults standing rather than half of a configuration. In the environment, a
+boolean key is true only for `1`, `true`, `TRUE`, `yes` or `on`; an integer key that is not all
+digits is skipped, so a typo leaves the previous layer's value standing; a list key is
+comma-separated.
 
-A concrete example: your user config sets `model` to `openai/gpt-5.6-sol`. The repo you're
-working in sets it to `anthropic/claude-opus-5` in `.adversarial-review-loop.json`. You run
-`/adversarial-review-loop:implement plan.md --model my-org/reviewer-model` for one specific
-run. Someone has `ARL_MODEL=debug/stub` set in their shell for testing. The model actually
-used is `debug/stub` — environment always wins, activation overrides beat both config
-files, and the repo file beats your personal one. Nothing here is silent: run
-`/adversarial-review-loop:config` with no arguments and it prints every key's resolved value
-*and which layer set it*, computed by re-running the merge layer by layer rather than
-guessing.
+Every value is read fresh for each review and each continuation prompt, except `final_review` and
+`roots`, which a run takes when it starts (use `/arl-finish` to ask for the final review mid-run,
+`add_root` for a folder), and `effort`, which the reviewer is registered with at session start and
+again when `/arl-config` sets it.
 
 ## Every key
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `harness` | `claude-code` | which reviewer CLI runs the review — `claude-code` or `opencode`. It defaults to Claude Code because that is the CLI this plugin already runs inside; an unimplemented name is refused when you arm, never quietly replaced with the default |
-| `model` | the harness's own (`opus` for `claude-code`, `openai/gpt-5.6-sol` for `opencode`) | probed for reachability at arm time, for a harness that can enumerate its models |
-| `variant` | unset | reasoning effort — `--variant` on OpenCode, `--effort` (`low`…`max`) on Claude Code |
-| `block_severity` | `medium` | blocks when `actionable=yes AND severity >= this` |
-| `late_block_severity` | `high` | from round 2 of a phase on, a new finding outside the paths changed since the previous round blocks only at or above this; never below `block_severity` |
-| `timeout_sec` | `900` | per review run |
-| `max_failures` | `2` | op failures since the last approval before `needs-human` (transient failures excluded — see `max_transient_failures`) |
-| `max_transient_failures` | `5` | timeouts/rate-limits/busy-review-slot failures since the last approval before `needs-human`; paced with backoff, no provider call spent while it waits |
-| `max_stop_blocks` | `3` | **no-progress** Stop blocks before escalating |
-| `max_defers` | `3` | pause escapes per activation |
-| `verify_cmd` | unset | run by the hook, output attached as evidence |
-| `review_guide` | unset | a Markdown file whose content is spliced into the phase and final reviewer prompts as repo-specific guidance; frozen and hashed when you arm. See "Repo-specific review guidance" |
-| `pure` | `true` | run the reviewer without its ambient extensions — `--pure` on OpenCode, `--safe-mode --disable-slash-commands` on Claude Code |
-| `disable_project_config` | `false` | ignore the repository's own agent config — `OPENCODE_DISABLE_PROJECT_CONFIG` on OpenCode, `--setting-sources user` on Claude Code |
-| `chunk_diff_bytes` | `400000` | per-attachment diff chunk size |
-| `hard_diff_ceiling` | `8388608` | above this → `needs-human` |
-| `max_file_bytes` | `16777216` | oversized-file guard |
-| `max_reason_bytes` | `32768` | prose cap in a denial message; `FINDING` lines are exempt |
-| `max_findings` | `200` | above this → `needs-human`, never a trimmed list |
-| `max_findings_bytes` | `65536` | same cap, measured by size instead of count |
-| `max_clarifications` | `2` | `clarify` questions per run before it points at `accept` |
-| `stall_rounds` | `3` | consecutive rounds a **blocking** finding (`actionable=yes`, at or above `block_severity`) must persist before `needs-human`; `0` disables |
-| `max_session_rounds` | `3` | rounds one reviewer session may carry before the next round starts a fresh one; `0` never resets |
-| `allow_dirty` | `false` | alternative to passing `--allow-dirty` every time |
-| `ttl_hours` | `24` | after this, every mutation is denied and each turn ends with a message — `resume` is usually the right fix, not a fresh `implement` |
-| `ignore_globs` | `[]` | paths whose sole change skips a review entirely |
-| `final_review` | `false` | run the final cumulative review at `Stop` |
-
-Environment variables are the upper-cased key with an `ARL_` prefix — `ARL_MODEL`,
-`ARL_BLOCK_SEVERITY`, `ARL_MAX_FAILURES`, and so on. Since an environment variable is
-always a string, each is coerced by the key's type: a boolean key checks against a set of
-true-ish spellings, an integer key requires all-digit text and is otherwise **skipped
-entirely** (a typo leaves the previous layer's value standing rather than silently becoming
-`0`), and `ARL_IGNORE_GLOBS` is comma-separated into a list. JSON config files need none of
-this — their values are already the right type.
+| `harness` | `subagent` | who reviews: `subagent`, a hidden Claude Code subagent the plugin registers, or `opencode`, which the engine runs itself. An unknown name is refused, never replaced by the default |
+| `model` | empty: the session's subagent default, or `openai/gpt-5.6-sol` for `opencode` | the reviewer's model |
+| `effort` | empty: the agent's default | the subagent reviewer's effort: `low`, `medium`, `high`, `xhigh` or `max`. A value that is no level is ignored, and said at session start |
+| `variant` | empty | OpenCode's `--variant` |
+| `disable_project_config` | `false` | OpenCode only: ignore the repository's own OpenCode config (`OPENCODE_DISABLE_PROJECT_CONFIG`) |
+| `verify_cmd` | empty | the command Claude is told to run before each review, named in the start prompt and every continuation prompt. The engine never runs it: what Claude reports reaches the reviewer as `verification.txt`, labelled as the implementer's report |
+| `block_severity` | `medium` | an actionable finding at or above this blocks the approval, whatever verdict the reviewer gave |
+| `late_block_severity` | `high` | from round 2 of a phase on, a new finding in a path untouched since the previous round blocks only at or above this; never below `block_severity` |
+| `timeout_sec` | `900` | one review run |
+| `max_failures` | `2` | reviewer failures (crash, broken contract) tolerated in a row: the next one makes the loop stop prompting Claude and ask you. Any answered review resets the count, and a `review` Claude calls anyway still runs |
+| `max_transient_failures` | `5` | timeouts and rate limits tolerated in a row, likewise |
+| `stall_rounds` | `5` | rounds a blocking finding may persist before the loop asks you; `0` disables |
+| `max_clarifications` | `2` | questions Claude may ask the reviewer about one review |
+| `ignore_globs` | `[]` | paths (inside their root) whose sole change approves a stage without a review. A change to `.adversarial-review-loop.json` itself is never ignored |
+| `final_review` | `false` | end every run with a review of all its changes, every root from where it joined the run |
+| `review_skill` | `auto` | each root's own review skill, attached as guidance for that root: `auto`, a skill name, or `off`. See below |
+| `review_guide` | empty | one Markdown file (relative to the launch folder) spliced into every review prompt |
+| `roots` | `[]` | folders every run in this launch folder starts with, besides the launch folder, `--root` and the paths the plan names |
+| `auto_compact` | `false` | compact the conversation before the phase that follows an approval. It fires only when Claude's turn ends right after the approval: a turn that goes on into the next phase and its review cancels it. Never headless |
+| `chunk_diff_bytes` | `400000` | the size of one diff file in the bundle |
+| `hard_diff_ceiling` | `8388608` | a diff larger than this makes the loop ask you rather than review a cut |
+| `max_file_bytes` | `16777216` | one changed file larger than this makes the loop ask you |
+| `max_reason_bytes` | `32768` | the reviewer's prose kept in the text Claude reads; findings are exempt |
+| `max_findings` | `200` | more findings than this makes the loop ask you (the phase is too large to judge), never a trimmed list |
+| `max_findings_bytes` | `65536` | the same cap, by size |
 
 ## Reading and writing it
 
 ```console
-$ /adversarial-review-loop:config
-harness                  claude-code          (default)
-model                    opus                 (default: claude-code)
-variant                                       (default)
-block_severity           medium               (default)
-...
-ttl_hours                72                   (user)
+> /arl-config
+adversarial-review-loop configuration for /home/you/work
+  auto_compact            false  (default)
+  block_severity          medium  (default)
+  ...
+> /arl-config effort high
+effort: "" -> high (wrote high to /home/you/.config/adversarial-review-loop/config.json)
+> /arl-config verify_cmd --repo -- make test
+> /arl-config effort --unset
 ```
 
-`model` prints `(default: <harness>)` rather than plain `(default)` because its default is
-not a constant: it is whatever the selected harness calls its own, so the value shown is
-what a run would actually pass and the layer says which harness decided it.
+The arguments are split as a shell would. Flags come before a bare `--`, which ends them, so a value
+can hold its own flags (`-- pytest --maxfail=1`). A value of several words keeps its quoting. A value
+that does not parse for its key is refused, never coerced, and a config file that does not parse is
+never overwritten. When another layer overrides the key you set, the answer says so.
 
-```console
-$ /adversarial-review-loop:config ttl_hours 72
-ttl_hours: 24 -> 72
-written to /home/you/.config/adversarial-review-loop/config.json
+## The project's own review skill
 
-$ /adversarial-review-loop:config ttl_hours --unset
-ttl_hours: 72 -> (unset)
+For each root a review covers, the engine looks in `.claude/skills/` and then `.agents/skills/` for
+a skill named `adversarial-review`, then any skill whose name holds `review` (`review_skill: auto`).
+A name picks that skill; `off` uses none. The skill's text is attached to the review as guidance
+scoped to that root, and the prompt says what replaces its own steps: the bundle replaces "establish
+the diff", the checks are not re-run, and the plugin's output contract replaces the skill's report
+format. `review_guide` is attached first, for every root. Guidance past 64 KiB in all is left out,
+and the review says what was dropped.
 
-$ /adversarial-review-loop:config verify_cmd --repo -- pytest --maxfail=1
-verify_cmd: (unset) -> pytest --maxfail=1
-written to <repo>/.adversarial-review-loop.json
-```
+## The launch folder's config is not trusted for policy
 
-Put `--` before a value that itself looks like a flag (a `verify_cmd` starting with `-`,
-for instance) so it isn't parsed as one. `--repo` writes the *repository's* config instead
-of your own — see "Repo config is not fully trusted," below, before reaching for it.
-`config` is `disable-model-invocation: true` and registers no hooks: it works whether or
-not anything is armed, and Claude can never invoke it itself.
+`.adversarial-review-loop.json` lives in the launch folder, which is usually a root under review.
+Claude can edit it like any other file, and every key is a real lever. The config is read when the
+review is prepared, so an edit takes effect on the very review that shows it: a `block_severity`
+of `critical` lets every high finding through, that one included, and `review_guide` is text the
+reviewer reads as instruction. The edit itself is in the phase's diff, and a change to the file is
+never ignored, so `ignore_globs: ["**"]` cannot approve its own phase without a reviewer, but it
+skips the review of every later phase that leaves the file alone. v4 does not try to stop such an
+edit (see [philosophy.md](philosophy.md)).
 
-Setting `model` additionally checks the name against the selected harness's model list
-(`opencode models`). An unreachable reviewer only warns at config time — arming will refuse
-on its own if it's still unreachable when you actually start a run — but a name the
-reviewer actively rejects is refused outright; pass `--force` to set it anyway. A harness
-that cannot enumerate its models at all (Claude Code has no such subcommand) says so and
-validates nothing: a name it does not know exits non-zero at review time, which blocks.
+## Where the run lives
 
-Setting `harness` is checked against the harnesses this build implements, and an
-unimplemented name is refused with no `--force` escape — that list is a fact about the
-build, not something a probe can be inconclusive about.
+Everything about a run is in `<launch folder>/.arl/`, never in a reviewed repository's tracked
+content:
 
-## Per-run overrides
-
-`--harness H`, `--model X` and `--variant V` on `implement` or `resume` apply for that one
-activation only, without touching either config file — useful for trying a different
-reviewer on one run, or recovering an activation whose configured model has since become
-unreachable. They're stored in the activation's own `overrides` and sit above both config
-files in the precedence chain, but below the environment.
-
-`--guide <path>` is in the same family but stronger: it sets `review_guide` for that one
-activation, and what gets pinned is the file's *content*, not its name — see below.
-
-`harness` is the one key that is **pinned** into `overrides` when you arm, whether or not
-you passed `--harness`. `model` and `variant` are not: they keep resolving through the
-config layers on every round. The difference is that `harness` is what decides which binary
-has to exist, so it is the only one whose drift silently voids the reachability check
-arming just did — a `.adversarial-review-loop.json` edited to another harness mid-activation
-would leave every later review failing with "that binary is not on PATH", and that file
-travels with the tree under review and is not a trust boundary.
-
-So an activation keeps the harness it was armed with, and switching it is explicit: pass
-`--harness` to `resume`, or set `ARL_HARNESS`, which still outranks the overlay. A
-`resume` that names a harness has its binary and model list checked against the one being
-switched *to*. Continuity does not carry across a switch: a session pointer minted by one
-harness is not presentable to another, so the next review simply starts fresh.
-
-What gets pinned is the harness that was actually **probed**, not the one you typed. Since
-`ARL_HARNESS` outranks the overlay, `ARL_HARNESS=claude-code … --harness opencode` checks
-*claude-code* — so claude-code is what is recorded, and the armed banner says so. Recording the
-flag instead would pin a reviewer nothing verified, and the activation would start running
-it the moment the variable left your environment.
-
-Two `resume` calls running at once are refused rather than combined: each checks the
-reviewer against the overrides it read, so merging their writes could store a
-harness/model pair neither one checked. The first to write wins; the other reports that the
-overrides moved and writes nothing. Run it again and it checks the combination against
-what is now on disk.
-
-## Example repo config
-
-```json
-{
-  "model": "openai/gpt-5.6-sol",
-  "variant": "high",
-  "verify_cmd": "make test",
-  "ignore_globs": ["CHANGELOG.md", "docs/**"]
-}
-```
-
-## Repo-specific review guidance
-
-The reviewer's prompt is fixed plugin text, and deliberately generic. `review_guide` is how
-a repository adds to it: a Markdown file whose content is spliced into the phase and final
-prompts as an additive extension of "what to look for".
-
-```json
-{ "review_guide": ".arl/review-guide.md" }
-```
-
-A relative value resolves against the repository root; an absolute one is taken as given, so
-a *user* config can name a guide that lives outside the tree under review. `--guide <path>`
-on `implement` sets it for one activation. Because it is an ordinary key, the usual
-precedence applies (defaults < user < repo < activation override < `ARL_REVIEW_GUIDE`).
-
-**Write it as guidance, not as rules for the gate.** What belongs in it: the invariants that
-matter in this repository, the subsystems where a regression is expensive, the shapes of bug
-that keep coming back, and the classes of finding that are noise here. What does not belong,
-and what the prompt's own framing tells the reviewer to reject and report as a `high`
-finding against the guide file: anything that redefines the output contract or the severity
-rubric, changes what blocks a commit, or asks for an approval, a withheld finding, a lowered
-severity, or a shortened read.
-
-Four things get it refused outright, while you are watching the command that armed it: a
-path that does not resolve to a readable regular file, a file that is empty or only
-whitespace, one larger than 64 KiB (a hard constant, deliberately not a config key — a cap
-this layer could raise would bound nothing), and one containing either reviewer contract
-marker.
-
-### What "frozen" means here
-
-The file is read once, when you arm, copied into the activation directory as
-`guide.frozen.md`, and hashed. Every later round reads only that copy and re-verifies the
-hash. Editing the source file, or editing `.adversarial-review-loop.json` to name a
-different one, changes nothing about a running activation — the same property the frozen
-plan has, and for the same reason.
-
-`/adversarial-review-loop:resume --guide <path>` replaces it mid-activation. That records a
-new revision (`guide.rev1.md`, then `guide.rev2.md`, …) beside the old one; nothing already
-frozen is renamed or overwritten, and `range.txt` tells a final cumulative review that
-earlier phases were judged under different guidance, with each revision's hash. There is no
-way to remove a guide mid-activation: `--guide` only ever replaces, so dropping bad guidance
-means abandoning the activation and re-arming — the same weight a change to the frozen
-plan's provenance carries.
-
-If the frozen copy no longer matches its recorded hash, the review escalates to
-`needs-human`. It never runs without the guide every disclosure says was in force.
-
-### Where it is disclosed
-
-`- review guide:` on the arming and resume banners (with the frozen copy's path and the
-first 12 hex of its sha256), a `review guide:` line in `/adversarial-review-loop:status`
-carrying the revision count, a header line in every stored report so
-`/adversarial-review-loop:report` shows it retroactively, a `## Project review guidance`
-section in the reviewer's own `range.txt`, and the composed block itself in `make dry-run`.
-Every round also leaves the exact prompt it ran under in the activation's `raw/` directory.
-
-## Repo config is not trusted for policy
-
-`.adversarial-review-loop.json` lives inside the repository under review, which the rest of
-this system treats as content an agent could have written — because it can be, once
-mutations are allowed, whether through `config --repo` (user-only) or a plain file edit
-(not user-only at all). Every key it can set is a real lever, and none of them are fenced
-off from a self-serving edit:
-
-- **`ignore_globs` is a full bypass, not a relaxation.** `{"ignore_globs": ["**"]}` makes
-  every changed path match, and a commit whose every path is ignored skips the reviewer
-  entirely — approved outright, with no model ever consulted
-  (`gitsnap.all_paths_ignored`, exercised with exactly this shape in
-  `tests/unit/test_commands_pretool.py`).
-- **`block_severity` raised to `critical`** means only a critical finding blocks; every
-  medium or high finding still shows up in the report, but nothing stops the commit.
-- **`late_block_severity` raised to `critical`** widens what a later round may defer: from
-  round 2 on, a new high finding in a file untouched since the previous round would then be
-  recorded rather than block. It cannot go the other way — a value below `block_severity`
-  is read as `block_severity` — and it never reaches round 1, a `final` review, a changed
-  path, or a file an earlier round already raised a finding in.
-- **`max_findings` / `max_findings_bytes` / `hard_diff_ceiling`, tuned high enough,** raise
-  the bar at which a well-formed review result escalates to `needs-human` instead of being
-  taken at face value. This is separate from operational fail-closed handling — a genuine
-  timeout or malformed response still blocks or escalates no matter what config says; what
-  moves is the threshold for a review that came back clean and well-formed.
-- **`verify_cmd` is a different kind of risk again**: an actual shell command, run through
-  `bash -lc` in the repository. Its output is only evidence — it can't itself approve a
-  commit — but setting it *is* code execution, and the string can be anything, not only a
-  command already present in the repo.
-- **`review_guide` is the first key whose value becomes *instruction* to the reviewer**
-  rather than evidence about the change. It is admissible for the same reason `verify_cmd`
-  is — this layer can already set `ignore_globs: ["**"]`, a complete and strictly worse
-  bypass — and it is bounded rather than trusted: gate-authored framing says the guide may
-  not change the contract, the rubric, what blocks or the verdict, the guide is fenced with
-  a per-review nonce below that framing and above the output contract, and its content is
-  frozen at arm so an edit mid-activation reaches nothing. What it can still do is steer
-  attention, which is why every surface that reports a review names the guide and its hash.
-
-None of this needs the `config` command at all. `/adversarial-review-loop:config --repo` is
-the controlled, user-only way to write this file; the file itself is an ordinary one, and
-Claude can rewrite it like any other file once mutations are permitted — the next config
-load simply picks up whatever it now says. Treat every key here as something Claude could
-set to whatever benefits Claude, not as a value that "can't weaken the gate." See
-[security.md](security.md) for the full picture.
-
-## Cost
-
-A review is an agentic run, and an agentic run's bill is roughly **context size × turns**:
-every tool call is a turn, and every turn re-reads the whole context. Two real rounds of the
-same phase under `harness=claude-code`, `model=opus`:
-
-| round | turns | tool calls | cache read | cache created | output | cost |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 (fresh session) | 50 | 49 | 5.65M | 189k | 32k | $5.58 |
-| 2 (resumed session) | 28 | 27 | 6.33M | 152k | 24k | $5.28 |
-
-The cache-read column is the bill. The payload itself was ~230 KB; it was re-read 50 times.
-
-**A resumed session costs *more* per turn under Claude Code, not less.** `--resume` replays
-every earlier round's attachments and tool results, so round 2 carried roughly twice the
-context per turn (~226k vs ~113k) and cost about the same as round 1 despite doing half the
-work. Continuity buys the reviewer's memory of the earlier round; it does not buy a discount.
-`prior-rounds.txt` and `incremental.diff` carry that memory anyway, as bounded, gate-rendered
-evidence — which is why `max_session_rounds 1` is a reasonable setting and not a loss.
-
-### The levers, roughly in order of effect
-
-| Lever | Effect |
+| Path | What |
 | --- | --- |
-| `model` | the largest single one. A smaller model is several times cheaper per token, and the token count barely moves |
-| `max_session_rounds 1` | never resume; each round pays fresh-session context instead of cumulative |
-| `variant low`/`medium` | `--effort` on Claude Code: less thinking output, and usually fewer turns |
-| a shorter plan | the frozen plan is capped at 64 KiB and sent **every round**, so plan length is a per-round tax |
-| `final_review` off (the default) | on, it adds one cumulative review of the whole activation |
-| `ignore_globs` | a commit whose every changed path matches skips the review entirely |
+| `state.json` | the run: phases, roots and their baselines, approvals, the pending review |
+| `plan.md` | the copy of the plan the run started with |
+| `reviews/<run>-<seq>/` | each review's prompt, bundle and answer |
+| `reports/` | one report per review round, read with `/arl-report` |
+| `shadow/` | the snapshot store of each plain-folder root |
+| `runs/<id>/` | earlier runs: archived by `/arl-implement --new`, or by any `/arl-implement` once stopped or complete (`corrupt-<time>` for one that could not be read) |
 
-### What the gate already does for you
-
-Two things happen without any configuration, both aimed at the per-turn context that the
-table above shows is the real driver:
-
-- **The frozen plan is sent once per reviewer session, not once per round.** A plan cannot be
-  revised without ending the session it was sent in, so rounds 2 and 3 are told it is already
-  in their context instead of receiving another copy — ~16k tokens per round at the 64 KiB
-  cap. A fresh session and the rare mid-review loss of session ownership both still get the
-  full plan.
-- **The working guidance rides in the system prompt.** `prompts/reviewer-efficiency.md` — batch
-  independent tool calls, grep to locate then read with `offset`/`limit`, never re-open a file
-  — is passed as `--append-system-prompt` on Claude Code rather than buried in the prompt
-  payload, because measured across seven real rounds the same words inside a ~100 KB user
-  message produced zero batched tool calls. OpenCode has no system-prompt flag, so there it is
-  appended to the prompt.
-
-### Where to read the numbers
-
-For a harness that reports its accounting (Claude Code does; OpenCode has no machine-readable
-output mode, so nothing is shown rather than something estimated):
-
-- each stored report carries a `cost:` line for the invocation it records;
-- `/adversarial-review-loop:status` totals the activation and the current phase;
-- the CLI's own output is kept verbatim beside each transcript as `raw/NNN-*.out.envelope`.
-
-None of these figures feed any decision the gate makes. They are reported, never read.
-
-## Where config state lives
-
-State — `state.json`, frozen plans, reports, bundles — never lives inside the repository.
-It's under `$XDG_STATE_HOME/adversarial-review-loop/`, one directory per `(worktree, session)`
-pair. The **one** exception to "nothing is written inside the repo" is an explicit,
-user-only `config <key> <value> --repo`, and even that never chmods anything beyond the one
-file it writes.
+A git root that contains `.arl/` gets it (`/.arl/`, or `/<path>/.arl/` when the launch folder is
+deeper) in its `.git/info/exclude`, never in a tracked file.

@@ -1,6 +1,6 @@
 {
   "name": "adversarial-review-loop",
-  "description": "Implement an agreed plan phase by phase, with an external adversarial review of each phase before moving on.",
+  "description": "Implement an agreed plan phase by phase, with an adversarial review of each phase before moving on.",
   "version": "3.0.1",
   "author": {
     "name": "Roberto Leinardi"
@@ -12,9 +12,9 @@
     "review",
     "code-review",
     "adversarial",
-    "hooks",
-    "quality-gate",
+    "plan",
     "claude-code",
+    "mod",
     "opencode"
   ]
 }

@@ -220,7 +220,7 @@ class Review:
     #: ``verdict`` (a reversal still blocks exactly as its ``FINDING`` lines say).
     supersedes: str = ""
     #: Rendered by :func:`oscillation.render`, one line per anchor that reappeared or was
-    #: named by 2+ ``SUPERSEDES`` lines across this label's ``round_history`` -- gate-computed
+    #: named by 2+ ``SUPERSEDES`` lines across this label's ``round_history`` -- engine-computed
     #: text, not reviewer prose. Empty when nothing oscillates. Set after this round's own
     #: entry has been recorded, so it reflects this round too -- unlike
     #: ``_prior_rounds``'s own "## Oscillating points", which by construction only

@@ -119,7 +119,8 @@ def _only_ignored(run: RunState, trees: Mapping[str, str], cfg: config.Config) -
 
     False whenever that is not certain -- no globs, no change, a root whose changes cannot be
     listed -- because True approves without a review. A glob is matched against the path inside
-    its root, as a single-repository project would write it.
+    its root, as a single-repository project would write it. A change to the configuration file
+    itself is never ignored: the edit that sets ``ignore_globs`` would otherwise approve itself.
     """
     globs = cfg.as_list("ignore_globs")
     if not globs:
@@ -133,6 +134,8 @@ def _only_ignored(run: RunState, trees: Mapping[str, str], cfg: config.Config) -
         if paths is None:
             return False
         changed.extend(path.removeprefix(f"{root.alias}/") for path in paths)
+    if any(path.rsplit("/", 1)[-1] == config.REPO_CONFIG_NAME for path in changed):
+        return False
     return bool(changed) and all(any(globmatch.matches(path, glob) for glob in globs) for path in changed)
 
 

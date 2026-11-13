@@ -47,6 +47,6 @@ Every step is idempotent: re-run the failed run, or dispatch again with the same
   tags are immutable, and the default branch requires the CI checks, so the bump pull request needs
   them green like any other.
 
-After a release, a local marketplace install picks up skill changes only once the plugin cache is
-refreshed; see [the install cache](../AGENTS.md#the-install-cache-and-what-it-means-for-iterating)
-in `AGENTS.md`.
+After a release, an installed copy picks up the new version only once the plugin is updated
+(`/plugin` in Claude Code) and the session restarted: the install is a cached copy, not the
+repository.

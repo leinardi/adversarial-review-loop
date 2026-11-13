@@ -365,3 +365,32 @@ def test_next_action_does_not_compact_by_default(engine: Engine, ws: Path) -> No
     started(engine, ws)
     approve_phase_one(engine, ws)
     assert engine(ws, "next-action")["compact"] is False
+
+
+def test_next_action_names_the_configured_checks(engine: Engine, ws: Path) -> None:
+    # Set mid-run, or after the start prompt was compacted away: every continuation names it.
+    started(engine, ws)
+    engine(ws, "set-phases", stdin='["one"]')
+    (ws / config.REPO_CONFIG_NAME).write_text(json.dumps({"verify_cmd": "make test"}))
+    assert "Run the project's checks (`make test`), then call review." in engine(ws, "next-action")["prompt"]
+
+
+def test_a_change_to_the_config_file_is_never_ignored(engine: Engine, ws: Path) -> None:
+    # An edit setting ignore_globs to everything must not approve itself without a reviewer.
+    started(engine, ws)
+    engine(ws, "set-phases", stdin='["one"]')
+    (ws / config.REPO_CONFIG_NAME).write_text(json.dumps({"ignore_globs": ["**"]}))
+    answer = engine(ws, "review", "prepare")
+    assert answer["ok"], answer
+    assert answer.get("status") != "skipped"
+    assert answer["review_id"]
+
+
+def test_the_final_review_prompt_names_the_configured_checks(engine: Engine, ws: Path) -> None:
+    (ws / config.REPO_CONFIG_NAME).write_text(json.dumps({"verify_cmd": "make test", "final_review": True}))
+    started(engine, ws)
+    engine(ws, "set-phases", stdin='["one"]')
+    assert engine(ws, "accept")["ok"]
+    prompt = engine(ws, "next-action")["prompt"]
+    assert "run the final review" in prompt
+    assert "`make test`" in prompt

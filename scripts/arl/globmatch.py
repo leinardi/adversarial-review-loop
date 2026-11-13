@@ -1,7 +1,7 @@
 """Bash pattern matching, as ``[[ $path == $glob ]]`` performs it.
 
 ``ignore_globs`` decides whether a review is **skipped**, so the matcher is part of the
-gate: a pattern that matches more than the user meant silently stops reviewing code. The
+engine: a pattern that matches more than the user meant silently stops reviewing code. The
 shell compared with ``[[ $p == $g ]]``, and these patterns were written against those rules,
 so those are the rules reproduced here.
 

@@ -92,7 +92,7 @@ _SKILL_FRAMING: Final = """\
 
 - **Establishing the diff.** The bundle already holds the complete diff; do not run git or look
   for another one.
-- **Running gates.** You cannot run commands, and the implementer already ran the project's
+- **Running gates.** You cannot run tests or builds, and the implementer already ran the project's
   checks; their reported outcome is in `verification.txt` when it was supplied.
 - **Its report format.** Your output is the contract below, whatever format the skill asks for.
 

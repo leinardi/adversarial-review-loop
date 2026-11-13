@@ -271,7 +271,7 @@ def test_an_unknown_number_lists_what_there_is(reports_dir: Path) -> None:
 
 
 def test_rendering_a_report_never_touches_stdout(reports_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Rule 2: this runs under hooks whose stdout is the protocol response."""
+    """AGENTS.md rule 3: the engine's stdout is its answer."""
     store_seq(reports_dir, "001", "APPROVED")
     report.render(reports_dir)
     report.reason(a_review(), "h", config=config_with())

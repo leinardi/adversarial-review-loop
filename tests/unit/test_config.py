@@ -97,7 +97,7 @@ def test_overrides_beat_repo_but_lose_to_environment(layers: dict[str, str], tmp
 
 
 def test_an_unknown_override_key_is_dropped(layers: dict[str, str], tmp_path: Path) -> None:
-    """The overlay is written into ``state.json``, which is not a trust boundary (Rule 3)."""
+    """``overrides`` takes only keys ``DEFAULTS`` knows; anything else is dropped."""
     cfg = config.load(str(tmp_path / "repo"), layers, overrides={"model": "override-model", "totally_not_a_real_key": "x"})
     assert cfg.as_str("model") == "override-model", "a known key from the overlay is still accepted"
     assert "totally_not_a_real_key" not in cfg.values

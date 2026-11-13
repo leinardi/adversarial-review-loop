@@ -20,9 +20,9 @@ ignore = [
 ]
 
 [lint.per-file-ignores]
-# Both carry a shebang for the reader, and neither may be executed by its own path. The gate's
-# only sanctioned invocation is `python3 -I "$PLUGIN_ROOT/scripts/arl-bootstrap.py"` (see
-# docs/design/interpreter-and-watchdog.md), and `sync_pins.py` is run as `python3 scripts/sync_pins.py`
+# Both carry a shebang for the reader, and neither may be executed by its own path. The engine's
+# only sanctioned invocation is `python3 -I "$PLUGIN_ROOT/scripts/arl-bootstrap.py"` (AGENTS.md
+# rule 5), and `sync_pins.py` is run as `python3 scripts/sync_pins.py`
 # from the Makefile. Making them executable would invite the direct call rather than record it.
 "scripts/arl-bootstrap.py" = ["EXE001"]
 "scripts/sync_pins.py" = ["EXE001"]

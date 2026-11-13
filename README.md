@@ -1,48 +1,45 @@
 # adversarial-review-loop
 
-A Claude Code plugin that implements an agreed plan **phase by phase, with an external adversarial
-review as an enforcement gate**. Claude cannot commit a phase until a separate reviewer — a second
-`claude` process by default, or [OpenCode](https://opencode.ai) — has reviewed the exact tree it is
-about to commit and passed it.
+A Claude Code plugin that implements an agreed plan **phase by phase, with an adversarial review of
+each phase before Claude moves on**. You give it a plan; Claude records the plan's phases,
+implements the first, asks for a review, fixes what the reviewer finds, and goes on to the next
+phase only once the review approves. A plan may span several git repositories and plain folders.
 
-The reviewer is *external* in the sense that matters: a fresh process, isolated from your ambient
-plugins, skills and MCP servers, given the diff as evidence and a fixed prompt, with no way to write
-anything and no memory of the session that wrote the code.
-
-The review is not advice Claude may weigh up. It is a `PreToolUse` gate on the commit itself:
-findings come back as a denial, and the commit only proceeds once they are resolved.
+The reviewer is a fresh agent every round: a hidden subagent by default, or
+[OpenCode](https://opencode.ai). It reads the phase's whole change, every file in every workspace
+root since the last approval, untracked files included. It is told what the earlier rounds found.
+It never edits anything and never re-runs the checks Claude already ran.
 
 ```text
-/adversarial-review-loop:implement plan.md
-   -> arms (freezes the baseline and the plan) before Claude has a turn
-   -> Claude proposes phases and freezes them
-   -> phase N implemented -> git commit -> INTERCEPTED
-        snapshot the whole working state into a tree
-        the reviewer reads the delta since the last approved tree
-        approved -> commit proceeds -> phase advances
-        findings -> commit denied, findings returned inline
-   -> all phases committed -> turn ends -> COMPLETE
-        (plus a final cumulative review first, if final_review is on)
+/arl-implement plan.md
+   -> Claude reads the plan and records its phases (set_phases)
+   -> phase N implemented, checks run -> review
+        the engine snapshots every root and builds the bundle (the diff since the last approval)
+        a fresh reviewer reads it and answers in a strict contract
+        findings -> Claude fixes them and calls review again
+        approved -> Claude commits each changed repository -> the loop prompts phase N+1
+   -> last phase approved (plus a final cumulative review, if asked) -> the run is complete
 ```
+
+**v4 enforces nothing.** It is a plan-and-go loop, not a gate: Claude could ignore a finding, and the
+plugin does not try to stop it. What it gets right is the review itself. The reviewer sees exactly
+the phase's changes, its verdict is parsed strictly, and no failure is ever reported as an approval.
+[docs/philosophy.md](docs/philosophy.md) says why. v3, the enforcement gate, is kept at the
+[`adversarial-review-loop--v3.0.1`](https://github.com/leinardi/adversarial-review-loop/tree/adversarial-review-loop--v3.0.1)
+tag.
 
 ## 📋 Requirements
 
-- Claude Code 2.1.287 or newer (the plugin registers `PreToolUse`, `PostToolUse`,
-  `PostToolUseFailure`, `Stop`, `SessionStart` and `UserPromptSubmit` hooks in `hooks/hooks.json`)
-- the reviewer CLI on `PATH` and authenticated: `claude` by default (you already have it), or
-  [`opencode`](https://opencode.ai) with `harness` set to `opencode`. Arming refuses if the
-  configured one is missing.
-- `python3` 3.12 or newer — the gate itself. No install step: the standard library plus a vendored,
-  lint-excluded copy of [bashlex](https://github.com/idank/bashlex) is everything it needs. **On
-  macOS the bundled `/usr/bin/python3` is 3.9 and will not do**; install one from Homebrew or
-  python.org.
-- `git`, `bash` 3.2 or newer, and an outer watchdog for the hooks: `timeout`/`gtimeout` (GNU or
-  uutils coreutils) **or** `perl`. macOS ships `perl` and no `timeout`, so it is covered out of the
-  box. Arming refuses if none of them is present.
+- Claude Code 2.1.323 or newer, with mods enabled. The plugin is a hooks module (`hooks/mod.ts`); a
+  session that loads no mods (`--safe-mode`) leaves the plugin doing nothing.
+- `python3` 3.12 or newer, which runs the engine with the standard library alone. **On macOS the
+  bundled `/usr/bin/python3` is 3.9 and will not do**; install one from Homebrew or python.org.
+- `git`.
+- Only for `harness: opencode`: [`opencode`](https://opencode.ai) on `PATH`, authenticated.
+
+Claude Code's sandbox needs no exception: the mod and the engine run outside it.
 
 ## 📦 Install
-
-Add this repository as a plugin marketplace, then install the plugin:
 
 ```console
 $ claude
@@ -50,263 +47,101 @@ $ claude
 > /plugin install adversarial-review-loop
 ```
 
-Then raise the Stop-hook block cap so a long loop is not cut short. Claude Code caps consecutive
-Stop blocks (default 8) and **overrides by ending the turn**, which reads as success — so give the
-loop headroom in `settings.json` and restart Claude Code, since the variable is read at process
-start:
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP": "40"
-  }
-}
-```
-
-### If you use Claude Code's sandbox
-
-Sandboxing is off unless you turned it on, so most people can skip this. If you did enable it, the
-loop needs two write permissions that a default-deny setup will refuse, and the symptoms do not look
-like permissions:
-
-| It needs to write | Because | What it looks like when denied |
-| --- | --- | --- |
-| the repository's `.git` | the snapshot layer runs `git add -A` against a throwaway index, which writes blobs | arming refuses a **clean** worktree, saying it cannot establish whether it is clean |
-| `$XDG_STATE_HOME/adversarial-review-loop` | every activation, approval and report lives there, never inside the repo under review | `ARMING FAILED`, naming the state directory |
-
-A blanket `"denyWrite": ["~/"]` covers both, and **`allowWrite` does not re-open it** — measured:
-paths listed in `allowWrite` are still refused when the home directory is denied. Narrow the deny
-instead of adding exceptions:
-
-```json
-{
-  "sandbox": {
-    "enabled": true,
-    "filesystem": {
-      "denyWrite": ["~/.ssh", "~/.aws", "~/.gnupg"],
-      "allowWrite": ["~/.local/state/adversarial-review-loop/**"]
-    }
-  }
-}
-```
-
-`excludedCommands` does not help here: the loop's git runs inside the gate process, not as a `git …`
-command the sandbox can pattern-match. If you would rather not loosen anything, run the loop in a
-session with the sandbox off — it is a per-session setting under `/sandbox`.
-
-### If a command says "run this first" instead of running
-
-On Claude Code 2.1.272 and later, a slash command's shell step runs only if Claude Code's permission
-check allows it. Otherwise Claude Code hands the command to Claude as
-`[run this first, exactly as written, and use its output: …]`. For
-`/adversarial-review-loop:implement` that ends in "arming never ran", because the gate will not let
-Claude arm the loop itself. Each skill ships its own `allowed-tools` rule for exactly the `arl.sh`
-subcommand it runs, so this only happens with an install older than that fix, or when your own
-`permissions.deny` or `permissions.ask` rule matches `arl.sh`. Update the plugin, or remove the
-rule. If a session is already stuck in `NEEDS_HUMAN` from a failed arm, leave the mode from a
-terminal outside Claude Code, in the repository:
-`<plugin-root>/scripts/arl.sh deactivate --session <session-id>`. The handed-off command shows both
-values.
-
 ## 🚀 Quick start
 
-1. Write a plan as a Markdown file — whatever describes the work; there is no required format.
-2. Run `/adversarial-review-loop:implement plan.md`. Arming happens before Claude gets a turn: the
-   baseline and the plan are frozen, and the reviewer is probed for reachability.
-3. Claude splits the plan into phases and freezes the list. Every mutation is denied until it does.
-4. Claude implements phase 1 and runs `git add -A && git commit -m "…"`. That commit is intercepted,
-   reviewed, and either allowed through or denied with the findings inline. Repeat until the phase
-   passes, then on to phase 2.
-5. `/adversarial-review-loop:status` at any time; `/adversarial-review-loop:report [n]` for a review
-   in full. While the loop is armed, a band above the prompt shows its status, phase, round and
-   failures, and an alert (an unreviewed commit, `NEEDS_HUMAN`, a state that cannot be read) appears
-   as a line in the transcript. The band is a display only: if it fails, the gate is unaffected.
+1. Write the plan as a Markdown file, with its phases in order. Name the repositories it touches by
+   path where you can: an existing git repository the plan names becomes a workspace root at the
+   start. A plain folder joins with `--root`, the `roots` setting, or when Claude writes into it.
+2. In the folder you want the run to live in, run `/arl-implement plan.md`.
+3. Watch. The band above the prompt shows the phase, the round and what the loop is doing;
+   `/arl-status` opens the review pane with the phases, the roots and the latest review.
 
-Pause after phase 5 with `--until 5`, or mid-run with `/adversarial-review-loop:pause`. Pick a plan
-back up in a new session with `/adversarial-review-loop:resume`, which runs to the end of the plan
-unless you pass `--until N` again — never a second `implement`, which re-baselines and throws away
-every approval.
+Claude asks for a review after each phase and commits each repository it changed once the review
+approves. When the loop needs you (the same findings keep coming back, the reviewer keeps failing,
+a file is too large to review, a folder joined with changes already in it), it asks, or headless it
+tells Claude to stop and tell you.
 
 ## 💻 Commands
 
-| Command | Who | What it does |
-| --- | --- | --- |
-| `/adversarial-review-loop:implement <plan.md> [--allow-dirty] [--until N] [--harness H] [--model X] [--variant V] [--guide <path>]` | you | Arms the loop for this worktree and starts the phased implementation |
-| `/adversarial-review-loop:resume [--until N] [--plan <path>] [--guide <path>] [--replan] [--allow-dirty] [--abandon-pending] [--harness H] [--model X] [--variant V]` | you | Continues an armed activation — in a new session, or adjusts it in this one — without losing the baseline or any approval. Clears the pause target unless `--until N` names a new one |
-| `/adversarial-review-loop:status` | anyone | Current state: phase, baseline, approvals, counters, stored reports |
-| `/adversarial-review-loop:report [n]` | anyone | Prints a stored review in full, untruncated |
-| `/adversarial-review-loop:pause [N \| 0 \| all]` | you | Moves the pause target without a re-arm: with no argument, the loop finishes and commits the phase it is on and then stops instead of continuing |
-| `/adversarial-review-loop:finish` | you | Runs the final cumulative review now, even with phases outstanding — and regardless of `final_review`, which makes it the way to get one on a default install |
-| `/adversarial-review-loop:accept [reason]` | you | Manually approves the current working tree for the current phase, without a review |
-| `/adversarial-review-loop:stop` | you | Leaves the mode. Nothing is reverted |
-| `/adversarial-review-loop:config [<key> <value> [--repo]] [<key> --unset [--repo]]` | you | Reads or writes the review-loop configuration. Unrelated to any armed activation — never registers the gate |
+| Command | What it does |
+| --- | --- |
+| `/arl-implement [--new] [--root DIR]... <plan.md>` | start a run. `--root` adds a folder the plan does not name; `--new` archives the active run under `.arl/runs/` |
+| `/arl-resume` | continue the run in this session: unpause, clear a decision the run waited on, abandon a review nothing is running |
+| `/arl-status` | the run, its phases and roots, in the review pane |
+| `/arl-report [N]` | the newest stored review report, or the N-th, in the pane |
+| `/arl-pause` | stop prompting Claude after this turn, until `/arl-resume` |
+| `/arl-accept` | approve the current phase (or the final review) as it stands, without a review |
+| `/arl-finish` | require a final review of the whole run before it completes |
+| `/arl-stop` | end the run |
+| `/arl-config [<key> <value> [--repo] \| <key> --unset [--repo]]` | show the configuration, or set or unset one key |
+| `/arl-remove-root <alias or path>` | drop a workspace root registered by mistake |
 
-Every command except `status` and `report` is `disable-model-invocation: true`: **Claude can never
-arm, resume, finish, stop, accept, pause, or run `config` itself** — only the exact slash command
-does, and no natural-language phrasing invokes any of them. A mode whose whole point is enforcement
-must not be self-enabling; the cost is that "use the review loop for this" does nothing. That stops
-the *command*, not ordinary file edits to what it writes — see the honest-agent bar under [Known
-limitations](#-known-limitations).
+The `arl-` prefix is not decoration: Claude Code ships `/status`, `/resume` and `/config`, and
+refuses a plugin command of the same name.
+
+Claude itself uses four tools the plugin registers: `set_phases`, `add_root` (before it changes a
+folder outside every root through Bash), `review` and `clarify` (one question to the reviewer about
+its findings).
 
 ## 🔧 Configuration
 
-Resolution order: `ARL_*` environment → repo `.adversarial-review-loop.json` →
-`$XDG_CONFIG_HOME/adversarial-review-loop/config.json` → defaults. Environment variables are the
-upper-cased key with an `ARL_` prefix (`ARL_BLOCK_SEVERITY`, `ARL_MODEL`, …).
+The settings most people touch:
 
-The keys most people touch:
-
-| Key | Default | Purpose |
+| Key | Default | What it does |
 | --- | --- | --- |
-| `harness` | `claude-code` | which reviewer CLI runs the review — `claude-code` or `opencode` |
-| `model` | the harness's own (`opus` for `claude-code`, `openai/gpt-5.6-sol` for `opencode`) | probed for reachability at arm time |
-| `variant` | unset | reasoning effort — `--variant` on OpenCode, `--effort` (`low`…`max`) on Claude Code |
-| `block_severity` | `medium` | blocks when `actionable=yes AND severity >= this` |
-| `verify_cmd` | unset | run by the hook, output attached to the review as evidence |
-| `review_guide` | unset | a Markdown file spliced into the reviewer's prompt as repo-specific guidance — see [configuration.md](docs/configuration.md#repo-specific-review-guidance) |
-| `ignore_globs` | `[]` | paths whose sole change skips a review. A full bypass, not a relaxation |
-| `final_review` | `false` | run the final cumulative review at `Stop` |
-| `ttl_hours` | `24` | after this, every mutation is denied and each turn ends with a message — `resume` is usually the fix, not `implement` |
-| `timeout_sec` | `900` | per review run |
+| `harness` | `subagent` | who reviews: a Claude Code subagent, or `opencode` |
+| `model` | the session's subagent default | the reviewer's model |
+| `effort` | the agent's default | the subagent reviewer's effort, `low` to `max` |
+| `verify_cmd` | unset | the checks Claude is told to run before each review, named in every prompt |
+| `block_severity` | `medium` | an actionable finding at or above this blocks the approval |
+| `final_review` | `false` | end every run with a review of all its changes |
+| `auto_compact` | `false` | compact the conversation before a phase that follows an approval, when the turn ends there |
 
-```json
-{
-  "model": "openai/gpt-5.6-sol",
-  "variant": "high",
-  "verify_cmd": "make test",
-  "ignore_globs": ["CHANGELOG.md", "docs/**"]
-}
-```
-
-Every key, the full precedence rules, and what a review actually costs are in
-[docs/configuration.md](docs/configuration.md). State lives under
-`$XDG_STATE_HOME/adversarial-review-loop/`: **no hook, and nothing Claude can invoke itself, ever
-writes inside the repository under review** — the one exception is `config <key> <value> --repo`, an
-explicit user-only write.
-
-## ❓ FAQ
-
-Each question links to its full answer.
-
-- **[How do I start?](docs/faq.md#how-do-i-start-using-the-plugin)** Install, write a plan `.md`,
-  run `/adversarial-review-loop:implement plan.md`.
-- **[How do I stop partway
-  through?](docs/faq.md#how-do-i-stop-partway-through-a-plan)** <kbd>Esc</kbd> stops the turn at
-  once, mid-phase. To stop at a *clean* boundary instead — current phase finished, reviewed and
-  committed — press <kbd>Esc</kbd>, run `/adversarial-review-loop:pause`, then `continue`.
-- **[I quit / rebooted / `/clear`ed mid-phase — how do I pick it back
-  up?](docs/faq.md#picking-up-where-you-left-off)** Same session id (`claude --resume`, or `/resume`
-  back to it): just `continue`. New session: `/adversarial-review-loop:resume --allow-dirty`.
-  `/adversarial-review-loop:status` tells you which you're in.
-- **[Can I implement only part of a plan?](docs/faq.md#can-i-implement-only-part-of-a-plan)**
-  `--until N` on `implement` or `resume`; carry on later with a bare `resume`, which clears the
-  target.
-- **[How do I customise what the reviewer looks
-  for?](docs/faq.md#how-do-i-customise-what-the-reviewer-looks-for)** `review_guide` — a Markdown
-  file added to the reviewer's prompt. It cannot change the contract or what blocks.
-- **[The reviewer keeps finding new things and the phase never
-  converges.](docs/faq.md#the-reviewer-keeps-finding-new-things-and-the-phase-never-converges-what-now)**
-  `/adversarial-review-loop:accept [reason]` approves the current tree without another review, and
-  records that it did.
-
-More — `RECONCILE`, `NEEDS_HUMAN`, rate limits, cost, running your tests as evidence, revising a
-plan mid-run — in [docs/faq.md](docs/faq.md).
+Every key, the layers (user file, the launch folder's `.adversarial-review-loop.json`, `ARL_*`
+variables) and the project's own review skill are in [docs/configuration.md](docs/configuration.md).
 
 ## 🚧 Known limitations
 
-- **Honest-agent bar.** Claude could commit through a wrapper script, abuse `defer`, or edit
-  `.adversarial-review-loop.json` directly — `disable-model-invocation` blocks the `config`
-  *command*, not ordinary edits to the file it writes. Policy written there **can** weaken the gate
-  silently: `ignore_globs: ["**"]` skips the reviewer call on every commit, a raised
-  `block_severity` stops findings from blocking, and `final_review false` removes the cumulative
-  backstop. None of these run unreviewed code; all of them change what the gate does. Nothing here
-  defends against a deliberately hostile agent, and this design does not pretend to — see
-  [security.md](docs/security.md).
-- **A mod can route around the gate.** On Claude Code 2.1.287 and later, a JavaScript hooks module
-  runs inside Claude Code rather than as a tool call, so it can commit and stop the mode without any
-  command for the gate to see. The end-of-turn report still catches that case. According to the
-  docs, a mod can also overrule the gate's denial or keep its hooks from running at all, which would
-  silence the report too. A mod is installed by you, or written by Claude and loaded only if you
-  answer "Enable hot reloading for this session". Don't enable that while the loop is armed: the
-  answer lasts for the whole session. See
-  [security.md](docs/security.md#the-threat-model-an-honest-agent-not-a-hostile-one).
-- **The Stop-block cap is residual.** Continuation pressure from `PostToolUse`, progress-aware
-  counting and `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` mitigate it, but a run that repeatedly ends its
-  turn without progress can still exhaust the cap — and exhaustion ends the turn.
-- **A slash command's argument reaches the shell unescaped, and the plugin can only mostly contain
-  that.** `$ARGUMENTS` is substituted into the skill body textually, with no shell escaping, so a
-  plan path like `x"; id; echo "` used to run `id`. Every skill that takes an argument now hands it
-  over inside a here-document with a quoted delimiter — the one shell construct whose body is never
-  parsed — so the argument arrives verbatim and nothing inside it runs. The substitution itself is
-  still not fixable here: it happens before any shell sees the body, so the containment remains that
-  these skills are `disable-model-invocation: true` and only the person typing the slash command can
-  supply the argument. An install also serves skill bodies from a version-pinned cache, so one
-  installed before this fix keeps the old, breakable body until it is updated.
-- **Binding is session-scoped.** An activation belongs to one session at a time, so `/clear`, a
-  crash, or a fresh `claude` leaves you in a session that is not bound to it. Nothing is disarmed
-  and nothing is lost — the activation stays armed and enforcing, and the unbound session is simply
-  denied every mutation *in that worktree* until `/adversarial-review-loop:resume` binds it,
-  carrying the baseline and every approval across. Returning to the same session (`claude --resume`)
-  needs no command at all. The cost is that a second session resuming the worktree retires the first
-  for good — see
-  [edge-cases.md](docs/edge-cases.md#clear-crashes-and-quitting-unbind-a-session-they-do-not-disarm-an-activation).
-- **Cost and latency.** Every phase costs at least one full-model review, and a denied commit blocks
-  the session for the length of the review. The `PreToolUse` hook itself adds ~111 ms to *every*
-  tool call — the measurements are in
-  [architecture.md](docs/architecture.md#what-the-hot-path-costs).
+- **Bash writes outside every root are not seen.** Edit and Write register the folder they write
+  to; Claude is told to call `add_root` before changing anything else through Bash, but nothing
+  checks that it did. A change nobody registered is a change nobody reviews.
+- Paths the plan names become roots at the start only inside a git worktree under your home folder
+  or beside the launch folder, with no hidden folder on the way (`/srv/api` does not count). Any
+  other folder joins through `--root`, the `roots` setting, `add_root`, or a write into it.
+- Launching inside a larger repository makes that whole repository a root.
+- Repositories nested deeper than the scan depth, inside `node_modules`, or in a folder their
+  container ignores are not discovered.
+- A folder that joins after the run started is checked by timestamps: if anything in it changed
+  since the start, you are asked for its baseline. `cp -p` and similar tools can evade the check.
+  Writing a new subfolder of a folder outside every root registers the subfolder; a later write
+  beside it registers the folder, and you are asked once for its baseline although nothing went
+  unreviewed.
+- Writes into scratch places (`/tmp`, `/var/tmp`, `$TMPDIR`, `~/.claude`) register nothing, unless
+  they share a top-level folder with a root, or go through `add_root` or `/add-dir`.
+- A repository nested in another root cannot be removed, only given a baseline.
+- `/arl-config --repo` writes `.adversarial-review-loop.json` into the launch folder, so it shows
+  up in that phase's diff.
+- The failure budget makes the loop stop prompting Claude, but a `review` Claude calls anyway still
+  runs.
 
 ## 📚 Documentation
 
-| Page | For | Covers |
-| --- | --- | --- |
-| [how-it-works.md](docs/how-it-works.md) | anyone, no engineering background needed | What problem this solves and why, in plain language |
-| [faq.md](docs/faq.md) | anyone using it day to day | The questions that come up first, answered short |
-| [configuration.md](docs/configuration.md) | anyone running the loop day to day | Every setting, precedence, cost, examples |
-| [architecture.md](docs/architecture.md) | engineers working on or integrating with the plugin | Components, data flow, the state machine, what blocks, on-disk layout |
-| [edge-cases.md](docs/edge-cases.md) | anyone debugging unexpected behaviour | What happens when things go sideways, and why |
-| [security.md](docs/security.md) | anyone assessing whether this is safe to trust | The threat model, what is and is not enforced, and why |
+[docs/](docs/README.md) has how it works, the configuration, the FAQ, the design philosophy and
+the architecture.
 
 ## 🔨 Development
 
 ```console
-make test                    # 3900+ tests against scratch repos, plus the shim selftest; no model is called
-make test-unit               # the pytest half only
-make test-filter FILTER=watchdog # one shim selftest section
-make dry-run                 # print the exact reviewer argv and prompt, without invoking it
-make check                   # pre-commit (shellcheck, yamllint, markdownlint, …)
+make dev-deps     # the pinned development dependencies, once per checkout
+make test         # the engine's unit tests and the launcher smoke test; no model is called
+make test-mod     # the mod's tests under `claude plugin test`
+make check        # pre-commit: ruff, mypy, eslint, tsc, shellcheck, markdownlint, licence headers, …
 ```
 
-`tests/unit/` drives the hook entrypoints with synthetic payloads against scratch git repos —
-through the same bootstrap production uses — and replaces the reviewer with
-`tests/fixtures/fake-reviewer.sh` (`ARL_REVIEWER_CMD`), so loop logic costs nothing to iterate on.
-It covers the snapshot layer, the command-shape table, every arm-failure mode, the fail-closed
-guards, commit divergence and reconcile, the findings cap, the Stop accounting and the TTL.
-
-`tests/selftest.sh` is a separate, much smaller suite in bash, for the one layer pytest structurally
-cannot reach because it runs *inside* the Python being launched: the interpreter probe, the shim
-contract, the watchdog layers, socket stdin, and the hot path's process budget.
-
-Running the tests needs `jq`, and comparing the chunker against the real GNU `split` needs GNU
-coreutils (`gsplit`); both are **development-only** — the gate itself uses neither, and those
-comparisons skip cleanly where coreutils is absent, as on a stock Mac.
-
-With the plugin enabled, its hooks run in every session, armed or not, and they deny any Claude Bash
-command that names a user-only subcommand (`arl.sh arm`, `finish`, `deactivate`, `resume`, `config`,
-`accept`, `pause`). When developing this repository, set
-`"enabledPlugins": {"adversarial-review-loop@adversarial-review-loop": false}` in its
-`.claude/settings.local.json`, and load the working tree with `claude --plugin-dir .` only when you
-mean to use the loop.
-
-[`AGENTS.md`](AGENTS.md) is the contract any change to this project has to honour — the five
-non-negotiable rules, the invariants, and the hazards that silently reopen a closed hole if
-reverted. Before the first real run, work through [`tests/STEP0.md`](tests/STEP0.md): the harness
-assumptions that only a live Claude Code session can settle.
+[`AGENTS.md`](AGENTS.md) is the contract a change to this project must honour, and
+[`tests/STEP0.md`](tests/STEP0.md) records the Claude Code behaviour the design rests on, measured
+in live sessions.
 
 ## 📄 Licence
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
-
-The gate parses commands with [bashlex](https://github.com/idank/bashlex), which is GPLv3 and is
-vendored under `scripts/arl/_vendor/` so the plugin works straight from a checkout with no install
-step. See [that directory's README](scripts/arl/_vendor/README.md) for the version, the upstream
-commit, and the one change made to it.

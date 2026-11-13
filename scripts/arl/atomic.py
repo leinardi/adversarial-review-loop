@@ -1,4 +1,4 @@
-"""Durable, private writes for everything the gate persists.
+"""Durable, private writes for everything the engine persists.
 
 Three properties, none of which the shell implementation had:
 
@@ -23,10 +23,10 @@ afterwards is too late, because the mutation has already happened. Descriptor-re
 traversal also closes the check/create race: the mode is set through the same descriptor
 that was verified, so there is no window in which the path could be swapped.
 
-The state root itself is opened normally rather than with ``O_NOFOLLOW``: its location is
-the user's own configuration (``ARL_STATE_DIR``, ``XDG_STATE_HOME``), symlinking it is
-legitimate, and its parents are outside anything the repository under review can influence.
-The boundary that matters starts at the components the gate creates for itself.
+The state root itself (``<launch folder>/.arl``) is opened normally rather than with
+``O_NOFOLLOW``: where the run lives is the person's choice, and its parents are not the engine's to
+police.
+The boundary that matters starts at the components the engine creates for itself.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -111,7 +111,7 @@ def _tighten(fd: int, what: Path) -> None:
     """Make the directory behind ``fd`` private, through the descriptor itself.
 
     Compared before being set, so a steady-state run pays one ``fstat`` and no ``fchmod``.
-    Failures are **not** suppressed: carrying on would mean writing state the gate cannot
+    Failures are **not** suppressed: carrying on would mean writing state the engine cannot
     show is private.
     """
     info = os.fstat(fd)
@@ -136,7 +136,7 @@ def _descend(parent_fd: int, name: str, whole: Path) -> int:
         # message names the real problem.
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
             if _is_symlink(parent_fd, name):
-                raise UnsafePathError(f"{whole}: component {name!r} is a symlink; the gate will not write state through one") from exc
+                raise UnsafePathError(f"{whole}: component {name!r} is a symlink; the engine will not write state through one") from exc
             raise UnsafePathError(f"{whole}: component {name!r} is not a directory") from exc
         raise
 
@@ -158,7 +158,7 @@ def private_dir_fd(path: Path, *, root: Path) -> Iterator[int]:
     """
     parts = _relative_parts(path, root)
 
-    # The root's own parents are outside the gate's boundary; create them plainly and do
+    # The root's own parents are outside the engine's boundary; create them plainly and do
     # not touch their modes.
     os.makedirs(root, mode=DIR_MODE, exist_ok=True)
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
@@ -278,10 +278,8 @@ def verified_file(path: Path, *, root: Path) -> bool:
     intermediate link are both decided here, rather than by whatever the path happens to
     resolve to at the moment some other process opens it.
 
-    ``root`` itself is opened normally, for the same reason :func:`private_dir_fd` does it: the
-    state root's own location is the user's configuration (``ARL_STATE_DIR``,
-    ``XDG_STATE_HOME``) and symlinking it is legitimate. The boundary starts at the components
-    the gate creates for itself.
+    ``root`` itself is opened normally, for the same reason :func:`private_dir_fd` does it. The
+    boundary starts at the components the engine creates for itself.
 
     Answers ``False`` for everything it cannot establish -- outside ``root``, missing, a
     symlink, a directory, a special file -- and never raises for an ordinary filesystem
@@ -329,7 +327,7 @@ def write_private_atomic(path: Path, text: str, *, root: Path, errors: str = "st
     on the caller's umask. If anything fails before the rename, the previous contents are
     still there, byte for byte.
 
-    ``errors`` is ``"strict"`` for everything the gate composes itself, because an
+    ``errors`` is ``"strict"`` for everything the engine composes itself, because an
     unencodable character there is a bug worth failing on. Reports pass
     ``"surrogateescape"``: they embed the reviewer's own output, which is not obliged to be
     valid UTF-8, and losing the whole report to one stray byte would throw away the evidence
@@ -421,13 +419,13 @@ def write_atomic(path: Path, text: str) -> None:
 def locked(lock_path: Path, *, root: Path) -> Iterator[None]:
     """Hold an exclusive lock across a read-modify-write of shared state.
 
-    Atomic rename prevents a torn file but not a lost update: a ``PostToolUse`` hook and a
-    user-run ``defer`` can interleave, and the loser's change -- an escalation, or a cleared
-    pending approval -- would simply vanish.
+    Atomic rename prevents a torn file but not a lost update: two engine commands (a review
+    being recorded and a person's ``/arl-stop``) can interleave, and the loser's change would
+    simply vanish.
 
-    Failure to take the lock is deliberately **not** swallowed. It propagates to the
-    entrypoint's fail-closed guard, which denies (Rule 1): a gate that cannot serialise its
-    own state cannot show that it is enforcing anything.
+    Failure to take the lock is deliberately **not** swallowed. It propagates, and the command
+    answers a failure (AGENTS.md rule 1): an engine that cannot serialise its own state cannot
+    record anything it is sure of.
     """
     with private_dir_fd(lock_path.parent, root=root) as dir_fd:
         fd = os.open(lock_path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, FILE_MODE, dir_fd=dir_fd)

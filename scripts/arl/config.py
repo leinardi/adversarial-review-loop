@@ -9,7 +9,7 @@ may select a model or widen an ignore list, but nothing here can execute code or
 failure into an approval -- every value is read as data by a typed accessor.
 
 ``-I`` implies ``-E``, which suppresses ``PYTHON*`` variables only; ``ARL_*`` is unaffected
-and still reaches the gate.
+and still reaches the engine.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -306,7 +306,7 @@ def severity_rank(label: str) -> int:
 
     An unrecognised label ranks as the most severe (5) -- the highest rank a real label ever
     gets is 4, so this guarantees an unparsable label clears any configured threshold. A
-    severity the gate cannot parse must never be a way to slip past it (Rule 1).
+    severity the engine cannot parse must never be a way to slip past it (Rule 1).
 
     Not the right function for ranking ``block_severity`` itself -- see ``threshold_rank``.
     """
@@ -322,7 +322,7 @@ def threshold_rank(label: str) -> int:
     every real label) would make almost nothing meet it, so a typo'd or unrecognised
     threshold would silently block far less than the default, not more. Rule 1 requires the
     opposite direction here, so an unrecognised threshold ranks at 1 -- the floor a finding's
-    rank clears most easily -- making the gate stricter on bad input, never looser.
+    rank clears most easily -- making the engine stricter on bad input, never looser.
     """
     return _SEVERITY_RANK.get(label.lower(), 1)
 

@@ -523,24 +523,28 @@ def _token(run: RunState) -> str:
     return ":".join(str(part) for part in (run.run_id, run.stage(), run.data["phases_revision"], len(run.data["approvals"]), run.data["rounds"]))
 
 
-def _prompt(run: RunState) -> str:
+def _prompt(run: RunState, verify_cmd: str = "") -> str:
+    # The configured checks are named in every prompt: the start prompt may be compacted away, or
+    # the setting changed mid-run.
+    gates = f"run the project's checks (`{verify_cmd}`)" if verify_cmd else "run the gates"
     stage = run.stage()
     if stage == "plan":
         return "The plan has no phases yet. Call set_phases with the plan's phases, then implement phase 1."
     if stage == "final":
         if run.data["rounds"]:
-            return "The final review asked for changes. Fix the cumulative findings, run the gates, then call review again."
+            return f"The final review asked for changes. Fix the cumulative findings, {gates}, then call review again."
         return (
             "Every phase is approved. Commit the approved phase by each repository's conventions, "
-            "then run the final review: call review for the whole run."
+            f"{gates}, then run the final review: call review for the whole run."
         )
     phase = run.current_phase()
     count = len(run.data["phases"])
     description = run.data["phases"][phase - 1]
     if run.data["rounds"]:
-        return f"The review of phase {phase} of {count} asked for changes. Fix the findings, run the gates, then call review again."
+        return f"The review of phase {phase} of {count} asked for changes. Fix the findings, {gates}, then call review again."
     lead = "Commit the approved phase by each repository's conventions, then implement" if run.approved_phases else "Implement"
-    return f"{lead} phase {phase} of {count}: {description}\nRun the project's gates, then call review."
+    first = f"Run the project's checks (`{verify_cmd}`)" if verify_cmd else "Run the project's gates"
+    return f"{lead} phase {phase} of {count}: {description}\n{first}, then call review."
 
 
 def start_prompt(run: RunState, verify_cmd: str) -> str:
@@ -576,7 +580,7 @@ def _blocker(run: RunState) -> dict[str, Any] | None:
     return None
 
 
-def next_action(run: RunState | None) -> dict[str, Any]:
+def next_action(run: RunState | None, *, verify_cmd: str = "") -> dict[str, Any]:
     """Whether the loop goes on after a main-loop turn, and the prompt that continues it.
 
     ``continue`` only when the run is active, no review is pending, no decision is waiting on the
@@ -594,4 +598,4 @@ def next_action(run: RunState | None) -> dict[str, Any]:
     if token == run.data["last_continuation"]:
         return {"action": "yield", "reason": "unchanged", "token": token}
     run.data["last_continuation"] = token
-    return {"action": "continue", "stage": run.stage(), "phase": run.current_phase(), "prompt": _prompt(run), "token": token}
+    return {"action": "continue", "stage": run.stage(), "phase": run.current_phase(), "prompt": _prompt(run, verify_cmd), "token": token}

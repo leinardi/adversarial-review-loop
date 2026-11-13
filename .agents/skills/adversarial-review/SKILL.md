@@ -12,9 +12,8 @@ description: >
 
 # Adversarial Review - adversarial-review-loop
 
-**Interim, v4 rewrite in progress.** The project is being rebuilt from v3's
-enforcement gate into a plan-and-go review loop (see `AGENTS.md`). v4 is not a
-security boundary, so do not report that the agent under review could bypass
+The project is a plan-and-go review loop (see `AGENTS.md`); since v4 it is not
+a security boundary, so do not report that the agent under review could bypass
 the loop. Report what makes a review wrong: evidence the reviewer never sees, a
 failure read as an approval, a verdict parsed loosely, state that loses or
 misattributes a round, and code or docs that still describe v3 behaviour that

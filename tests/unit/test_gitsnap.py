@@ -2,7 +2,7 @@
 
 Beyond that section's verdicts, the properties the shell suite could not easily assert are
 covered here: that the repository's real index is byte-identical afterwards, that nothing is
-left inside the repository under review (Rule 3), and that the throwaway index is removed on
+left inside the repository under review (AGENTS.md rule 4), and that the throwaway index is removed on
 every path out.
 """
 
@@ -168,7 +168,7 @@ def test_a_split_index_snapshots_to_the_tree_that_will_be_committed(git_repo: Pa
     """A copied split index resolves its shared half against ``$GIT_DIR``, so the copy is usable.
 
     And the copy is written back with ``core.splitIndex=false``, so no new ``sharedindex.*``
-    is deposited in the repository under review (Rule 3).
+    is deposited in the repository under review (rule 4).
     """
     git(git_repo, "update-index", "--split-index")
     (git_repo / "new.txt").write_text("new\n")
@@ -219,7 +219,7 @@ def test_ignored_files_are_not_stageable(git_repo: Path) -> None:
     assert gitsnap.stageable(str(git_repo)) == [".gitignore"]
 
 
-# -- Rule 3: the repository under review is not touched --------------------
+# -- Rule 4: the repository under review is not touched --------------------
 
 
 def test_the_real_index_is_byte_identical_afterwards(git_repo: Path) -> None:

@@ -18,7 +18,7 @@ the shim passes it as an absolute path.
 
 ``-I`` likewise makes the interpreter ignore ``PYTHONPYCACHEPREFIX`` (measured:
 ``sys.pycache_prefix`` is ``None``), so the cache directory is set here at runtime, before
-``arl`` is imported. Rule 3 -- nothing is written inside the repository under review --
+``arl`` is imported. Rule 4 -- nothing is written inside the repository under review --
 applies to ``__pycache__`` as much as to anything else, and the plugin gates work on
 itself. ``-B`` would also keep the tree clean but throws the bytecode cache away on every
 hook, which is the hot path.
@@ -96,7 +96,7 @@ def _enclosing_repo_root(start: str) -> str:
 
 
 def _cache_dir_is_safe(cache_dir: str) -> bool:
-    """Is it safe to write bytecode under ``cache_dir``? (Rule 3.)
+    """Is it safe to write bytecode under ``cache_dir``? (Rule 4.)
 
     ``XDG_CACHE_HOME`` is ordinary environment, not a trusted input: a value of
     ``$PWD/.cache`` is perfectly absolute and lands squarely inside the repository under
@@ -122,7 +122,7 @@ def _configure_bytecode_cache() -> None:
 
     The fallback is deliberately ``dont_write_bytecode`` rather than "write beside the
     source". Losing the cache costs a few milliseconds per hook; writing into the tree
-    under review breaks Rule 3, and the plugin gates work on itself.
+    under review breaks Rule 4, and the plugin gates work on itself.
     """
     cache_dir = _bytecode_cache_dir()
     if _cache_dir_is_safe(cache_dir):
