@@ -358,3 +358,19 @@ test('add_root on a root that has no baseline yet settles it with the user', asy
   expect(await callTool($, 'add_root', { path: '/lib' })).toContain('whose baseline the user just chose')
   expect(w.calls.at(-1)?.args).toEqual(['root-baseline', 'lib', '--current'])
 })
+
+test('the band says working while Claude\'s main turn runs, and idle once it ended, whatever ended it', async ($, on) => {
+  world(on, { engine: { attach: { ok: true, run: summary(), foreign_review: false, effort: '' }, status: STATUS, 'next-action': { ok: true, action: 'yield', reason: 'unchanged' } } })
+  on('turn.start', (_, e) => e as never)
+  await start($)
+  const band = async (): Promise<string | undefined> => {
+    const ui = await $.ui.mount({ plugin: 'adversarial-review-loop', component: 'AbovePrompt', surface: 'terminal', props: { hasSurvey: false, isCollapsed: false, isWorking: true, maxRows: 10 } } as never)
+    const text = (await ui.find({ type: 'Text', text: /phase 1/ }))?.text
+    await ui.unmount()
+    return text
+  }
+  await $.turn.start({ text: 'go', turnId: 't1' } as never)
+  expect(await band()).toContain('· working')
+  await turnEnds($, { reason: 'aborted', isAborted: true })
+  expect(await band()).toContain('· idle')
+})

@@ -44,6 +44,7 @@ test('every command is registered with the arl- prefix: Claude Code ships /statu
     'arl-resume',
     'arl-status',
     'arl-report',
+    'arl-phases',
     'arl-pause',
     'arl-accept',
     'arl-finish',
@@ -60,6 +61,18 @@ test('a session start reattaches: it names its session, and the reviewer gets th
   expect(w.registered.agents).toEqual([expect.objectContaining({ name: 'reviewer', effort: 'high' })])
 })
 
+test('an interactive session that starts on an active run opens the pane', async ($, on) => {
+  const w = world(on, { engine: { attach: { ok: true, run: summary(), foreign_review: false, effort: '' } } })
+  await start($, true)
+  expect(w.opened).toEqual(['arl'])
+})
+
+test('a headless session that starts on a run opens no pane', async ($, on) => {
+  const w = world(on, { engine: { attach: { ok: true, run: summary(), foreign_review: false, effort: '' } } })
+  await start($)
+  expect(w.opened).toEqual([])
+})
+
 test('a review another session started is said at the start, and left to /arl-resume', async ($, on) => {
   const w = world(on, { engine: { attach: { ok: true, run: summary(), foreign_review: true, effort: '', effort_note: "effort 'ultra' is no level" } } })
   await start($)
@@ -72,7 +85,7 @@ test('a review another session started is said at the start, and left to /arl-re
 test('a run the engine cannot read is said at the start, and the session still starts', async ($, on) => {
   const w = world(on, { engine: { attach: { ok: false, code: 'state-corrupt', error: 'bad json' } } })
   await start($)
-  expect(w.logged.join('\n')).toContain('could not read the run here: bad json')
+  expect(w.logged.join('\n')).toContain('Could not read the run here: bad json')
   expect(w.registered.agents).toHaveLength(1)
 })
 
@@ -133,6 +146,16 @@ test('/arl-resume abandons any pending review and tells Claude to call review ag
   expect(w.submitted[0]).toContain('Implement phase 2 of 2: two')
 })
 
+test('/arl-resume tells Claude what the run is: a new session knows nothing of it', async () => {
+  at()
+  const context = 'This is the adversarial-review-loop run r1 on the plan /work/plan.md (a copy is at /work/.arl/plan.md)'
+  const { $, w } = fakeEngine({ engine: { resume: { ok: true, run: summary(), abandoned_review: false, context }, 'next-action': CONTINUE } })
+  await runCommand($, 'arl-resume', '')
+  await settle()
+  expect(w.submitted[0]).toContain(context)
+  expect(w.submitted[0]).toContain('Implement phase 2 of 2: two')
+})
+
 test('/arl-resume that cannot continue says why, and submits nothing', async () => {
   at()
   const { $, w } = fakeEngine({ engine: { resume: { ok: true, run: summary() }, 'next-action': { ok: true, action: 'yield', reason: 'complete' } } })
@@ -160,14 +183,14 @@ test('/arl-resume asks for a missing baseline, then continues', async () => {
   expect(w.submitted).toHaveLength(1)
 })
 
-test('/arl-status shows the run to the person and the pane, and tells Claude one line', async () => {
+test('/arl-status answers the run as several lines of its own text, and opens the pane', async () => {
+  // Measured live: a log line is one line, and its newlines drew as stray characters.
   at(true)
   const run = summary({ approved_phases: 1, phase: 2, rounds: 1, roots: [{ alias: 'web', path: '/w', kind: 'git', baseline: 'unknown', proposed: '' }] })
   const { $, w } = fakeEngine({ engine: { status: { ok: true, run } } })
-  const text = String(await runCommand($, 'arl-status', ''))
-  expect(text).toBe('Run r1 (active): phase 2/2: two, round 2. The pane shows it.')
-  const shown = w.logged.join('\n')
-  expect(shown).toContain('✓ 1. one')
+  const shown = String(await runCommand($, 'arl-status', ''))
+  expect(w.logged).toEqual([])
+  expect(shown).toContain('✓ 1. one\n')
   expect(shown).toContain('▶ 2. two  (round 2)')
   expect(shown).toContain('web  /w  (git)  baseline unknown')
   expect(w.opened).toEqual(['arl'])
@@ -180,12 +203,20 @@ test('/arl-status headless answers the whole status as its text, and opens no pa
   expect(w.opened).toEqual([])
 })
 
-test('/arl-report puts the report in the pane, never in Claude\'s context', async () => {
+test('/arl-report shows the report in a pane of its own, which scrolls, never in Claude\'s context', async () => {
   at(true)
   const { $, w } = fakeEngine({ engine: { report: { ok: true, text: '# Report 1\nVERDICT APPROVED', reports: [] } } })
-  expect(await runCommand($, 'arl-report', '1')).toBe('Report 1 is in the review pane.')
+  expect(await runCommand($, 'arl-report', '1')).toBe('Report 1 is in the report pane.')
   expect(w.state.get('adversarial-review-loop/report')).toBe('# Report 1\nVERDICT APPROVED')
-  expect(w.opened).toEqual(['arl'])
+  expect(w.opened).toEqual(['arl-report'])
+  expect(w.logged).toEqual([])
+})
+
+test('/arl-phases lists every phase to the person', async () => {
+  at(true)
+  const { $, w } = fakeEngine({ engine: { status: { ok: true, run: { ...summary(), phases: ['one', 'two'], phase_count: 2 } } } })
+  expect(await runCommand($, 'arl-phases', '')).toBe('▶ 1. one  (round 1)\n· 2. two')
+  expect(w.logged).toEqual([])
 })
 
 test('/arl-report headless answers the engine text, by number when given', async () => {
@@ -266,8 +297,8 @@ test('/arl-config whose new effort the host refuses says the config is written, 
 test('/arl-config with no key shows the listing to the person, and leaves the reviewer as it is', async () => {
   at(true)
   const { $, w } = fakeEngine({ engine: { config: { ok: true, text: 'every key', effort: '' } } })
-  expect(await runCommand($, 'arl-config', '')).toBe('The configuration is shown above.')
-  expect(w.logged).toEqual(['every key'])
+  expect(await runCommand($, 'arl-config', '')).toBe('every key')
+  expect(w.logged).toEqual([])
   expect(w.registered.agents).toEqual([])
 })
 
@@ -315,7 +346,7 @@ test('a compaction that fails is said, and the run continues uncompacted', async
   const { $, w } = fakeEngine({ engine: { status: { ok: true, run: summary() }, 'next-action': { ...CONTINUE, compact: true } }, compactFails: true })
   await continueRun($)
   await settle()
-  expect(w.logged.join('\n')).toContain('could not compact')
+  expect(w.logged.join('\n')).toContain('Could not compact')
   expect(w.submitted).toEqual([CONTINUE.prompt])
 })
 
@@ -327,7 +358,7 @@ test('a recorded review lands in the pane, is logged, and a completed run is not
   // A shaped atom stores its value under its shape tag.
   expect(w.state.get('adversarial-review-loop/last')).toEqual({ shape: 'last-1', value: { label: 'phase1', verdict: 'APPROVED', message: RECORDED.message, report: '/r.md' } })
   expect(w.state.get('adversarial-review-loop/activity')).toBe('')
-  expect(w.logged).toEqual(['adversarial-review-loop: phase1 APPROVED'])
+  expect(w.logged).toEqual(['phase1 APPROVED'])
   expect(w.notified.join('\n')).toContain('the run is complete')
 })
 
@@ -352,10 +383,83 @@ test('a write the person refuses drops the root registered for it', async ($, on
   expect(w.calls.find(call => call.args[0] === 'root-remove')?.args).toEqual(['root-remove', 'web', '--undo'])
 })
 
-test('a write that runs keeps its root', async ($, on) => {
-  const w = world(on, { engine: { status: STATUS, 'root-add': ADDED }, check: 'allow', writeOutcome: 'run' })
+test('a write that runs keeps its root: the engine refuses to drop a folder that changed', async ($, on) => {
+  const w = world(on, {
+    engine: { status: STATUS, 'root-add': ADDED, 'root-remove': { ok: false, code: 'kept', error: "root 'web' changed since it joined; it stays" } },
+    check: 'allow',
+    writeOutcome: 'run',
+  })
   await start($)
   const result = await $.tool.call({ tool: 'Write', file_path: '/elsewhere/web/a.ts', content: 'x' })
   expect(result.context?.join('\n')).toContain('registered /elsewhere/web as root web')
+  expect(w.commands()).toContain('root-remove')
+})
+
+test('a write refused in a shape that says nothing still gives its root back', async ($, on) => {
+  // Measured live: the person's "No" in the write dialog reached the hook as neither `deny` nor
+  // `isError`, and the folder stayed a root of the run although nothing was written.
+  const w = world(on, { engine: { status: STATUS, 'root-add': ADDED, 'root-remove': { ok: true, alias: 'web' } }, check: 'allow', writeOutcome: 'run' })
+  await start($)
+  const result = await $.tool.call({ tool: 'Write', file_path: '/elsewhere/web/a.ts', content: 'x' })
+  expect(w.commands()).toContain('root-remove')
+  expect(result.context?.join('\n') ?? '').not.toContain('registered /elsewhere/web')
+})
+
+test('a write whose refusal ends the call with an error still gives its root back', async ($, on) => {
+  // Measured live: after "No" in the write dialog nothing after the write ran in the hook.
+  const w = world(on, { engine: { status: STATUS, 'root-add': ADDED, 'root-remove': { ok: true, alias: 'web' } }, check: 'allow', writeOutcome: 'throw' })
+  await start($)
+  await $.tool.call({ tool: 'Write', file_path: '/elsewhere/web/a.ts', content: 'x' }).catch(() => undefined)
+  expect(w.commands()).toContain('root-remove')
+})
+
+test('a root whose undo got no engine answer is offered back again when the turn ends', async ($, on) => {
+  // Measured live: the person's "No" aborts the write's dispatch, and the undo's engine call with it.
+  let removes = 0
+  const remove = (): unknown => (++removes === 1 ? { ok: false, code: 'engine', error: 'the engine could not run: aborted' } : { ok: true, alias: 'web' })
+  const w = world(on, {
+    engine: { status: STATUS, 'root-add': ADDED, 'root-remove': remove, 'next-action': { ok: true, action: 'yield', reason: 'unchanged' } },
+    check: 'allow',
+    writeOutcome: 'deny',
+  })
+  await start($)
+  await $.tool.call({ tool: 'Write', file_path: '/elsewhere/web/a.ts', content: 'x' })
+  expect(removes).toBe(1)
+  await $.turn.complete({ answer: 'done', reason: 'answer', durationMs: 5, isAborted: false, turnId: 't1' } as never)
+  expect(removes).toBe(2)
+  expect(w.commands().filter(command => command === 'root-remove')).toHaveLength(2)
+})
+
+test('a write still waiting when the main turn ends keeps the root it registered', async ($, on) => {
+  // A background subagent's write can sit in its dialog past the main turn's end: offering its
+  // root back then would drop the folder before the write lands, and nobody would review it.
+  let release: () => void = () => undefined
+  const waiting = new Promise<void>(resolve => {
+    release = resolve
+  })
+  const w = world(on, {
+    engine: { status: STATUS, 'root-add': ADDED, 'root-remove': { ok: false, code: 'kept', error: 'changed' }, 'next-action': { ok: true, action: 'yield', reason: 'unchanged' } },
+    check: 'allow',
+  })
+  on('tool.call', { tool: 'Write' }, async () => {
+    await waiting
+    return { result: 'written' } as never
+  })
+  await start($)
+  const write = $.tool.call({ tool: 'Write', file_path: '/elsewhere/web/a.ts', content: 'x', agentId: 'sub-1' })
+  await settle()
+  await $.turn.complete({ answer: 'done', reason: 'answer', durationMs: 5, isAborted: false, turnId: 't1' } as never)
   expect(w.commands()).not.toContain('root-remove')
+  release()
+  await write
+  expect(w.commands()).toContain('root-remove')
+})
+
+test('/arl-resume that cannot continue still tells Claude what the run is', async () => {
+  at()
+  const context = 'This is the adversarial-review-loop run r1 on the plan /work/plan.md'
+  const { $ } = fakeEngine({ engine: { resume: { ok: true, run: summary(), context }, 'next-action': { ok: true, action: 'yield', reason: 'waiting' } } })
+  const text = String(await runCommand($, 'arl-resume', ''))
+  expect(text).toContain('does not continue now (waiting)')
+  expect(text).toContain(context)
 })

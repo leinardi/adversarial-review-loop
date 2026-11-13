@@ -36,8 +36,10 @@ and asks the person when the engine says the run waits for them.
   tool waits for the subagent's `turn.complete` while a `$.process.spawn(['sleep', timeout])` is in
   flight: the spawn stops the clock, and its exit is the review's timeout.
 - **Roots before writes.** A `tool.call` hook on Edit, Write and NotebookEdit registers the folder
-  a file is written to, unless the session's rules deny the write, and takes it back
-  (`root-remove --undo`) when the write is refused or fails and the folder is unchanged.
+  a file is written to, unless the session's rules deny the write. Once the write is over it offers
+  the root back (`root-remove --undo`), and the engine drops it only when the folder is unchanged:
+  the write was refused or failed. An undo the refusal's abort cut short is retried at the turn's
+  end.
 - **Continuation.** After a main-loop turn that ended with an answer, the mod asks `next-action`;
   on `continue` it submits the engine's prompt (after compacting, when `auto_compact` is due).
 

@@ -44,7 +44,9 @@ declare module 'claude-code' {
       last: Shaped<LastReview | null>
       /** What the loop is doing now (`reviewing phase 2, round 1`), empty when idle. */
       activity: string
-      /** A stored report the person asked to see (`/arl-report`), empty for none. */
+      /** Whether Claude's main turn is running. */
+      busy: boolean
+      /** The stored report the person asked to see (`/arl-report`), for the report pane. */
       report: string
     }
   }

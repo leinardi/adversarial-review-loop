@@ -182,6 +182,26 @@ test('the user accepting a stalled phase approves it through the engine', async 
   expect(text).toContain('The user accepted this stage as it stands')
 })
 
+test('the user accepting a stage of a paused run tells Claude to stop after the commit, not to go on', async () => {
+  // Pausing is the user's stop: "go on with the next phase" would undo it.
+  at(true)
+  const { $ } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': STALLED, accept: { ok: true, run: summary({ status: 'paused' }) } }, files: PROMPTS, choices: ['Accept'] })
+  const text = await review($, {}, reviewer([APPROVED]).run)
+  expect(text).toContain('then stop: the user paused the run')
+  expect(text).not.toContain('go on with the next phase')
+})
+
+test('keep going on a paused run keeps it paused', async () => {
+  at(true)
+  const { $, w } = fakeEngine({
+    engine: { 'review prepare': PREPARED, 'review record': STALLED, status: { ok: true, run: summary({ status: 'paused' }) }, resume: { ok: true, run: summary() }, pause: { ok: true, run: summary({ status: 'paused' }) } },
+    files: PROMPTS,
+    choices: ['Keep going'],
+  })
+  await review($, {}, reviewer([APPROVED]).run)
+  expect(w.commands().slice(-2)).toEqual(['resume', 'pause'])
+})
+
 test('keep going resumes the run in this session', async () => {
   at(true)
   const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': STALLED, resume: { ok: true, run: summary() } }, files: PROMPTS, choices: ['Keep going'] })

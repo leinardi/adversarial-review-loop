@@ -66,6 +66,7 @@ __all__ = [
     "locked_state",
     "new_document",
     "next_action",
+    "resume_context",
     "run_paths",
     "start_prompt",
 ]
@@ -542,7 +543,12 @@ def _prompt(run: RunState, verify_cmd: str = "") -> str:
     description = run.data["phases"][phase - 1]
     if run.data["rounds"]:
         return f"The review of phase {phase} of {count} asked for changes. Fix the findings, {gates}, then call review again."
-    lead = "Commit the approved phase by each repository's conventions, then implement" if run.approved_phases else "Implement"
+    # The prompt may come after the work did (a resume, an accept): it must not claim either is undone.
+    lead = (
+        "Commit the approved phase by each repository's conventions if that is not done yet, then implement (or finish)"
+        if run.approved_phases
+        else "Implement (or finish)"
+    )
     first = f"Run the project's checks (`{verify_cmd}`)" if verify_cmd else "Run the project's gates"
     return f"{lead} phase {phase} of {count}: {description}\n{first}, then call review."
 
@@ -561,6 +567,29 @@ def start_prompt(run: RunState, verify_cmd: str) -> str:
         "4. Fix what the review finds and call review again. On approval, commit each changed git repository by "
         "its own conventions and go on with the next phase.\n\n"
         "The loop prompts you after each turn while work remains. When a review hands a decision to the user, stop and tell them."
+    )
+
+
+def resume_context(run: RunState, verify_cmd: str) -> str:
+    """What a resumed session is told about the run: a new session knows nothing of it.
+
+    ``/arl-resume`` is often the first thing in a session that did not start the run, so the
+    continuation alone (``phase 2 of 4: title``) would leave Claude without the plan, the roots and
+    the loop's rules.
+    """
+    roots = "; ".join(f"{root['alias']} = {root['path']}" for root in run.roots)
+    checks = f"run the project's checks (`{verify_cmd}`)" if verify_cmd else "run the project's checks"
+    done = run.approved_phases
+    phases = "; ".join(f"{index}. {title}{' (approved)' if index <= done else ''}" for index, title in enumerate(run.data["phases"], start=1))
+    return (
+        f"This is the adversarial-review-loop run {run.run_id} on the plan {run.data['plan']['source']} "
+        f"(a copy is at {run.paths.plan_file}): read it if this conversation does not hold it.\n"
+        + (f"Phases: {phases}.\n" if phases else "")
+        + f"Workspace roots: {roots}. Edit and Write register the folders they write to; before you change anything "
+        "through Bash outside them, call add_root for that directory.\n"
+        f"When a phase is implemented, {checks}, then call review with what they reported. Fix what the review finds "
+        "and call review again. On approval, commit each changed git repository by its own conventions. When a review "
+        "hands a decision to the user, stop and tell them."
     )
 
 

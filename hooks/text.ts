@@ -52,7 +52,7 @@ export const TOOLS = {
   },
   review: {
     description:
-      "Ask for the adversarial review of the current phase (or of the final review stage) once the phase is implemented. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions and go on with the next phase. The review sees every change since the last approval, in every root.",
+      "Ask for the adversarial review of the current phase (or of the final review stage) once the phase is implemented. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
     inputSchema: {
       type: 'object',
       properties: {

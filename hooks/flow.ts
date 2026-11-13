@@ -24,7 +24,7 @@ import type { RunView } from '../types'
 import { type Answer, engine, engineStream } from './engine'
 import { Interrupted, normalize, type Ran, runReviewer, type Task, within } from './reviewer'
 import { ACCEPT, KEEP_GOING, STOP } from './text'
-import { showActivity, showLast, showReport, showRun } from './ui'
+import { showActivity, showLast, showRun } from './ui'
 
 /** What the session told the mod at its start. */
 export const session = {
@@ -89,7 +89,7 @@ async function runStream($: EngineInterface, args: readonly string[], input = ''
 }
 
 export function refused(answer: Answer): string {
-  return `adversarial-review-loop refused (${answer.code ?? 'error'}): ${answer.error ?? 'no reason given'}`
+  return `Refused (${answer.code ?? 'error'}): ${answer.error ?? 'no reason given'}`
 }
 
 // --------------------------------------------------------------------------
@@ -121,12 +121,23 @@ export async function decide($: EngineInterface, waiting: { kind: string; detail
   if (choice === ACCEPT) {
     const accepted = await run($, ['accept'])
     if (!accepted.ok) return `\n\nThe user chose to accept, but accepting failed: ${accepted.error ?? ''}${handOver}`
-    const after = (accepted.run as RunSummary | undefined)?.stage
-    return `\n\nThe user accepted this stage as it stands. Commit each changed git repository by its own conventions${after === 'done' ? '. The run is complete.' : after === 'final' ? ', then call review for the final review.' : ', then go on with the next phase.'}`
+    const after = accepted.run as RunSummary | undefined
+    const next =
+      after?.stage === 'done'
+        ? '. The run is complete.'
+        : after?.status === 'paused'
+          ? ', then stop: the user paused the run, and nothing more is done until they resume it with /arl-resume.'
+          : after?.stage === 'final'
+            ? ', then call review for the final review.'
+            : ', then go on with the next phase.'
+    return `\n\nThe user accepted this stage as it stands. Commit each changed git repository by its own conventions${next}`
   }
   if (choice === KEEP_GOING) {
+    // Resuming clears the decision and would also undo a pause the user set: keep that.
+    const paused = (await run($, ['status'])).run as RunSummary | null | undefined
     const resumed = await run($, ['resume', '--session', session.id])
     if (!resumed.ok) return `\n\nThe user chose to keep going, but resuming failed: ${resumed.error ?? ''}${handOver}`
+    if (paused?.status === 'paused') await run($, ['pause'])
     return waiting.kind === 'oversized'
       ? '\n\nThe user wants you to keep going: remove the oversized file, or ignore it in its root, then call review again.'
       : waiting.kind === 'failures'
@@ -346,9 +357,8 @@ export async function announce($: EngineInterface, recorded: Answer, message: st
   const label = String(recorded.label ?? 'review')
   const verdict = String(recorded.verdict ?? '')
   await showLast($, { label, verdict, message, report: String(recorded.report ?? '') }).catch(() => undefined)
-  await showReport($, '').catch(() => undefined)
   // A toast is not seen in the terminal (STEP0 I5); a log line is.
-  $.ui.log(`adversarial-review-loop: ${label} ${verdict}`)
+  $.ui.log(`${label} ${verdict}`)
   if ((recorded.run as RunSummary | undefined)?.status === 'complete') {
     void $.ui.notify('adversarial-review-loop: the run is complete, every stage approved.').catch(() => undefined)
   }
@@ -454,10 +464,16 @@ export async function ensureRoot($: EngineInterface, directory: string, { explic
 /**
  * Take back a root this session registered for a write that then did not happen. The engine
  * keeps it when anything in it changed, and moves nothing else: the loop is not prompted again.
+ * Answers `dropped`, `kept` (the engine refused), or `unknown` when the engine gave no answer:
+ * measured live, a write the person refused aborts its dispatch, and the hook's next engine call
+ * with it.
  */
-export async function dropRoot($: EngineInterface, alias: string): Promise<void> {
-  const answer = await run($, ['root-remove', alias, '--undo'])
-  if (answer.ok) await run($, ['status'])
+export async function dropRoot($: EngineInterface, alias: string): Promise<'dropped' | 'kept' | 'unknown'> {
+  const answer = await run($, ['root-remove', alias, '--undo']).catch(() => undefined)
+  if (answer === undefined || (!answer.ok && answer.code === 'engine')) return 'unknown'
+  if (!answer.ok) return 'kept'
+  await run($, ['status']).catch(() => undefined)
+  return 'dropped'
 }
 
 /**
@@ -520,10 +536,10 @@ async function compactThenSubmit($: EngineInterface, prompt: string): Promise<vo
   try {
     await $.session.compact({ instructions: 'Keep the plan, the phases and which are approved, and the workspace roots.' })
   } catch (error) {
-    $.ui.log(`adversarial-review-loop could not compact before the next phase (${String(error)}); continuing without.`)
+    $.ui.log(`Could not compact before the next phase (${String(error)}); continuing without.`)
   }
   await $.prompt.submit({ text: prompt }).catch((error: unknown) => {
-    $.ui.log(`adversarial-review-loop could not continue the run (${String(error)}): /arl-resume continues it.`)
+    $.ui.log(`Could not continue the run (${String(error)}): /arl-resume continues it.`)
   })
 }
 
@@ -537,7 +553,10 @@ export async function proceed($: EngineInterface, lead = ''): Promise<string> {
     next = await engine($, session.dir, ['next-action'])
   }
   if (!next.ok) return refused(next)
-  if (next.action !== 'continue' || typeof next.prompt !== 'string') return `The loop does not continue now (${String(next.reason ?? 'no reason given')}).`
+  if (next.action !== 'continue' || typeof next.prompt !== 'string') {
+    // Nothing is submitted, so what Claude was to be told goes in the command's own text.
+    return `The loop does not continue now (${String(next.reason ?? 'no reason given')}).${lead ? `\n\n${lead}` : ''}`
+  }
   const prompt = lead ? `${lead}\n\n${next.prompt}` : next.prompt
   if (next.compact === true && session.isInteractive) {
     later($, prompt)
@@ -545,7 +564,7 @@ export async function proceed($: EngineInterface, lead = ''): Promise<string> {
     // A prompt submitted from a command starts its turn once the command has ended.
     $.clock.after(0, () => {
       void $.prompt.submit({ text: prompt }).catch((error: unknown) => {
-        $.ui.log(`adversarial-review-loop could not continue the run (${String(error)}): /arl-resume continues it.`)
+        $.ui.log(`Could not continue the run (${String(error)}): /arl-resume continues it.`)
       })
     })
   }

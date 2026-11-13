@@ -154,7 +154,7 @@ export type WorldOptions = {
   /** The session's permission verdict for a write (`$.tool.check`); left out, no stand-in answers. */
   check?: 'allow' | 'ask' | 'deny'
   /** What the write itself comes to: `'deny'` as when the person refuses it in the dialog. */
-  writeOutcome?: 'run' | 'deny'
+  writeOutcome?: 'run' | 'deny' | 'throw'
   /** Make `$.session.compact` reject, as a headless session does. */
   compactFails?: boolean
 }
@@ -290,7 +290,10 @@ export function world(on: On, options: WorldOptions): World {
   }
   if (options.writeOutcome !== undefined) {
     const outcome = options.writeOutcome
-    on('tool.call', { tool: /^(Edit|Write|NotebookEdit)$/ }, () => (outcome === 'deny' ? { deny: 'The user refused the write.' } : { result: 'written' }) as never)
+    on('tool.call', { tool: /^(Edit|Write|NotebookEdit)$/ }, () => {
+      if (outcome === 'throw') throw new Error('The user refused the write.')
+      return (outcome === 'deny' ? { deny: 'The user refused the write.' } : { result: 'written' }) as never
+    })
   }
   on('prompt.submit', (_, e) => {
     state.submitted.push(e.text)

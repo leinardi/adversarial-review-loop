@@ -37,7 +37,7 @@ from arl.atomic import ensure_private_dir, write_private_atomic
 from arl.configcmd import cmd_config
 from arl.errors import StateLoadError
 from arl.gitsnap import SnapshotError
-from arl.state import RunError, RunPaths, RunState, locked_run_dir, locked_state, new_document, next_action, start_prompt
+from arl.state import RunError, RunPaths, RunState, locked_run_dir, locked_state, new_document, next_action, resume_context, start_prompt
 
 __all__ = ["COMMANDS", "plan_named_paths"]
 
@@ -179,7 +179,8 @@ def cmd_resume(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         run = _require(loaded)
         outcome = run.resume(session=str(args.get("session") or ""))
         run.save()
-        return {"ok": True, "run": run.summary(), **outcome}
+        cfg = config.load(str(paths.launch_dir))
+        return {"ok": True, "run": run.summary(), "context": resume_context(run, cfg.as_str("verify_cmd")), **outcome}
 
 
 def cmd_set_phases(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:

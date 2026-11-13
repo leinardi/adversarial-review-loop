@@ -49,6 +49,12 @@ __all__ = [
 ]
 
 _FOOTER = "Verify and address the findings above, then ask for the review again.\n"
+#: A changes-required verdict that names no finding: its reasons are in the prose.
+_PROSE_FOOTER = "Address what the reviewer's prose above asks for, then ask for the review again.\n"
+#: The reviewer, or a findings ceiling, handed the run to the user: no review runs until they decide.
+_HUMAN_FOOTER = "The run now waits for the user: stop, and tell them what the review says.\n"
+#: A review that failed: there is nothing to address.
+_FAILED_FOOTER = "There are no findings to address. Call review again once what stopped it is fixed, or tell the user.\n"
 
 _DEFERRED_INTRO = (
     "Deferred findings -- actionable, at or above block_severity, but new and outside the paths changed since the "
@@ -214,6 +220,18 @@ def store(review: Review, target: Target, *, seq: str, reports_dir: Path, config
     return path
 
 
+def _footer(review: Review) -> str:
+    """What Claude is told to do next, by what the round came to."""
+    if review.verdict == "NEEDS_HUMAN":
+        return _HUMAN_FOOTER
+    if review.verdict == "OP_FAILURE":
+        return _FAILED_FOOTER
+    if review.findings or review.all_findings:
+        return _FOOTER
+    # A CHANGES_REQUIRED whose reasons are only in the reviewer's prose.
+    return _PROSE_FOOTER
+
+
 def reason(review: Review, headline: str, *, config: Config) -> str:
     """The message ``review record`` hands back to Claude when a review did not approve.
 
@@ -252,7 +270,7 @@ def reason(review: Review, headline: str, *, config: Config) -> str:
         out.append("\n")
     if review.report:
         out.append(f"\nFull report: {review.report}\n")
-    out.append(f"\n{_FOOTER}")
+    out.append(f"\n{_footer(review)}")
     return "".join(out)
 
 

@@ -54,8 +54,9 @@ $ claude
    path where you can: an existing git repository the plan names becomes a workspace root at the
    start. A plain folder joins with `--root`, the `roots` setting, or when Claude writes into it.
 2. In the folder you want the run to live in, run `/arl-implement plan.md`.
-3. Watch. The band above the prompt shows the phase, the round and what the loop is doing;
-   `/arl-status` opens the review pane with the phases, the roots and the latest review.
+3. Watch. The band above the prompt shows the phase, the round and what the loop is doing. The
+   review pane shows the run in a few lines: the phases around the current one, the roots and
+   the latest review's blocking findings. `/arl-status` opens it.
 
 Claude asks for a review after each phase and commits each repository it changed once the review
 approves. When the loop needs you (the same findings keep coming back, the reviewer keeps failing,
@@ -68,9 +69,10 @@ tells Claude to stop and tell you.
 | --- | --- |
 | `/arl-implement [--new] [--root DIR]... <plan.md>` | start a run. `--root` adds a folder the plan does not name; `--new` archives the active run under `.arl/runs/` |
 | `/arl-resume` | continue the run in this session: unpause, clear a decision the run waited on, abandon a review nothing is running |
-| `/arl-status` | the run, its phases and roots, in the review pane |
-| `/arl-report [N]` | the newest stored review report, or the N-th, in the pane |
-| `/arl-pause` | stop prompting Claude after this turn, until `/arl-resume` |
+| `/arl-status` | open the review pane, and show the run with every phase and every root's path |
+| `/arl-phases` | list every phase of the run |
+| `/arl-report [N]` | the newest stored review report, or the N-th, in a pane of its own |
+| `/arl-pause` | stop the run after the current phase, until `/arl-resume`: the loop prompts nothing, and a review Claude asks for still runs and tells it to stop there |
 | `/arl-accept` | approve the current phase (or the final review) as it stands, without a review |
 | `/arl-finish` | require a final review of the whole run before it completes |
 | `/arl-stop` | end the run |
@@ -96,7 +98,7 @@ The settings most people touch:
 | `verify_cmd` | unset | the checks Claude is told to run before each review, named in every prompt |
 | `block_severity` | `medium` | an actionable finding at or above this blocks the approval |
 | `final_review` | `false` | end every run with a review of all its changes |
-| `auto_compact` | `false` | compact the conversation before a phase that follows an approval, when the turn ends there |
+| `auto_compact` | `false` | compact the conversation before each phase that follows an approval: Claude is told to end its turn after the approval, and the loop compacts, then prompts the next phase |
 
 Every key, the layers (user file, the launch folder's `.adversarial-review-loop.json`, `ARL_*`
 variables) and the project's own review skill are in [docs/configuration.md](docs/configuration.md).
@@ -124,6 +126,8 @@ variables) and the project's own review skill are in [docs/configuration.md](doc
   up in that phase's diff.
 - The failure budget makes the loop stop prompting Claude, but a `review` Claude calls anyway still
   runs.
+- A subagent reviewer that times out cannot be stopped (Claude Code has no call for it): it runs on
+  in the background, denied every tool, and its late answer is never recorded or shown to Claude.
 
 ## 📚 Documentation
 

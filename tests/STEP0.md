@@ -1019,8 +1019,8 @@ call WebFetch once on `https://example.com`.
 Phase 7 of the v4 plan: the whole loop, headless, from this checkout. Each run used
 `claude -p "/arl-implement plan.md" --plugin-dir <checkout> --model haiku --permission-mode
 acceptEdits` with Bash limited to `git`, `python3`, `cat`, `ls` and `echo`, in a scratch folder.
-The checks that need a person (the sandbox, the band and the pane, immediate commands, compaction,
-interrupts, auto mode) are not here.
+K1 to K6 are headless; K7 is the checks that need a person (the sandbox, the band and the pane,
+immediate commands, compaction, interrupts, auto mode).
 
 ### K1. A three-phase plan over two git roots and a plain folder: pass
 
@@ -1082,6 +1082,57 @@ The harness now runs `opencode run <prompt> --standalone -m <model>[#<variant>] 
 top level and on `build`. A failed run's output is kept in its report. The same plan then ran end
 to end: reviewed by OpenCode, approved with three low findings, committed. It ran again in a
 repository whose `opencode.json` allowed everything on `agent.build`: approved, committed.
+
+### K7. Interactive: the loop in a person's session
+
+Claude Code 2.1.323, `claude --plugin-dir <checkout> --permission-mode default --settings
+'{"sandbox":{"enabled":true}}'`, Sonnet, in a scratch folder with two git repositories and a plain
+folder. Three plans, 13 phases, run by the user and read back here.
+
+- **The sandbox and the plugin's tools: pass.** `set_phases`, `review` and the reviewer subagent
+  asked for nothing. Claude Code's own sandbox could not start on this machine (`apply-seccomp:
+  write /proc/self/setgroups … Permission denied`, nested user namespaces restricted), so every Bash
+  call fell back to an unsandboxed prompt. The plugin was not affected.
+- **Band and pane: pass, with a redesign.** Both updated as reviews landed. On a small terminal the
+  pane was cut after a few lines, so the latest review and a report put in the pane were never
+  seen. The pane is now a few lines (the phases around the current one, root names, up to three
+  blocking findings), and `/arl-status`, `/arl-phases` and `/arl-report` print to the transcript.
+- **Immediate commands: pass.** `/arl-report` and `/arl-pause` acted during Claude's turn. Pause
+  then refused the `review` Claude called in the same turn, which the docs did not say. A paused run
+  now still reviews; the first retest then showed Claude reading the approval as "go on" and
+  finishing the plan while paused. Every review answer on a paused run now tells Claude to commit
+  and stop, and in the next retest it stopped after the phase it was in.
+- **Command output.** `$.ui.log` draws one line: the newlines of a multi-line status came out as
+  stray characters. `/arl-status`, `/arl-phases` and `/arl-config` answer as the command's own text,
+  and `/arl-report` opens a pane of its own.
+- **A prompt from a command's timer: pass.** `/arl-resume` and `/arl-accept` at a phase boundary
+  started Claude.
+- **Compaction: pass through a command, never after a review.** `/arl-accept` compacted (64k to 49k
+  tokens) before the next prompt. After a review's approval Claude went on in the same turn, so the
+  turn never ended at the boundary, and nothing compacted in six phases. An approval now tells Claude
+  to end its turn when `auto_compact` is on. (`next-action` consumes the once-per-approval flag: a
+  probe of it by hand before `/arl-resume` spent it.)
+- **An interrupt hands control back: pass.** Esc right after an approval continued nothing, as
+  designed. Esc on a permission dialog does not count as an interrupt: the loop went on. The band
+  kept saying `working` after an interrupt; it now follows `turn.start` and `turn.complete`.
+- **A refused write: fail, fixed.** "No" in the Write dialog for a file in a new folder outside every
+  root left that folder a root, although nothing was written. A debug log of the retest showed why:
+  the refusal reaches the hook as `isError: true`, but it aborts the write's dispatch, and the
+  undo's engine call, started 26 ms later, died with it. The mod now offers back every root a write
+  registered, and a root whose undo got no answer is offered again at the turn's end; the engine
+  keeps one whose content changed. The third run showed `Roots: sm3, lib` after the refusal.
+- **A new session on a run: pass, with a fix.** The start logged the pending review of the session
+  that had quit, `/arl-implement` refused with `run-exists`, and `/arl-resume` abandoned the review.
+  But its prompt held only "implement phase 2 of 4: title", and the new Claude went looking for the
+  plan in another repository. `resume` now answers the run's context (plan, copy, phases, roots,
+  rules), and the prompt carries it. A session that starts on a run now opens the pane.
+- **A reviewer that times out: pass, with a limit.** `timeout_sec 10` gave `OP_FAILURE` and
+  approved nothing. The subagent ran on ("Waiting for 1 background agent"): nothing in the mod API
+  stops one. Its late answer never reached Claude.
+- **Esc during an OpenCode review: pass.** The `opencode run --standalone` process got SIGTERM,
+  exited, and left no process behind.
+- **Auto mode: pass.** Four phases were reviewed and approved in auto mode with no contract error or
+  host preamble.
 
 ## If A1 fails
 

@@ -26,7 +26,7 @@ import { engine } from './engine'
 import { addRoot, clarify, continueRun, dropRoot, ensureRoot, parentOf, type Registration, review, session, setPhases, track, unregistered } from './flow'
 import { deliver, registerReviewer, REVIEWER, reviewerDecision } from './reviewer'
 import { TOOLS, type ToolName } from './text'
-import { registerUi } from './ui'
+import { PANE, PANE_TITLE, registerUi, showBusy } from './ui'
 
 /** Serve one of the plugin's tools; `undefined` for a name it does not register. */
 async function serve($: EngineInterface, name: string, input: Record<string, unknown>, signal: AbortSignal): Promise<string | undefined> {
@@ -68,14 +68,19 @@ function argumentsOf(e: Record<string, unknown>): Record<string, unknown> {
 async function attach($: EngineInterface): Promise<string> {
   const answer = await engine($, session.dir, ['attach', '--session', session.id])
   if (!answer.ok) {
-    $.ui.log(`adversarial-review-loop could not read the run here: ${answer.error ?? 'no reason given'}`)
+    $.ui.log(`Could not read the run here: ${answer.error ?? 'no reason given'}`)
     return ''
   }
   await track($, answer)
-  if (answer.foreign_review === true) {
-    $.ui.log('adversarial-review-loop: a review another session started is pending. If that session is gone, /arl-resume abandons it and continues the run here.')
+  const found = answer.run as { status?: string } | null | undefined
+  if (session.isInteractive && (found?.status === 'active' || found?.status === 'paused')) {
+    // A session that starts on a run shows it: nothing else would say a run is here.
+    await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
   }
-  if (typeof answer.effort_note === 'string') $.ui.log(`adversarial-review-loop: ${answer.effort_note}`)
+  if (answer.foreign_review === true) {
+    $.ui.log('A review another session started is pending. If that session is gone, /arl-resume abandons it and continues the run here.')
+  }
+  if (typeof answer.effort_note === 'string') $.ui.log(answer.effort_note)
   return typeof answer.effort === 'string' ? answer.effort : ''
 }
 
@@ -86,18 +91,36 @@ function writtenFile(e: { tool: string } & Record<string, unknown>): string | un
   return undefined
 }
 
+/**
+ * Roots whose write is over but whose undo got no engine answer: measured live, a write the person
+ * refused aborts its dispatch, and the undo's engine call with it. Only a write that has ended is
+ * listed, so the sweep never drops the folder of the write that registered it while that write is
+ * in flight. Another write into the same folder still waiting in its dialog at the turn's end is
+ * not tracked: that narrow case can still lose its root.
+ */
+const retry = new Set<string>()
+
+/** Offer those roots back again; the engine keeps one whose content changed. */
+async function sweepRoots($: EngineInterface): Promise<void> {
+  for (const alias of [...retry]) {
+    if ((await dropRoot($, alias)) !== 'unknown') retry.delete(alias)
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     session.dir = e.cwd
     session.isInteractive = e.isInteractive
     session.id = await $.session.id()
+    // A session that ended mid-turn left the flag set; this one has run no turn yet.
+    await showBusy($, false).catch(() => undefined)
     await registerTools($)
     const effort = await attach($).catch(() => '')
     // The reviewer before anything optional: without it every review fails. An effort the host
     // refuses falls back to the default.
     await registerReviewer($, effort).catch(async (error: unknown) => {
-      $.ui.log(`adversarial-review-loop: the reviewer could not be registered with effort ${effort} (${String(error)}); using the default.`)
+      $.ui.log(`The reviewer could not be registered with effort ${effort} (${String(error)}); using the default.`)
       await registerReviewer($)
     })
     await registerCommands($)
@@ -122,14 +145,23 @@ export const register: Register = on => {
     if (check?.decision === 'deny') return next(e)
     // A registration that fails is said, never dropped: the write would land unreviewed.
     const registered: Registration = await ensureRoot($, parentOf(file)).catch((error: unknown) => ({ note: unregistered(parentOf(file), String(error)) }))
-    const result = await next(e)
-    // Refused after all (the person said no, which reaches here as an error) or failed: the
-    // folder it registered is dropped again, but only while nothing in it changed (the engine
-    // checks), since a hook downstream may refuse a write that ran.
-    if (result.deny !== undefined || result.isError === true) {
-      if (registered.added !== undefined) await dropRoot($, registered.added).catch(() => undefined)
-      return result
+    // A folder this write registered is offered back once the write is over, whatever became of
+    // it: the engine keeps it whenever anything in it changed, which a write that ran always did.
+    let result: Awaited<ReturnType<typeof next>>
+    let dropped = false
+    try {
+      result = await next(e)
+    } finally {
+      if (registered.added !== undefined) {
+        const outcome = await dropRoot($, registered.added)
+        // No answer: the refusal that aborted the write took the engine call with it, so the
+        // turn's end asks again.
+        if (outcome === 'unknown') retry.add(registered.added)
+        dropped = outcome === 'dropped'
+      }
     }
+    if (dropped) return result
+    if (result.deny !== undefined || result.isError === true) return result
     return registered.note === undefined ? result : { ...result, context: [...(result.context ?? []), registered.note] }
   })
 
@@ -141,8 +173,16 @@ export const register: Register = on => {
     return verdict
   }).catch(($, e, next) => (e.agentId === undefined ? next(e) : { decision: 'deny', reason: 'the reviewer permission check failed' }))
 
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await showBusy($, true).catch(() => undefined)
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) deliver(e.agentId, { answer: e.answer, reason: e.reason, usage: e.usage, durationMs: e.durationMs })
+    // Whatever ended it (an answer, an interrupt, an error), the main turn is over.
+    if (e.agentId === undefined) await showBusy($, false).catch(() => undefined)
+    if (e.agentId === undefined) await sweepRoots($)
     const done = await next(e)
     // An interrupted or failed turn hands control back to the person.
     if (e.agentId === undefined && e.reason === 'answer') await continueRun($)
@@ -160,8 +200,8 @@ export const register: Register = on => {
   for (const spec of COMMANDS) {
     on('command.run', { command: spec.name }, async ($, e) => {
       const text = await runCommand($, e.command, e.args)
-      return { text: text ?? `adversarial-review-loop has no command ${e.command}.` }
-    }).catch(($, e) => ({ text: `adversarial-review-loop: /${e.command} failed.` }))
+      return { text: text ?? `No command ${e.command} here.` }
+    }).catch(($, e) => ({ text: `/${e.command} failed.` }))
   }
 
   registerUi(on)

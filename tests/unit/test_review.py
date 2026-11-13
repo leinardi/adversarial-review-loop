@@ -1168,3 +1168,153 @@ def test_an_unknown_harness_is_refused_before_any_ticket_is_issued(ws: Path, eng
     edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
     assert prepare(engine, ws)["code"] == "unknown-harness"
     assert load(ws).data["pending_ticket"] is None
+
+
+# --------------------------------------------------------------------------
+# Measured in the interactive checks (STEP0 Session K)
+# --------------------------------------------------------------------------
+
+
+def test_a_paused_run_still_reviews_what_claude_asks_for(ws: Path, engine: Engine, answers: Path) -> None:
+    """**Fails on a prepare that requires an active run.** Pausing stops the loop prompting
+    Claude after the turn; measured live, it also refused the review Claude called in that same
+    turn, leaving a finished phase unreviewed until the person resumed."""
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    assert engine(ws, "pause")["ok"]
+
+    outcome = review(engine, ws, answers, "VERDICT APPROVED")
+
+    assert outcome["verdict"] == "APPROVED"
+    assert load(ws).status == "paused", "a review does not unpause the run"
+    assert engine(ws, "next-action")["action"] == "yield"
+    # Measured live: without this, Claude read the approval as "go on" and finished the plan.
+    assert "The user paused the run" in outcome["message"]
+    assert "do not start the next phase" in outcome["message"]
+
+
+def test_an_active_run_is_not_told_it_is_paused(ws: Path, engine: Engine, answers: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    assert "paused" not in review(engine, ws, answers, "VERDICT APPROVED")["message"]
+
+
+def test_with_auto_compact_an_approval_tells_claude_to_end_its_turn(ws: Path, engine: Engine, answers: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**Fails on an approval that says nothing about the turn.** The loop compacts only between
+    turns, and Claude goes on with the next phase in the same turn: measured live, no approval but
+    one the person gave by command ever compacted."""
+    monkeypatch.setenv("ARL_AUTO_COMPACT", "true")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+
+    outcome = review(engine, ws, answers, "VERDICT APPROVED")
+
+    assert "end your turn without starting the next stage" in outcome["message"]
+
+
+def test_without_auto_compact_an_approval_says_nothing_about_the_turn(ws: Path, engine: Engine, answers: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    assert "end your turn" not in review(engine, ws, answers, "VERDICT APPROVED")["message"]
+
+
+def test_a_failed_review_does_not_ask_claude_to_address_findings_it_does_not_have(ws: Path, engine: Engine) -> None:
+    """Measured live: a timed-out review ended "Verify and address the findings above"."""
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws)
+
+    outcome = engine(ws, "review", "record", ticket["review_id"], "--failed", "transient", "--error", "the reviewer did not answer within 10 s")
+
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert "address the findings above" not in outcome["message"]
+    assert "no findings to address" in outcome["message"]
+
+
+def test_resume_tells_a_new_session_what_the_run_is(ws: Path, engine: Engine) -> None:
+    """**Fails on a resume that answers no context.** Measured live: a new session resumed with
+    only "implement phase 2 of 4: title", and went looking for the plan in the wrong repository."""
+    started(engine, ws, phases=2)
+
+    context = engine(ws, "resume")["context"]
+
+    assert str(ws / "plan.md") in context
+    assert str(ws / ".arl" / "plan.md") in context
+    assert "1. phase 1; 2. phase 2" in context
+    assert "add_root" in context and "call review" in context
+    for root in load(ws).roots:
+        assert root["path"] in context
+
+
+def test_the_next_phase_prompt_does_not_claim_the_work_is_undone(ws: Path, engine: Engine, answers: Path) -> None:
+    """A resume or an accept prompts after the commit or the work may already have happened:
+    measured live, "Commit … then implement phase 3" came with phase 3 already written."""
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    review(engine, ws, answers, "VERDICT APPROVED")
+
+    prompt = engine(ws, "next-action")["prompt"]
+
+    assert "if that is not done yet" in prompt
+    assert "implement (or finish) phase 2 of 3" in prompt
+
+
+def test_changes_required_with_only_prose_points_claude_at_the_prose(ws: Path, engine: Engine, answers: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    outcome = review(engine, ws, answers, "VERDICT CHANGES_REQUIRED")
+    assert outcome["verdict"] == "CHANGES_REQUIRED"
+    assert "no findings to address" not in outcome["message"]
+    assert "reviewer's prose above" in outcome["message"]
+
+
+def test_a_paused_run_is_not_told_the_loop_will_prompt_it(ws: Path, engine: Engine, answers: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ARL_AUTO_COMPACT", "true")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    assert engine(ws, "pause")["ok"]
+    assert "end your turn" not in review(engine, ws, answers, "VERDICT APPROVED")["message"]
+
+
+def test_a_review_handed_to_the_user_tells_claude_to_stop_not_to_retry(
+    ws: Path, engine: Engine, answers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``NEEDS_HUMAN`` round (here the findings ceiling) leaves the run waiting: the next
+    ``review`` is refused, so "call review again" would send Claude into a refusal."""
+    monkeypatch.setenv("ARL_MAX_FINDINGS", "1")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    outcome = review(engine, ws, answers, finding("api/src/main.py:1"), finding("api/src/main.py:2"), "VERDICT CHANGES_REQUIRED")
+    assert outcome["verdict"] == "NEEDS_HUMAN"
+    assert "Call review again" not in outcome["message"]
+    assert "stop, and tell them" in outcome["message"]
+
+
+def test_a_paused_run_is_told_to_stop_after_an_approval_no_reviewer_gave(ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every change matched ``ignore_globs``: the approval comes from ``prepare``, not ``record``,
+    and must say the run is paused all the same."""
+    monkeypatch.setenv("ARL_IGNORE_GLOBS", "*.md")
+    started(engine, ws)
+    edit(ws / "notes" / "todo.md", "done\n")
+    assert engine(ws, "pause")["ok"]
+
+    outcome = prepare(engine, ws)
+
+    assert outcome["status"] == "skipped"
+    assert "The user paused the run" in outcome["message"]
+
+
+def test_a_paused_review_that_waits_for_the_user_leaves_the_instruction_to_their_choice(
+    ws: Path, engine: Engine, answers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mod asks the user and tells Claude what they chose: a "stop" from the pause before it
+    would contradict an "accept" or a "keep going"."""
+    monkeypatch.setenv("ARL_MAX_FINDINGS", "1")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    assert engine(ws, "pause")["ok"]
+
+    outcome = review(engine, ws, answers, finding("api/src/main.py:1"), finding("api/src/main.py:2"), "VERDICT CHANGES_REQUIRED")
+
+    assert outcome["verdict"] == "NEEDS_HUMAN"
+    assert "The user paused the run" not in outcome["message"]

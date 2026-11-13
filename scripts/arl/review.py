@@ -139,11 +139,38 @@ def _only_ignored(run: RunState, trees: Mapping[str, str], cfg: config.Config) -
     return bool(changed) and all(any(globmatch.matches(path, glob) for glob in globs) for path in changed)
 
 
+def _next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
+    """What Claude is told about the rest of its turn after a recorded round, or nothing.
+
+    A run waiting for the user says nothing here: the mod puts the decision to them, and their
+    choice is what Claude is told.
+    """
+    if run.data["waiting"] is not None or run.stage() == "done":
+        return ""
+    if run.status == "paused":
+        # Measured live: a paused run's approval read as "go on", and Claude implemented every
+        # remaining phase in the same turn. Pausing is the user's stop.
+        first = "Commit each changed git repository by its own conventions, then stop: " if verdict == "APPROVED" else "Stop here: "
+        return (
+            f"\nThe user paused the run. {first}do not start the next phase or fix anything more until the user resumes "
+            "it with /arl-resume. Tell the user where the run stands.\n"
+        )
+    if verdict == "APPROVED" and cfg.as_bool("auto_compact"):
+        # The loop compacts only between turns: a next phase started in this turn would be
+        # summarised away mid-work, so the compaction never comes.
+        return (
+            "\nCommit each changed git repository by its own conventions, then end your turn without starting the "
+            "next stage: the loop compacts the conversation and prompts it.\n"
+        )
+    return ""
+
+
 def _skip(run: RunState, trees: Mapping[str, str], cfg: config.Config) -> dict[str, Any]:
     what = "the final review" if run.stage() == "final" else f"phase {run.current_phase()}"
     run.approve(trees, by="ignored")
     run.save()
     message = f"Every change of {what} matches ignore_globs ({', '.join(cfg.as_list('ignore_globs'))}), so it was approved without a review.\n"
+    message += _next_turn(run, cfg, "APPROVED")
     return {"ok": True, "status": "skipped", "verdict": "APPROVED", "message": message, "run": run.summary()}
 
 
@@ -153,7 +180,8 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     verification = _validated_verification(args.get("verification"))
     with locked_state(paths) as loaded:
         run = _require(loaded)
-        run.require_status("active")
+        # Paused means the loop stops prompting Claude, not that a review Claude asks for is refused.
+        run.require_status("active", "paused")
         decision = run.pending_decision()
         if decision is not None:
             # Another review would end it by approving: only the user ends a stall or a call for them.
@@ -418,6 +446,7 @@ def _apply(run: RunState, ticket: Mapping[str, Any], target: Target, review: Rev
         message = f"{_headline(target, review.verdict)}\n\n{report.deferred_text(review, what='approval')}Full report: {review.report}\n"
     else:
         message = report.reason(review, _headline(target, review.verdict), config=cfg) + note
+    message += _next_turn(run, cfg, review.verdict)
     run.save()
     return {
         "ok": True,

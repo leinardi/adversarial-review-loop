@@ -25,13 +25,14 @@ import type { RunView } from '../types'
 import { type Answer } from './engine'
 import { announce, proceed, refused, run, session } from './flow'
 import { registerReviewer } from './reviewer'
-import { briefly, PANE, PANE_TITLE, paneLines, showLast, showReport } from './ui'
+import { briefly, PANE, PANE_TITLE, phasesText, REPORT_PANE, REPORT_TITLE, showLast, showReport, statusText } from './ui'
 
 export const COMMANDS: readonly CommandSpec[] = [
   { name: 'arl-implement', description: 'Implement a plan phase by phase, each phase reviewed before the next', argumentHint: '[--new] [--root DIR]... <plan.md>' },
   { name: 'arl-resume', description: 'Continue the adversarial-review-loop run in this session' },
   { name: 'arl-status', description: 'Show the adversarial-review-loop run and open its pane', immediate: true },
   { name: 'arl-report', description: 'Show the newest review report, or the N-th', argumentHint: '[N]', immediate: true },
+  { name: 'arl-phases', description: 'List every phase of the adversarial-review-loop run', immediate: true },
   { name: 'arl-pause', description: 'Pause the run: Claude is not prompted again until /arl-resume', immediate: true },
   { name: 'arl-accept', description: 'Approve the current phase (or the final review) as it stands' },
   { name: 'arl-finish', description: 'Require a final review of the whole run before it completes' },
@@ -44,30 +45,13 @@ export const COMMANDS: readonly CommandSpec[] = [
 export async function registerCommands($: EngineInterface): Promise<void> {
   for (const spec of COMMANDS) {
     await $.command.register(spec).catch((error: unknown) => {
-      $.ui.log(`adversarial-review-loop: /${spec.name} could not be registered (${String(error)}).`)
+      $.ui.log(`/${spec.name} could not be registered (${String(error)}).`)
     })
   }
 }
 
 function summaryOf(answer: Answer): RunView | null {
   return (answer.run as RunView | null | undefined) ?? null
-}
-
-/** The run as text: the pane's lines, without the latest review. */
-function statusText(view: RunView | null): string {
-  return paneLines(view, null, '')
-    .map(line => line.text)
-    .join('\n')
-}
-
-/**
- * Show a long answer to the person and keep it out of Claude's context: a command's text is in
- * every later request. Headless there is no one but the output to show it to, so it is the text.
- */
-function display($: EngineInterface, text: string, short: string): string {
-  if (!session.isInteractive) return text
-  $.ui.log(text)
-  return short
 }
 
 /** Open the review pane where a person can see it; nothing headless. */
@@ -115,13 +99,12 @@ async function implement($: EngineInterface, args: string): Promise<string> {
   const answer = await run($, ['init', '--plan', parsed.plan, ...(parsed.isNew ? ['--new'] : []), ...parsed.roots.flatMap(root => ['--root', root])])
   if (!answer.ok) return refused(answer)
   const view = summaryOf(answer)
-  // The pane's latest review and report were the old run's.
+  // The pane's latest review was the old run's.
   await showLast($, null).catch(() => undefined)
-  await showReport($, '').catch(() => undefined)
   const prompt = String(answer.prompt ?? '')
   $.clock.after(0, () => {
     void $.prompt.submit({ text: prompt }).catch((error: unknown) => {
-      $.ui.log(`adversarial-review-loop could not start Claude on the plan (${String(error)}).`)
+      $.ui.log(`Could not start Claude on the plan (${String(error)}).`)
     })
   })
   await openPane($)
@@ -136,7 +119,9 @@ async function resume($: EngineInterface): Promise<string> {
   const answer = await run($, ['resume'])
   if (!answer.ok) return refused(answer)
   const abandoned = answer.abandoned_review === true
-  const lead = abandoned ? 'The run resumes. The review that was in flight was abandoned: when the phase is ready, call review again.' : 'The run resumes.'
+  const resumes = abandoned ? 'The run resumes. The review that was in flight was abandoned: when the phase is ready, call review again.' : 'The run resumes.'
+  // This session may not be the one that started the run: it is told what the run is.
+  const lead = typeof answer.context === 'string' && answer.context ? `${resumes}\n\n${answer.context}` : resumes
   const view = summaryOf(answer)
   const where = view === null ? '' : ` at ${briefly(view)}`
   return `Resumed run ${view?.run_id ?? ''}${where}${abandoned ? ' (the pending review was abandoned)' : ''}. ${await proceed($, lead)}`
@@ -147,7 +132,15 @@ async function status($: EngineInterface): Promise<string> {
   if (!answer.ok) return refused(answer)
   await openPane($)
   const view = summaryOf(answer)
-  return display($, statusText(view), view === null ? 'No run here.' : `Run ${view.run_id} (${view.status}): ${briefly(view)}. The pane shows it.`)
+  // The command's own text: a log line is one line (measured: its newlines drew as stray
+  // characters). A short text costs little in the requests it goes into.
+  return statusText(view)
+}
+
+async function phases($: EngineInterface): Promise<string> {
+  const answer = await run($, ['status'])
+  if (!answer.ok) return refused(answer)
+  return phasesText(summaryOf(answer))
 }
 
 async function report($: EngineInterface, args: string): Promise<string> {
@@ -157,10 +150,11 @@ async function report($: EngineInterface, args: string): Promise<string> {
   if (!answer.ok) return refused(answer)
   const text = String(answer.text ?? '')
   if (!session.isInteractive) return text
-  // A report holds the reviewer's raw output: it goes to the pane, not into Claude's context.
+  // A report holds the reviewer's raw output, too long for Claude's context and for a log line:
+  // it gets a pane of its own, which scrolls.
   await showReport($, text).catch(() => undefined)
-  await openPane($)
-  return `Report ${number || '(newest)'} is in the review pane.`
+  await $.ui.open({ id: REPORT_PANE, title: REPORT_TITLE }).catch(() => undefined)
+  return `Report ${number || '(newest)'} is in the report pane.`
 }
 
 async function transition($: EngineInterface, command: 'pause' | 'stop'): Promise<string> {
@@ -201,7 +195,7 @@ async function configure($: EngineInterface, args: string): Promise<string> {
     if (refused) return `${String(answer.text ?? '')}${refused}`
   }
   const text = String(answer.text ?? '')
-  return answer.key === undefined ? display($, text, 'The configuration is shown above.') : text
+  return text
 }
 
 async function removeRoot($: EngineInterface, args: string): Promise<string> {
@@ -223,6 +217,8 @@ export async function runCommand($: EngineInterface, name: string, args: string)
       return status($)
     case 'arl-report':
       return report($, args)
+    case 'arl-phases':
+      return phases($)
     case 'arl-pause':
       return transition($, 'pause')
     case 'arl-stop':

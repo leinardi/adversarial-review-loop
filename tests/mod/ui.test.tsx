@@ -21,7 +21,7 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 import type { RunView } from '../../types'
-import { bandLine, paneLines } from '../../hooks/ui'
+import { bandLine, blockingFindings, paneLines, phasesText, statusText } from '../../hooks/ui'
 import { PLUGIN, summary } from './world'
 
 const run = (fields: Record<string, unknown> = {}): RunView => summary(fields) as unknown as RunView
@@ -50,32 +50,88 @@ test('the pane without a run says how to start one', () => {
   expect(paneLines(null, null, '').map(line => line.text)).toEqual(['No adversarial-review-loop run here. Start one with /arl-implement <plan.md>.'])
 })
 
-test('the pane marks approved, current and later phases, the final review, and unknown baselines', () => {
+test('the pane shows the phases around the current one on one line, and unknown baselines', () => {
   const lines = paneLines(
     run({ phases: ['one', 'two', 'three'], phase_count: 3, phase: 2, approved_phases: 1, rounds: 1, final_required: true, roots: [{ alias: 'web', path: '/w', kind: 'dir', baseline: 'unknown', proposed: '' }] }),
     null,
     '',
   ).map(line => line.text)
-  expect(lines).toContain('  ✓ 1. one')
-  expect(lines).toContain('  ▶ 2. two  (round 2)')
-  expect(lines).toContain('  · 3. three')
-  expect(lines).toContain('  · final review')
-  expect(lines).toContain('  web  /w  (dir)  baseline unknown')
+  expect(lines[0]).toBe('Run r1 · active · phase 2/3 · round 2')
+  expect(lines).toContain('  ✓ 1. one  ▶ 2. two  · 3. three  · final review')
+  expect(lines).toContain('Roots: web (baseline unknown)')
 })
 
-test('a report the person asked for takes the latest review\'s place in the pane', () => {
-  const texts = paneLines(run(), { label: 'phase1', verdict: 'APPROVED', message: 'ok', report: '/r.md' }, '', '# Review 001\nraw').map(line => line.text)
-  expect(texts).toContain('# Review 001')
-  expect(texts).not.toContain('Latest review: phase1, APPROVED')
+test('a long plan shows only the previous, current and next phase in the pane, and lists them all on request', () => {
+  const phases = Array.from({ length: 30 }, (_, index) => `p${index + 1}`)
+  const long = run({ phases, phase_count: 30, phase: 12, approved_phases: 11 })
+  const lines = paneLines(long, null, '').map(line => line.text)
+  expect(lines).toContain('  … ✓ 11. p11  ▶ 12. p12  · 13. p13 …')
+  expect(lines.length).toBeLessThan(8)
+  const all = phasesText(long).split('\n')
+  expect(all).toHaveLength(30)
+  expect(all[11]).toBe('▶ 12. p12  (round 1)')
 })
 
-test('the pane shows the latest review: its verdict, what Claude was told, and the report', () => {
-  const lines = paneLines(run(), { label: 'phase1', verdict: 'CHANGES_REQUIRED', message: 'Fix:\n- a.py:3 bug\n', report: '/work/.arl/reports/001.md' }, '')
+test('the pane lists at most three blocking findings of the latest review, one line each', () => {
+  const message = [
+    'The review of phase 1 asks for changes.',
+    '',
+    'Blocking findings (actionable, severity >= medium) -- every one must be resolved:',
+    '',
+    ...[1, 2, 3, 4].map(n => `FINDING severity=high actionable=yes file=api/a.py:${n} | bug ${n}`),
+    '',
+    'All findings reported (non-blocking ones included, for context):',
+    '',
+    'FINDING severity=low actionable=no file=api/b.py | nit',
+  ].join('\n')
+  const lines = paneLines(run(), { label: 'phase1', verdict: 'CHANGES_REQUIRED', message, report: '/r.md' }, '')
   const texts = lines.map(line => line.text)
-  expect(texts).toContain('Latest review: phase1, CHANGES_REQUIRED')
-  expect(texts).toContain('- a.py:3 bug')
-  expect(texts.at(-1)).toBe('Report: /work/.arl/reports/001.md')
-  expect(lines.find(line => line.text.startsWith('Latest review'))?.color).toBe('error')
+  expect(texts).toContain('Latest: phase1 CHANGES_REQUIRED · 4 blocking')
+  expect(texts).toContain('  high api/a.py:1  bug 1')
+  expect(texts).not.toContain('  high api/a.py:4  bug 4')
+  expect(texts).toContain('  … 1 more')
+  expect(texts.join('\n')).not.toContain('nit')
+  expect(texts.join('\n')).not.toContain('/r.md')
+  const latest = lines.find(line => line.text.startsWith('Latest'))
+  expect(latest?.segments.find(segment => segment.text === 'CHANGES_REQUIRED')?.color).toBe('error')
+  const finding = lines.find(line => line.text.startsWith('  high'))
+  expect(finding?.segments.find(segment => segment.text === 'high')?.color).toBe('error')
+})
+
+test('deferred findings and an approval\'s listed findings are never counted as blocking', () => {
+  const deferred = 'Deferred findings -- actionable, at or above block_severity, but new:\n\nFINDING severity=medium actionable=yes file=api/c.py | later\n'
+  const approved = `The review of phase 1 approved the change.\n\n${deferred}Full report: /r.md\n`
+  expect(blockingFindings(approved, 'APPROVED')).toEqual([])
+  const changes = `The review of phase 1 asks for changes.\n\nBlocking findings (actionable, severity >= medium) -- every one must be resolved:\n\nFINDING severity=high actionable=yes file=api/a.py | bug\n\n${deferred}`
+  expect(blockingFindings(changes, 'CHANGES_REQUIRED')).toEqual(['high api/a.py  bug'])
+  const texts = paneLines(run(), { label: 'phase1', verdict: 'APPROVED', message: approved, report: '/r.md' }, '').map(line => line.text)
+  expect(texts).toContain('Latest: phase1 APPROVED')
+})
+
+test('phase marks are coloured: approved green, current blue and bold, later grey', () => {
+  const lines = paneLines(run({ phases: ['one', 'two', 'three'], phase_count: 3, phase: 2, approved_phases: 1 }), null, '')
+  const window = lines.find(line => line.text.includes('▶ 2. two'))?.segments ?? []
+  expect(window.find(segment => segment.text === '✓ 1. one')?.color).toBe('success')
+  expect(window.find(segment => segment.text === '▶ 2. two')).toEqual({ text: '▶ 2. two', color: 'suggestion', bold: true })
+  expect(window.find(segment => segment.text === '· 3. three')?.color).toBe('inactive')
+})
+
+test('the final review is drawn after every phase, the elided ones included', () => {
+  const phases = Array.from({ length: 10 }, (_, index) => `p${index + 1}`)
+  const lines = paneLines(run({ phases, phase_count: 10, phase: 2, approved_phases: 1, final_required: true }), null, '').map(line => line.text)
+  expect(lines).toContain('  ✓ 1. p1  ▶ 2. p2  · 3. p3 …  · final review')
+})
+
+test('the band says working only while Claude\'s turn runs', () => {
+  expect(bandLine(run(), '', false)).toBe('adversarial-review-loop · phase 1/2: one · round 1 · idle')
+  expect(bandLine(run(), '', true)).toBe('adversarial-review-loop · phase 1/2: one · round 1 · working')
+})
+
+test('/arl-status text holds every phase and every root path', () => {
+  const text = statusText(run({ roots: [{ alias: 'web', path: '/w', kind: 'dir', baseline: 'set', proposed: '' }] }))
+  expect(text).toContain('▶ 1. one  (round 1)')
+  expect(text).toContain('· 2. two')
+  expect(text).toContain('  web  /w  (dir)')
 })
 
 const stored = (key: string, value: unknown): unknown => (key === 'run' ? { shape: 'run-1', value } : key === 'last' ? { shape: 'last-1', value } : value)
@@ -109,8 +165,9 @@ test('the pane draws the run on every surface', async ($, on) => {
       surface,
       props: { title: 'Adversarial review', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
     } as never)
-    expect((await ui.find({ type: 'Text', text: /^Run r1/ }))?.text).toBe('Run r1 · active · phase 1/2: one')
-    expect((await ui.find({ type: 'Text', text: /Latest review/ }))?.text).toBe('Latest review: phase1, APPROVED')
+    expect((await ui.find({ type: 'Text', text: /^Run r1/ }))?.text).toBe('Run r1')
+    expect((await ui.find({ type: 'Text', text: /^active$/ }))?.props.color).toBe('suggestion')
+    expect((await ui.find({ type: 'Text', text: /^APPROVED$/ }))?.props.color).toBe('success')
     await ui.unmount()
   }
 })
