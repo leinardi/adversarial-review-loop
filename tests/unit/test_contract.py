@@ -830,3 +830,35 @@ def test_a_huge_cited_line_is_noted_without_its_digits() -> None:
     assert contract.citation_notes(findings, {"a/x.py": 10}.get) == (
         "a/x.py: cited a line number is past the end of the file (10 lines); locate it by the description\n"
     )
+
+
+# --------------------------------------------------------------------------
+# done when
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "condition"),
+    [
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken || done when: x() checks y", "x() checks y"),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken ||done when:x() checks y  ", "x() checks y"),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken", ""),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken || done when:", ""),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | a || b is wrong", ""),
+        ("not a finding || done when: x", ""),
+    ],
+)
+def test_done_when_is_read_from_the_end_of_the_finding_text(line: str, condition: str) -> None:
+    assert contract.done_when(line) == condition
+
+
+def test_a_finding_with_a_condition_parses_blocks_and_is_stored_verbatim(tmp_path: Path) -> None:
+    line = "FINDING severity=high actionable=yes file=a/x.py:3 | broken || done when: x() checks y"
+    parsed = parse_text(tmp_path, contract_text(line, "VERDICT CHANGES_REQUIRED"))
+    assert parsed.verdict == "CHANGES_REQUIRED"
+    assert parsed.findings == f"{line}\n"
+
+
+def test_an_empty_condition_is_not_a_contract_violation(tmp_path: Path) -> None:
+    parsed = parse_text(tmp_path, contract_text("FINDING severity=low actionable=no file=a/x.py:3 | nit || done when:", "VERDICT APPROVED"))
+    assert parsed.verdict == "APPROVED"

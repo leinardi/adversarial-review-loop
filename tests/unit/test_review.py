@@ -1172,6 +1172,23 @@ def test_prepare_tells_the_mod_how_to_run_the_subagent(ws: Path, engine: Engine)
     assert (ticket["reviewer_model"], ticket["timeout_sec"]) == ("haiku", 120)
 
 
+def test_a_finding_kept_with_a_better_condition_still_blocks(ws: Path, engine: Engine, answers: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    first = finding("api/src/main.py:1", detail="prints the wrong value || done when: main prints 3")
+    outcome = review(engine, ws, answers, first, "VERDICT CHANGES_REQUIRED")
+    assert "  suggested check: main prints 3\n" in outcome["message"]
+    edit(ws / "api" / "src" / "main.py", "print(3)\n")
+    ticket = prepare(engine, ws)
+    # The stored line, condition included, is what the next round is shown.
+    assert first in bundle_text(ticket, "prior-rounds.txt")
+    kept = finding("api/src/main.py:1", detail="prints 3 but still to stdout; the condition was insufficient || done when: main logs 3")
+    outcome = record(engine, ws, ticket["review_id"], write_answer(answers, kept, "VERDICT CHANGES_REQUIRED"))
+    assert (outcome["status"], outcome["verdict"]) == ("recorded", "CHANGES_REQUIRED")
+    assert "  suggested check: main logs 3\n" in outcome["message"]
+    assert load(ws).data["round_history"][-1]["findings"] == [kept]
+
+
 def test_round_2_runs_on_late_model_and_says_so(ws: Path, engine: Engine, answers: Path) -> None:
     (ws / ".adversarial-review-loop.json").write_text(json.dumps({"model": "opus", "late_model": "sonnet"}))
     started(engine, ws)

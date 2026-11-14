@@ -55,6 +55,7 @@ __all__ = [
     "Target",
     "citation_notes",
     "cited_line",
+    "done_when",
     "is_single_stored_line",
     "normalized_file",
     "parse",
@@ -96,6 +97,22 @@ FINDING_RE: Final = re.compile(
     r"[ \t]+actionable=(?P<actionable>yes|no)"
     rf"[ \t]+file=(?P<file>[^|{_SPACE}](?:[^|]*[^|{_SPACE}])?)[ \t]*\|[ \t]*[^{_SPACE}]"
 )
+
+
+#: A finding's optional suggested check, at the end of its text: `` || done when: <condition>``.
+_DONE_WHEN_RE: Final = re.compile(rf"\|\|[ \t]*done when:[ \t]*(?P<condition>[^{_SPACE}].*?)[{_SPACE}]*$")
+
+
+def done_when(line: str) -> str:
+    """The suggested check a ``FINDING`` line ends with, or ``""`` when it names none.
+
+    Read from the finding's text only (after the first ``|``, which ``file=`` cannot hold), so a
+    path can never be mistaken for one. A missing or empty condition is not a contract error.
+    """
+    if FINDING_RE.match(line) is None:
+        return ""
+    match = _DONE_WHEN_RE.search(line.split("|", 1)[1])
+    return match.group("condition") if match else ""
 
 
 #: The ``SUPERSEDES`` grammar, exactly as ``prompts/reviewer-phase.md`` specifies it:
@@ -186,6 +203,10 @@ class Finding:
     actionable: bool
     #: The raw ``file=`` value -- ``path``, ``path:line`` or ``-`` -- exactly as written.
     file: str = "-"
+    #: The reviewer's suggested check that the defect is gone (`` || done when: <condition>``),
+    #: or ``""``. Advice to the implementer and to the next round, never a ceiling: a later round
+    #: judges the defect itself, and nothing here is read for a verdict.
+    done_when: str = ""
 
 
 @dataclass
@@ -480,7 +501,13 @@ def _scan_block(block_lines: list[str], *, allow_supersedes: bool) -> tuple[list
         match = FINDING_RE.match(line)
         if match is not None:
             findings.append(
-                Finding(line=line, severity=match.group("severity"), actionable=match.group("actionable") == "yes", file=match.group("file"))
+                Finding(
+                    line=line,
+                    severity=match.group("severity"),
+                    actionable=match.group("actionable") == "yes",
+                    file=match.group("file"),
+                    done_when=done_when(line),
+                )
             )
             continue
         if allow_supersedes and _SUPERSEDES_RE.match(line):

@@ -49,7 +49,7 @@ Write your review as prose first, ranked most severe first — what is wrong, wh
 
 ```
 <<<ARL-FINDINGS>>>
-FINDING severity=critical actionable=yes file=api/internal/x.go:42 | Nil deref when token absent
+FINDING severity=critical actionable=yes file=api/internal/x.go:42 | Nil deref when token absent || done when: Load returns ErrNoToken before dereferencing token, and a test covers the absent token
 FINDING severity=low actionable=no file=web/src/a.ts:9 | Naming preference
 SUPERSEDES round=1 file=api/internal/db/q.go:88 | round 1 called this a lost transaction; the caller does hold the lock, retracting it
 VERDICT CHANGES_REQUIRED
@@ -59,6 +59,8 @@ VERDICT CHANGES_REQUIRED
 Rules for the block:
 
 - One `FINDING` line per finding, on a single line. `severity` is one of `info`, `low`, `medium`, `high`, `critical`. `file` is `<alias>/path:line` where you can name one, or `<alias>/path` alone, or `-` when there is no single location. The path must start with one of the aliases in `range.txt`'s **Roots** section, exactly as the diff shows it; a finding whose path names no root fails the review. The line is that file's own line as it is now under its root, the numbering the `+` side of the diff's `@@` headers counts in, never a line of `changes.NN.diff`.
+- End every finding that blocks with `|| done when: <condition>`: what, checked by reading the code, would show the defect is gone, such as a guard in place, a call removed or a test asserting the behaviour. It is your suggested evidence for the implementer, never a ceiling: whoever reviews the fix judges the defect itself. A finding that does not block may carry one too.
+- From round 2 on, a finding in `prior-rounds.txt` may carry a condition. When it is met and the defect is gone, the finding is fixed. When it is met and the defect remains, say that the condition was insufficient and why, keep the finding and state a better condition. A condition never licenses a new, unrelated demand under the same finding: something else wrong is a finding of its own. Review of what the fix itself changed is unchanged.
 - Severity rubric — pick the label the finding actually earns, not the one that feels safe:
     - `critical` / `high` — a wrong result, a crash, or a security issue on a reachable path.
     - `medium` — a contract break, lost test coverage, or a bug on plausible input.

@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from arl import harness
+from arl import contract, harness
 from arl.atomic import write_private_atomic
 from arl.config import Config
 from arl.util import truncate
@@ -253,7 +253,12 @@ def reason(review: Review, headline: str, *, config: Config, waiting: bool = Fal
         )
     if review.findings:
         out.append(f"\nBlocking findings (actionable, severity >= {config.as_str('block_severity')}) -- every one must be resolved:\n\n")
-        out.append(review.findings)
+        for line in review.findings.splitlines():
+            out.append(f"{line}\n")
+            # The reviewer's evidence that the defect is gone; the next round judges the defect.
+            check = contract.done_when(line)
+            if check:
+                out.append(f"  suggested check: {check}\n")
     if review.deferred:
         # A `CHANGES_REQUIRED` that carries deferred lines: the reviewer's own verdict blocked
         # (stricter wins), or other findings did. Either way these are shown as what they are.
