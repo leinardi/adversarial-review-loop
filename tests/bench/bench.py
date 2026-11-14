@@ -69,6 +69,7 @@ __all__ = [
     "analyze_transcript",
     "assign",
     "bench_dir",
+    "diff_coverage",
     "findings_of",
     "log",
     "main",
@@ -389,6 +390,101 @@ def _rows(path: Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in handle if line.strip()]
 
 
+#: A bundle diff chunk, as the review prompt names it.
+_DIFF_CHUNK: Final = re.compile(r"/bundle/changes\.\d+\.diff$")
+#: One line of a Read result: its line number, a tab, the text.
+_NUMBERED: Final = re.compile(r"^\s*(\d+)\t", re.MULTILINE)
+
+
+def _result_text(block: Mapping[str, Any]) -> str:
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    return "\n".join(str(part.get("text", "")) for part in content or [] if isinstance(part, dict))
+
+
+#: Where the review prompt names its bundle, and each bundle file it lists.
+_BUNDLE_DIR: Final = re.compile(r"The bundle is the directory `([^`]+)`")
+_LISTED_CHUNK: Final = re.compile(r"`(/[^`]*/bundle/changes\.\d+\.diff)`")
+
+
+def _prompt_text(rows: Sequence[Mapping[str, Any]]) -> str:
+    """The task the reviewer was given: its transcript's first user message."""
+    for row in rows:
+        message = row.get("message")
+        if row.get("type") == "user" and isinstance(message, dict):
+            content = message.get("content")
+            return content if isinstance(content, str) else _result_text(message)
+    return ""
+
+
+def bundle_chunks(rows: Sequence[Mapping[str, Any]]) -> list[str] | None:
+    """Every ``changes.NN.diff`` of the bundle the reviewer was given, whatever it went on to read.
+
+    The bundle directory the prompt names is listed on disk, and every chunk the prompt lists is
+    added. ``None`` when the prompt names no bundle: then what the review should have read is not
+    known, and coverage must not be reported as complete.
+    """
+    prompt = _prompt_text(rows)
+    named = _BUNDLE_DIR.search(prompt)
+    listed = set(_LISTED_CHUNK.findall(prompt))
+    if named is None and not listed:
+        return None
+    if named is not None:
+        listed.update(str(path) for path in Path(named.group(1)).glob("changes.*.diff") if _DIFF_CHUNK.search(str(path)))
+    return sorted(listed)
+
+
+def diff_coverage(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Which lines of each bundle ``changes.NN.diff`` the reviewer's reads returned.
+
+    The chunks expected come from the bundle itself (:func:`bundle_chunks`), so a chunk never
+    opened, or opened by a read that got no answer, counts with ``0`` lines read. Lines read are
+    taken from the numbered lines of each ``Read`` result, so a read the tool cut short counts
+    only for what it returned. A file's length is read from disk, ``None`` when it is gone, and
+    the total is ``None`` when any length or the bundle itself is unknown. A line returned twice
+    counts once, and ``reread`` counts the extra returns.
+    """
+    targets: dict[str, str] = {}
+    for row in rows:
+        message = row.get("message")
+        if row.get("type") != "assistant" or not isinstance(message, dict):
+            continue
+        for block in message.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Read":
+                target = str((block.get("input") or {}).get("file_path") or "")
+                if _DIFF_CHUNK.search(target):
+                    targets[str(block.get("id"))] = target
+    expected = bundle_chunks(rows)
+    seen: dict[str, collections.Counter[int]] = {target: collections.Counter() for target in expected or []}
+    answered: set[str] = set()
+    for row in rows:
+        message = row.get("message")
+        if row.get("type") != "user" or not isinstance(message, dict) or not isinstance(message.get("content"), list):
+            continue
+        for block in message["content"]:
+            use = str(block.get("tool_use_id")) if isinstance(block, dict) and block.get("type") == "tool_result" else ""
+            # A transcript can repeat a row; its result is counted once.
+            if use in targets and use not in answered:
+                answered.add(use)
+                seen.setdefault(targets[use], collections.Counter()).update(int(number) for number in _NUMBERED.findall(_result_text(block)))
+    files: dict[str, dict[str, int | None]] = {}
+    for target, lines in sorted(seen.items()):
+        try:
+            length: int | None = len(Path(target).read_text(encoding="utf-8", errors="replace").splitlines())
+        except OSError:
+            length = None
+        # Read numbers the empty line after a final newline too: only the file's own lines count.
+        kept = {number: count for number, count in lines.items() if length is None or 1 <= number <= length}
+        files[Path(target).name] = {"read": len(kept), "lines": length, "reread": sum(count - 1 for count in kept.values())}
+    lengths = [entry["lines"] for entry in files.values()]
+    return {
+        "files": files,
+        "read": sum(int(entry["read"] or 0) for entry in files.values()),
+        "lines": None if expected is None or None in lengths else sum(int(length or 0) for length in lengths),
+    }
+
+
 def analyze_transcript(path: Path) -> dict[str, Any]:
     """Requests, tool calls, tokens and cost units of one reviewer subagent transcript.
 
@@ -396,7 +492,8 @@ def analyze_transcript(path: Path) -> dict[str, Any]:
     once and its content blocks are joined.
     """
     messages: dict[str, dict[str, Any]] = {}
-    for row in _rows(path):
+    rows = _rows(path)
+    for row in rows:
         if row.get("type") != "assistant" or not isinstance(row.get("message"), dict):
             continue
         message = row["message"]
@@ -441,6 +538,7 @@ def analyze_transcript(path: Path) -> dict[str, Any]:
         **{f"tok_{key}": value for key, value in tokens.items()},
         "final_context": sum(int(last.get(key) or 0) for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")),
         "cost_units_k": round(sum(tokens[key] * weight for key, weight in COST_WEIGHTS.items()) / 1000, 1),
+        "diff_coverage": diff_coverage(rows),
     }
 
 
@@ -698,6 +796,10 @@ def _cell(cell: Cell, timeout: int, replace: bool) -> dict[str, Any]:
     summary: dict[str, Any] = {
         **result, **head, "verdict": history[-1].get("verdict") if history else "no recorded round",
         "requests": sum(row["requests"] for row in rows), "cost_units_k": round(sum(row["cost_units_k"] for row in rows), 1),
+        # A round-1 review must read the whole diff: a cheaper one that did not is no saving.
+        # The review's own transcript, not its repair's, which reads only the transcript tail.
+        "diff_read": next((row["diff_coverage"]["read"] for row in rows if "(repair)" not in row["description"]), 0),
+        "diff_lines": next((row["diff_coverage"]["lines"] for row in rows if "(repair)" not in row["description"]), None),
     }  # fmt: skip
     if cell.seeded:
         summary["score"] = score_case(cell.tag, round2=False, truth_path=None, block_severity="medium")
@@ -730,8 +832,8 @@ def matrix(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 def _table(results: Sequence[Mapping[str, Any]]) -> str:
     lines = [
-        "| Phase | Model | Variant | Kind | Requests | Units (k) | Verdict | Reported | Blocking |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Phase | Model | Variant | Kind | Requests | Units (k) | Diff read | Verdict | Reported | Blocking |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for result in results:
         score = result.get("score") or {}
@@ -739,8 +841,9 @@ def _table(results: Sequence[Mapping[str, Any]]) -> str:
         reported = f"{score['reported']}/{score['of']}" if "of" in score else ""
         blocking = f"{score['blocking']}/{score['of']}" if "of" in score else ""
         kind = "seeded" if result["seeded"] else "clean"
+        read = f"{result.get('diff_read', 0)}/{result.get('diff_lines') or '?'}"
         lines.append(
-            f"| {result['phase']} | {result['model']} | {result['variant']} | {kind} | {result['requests']} | {result['cost_units_k']} | {verdict} | {reported} | {blocking} |"
+            f"| {result['phase']} | {result['model']} | {result['variant']} | {kind} | {result['requests']} | {result['cost_units_k']} | {read} | {verdict} | {reported} | {blocking} |"
         )
     return "\n".join(lines)
 

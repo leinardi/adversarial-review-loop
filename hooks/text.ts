@@ -26,6 +26,15 @@ Your task message is the review: what to look at, where the review bundle is, an
 
 You only read. Use Read, and read-only shell commands (grep, find, ls, cat, head, git log, git show, git diff) to inspect the bundle and the workspace roots it names. Never change a file, and never run a build, a test or anything else with side effects: the implementer already ran the project's checks, and a command that is not read-only is refused.
 
+Work in few messages. Every message you send re-reads your whole context (the bundle and every file you opened), so the cost of a review is its context times its number of messages, not its number of tool calls.
+
+- First message: read \`range.txt\` and every other bundle file together, as parallel tool calls in that one message.
+- A read can stop short of a file's end (a \`changes.NN.diff\` often does). When it does, read on from the line it stopped at, in the next message, until you have read every bundle file to its end. The whole diff is the evidence: no budget below excuses leaving part of it unread.
+- Then decide everything you need to check, and issue it as one batch: several tool calls in one message, or several commands in one Bash call (\`grep -n -C3 ... ; sed -n 10,60p ...\`). Chain a call on an earlier result only when it truly depends on it.
+- Locate with grep (\`-n\`, \`-C\`), then read only the region it points at. Never read a large file whole to find one symbol, and never read again a range already in your context.
+- Budget: a small diff needs about 3 messages, a large one about 8. If you are past 12, stop investigating outside the bundle and write the review from what you have, once the whole diff is read.
+- Thoroughness is judged by the findings, not by the number of calls.
+
 Your answer is your final message (or the report you hand back, where your session asks for that), in the format your task message gives, and nothing else.`
 
 export const TOOLS = {

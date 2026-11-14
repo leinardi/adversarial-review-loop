@@ -402,3 +402,82 @@ def test_round2_refuses_a_missing_source(monkeypatch: pytest.MonkeyPatch, tmp_pa
     (tmp_path / "cases").mkdir()
     with pytest.raises(SystemExit, match="no recorded run"):
         bench.make_round2("p", "nothing", "two", fix=tmp_path / "none.patch")
+
+
+def _prompt_row(bundle: Path) -> dict[str, Any]:
+    """The reviewer's task, naming its bundle as the review prompt does."""
+    listed = "".join(f"- `{path}`\n" for path in sorted(bundle.iterdir()))
+    return {"type": "user", "message": {"role": "user", "content": f"## The bundle\n\nThe bundle is the directory `{bundle}`. Read:\n\n{listed}"}}
+
+
+def _read_rows(diff: Path, *results: tuple[str, range]) -> list[dict[str, Any]]:
+    """A transcript that reads ``diff`` once per result: each answers the numbered lines in its range."""
+    rows: list[dict[str, Any]] = [_prompt_row(diff.parent)]
+    for use, lines in results:
+        rows.append(
+            {
+                "type": "assistant",
+                "message": {"id": use, "content": [{"type": "tool_use", "id": use, "name": "Read", "input": {"file_path": str(diff)}}]},
+            }
+        )
+        text = "".join(f"{number}\tline {number}\n" for number in lines)
+        rows.append({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": use, "content": text}]}})
+    return rows
+
+
+def test_diff_coverage_counts_what_the_reads_returned(tmp_path: Path) -> None:
+    diff = tmp_path / "bundle" / "changes.00.diff"
+    diff.parent.mkdir()
+    diff.write_text("".join(f"line {number}\n" for number in range(1, 11)))
+    # A first read cut short at line 4, a continuation to 7, and 6-7 read again. Line 11 is the
+    # empty line Read numbers after the final newline.
+    rows = _read_rows(diff, ("a", range(1, 5)), ("b", range(5, 8)), ("c", range(6, 8)), ("d", range(11, 12)))
+    rows.append(rows[1])  # a repeated row counts once
+    coverage = bench.diff_coverage(rows)
+    assert (coverage["read"], coverage["lines"]) == (7, 10)
+    assert coverage["files"]["changes.00.diff"] == {"read": 7, "lines": 10, "reread": 2}
+
+
+def test_diff_coverage_ignores_reads_of_other_files(tmp_path: Path) -> None:
+    other = tmp_path / "bundle" / "range.txt"
+    other.parent.mkdir()
+    other.write_text("x\n")
+    assert bench.diff_coverage(_read_rows(other, ("a", range(1, 2)))) == {"files": {}, "read": 0, "lines": 0}
+
+
+def _chunks(tmp_path: Path, count: int, length: int) -> list[Path]:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "range.txt").write_text("x\n")
+    paths = [bundle / f"changes.{index:02d}.diff" for index in range(count)]
+    for path in paths:
+        path.write_text("".join(f"line {number}\n" for number in range(1, length + 1)))
+    return paths
+
+
+def test_diff_coverage_counts_a_chunk_never_opened(tmp_path: Path) -> None:
+    first, _ = _chunks(tmp_path, 2, 10)
+    coverage = bench.diff_coverage(_read_rows(first, ("a", range(1, 11))))
+    assert (coverage["read"], coverage["lines"]) == (10, 20)
+    assert coverage["files"]["changes.01.diff"] == {"read": 0, "lines": 10, "reread": 0}
+
+
+def test_diff_coverage_counts_a_read_that_got_no_answer_as_unread(tmp_path: Path) -> None:
+    first, second = _chunks(tmp_path, 2, 10)
+    rows = _read_rows(first, ("a", range(1, 11)))
+    rows.append(
+        {
+            "type": "assistant",
+            "message": {"id": "b", "content": [{"type": "tool_use", "id": "b", "name": "Read", "input": {"file_path": str(second)}}]},
+        }
+    )
+    coverage = bench.diff_coverage(rows)
+    assert (coverage["read"], coverage["lines"]) == (10, 20)
+
+
+def test_diff_coverage_without_a_named_bundle_has_no_total(tmp_path: Path) -> None:
+    """A transcript whose prompt names no bundle cannot show what was left unread: never full coverage."""
+    [diff] = _chunks(tmp_path, 1, 10)
+    rows = _read_rows(diff, ("a", range(1, 11)))[1:]
+    coverage = bench.diff_coverage(rows)
+    assert (coverage["read"], coverage["lines"]) == (10, None)

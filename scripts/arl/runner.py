@@ -160,7 +160,11 @@ def _harness(config: Config) -> harness.Harness:
 
 
 def efficiency_text() -> str:
-    """``prompts/reviewer-efficiency.md``: how to work, as opposed to what to review.
+    """``prompts/reviewer-efficiency-opencode.md``: how to work, as opposed to what to review.
+
+    Written for OpenCode's read-only agent and its four tools (``read``, ``grep``, ``glob``,
+    ``list``). The subagent reviewer has its own, in ``REVIEWER_SYSTEM_PROMPT``
+    (``hooks/text.ts``), because its tools differ: Read, and grep through Bash.
 
     Read on every invocation rather than cached at import: a hook is a fresh process each
     time, so there is nothing to cache across, and reading it at the call site keeps this the
@@ -173,7 +177,7 @@ def efficiency_text() -> str:
     module, and deliberately so: nothing here bears on a verdict.
     """
     try:
-        return decode(arl.prompt_path("reviewer-efficiency").read_bytes()).rstrip("\n")
+        return decode(arl.prompt_path("reviewer-efficiency-opencode").read_bytes()).rstrip("\n")
     except OSError as exc:
         log(f"the reviewer efficiency guidance could not be read ({exc}); continuing without it")
         return ""

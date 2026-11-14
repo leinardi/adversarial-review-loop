@@ -122,6 +122,21 @@ test('paths are compared segment by segment, after resolving dots', () => {
 // Registration, as the session sees it
 // --------------------------------------------------------------------------
 
+test('the reviewer is told to work in few messages, within a budget: its cost is its context times its messages', async ($, on) => {
+  const w = world(on, { engine: {} })
+  await start($)
+  const prompt = String((w.registered.agents[0] as { prompt?: string } | undefined)?.prompt ?? '')
+  expect(prompt).toContain('Work in few messages.')
+  expect(prompt).toContain('read `range.txt` and every other bundle file together')
+  expect(prompt).toContain('If you are past 12, stop investigating outside the bundle')
+  // A read cut short is finished: the budget never excuses leaving part of the diff unread.
+  expect(prompt).toContain('read on from the line it stopped at')
+  expect(prompt).toContain('no budget below excuses leaving part of it unread')
+  expect(prompt).not.toContain('never re-read a file')
+  // Still a reviewer that only reads.
+  expect(prompt).toContain('You only read.')
+})
+
 test('the reviewer is registered read-only with no CLAUDE.md, and hidden from Claude', async ($, on) => {
   const w = world(on, { engine: {} })
   await start($)

@@ -190,3 +190,49 @@ of either phase (`M6`, `L6`).
 
 Both re-raises cite the line of a fixed defect and raise something next to it: a fix only half
 applied (`hooks/mod.ts:106`) and a test the fix did not add (`hooks/flow.ts:501`).
+
+## Measured on this harness
+
+`make bench-baseline` cells on the 93 KB (`medium`) and 141 KB (`large1`) phases. The baseline is
+the plugin at `a9f8bc8`, one run per cell. "Now" is the reviewer efficiency guidance with
+40 KB diff chunks: Sonnet three runs per cell, Opus one. Units are cost units (k); "now" gives
+the mean, and the range where there are three runs. A seeded cell shows blocking recall per run.
+Every run in this table read its whole diff (`Diff read` in the matrix table). The clean cells'
+blocking findings, where there are any, are real issues of those commits, fixed later.
+
+| Phase | Model | Kind | Baseline requests | units | recall | Now requests | units | recall |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 93 KB | Sonnet | clean | 8 | 129 |  | 3 to 7 | 108 (94 to 126) |  |
+| 93 KB | Sonnet | seeded | 4 | 94 | 3/6 | 2 to 3 | 83 (80 to 88) | 3, 2, 3 |
+| 141 KB | Sonnet | clean | 15 | 283 |  | 3 to 10 | 177 (139 to 219) |  |
+| 141 KB | Sonnet | seeded | 6 | 146 | 3/6 | 3 | 123 (122 to 124) | 2, 3, 2 |
+| 93 KB | Opus | clean | 13 | 229 |  | 7 | 189 |  |
+| 93 KB | Opus | seeded | 8 | 138 | 5/6 | 3 | 108 | 5/6 |
+| 141 KB | Opus | clean | 16 | 290 |  | 10 | 283 |  |
+| 141 KB | Opus | seeded | 11 | 215 | 5/6 | 4 | 148 | 5/6 |
+
+Requests fell in every cell, and units by 2 to 38%. Recall held: three more baseline runs of the
+141 KB Sonnet seeded cell scored 2, 2 and 3, the same spread. The baseline is one run per cell
+and run-to-run cost varies by up to half (the 141 KB Sonnet clean runs above), so a single cell's
+saving is not a measurement; the direction across all eight is.
+
+### Why the chunk size changed
+
+Claude Code's `Read` returns at most 25,000 tokens of a file, about 1,000 lines of these diffs.
+The 141 KB diff used to be one 2,827-line file, and its first read stopped at line 1,004 with a
+note to read on. Sonnet often read one more page and then wrote its review: three of four
+baseline runs of the 141 KB seeded cell read 1,699 to 1,859 lines, and a run with the guidance
+that stopped at 1,704 wrote that it had read the whole diff. With 40 KB chunks a single read
+takes in a whole file; the prompts still tell the reviewer to read on when a read stops short,
+which a dense diff can still need.
+
+### Historical, not validated
+
+Earlier runs of this work, kept for the record only. They are not evidence of a saving, because
+some read only part of the diff and a skipped part is cheap.
+
+- First guidance wording (`never re-read a file`), 400 KB chunks, one run per cell: Sonnet read
+  1,116 of 1,597, 1,257 of 1,599 and 2,008 of 2,827 diff lines in three of four cells.
+- Revised wording, 400 KB chunks: all eight single runs read the whole diff, but seven 141 KB
+  Sonnet seeded runs then read all of it in five (blocking recall 1, 2, 2, 2, 1) and stopped at
+  1,751 and 1,704 lines in two (recall 2 and 3).

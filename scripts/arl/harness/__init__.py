@@ -123,7 +123,7 @@ class ReviewSpec:
     #: Where the reviewer runs: the run's launch directory.
     repo: str
     prompt_text: str
-    #: The plugin's working guidance (``prompts/reviewer-efficiency.md``), for a harness that can
+    #: The plugin's working guidance (``prompts/reviewer-efficiency-opencode.md``), for a harness that can
     #: put it somewhere other than the prompt.
     system_prompt: str = ""
     title: str
