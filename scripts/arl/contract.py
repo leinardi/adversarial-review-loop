@@ -1,5 +1,4 @@
-"""The reviewer's output contract: the finding grammar, the verdict the engine recomputes, and
-the clarify reply.
+"""The reviewer's output contract: the finding grammar and the verdict the engine recomputes.
 
 **Every failure mode ends in a verdict that is not an approval.** A reviewer that says nothing,
 omits the markers, emits a line the contract does not allow or an unrecognised verdict maps to
@@ -27,14 +26,14 @@ at or above ``block_severity`` blocks regardless of what it concluded.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Final
 
 from arl.config import Config, late_threshold_rank, severity_rank, threshold_rank
 from arl.errors import OcrlError
-from arl.util import decode, encode
+from arl.util import decode
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from arl import harness
@@ -46,7 +45,6 @@ __all__ = [
     "FINDING_RE",
     "LINE_SUFFIX_RE",
     "ROUND_VERDICTS",
-    "ClarifyReply",
     "ContractError",
     "Finding",
     "LateScope",
@@ -56,13 +54,13 @@ __all__ = [
     "citation_notes",
     "cited_line",
     "done_when",
+    "finding_id",
+    "finding_ids",
     "is_single_stored_line",
     "normalized_file",
     "parse",
-    "parse_clarify",
     "records",
     "unknown_alias",
-    "valid_retractions",
 ]
 
 
@@ -115,11 +113,30 @@ def done_when(line: str) -> str:
     return match.group("condition") if match else ""
 
 
+def finding_id(order: int, number: int) -> str:
+    """The id of the ``number``-th finding of round ``order`` of a stage: ``r<order>.<number>``.
+
+    Given by the engine, never written by the reviewer: two findings may share a ``file=``, so a
+    location cannot name one. ``order`` is the round's position among its stage's recorded rounds,
+    ``number`` the finding's position in that round's block, both from 1.
+    """
+    return f"r{order}.{number}"
+
+
+def finding_ids(order: int, findings: str, lines: str) -> list[tuple[str, str]]:
+    """Each of ``lines`` with its id, ``findings`` being the whole block those lines were taken
+    from in order (``Review.all_findings``). A line repeated in the block takes its ids in turn."""
+    taken: dict[str, list[str]] = {}
+    for number, line in enumerate(records(findings), start=1):
+        taken.setdefault(line, []).append(finding_id(order, number))
+    return [(taken[line].pop(0) if taken.get(line) else "", line) for line in records(lines)]
+
+
 #: The ``SUPERSEDES`` grammar, exactly as ``prompts/reviewer-phase.md`` specifies it:
 #: ``SUPERSEDES round=<n> file=<path[:line]|-> | <why>``. Its own strict regex alongside
 #: ``FINDING_RE`` -- an unrecognised line is still a :class:`ContractError` (Rule 1). The
 #: ``file=`` clause is the same shape ``FINDING_RE`` accepts, ``-`` included, and captured the
-#: same way: :func:`valid_retractions` matches it against a finding's.
+#: same way.
 _SUPERSEDES_RE: Final = re.compile(
     r"^SUPERSEDES[ \t]+round=(?P<round>[0-9]{1,9})"
     rf"[ \t]+file=(?P<file>[^|{_SPACE}](?:[^|]*[^|{_SPACE}])?)[ \t]*\|[ \t]*[^{_SPACE}]"
@@ -240,6 +257,9 @@ class Review:
     deferred: str = ""
     #: Every ``FINDING`` line, newline-terminated.
     all_findings: str = ""
+    #: This round's position among its stage's recorded rounds, from 1, once it is recorded: what
+    #: its findings' ids (:func:`finding_id`) are numbered from. ``0`` before that.
+    ordinal: int = 0
     #: What the engine adds for Claude, one line each, newline-terminated: a ``VERDICT`` it
     #: supplied, a cited line past the end of its file. Shown, recorded in the report, and never
     #: read for the verdict.
@@ -351,44 +371,6 @@ def is_single_stored_line(value: object) -> bool:
     parsed records, split on ``\\n``); anything that does is rejected here.
     """
     return isinstance(value, str) and value.splitlines()[0:1] == [value]
-
-
-def valid_retractions(entry: dict[str, Any], lines: Sequence[object], *, ordinal: int) -> list[str]:
-    """The lines of ``lines`` that each retract one finding of the round ``entry``, in order.
-
-    Shared by the two places a clarify's retraction is trusted -- the clarify command before it
-    records one, ``bundle._prior_rounds`` before it renders one -- so the two cannot drift. A
-    line survives only when it is a single line (:func:`is_single_stored_line`) matching
-    ``_SUPERSEDES_RE`` with the anchored ``re.match`` a stored ``FINDING`` is re-validated with,
-    its ``round=`` is ``ordinal``, and its ``file=`` is exactly the ``file=`` of exactly one of
-    ``entry``'s re-validated ``FINDING`` lines. That is ``oscillation._retirements``' rule:
-    ``file=-`` names nothing, and two findings in one file name neither.
-
-    **One line per finding, the first wins.** A later line naming a finding already retracted is
-    dropped, so a caller that puts what is already recorded ahead of new lines learns which new
-    ones survive from the tail.
-
-    ``ordinal`` is the round's position as :func:`oscillation.ordinal_of` proves it, never the
-    stored ``round`` field.
-    """
-    stored = entry.get("findings")
-    files: list[str] = []
-    for line in stored if isinstance(stored, list) else []:
-        match = FINDING_RE.match(line) if isinstance(line, str) and is_single_stored_line(line) else None
-        if match is not None:
-            files.append(match.group("file"))
-    kept: list[str] = []
-    retracted: set[str] = set()
-    for line in lines:
-        match = _SUPERSEDES_RE.match(line) if isinstance(line, str) and is_single_stored_line(line) else None
-        if match is None or int(match.group("round")) != ordinal:
-            continue
-        file = match.group("file")
-        if file == "-" or files.count(file) != 1 or file in retracted:
-            continue
-        retracted.add(file)
-        kept.append(match.string)
-    return kept
 
 
 def unknown_alias(review: Review, aliases: frozenset[str], *, retired: frozenset[str] = frozenset()) -> str:
@@ -696,67 +678,3 @@ def citation_notes(findings: str, line_count: Callable[[str], int | None]) -> st
             which = f"line {number}" if number < CITED_LINE_CAP else "a line number"
             notes.append(f"{path}: cited {which} is past the end of the file ({length} lines); locate it by the description\n")
     return "".join(notes)
-
-
-@dataclass(frozen=True)
-class ClarifyReply:
-    """A clarify reply, split by :func:`parse_clarify`.
-
-    ``prose`` is what the implementing agent is shown. ``supersedes`` holds the retraction block's
-    lines, checked against the grammar only -- the clarify command still validates each against
-    the round it answers (:func:`valid_retractions`) before recording any. ``problem`` says why a
-    block that was there did not validate, and ``supersedes`` is then empty.
-    """
-
-    prose: str
-    supersedes: tuple[str, ...] = ()
-    problem: str = ""
-
-
-def parse_clarify(text: str) -> ClarifyReply:
-    """Split a clarify reply into its prose and its retraction block, if it has one. Never raises.
-
-    A clarify answers in prose and may end with one block holding ``SUPERSEDES`` lines and nothing
-    else (``prompts/reviewer-clarify.md``). No marker anywhere is the ordinary reply, all of it
-    prose. Once either marker appears, the block has to be exactly what that prompt allows or
-    nothing is taken from it: the bytes pass :func:`_byte_contract_violation` (a lone surrogate
-    must never reach ``state.json``), there is one marker pair in order (:func:`_locate_block`),
-    and every non-blank line matches ``_SUPERSEDES_RE`` with the anchored ``re.match``
-    :func:`_scan_block` uses. A ``FINDING`` or a ``VERDICT`` there is a re-review, which a clarify
-    is not, so it is a problem rather than a line to skip. So is a block with no line in it.
-
-    **The block must end the reply**: anything but blank lines after ``<<<ARL-END>>>`` is a problem
-    too. Text there can correct or contradict the retraction above it -- "on reflection, the
-    finding stands" -- and recording the block while dropping that text would report a retraction
-    the reviewer took back.
-
-    A problem is not a failed clarify: nothing approves either way, so prose is still returned and
-    the caller names the problem. The prose is the text above the block, or the whole reply when no
-    block could be located or text follows it, so nothing the reviewer wrote after the block is
-    hidden.
-    """
-    lines = records(text)
-    if not any(_is_marker(line, FINDINGS_MARKER) or _is_marker(line, END_MARKER) for line in lines):
-        return ClarifyReply(prose=text)
-    start: int | None = None
-    supersedes: list[str] = []
-    try:
-        violation = _byte_contract_violation(encode(text))
-        if violation:
-            raise ContractError(violation)
-        start, end = _locate_block(lines)
-        if any(line.strip() for line in lines[end + 1 :]):
-            # Nothing is set aside as a block when the block does not end the reply: the whole
-            # reply, trailing text included, is what the implementing agent is shown.
-            start = None
-            raise ContractError("the retraction block must end the reply, but text follows <<<ARL-END>>>")
-        supersedes = [line for line in lines[start + 1 : end] if line.strip()]
-        for line in supersedes:
-            if not _SUPERSEDES_RE.match(line):
-                raise ContractError(f"a clarify block may hold only SUPERSEDES lines, not: {line[:CONTRACT_ECHO_CHARS]}")
-        if not supersedes:
-            raise ContractError("the block holds no SUPERSEDES line")
-    except ContractError as exc:
-        prose = text if start is None else "\n".join(lines[:start]).rstrip("\n")
-        return ClarifyReply(prose=prose, problem=str(exc))
-    return ClarifyReply(prose="\n".join(lines[:start]).rstrip("\n"), supersedes=tuple(supersedes))

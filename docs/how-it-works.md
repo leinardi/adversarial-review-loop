@@ -39,8 +39,11 @@ that and asks again; only an approval moves the run to the next phase.
    gets one repair attempt, then counts as a failure. A failure is never an approval. A finding
    that cites a line past the end of its file still stands, with a note telling Claude to find
    it by its description.
-8. **Claude reads the outcome.** Findings: fix them and call `review` again; the next reviewer is
-   told what this one found. Approval: commit each changed repository by its own conventions.
+8. **Claude reads the outcome.** Findings, each with an id (`r1.3`): fix them and call `review`
+   again, saying for each one whether it was fixed or is rejected, with a note. The next reviewer
+   is told what this one found and what Claude said, and accounts for every finding: fixed, still
+   open, or withdrawn. A rejection that cites no file and line stays open. Approval: commit each
+   changed repository by its own conventions.
 9. **The loop continues.** When Claude's turn ends, the plugin asks the engine whether work
    remains and, if so, prompts Claude with the next phase. After the last approval (and the final
    review, if one is required) the run is complete.

@@ -44,7 +44,6 @@ if TYPE_CHECKING:  # pragma: no cover - imported for typing only
 __all__ = [
     "SUBAGENT",
     "UNIMPLEMENTED_MODEL",
-    "ClarifySpec",
     "Command",
     "Harness",
     "PayloadError",
@@ -132,19 +131,6 @@ class ReviewSpec:
     config: Config
 
 
-@dataclass(frozen=True, kw_only=True)
-class ClarifySpec:
-    """One clarify question about a review already given; the same shape as a review."""
-
-    repo: str
-    prompt_text: str
-    system_prompt: str = ""
-    title: str
-    bundle_dir: Path
-    roots: tuple[str, ...] = ()
-    config: Config
-
-
 @dataclass(frozen=True)
 class Usage:
     """What one reviewer invocation cost, as its CLI reported it.
@@ -223,9 +209,6 @@ class Harness(Protocol):
 
     def review_command(self, spec: ReviewSpec) -> Command:
         """The command that runs one review."""
-
-    def clarify_command(self, spec: ClarifySpec) -> Command:
-        """The command that answers one clarify question."""
 
     def transcript(self, raw: bytes) -> bytes:
         """The reviewer's answer, extracted from whatever its CLI actually wrote.

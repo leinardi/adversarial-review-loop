@@ -23,7 +23,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { COMMANDS, openPane, registerCommands, runCommand } from './commands'
 import { engine } from './engine'
-import { addRoot, clarify, continueRun, ensureRoot, parentOf, type Registration, review, session, resetWrites, setPhases, sweepRoots, track, unregistered, writeIn } from './flow'
+import { addRoot, continueRun, ensureRoot, parentOf, type Registration, review, session, resetWrites, setPhases, sweepRoots, track, unregistered, writeIn } from './flow'
 import { countStep, deliver, registerReviewer, REVIEWER, reviewerDecision } from './reviewer'
 import { TOOLS, type ToolName } from './text'
 import { pane, registerUi, showBusy } from './ui'
@@ -37,8 +37,6 @@ async function serve($: EngineInterface, name: string, input: Record<string, unk
       return addRoot($, input)
     case 'review':
       return review($, input, signal)
-    case 'clarify':
-      return clarify($, input, signal)
     default:
       return undefined
   }

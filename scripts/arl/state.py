@@ -55,6 +55,7 @@ from arl.atomic import locked, write_private_atomic
 from arl.errors import OcrlError, StateLoadError
 
 __all__ = [
+    "DISPOSITION_STATUSES",
     "RUN_DIR_NAME",
     "STATE_VERSION",
     "STATUSES",
@@ -146,7 +147,8 @@ def new_document(*, plan_source: str, final_review: bool) -> dict[str, Any]:
         "round_history": [],
         # Rounds that failed (OP_FAILURE, NEEDS_HUMAN): what they cost, for /arl-stats only.
         "failure_history": [],
-        "clarify_history": [],
+        # What the implementer stated about earlier findings (`review`'s dispositions), by id.
+        "dispositions": [],
         "review_seq": 0,
         "stall_floor": 0,
         "failures": 0,
@@ -179,7 +181,6 @@ _SCHEMA: Final[Mapping[str, type | tuple[type, ...]]] = {
     "approvals": list,
     "rounds": int,
     "round_history": list,
-    "clarify_history": list,
     "review_seq": int,
     "stall_floor": int,
     "failures": int,
@@ -196,7 +197,10 @@ _SCHEMA: Final[Mapping[str, type | tuple[type, ...]]] = {
 
 #: Keys added after the first v4 states were written, and what a document without one holds.
 #: Absent is read as empty; present, the key must still hold its type.
-_LATER_KEYS: Final[Mapping[str, type]] = {"failure_history": list}
+_LATER_KEYS: Final[Mapping[str, type]] = {"failure_history": list, "dispositions": list}
+
+#: What a disposition may say of a finding.
+DISPOSITION_STATUSES: Final = ("fixed", "rejected")
 
 
 def _validated(document: object) -> dict[str, Any]:
@@ -315,6 +319,40 @@ class RunState:
             if isinstance(entry, dict) and entry.get("label") == label and entry.get("revision") == revision
         ]
 
+    def dispositions_of(self, label: str) -> dict[str, dict[str, Any]]:
+        """What the implementer stated about ``label``'s findings under the current phase list, by
+        finding id. A malformed entry is skipped: a statement is shown to the reviewer as evidence,
+        and decides nothing."""
+        revision = self.data["phases_revision"]
+        out: dict[str, dict[str, Any]] = {}
+        for entry in self.data["dispositions"]:
+            if (
+                isinstance(entry, dict)
+                and entry.get("label") == label
+                and entry.get("revision") == revision
+                and isinstance(entry.get("id"), str)
+                and entry.get("status") in DISPOSITION_STATUSES
+                and isinstance(entry.get("note"), str)
+            ):
+                out[entry["id"]] = entry
+        return out
+
+    def state_dispositions(self, label: str, stated: Sequence[Mapping[str, str]], *, seq: int) -> None:
+        """Record ``stated`` for ``label``, stated for review ``seq``: a later statement about the
+        same finding replaces the earlier one."""
+        revision = self.data["phases_revision"]
+        ids = {entry["id"] for entry in stated}
+        kept = [
+            entry
+            for entry in self.data["dispositions"]
+            if not (isinstance(entry, dict) and entry.get("label") == label and entry.get("revision") == revision and entry.get("id") in ids)
+        ]
+        kept.extend(
+            {"label": label, "revision": revision, "id": entry["id"], "status": entry["status"], "note": entry["note"], "seq": seq}
+            for entry in stated
+        )
+        self.data["dispositions"] = kept
+
     def next_review_seq(self) -> int:
         self.data["review_seq"] += 1
         return int(self.data["review_seq"])
@@ -349,6 +387,8 @@ class RunState:
             raise RunError("phases-approved", f"{approved} phase(s) are already approved; changing the list needs --replan")
         self.data["phases"] = [*self.data["phases"][:approved], *cleaned]
         self.data["phases_revision"] += 1
+        # The rounds they answered no longer count (``rounds_of``), and nor do they.
+        self.data["dispositions"] = []
         self.data["rounds"] = 0
         self.data["compact_due"] = False
         self.invalidate_ticket("replanned")

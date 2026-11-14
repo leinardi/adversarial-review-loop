@@ -84,9 +84,10 @@ tells Claude to stop and tell you.
 The `arl-` prefix is not decoration: Claude Code ships `/status`, `/resume` and `/config`, and
 refuses a plugin command of the same name.
 
-Claude itself uses four tools the plugin registers: `set_phases`, `add_root` (before it changes a
-folder outside every root through Bash), `review` and `clarify` (one question to the reviewer about
-its findings).
+Claude itself uses three tools the plugin registers: `set_phases`, `add_root` (before it changes a
+folder outside every root through Bash) and `review`. After a review that asked for changes,
+`review` also takes Claude's dispositions: each finding, by its id (`r1.3`), fixed or rejected with
+a note, which the next reviewer checks against the code.
 
 ## 🔧 Configuration
 

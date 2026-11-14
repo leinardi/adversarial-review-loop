@@ -44,15 +44,12 @@ from arl.atomic import write_private_file
 from arl.bundle import BundleError, BundleTooLarge
 from arl.contract import Review, Target
 from arl.errors import OcrlError
-from arl.state import RunError, RunPaths, RunState, locked_state, repositories
+from arl.state import DISPOSITION_STATUSES, RunError, RunPaths, RunState, locked_state, repositories
 from arl.util import decode, encode, log
 
 __all__ = [
     "REPAIR_TAIL_BYTES",
     "abandon",
-    "clarify_prepare",
-    "clarify_record",
-    "clarify_run_external",
     "next_turn",
     "prepare",
     "record",
@@ -113,6 +110,47 @@ def _validated_verification(raw: object) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or not all(isinstance(entry, dict) for entry in raw):
         raise RunError("bad-verification", "verification must be a list of objects (root, command, cwd, status, output)")
     return [dict(entry) for entry in raw]
+
+
+#: How long one disposition's note may be.
+_NOTE_BYTES: Final = 4096
+
+
+def _validated_dispositions(raw: object, run: RunState) -> list[dict[str, str]]:
+    """What the implementer states about the previous round's findings, or a refusal.
+
+    Each entry names a finding of the latest recorded round of the current stage by its id
+    (``r<round>.<n>``), says ``fixed`` or ``rejected``, and may carry a note. An id that names no
+    such finding, or a second entry for one id, is refused as malformed verification is: a
+    statement about a finding the reviewer cannot find would be shown as evidence of nothing.
+    """
+    if raw is None:
+        return []
+    shape = "dispositions must be a list of objects (id, status, note)"
+    if not isinstance(raw, list) or not all(isinstance(entry, dict) for entry in raw):
+        raise RunError("bad-dispositions", shape)
+    if not raw:
+        return []
+    rounds = run.rounds_of(run.label())
+    if not rounds:
+        raise RunError("bad-dispositions", "there is no earlier round of this stage for a disposition to answer")
+    order = len(rounds)
+    stored = rounds[-1].get("findings")
+    known = {contract.finding_id(order, number) for number in range(1, (len(stored) if isinstance(stored, list) else 0) + 1)}
+    out: list[dict[str, str]] = []
+    for entry in raw:
+        ident, status, note = entry.get("id"), entry.get("status"), entry.get("note", "")
+        if not isinstance(ident, str) or ident not in known:
+            names = ", ".join(sorted(known)) or "none"
+            raise RunError("bad-dispositions", f"disposition id {str(ident)[:40]!r} names no finding of round {order} (its ids: {names})")
+        if any(seen["id"] == ident for seen in out):
+            raise RunError("bad-dispositions", f"finding {ident} has more than one disposition")
+        if status not in DISPOSITION_STATUSES:
+            raise RunError("bad-dispositions", f"disposition status must be one of {', '.join(DISPOSITION_STATUSES)}, not {str(status)[:40]!r}")
+        if not isinstance(note, str) or len(encode(note)) > _NOTE_BYTES:
+            raise RunError("bad-dispositions", f"a disposition note must be text of at most {_NOTE_BYTES} bytes")
+        out.append({"id": ident, "status": str(status), "note": note})
+    return out
 
 
 def _snapshot_or_wait(run: RunState) -> dict[str, str]:
@@ -207,6 +245,7 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         stage = run.stage()
         if stage not in ("phase", "final"):
             raise RunError("nothing-to-review", "set the phases first" if stage == "plan" else "the run is complete")
+        stated = _validated_dispositions(args.get("dispositions"), run)
         if not run.roots:
             # An empty bundle would show the reviewer nothing, and its approval would cover changes
             # no one saw.
@@ -224,6 +263,9 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         if _only_ignored(run, trees, cfg):
             return _skip(run, trees, cfg)
         seq = run.next_review_seq()
+        if stated:
+            # On the run, not the ticket: a review that fails or is abandoned keeps them for the next.
+            run.state_dispositions(run.label(), stated, seq=seq)
         review_dir = _review_dir(paths, run.run_id, seq)
         target = bundle.target_for(run, trees, final=stage == "final")
         changed = {root.alias for root in target.roots if root.base != root.head}
@@ -488,6 +530,8 @@ def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about wh
         # A review that answered ends a run of failures, and the wait the budget started with it.
         run.clear_wait("failures")
         rounds = run.rounds_of(target.label)
+        # What this round's finding ids are numbered from: the next round may answer them.
+        review.ordinal = len(rounds)
         points = oscillation.reversals(rounds, target.label, block_severity=cfg.as_str("block_severity"))
         review.oscillating = oscillation.render(points) if points else ""
         if review.verdict == "APPROVED":
@@ -522,7 +566,7 @@ def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about wh
     if review.verdict == "APPROVED":
         # A note is about a finding, and an approval shows Claude only the deferred ones.
         shown = {cited[0] for cited in map(_cited, contract.records(review.deferred)) if cited is not None}
-        notes = "".join(f"Review note: {note}\n\n" for note in review.notes.splitlines() if note.partition(": ")[0] in shown)
+        notes = "".join(f"Review note: {note}\n\n" for note in contract.records(review.notes) if note.partition(": ")[0] in shown)
         message = f"{_headline(target, review.verdict)}\n\n{notes}{report.deferred_text(review, what='approval')}Full report: {review.report}\n"
     else:
         message = report.reason(review, _headline(target, review.verdict), config=cfg, waiting=run.data["waiting"] is not None) + note
@@ -728,115 +772,3 @@ def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             return outcome
         prompt, answer = Path(outcome["prompt_file"]), Path(outcome["answer_file"])
     return outcome
-
-
-# --------------------------------------------------------------------------
-# clarify
-# --------------------------------------------------------------------------
-
-
-def _clarified_round(run: RunState) -> dict[str, Any]:
-    """The latest recorded round of the current stage: the only review a question can be about."""
-    rounds = run.rounds_of(run.label())
-    if not rounds:
-        raise RunError("nothing-to-clarify", "no review of the current stage has been recorded yet")
-    return rounds[-1]
-
-
-def _asked_of(cfg: config.Config, round_number: int, label: str) -> config.Config:
-    """``cfg`` as a question about round ``round_number`` of ``label`` runs: on the model that ran it."""
-    return config.for_round(cfg, round_number=round_number, final=label == "final")
-
-
-def clarify_prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
-    """Prepare one question about the latest recorded round, within ``max_clarifications``."""
-    cfg = _load_config(paths)
-    question = str(args.get("question") or "").strip()
-    if not question:
-        raise RunError("no-question", "clarify reads the question on stdin")
-    with locked_state(paths) as loaded:
-        run = _require(loaded)
-        entry = _clarified_round(run)
-        seq = int(entry["seq"])
-        review_dir = _review_dir(paths, run.run_id, seq)
-        bundle_dir = review_dir / "bundle"
-        # Counted as asked, not as answered: a question whose reply never came back still spent
-        # the budget, or a failing reviewer could be asked without end.
-        asked = len(list(bundle_dir.glob("question-*.txt")))
-        if asked >= cfg.as_int("max_clarifications"):
-            raise RunError("clarify-budget", f"this review was already asked {asked} question(s), the max_clarifications budget")
-        number = asked + 1
-        write_private_file(bundle_dir / f"question-{number}.txt", encode(question + "\n"))
-        files = ["range.txt", *sorted(path.name for path in bundle_dir.glob("changes.*.diff")), "review.md"]
-        if entry.get("repaired"):
-            files.append("repair.txt")
-        if (bundle_dir / "prior-rounds.txt").is_file():
-            files.append("prior-rounds.txt")
-        files.append(f"question-{number}.txt")
-        prompt = review_dir / f"clarify-{number}-prompt.md"
-        bundle.compose_fixed("reviewer-clarify", bundle_dir, files, prompt)
-        round_number, label = int(entry.get("round") or 1), str(entry.get("label") or "")
-        return {
-            "ok": True,
-            "run_id": run.run_id,
-            "round_seq": seq,
-            "round": round_number,
-            "label": label,
-            "question": number,
-            **_subagent_settings(_asked_of(cfg, round_number, label)),
-            "prompt_file": str(prompt),
-            "bundle_dir": str(bundle_dir),
-            "roots": [str(root["path"]) for root in run.roots],
-            "answer_file": str(review_dir / f"clarify-{number}-answer.md"),
-        }
-
-
-def clarify_record(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
-    """Record the reply to question ``args["question"]`` about round ``args["round_seq"]``.
-
-    The prose goes back to Claude. A retraction block is kept only for the lines that each retract
-    exactly one finding of that round (:func:`arl.contract.valid_retractions`); it changes no
-    verdict, and is shown under that round in the next round's ``prior-rounds.txt``.
-    """
-    answer = Path(str(args["answer"])).expanduser()
-    try:
-        text = decode(answer.read_bytes())
-    except OSError as exc:
-        raise RunError("no-answer", f"the clarify answer at {answer} could not be read: {exc}") from exc
-    reply = contract.parse_clarify(text)
-    with locked_state(paths) as loaded:
-        run = _require(loaded)
-        entry = _clarified_round(run)
-        seq = int(entry["seq"])
-        if str(args.get("round_seq")) != str(seq) or (args.get("run_id") and args["run_id"] != run.run_id):
-            raise RunError("stale-clarify", "a newer round has been recorded since this question was asked")
-        rounds = run.rounds_of(entry["label"])
-        ordinal = oscillation.ordinal_of(rounds, entry["label"], seq)
-        # A final reviewer may not retract (its contract has no SUPERSEDES), so nor may its clarify.
-        final = entry["label"] == "final"
-        kept = contract.valid_retractions(entry, list(reply.supersedes), ordinal=ordinal) if ordinal is not None and not final else []
-        run.data["clarify_history"].append({"label": entry["label"], "round_seq": seq, "question": int(args["question"]), "supersedes": kept})
-        run.save()
-    dropped = len(reply.supersedes) - len(kept)
-    note = reply.problem or (f"{dropped} retraction line(s) did not name exactly one finding of that round and were not recorded" if dropped else "")
-    return {"ok": True, "reply": reply.prose, "retracted": kept, "problem": note}
-
-
-def clarify_run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
-    """Ask the external reviewer one question, then record its reply."""
-    cfg = _load_config(paths)
-    _external_harness(cfg)
-    prepared = clarify_prepare(paths, args)
-    try:
-        runner.run_clarify(
-            str(paths.launch_dir),
-            Path(prepared["bundle_dir"]),
-            prompt_file=Path(prepared["prompt_file"]),
-            title=f"arl clarify {prepared['round_seq']}-{prepared['question']}",
-            out_path=Path(prepared["answer_file"]),
-            config=_asked_of(cfg, int(prepared["round"]), str(prepared["label"])),
-            roots=tuple(prepared["roots"]),
-        )
-    except runner.ReviewerFailed as exc:
-        raise RunError("clarify-failed", f"the reviewer could not answer: {exc}") from exc
-    return clarify_record(paths, {**prepared, "answer": prepared["answer_file"]})

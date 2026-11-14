@@ -26,7 +26,7 @@ as an approval.
 The architecture ([docs/architecture.md](docs/architecture.md) has the long form):
 
 - **The mod** (`hooks/mod.ts`): the orchestrator and UI. It registers the tools
-  Claude calls (`set_phases`, `add_root`, `review`, `clarify`), the reviewer subagent, the slash
+  Claude calls (`set_phases`, `add_root`, `review`), the reviewer subagent, the slash
   commands, and the band and review pane.
 - **The engine** (`scripts/arl/`, Python): workspace roots and snapshots, the review bundle,
   prompt composition, contract parsing and the verdict, stall detection, reports, and the run
@@ -62,12 +62,12 @@ The architecture ([docs/architecture.md](docs/architecture.md) has the long form
 | `scripts/arl.sh` | launcher: finds a Python 3.12 or newer and runs the bootstrap |
 | `scripts/arl-bootstrap.py` | trusted absolute entrypoint; establishes `sys.path` and `sys.pycache_prefix` before `arl` is imported |
 | `scripts/arl/cli.py` | subcommand dispatch: argv in, one JSON answer on stdout |
-| `scripts/arl/commands.py` | the command table: `init`, `resume`, `set-phases`, `root-add`, `root-remove`, `root-baseline`, `attach`, `status`, `report`, `config`, `stats`, `pause`, `stop`, `finish`, `accept`, `next-action`, and the `review`/`clarify` subcommands |
+| `scripts/arl/commands.py` | the command table: `init`, `resume`, `set-phases`, `root-add`, `root-remove`, `root-baseline`, `attach`, `status`, `report`, `config`, `stats`, `pause`, `stop`, `finish`, `accept`, `next-action`, and the `review` subcommands |
 | `scripts/arl/configcmd.py` | `config`: every key with its layer, or set or unset one key |
-| `scripts/arl/state.py` | the run state in `<launch dir>/.arl/state.json`: stages, approvals, tickets, the rounds and failed rounds with their usage, `next_action` |
+| `scripts/arl/state.py` | the run state in `<launch dir>/.arl/state.json`: stages, approvals, tickets, the rounds and failed rounds with their usage, the dispositions stated, `next_action` |
 | `scripts/arl/workspace.py` | workspace roots: git and shadow snapshots, nested-repository discovery, late baselines |
-| `scripts/arl/contract.py` | the reviewer output contract: `FINDING`/`SUPERSEDES` grammar, `parse`, the recomputed verdict, the late-round scope type, `parse_clarify` |
-| `scripts/arl/review.py` | the review pipeline: `review prepare`/`record`/`run-external`, repair, failure budgets, stalls, `clarify` |
+| `scripts/arl/contract.py` | the reviewer output contract: `FINDING`/`SUPERSEDES` grammar, `parse`, the recomputed verdict, the late-round scope type, finding ids, `done when` |
+| `scripts/arl/review.py` | the review pipeline: `review prepare`/`record`/`run-external`, dispositions, repair, failure budgets, stalls |
 | `scripts/arl/bundle.py` | the review bundle: alias-prefixed diff chunks per root, `range.txt`, `verification.txt`, prior rounds, prompt composition |
 | `scripts/arl/runner.py` | running the reviewer: the bounded runner, transcript reduction, failure classification |
 | `scripts/arl/harness/`, `reviewer_probe.py` | the reviewer-CLI seam; `opencode.py` is the one external harness, and the probe lists its models |

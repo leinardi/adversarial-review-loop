@@ -80,7 +80,7 @@ from typing import Final
 
 from arl.config import severity_rank, threshold_rank
 
-__all__ = ["Anchor", "OscillationPoint", "PersistingPoint", "ordinal_of", "persisting", "render", "render_persisting", "reversals"]
+__all__ = ["Anchor", "OscillationPoint", "PersistingPoint", "persisting", "render", "render_persisting", "reversals"]
 
 #: POSIX ``[[:space:]]`` in the C locale, spelled out rather than left to ``\s`` -- the same
 #: reasoning and the same literal class as ``contract._SPACE``.
@@ -259,30 +259,6 @@ def _ordered_rounds(history: Sequence[Mapping[str, object]], label: str) -> tupl
         previous = seq
         rounds.append((seq, entry))
     return rounds, trustworthy
-
-
-def ordinal_of(history: Sequence[Mapping[str, object]], label: str, seq: int) -> int | None:
-    """The round number the reviewer was shown for the round of ``label`` whose ``seq`` is ``seq``, or
-    ``None`` when that cannot be proved.
-
-    ``round=N`` means the 1-based **stored-order** position ``bundle._prior_rounds``
-    renders and ``range.txt``'s ``review round of this phase`` counts, so this is
-    :func:`_ordered_rounds`' numbering and nothing re-derived from ``seq``. ``None`` when that
-    numbering is not trustworthy (a dropped or non-increasing ``seq`` anywhere in the label), and
-    when ``seq`` names no round or more than one -- a duplicate is already non-increasing, but the
-    answer does not rest on that. ``history`` should already be narrowed to the current phase
-    list (``RunState.rounds_of``), as for :func:`reversals`.
-
-    Read-only, and neither signal calls it. Its callers are the clarify command, which records a
-    clarify's retraction only against a proved ordinal, and ``bundle._prior_rounds``,
-    which renders one only under the same proof -- so the two cannot disagree about which round a
-    ``SUPERSEDES`` line names.
-    """
-    rounds, trustworthy = _ordered_rounds(history, label)
-    if not trustworthy or isinstance(seq, bool):
-        return None
-    positions = [position for position, (entry_seq, _entry) in enumerate(rounds, start=1) if entry_seq == seq]
-    return positions[0] if len(positions) == 1 else None
 
 
 def _retirements(

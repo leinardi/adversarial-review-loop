@@ -1,5 +1,5 @@
 """The reviewer output contract: the findings block, the recomputed verdict, the late-round
-scope, ``SUPERSEDES`` and a clarify reply's retraction block.
+scope and ``SUPERSEDES``.
 
 No reviewer output the contract does not allow produces ``APPROVED``.
 """
@@ -623,109 +623,6 @@ def test_a_supersedes_line_from_a_final_review_fails_the_contract(tmp_path: Path
     out.write_bytes(_block("SUPERSEDES round=1 file=a.txt:1 | not allowed here", "VERDICT APPROVED"))
     assert contract.parse(out, config=config_with(), allow_supersedes=False).verdict == "OP_FAILURE"
     assert contract.parse(out, config=config_with()).verdict == "OP_FAILURE"
-
-
-# --------------------------------------------------------------------------
-# parse_clarify: a clarify reply and its retraction block
-# --------------------------------------------------------------------------
-
-_RETRACTION = "SUPERSEDES round=1 file=a.txt:1 | the premise was wrong"
-
-
-def test_a_clarify_reply_with_no_markers_is_all_prose() -> None:
-    text = "Just an answer.\nOn two lines.\n"
-    assert contract.parse_clarify(text) == contract.ClarifyReply(prose=text)
-
-
-def test_a_clarify_retraction_block_is_split_from_the_prose_above_it() -> None:
-    reply = contract.parse_clarify(f"You are right.\n\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n\n<<<ARL-END>>>\n")
-    assert reply.prose == "You are right."
-    assert reply.supersedes == (_RETRACTION,)
-    assert reply.problem == ""
-
-
-@pytest.mark.parametrize(
-    "block_line",
-    [
-        "FINDING severity=high actionable=yes file=b.txt:2 | a brand-new finding",
-        "VERDICT APPROVED",
-        "VERDICT CHANGES_REQUIRED",
-        "SUPERSEDES round=1 file=a.txt:1",
-        "prose inside the block",
-    ],
-)
-def test_a_clarify_block_holding_anything_but_supersedes_yields_no_retraction(block_line: str) -> None:
-    """A ``FINDING`` or a ``VERDICT`` in a clarify block is a re-review, which a clarify is not.
-    The valid line beside it is not salvaged: a block that breaks the contract yields nothing."""
-    reply = contract.parse_clarify(f"Prose above.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n{block_line}\n<<<ARL-END>>>\n")
-    assert reply.supersedes == ()
-    assert reply.problem
-    assert reply.prose == "Prose above.", "the prose above a located block is still returned"
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        f"<<<ARL-FINDINGS>>>\n{_RETRACTION}\n<<<ARL-END>>>\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n<<<ARL-END>>>\n",
-        f"Prose.\n<<<ARL-END>>>\n{_RETRACTION}\n<<<ARL-FINDINGS>>>\n",
-        f"Prose.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n",
-        f"Prose.\n{_RETRACTION}\n<<<ARL-END>>>\n",
-    ],
-    ids=["two-blocks", "inverted", "no-end-marker", "no-start-marker"],
-)
-def test_a_clarify_block_that_cannot_be_located_yields_no_retraction(text: str) -> None:
-    reply = contract.parse_clarify(text)
-    assert reply.supersedes == ()
-    assert reply.problem
-    assert reply.prose == text, "with no block located, the whole reply is the prose"
-
-
-@pytest.mark.parametrize(
-    "trailing",
-    [
-        "On reflection, the finding stands.",
-        "FINDING severity=high actionable=yes file=a.txt:1 | still wrong after all",
-        "VERDICT CHANGES_REQUIRED",
-        "SUPERSEDES round=1 file=b.txt:2 | one more, outside the block",
-    ],
-    ids=["prose", "finding", "verdict", "supersedes"],
-)
-def test_a_clarify_block_followed_by_text_yields_no_retraction(trailing: str) -> None:
-    """The block must end the reply. Text after it can take the retraction back, so recording the
-    block while dropping that text would report a retraction the reviewer no longer makes."""
-    text = f"You are right.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n<<<ARL-END>>>\n\n{trailing}\n"
-    reply = contract.parse_clarify(text)
-    assert reply.supersedes == ()
-    assert "must end the reply" in reply.problem
-    assert reply.prose == text, "the trailing text is shown, not hidden"
-
-
-def test_blank_lines_after_a_clarify_block_are_allowed() -> None:
-    reply = contract.parse_clarify(f"You are right.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n<<<ARL-END>>>\n\n  \n\t\n")
-    assert reply.supersedes == (_RETRACTION,)
-    assert reply.problem == ""
-
-
-def test_an_empty_clarify_block_yields_no_retraction() -> None:
-    reply = contract.parse_clarify("Prose.\n<<<ARL-FINDINGS>>>\n\n<<<ARL-END>>>\n")
-    assert reply.supersedes == ()
-    assert "no SUPERSEDES" in reply.problem
-    assert reply.prose == "Prose."
-
-
-def test_a_clarify_block_carrying_a_nul_byte_yields_no_retraction() -> None:
-    reply = contract.parse_clarify(f"Prose.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\0\n<<<ARL-END>>>\n")
-    assert reply.supersedes == ()
-    assert "NUL" in reply.problem
-
-
-def test_a_clarify_block_that_is_not_valid_utf8_yields_no_retraction() -> None:
-    """``_decode`` keeps invalid bytes as lone surrogates, and one reaching ``clarify_history``
-    could not be encoded when ``state.json`` is saved."""
-    raw = f"Prose.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}".encode() + b"\xff\n<<<ARL-END>>>\n"
-    reply = contract.parse_clarify(raw.decode("utf-8", "surrogateescape"))
-    assert reply.supersedes == ()
-    assert "UTF-8" in reply.problem
 
 
 def test_a_finding_detail_with_a_unicode_line_separator_stays_one_record(tmp_path: Path) -> None:

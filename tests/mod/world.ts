@@ -20,7 +20,7 @@
 //
 // The test kit answers `$.agent.spawn` with a model and no agent id (only the engine's own Agent
 // tool sets one), so no test here starts a reviewer through the kit: the review flow is driven
-// directly (`reviewWith`, `clarifyWith`) on a hand-made `$` (`fakeEngine`) with a stand-in
+// directly (`reviewWith`) on a hand-made `$` (`fakeEngine`) with a stand-in
 // reviewer, and the wait for a subagent's answer is tested on its own.
 
 import type { EngineInterface, On } from 'claude-code'
@@ -90,7 +90,7 @@ export const RECORDED = {
 export const PROMPTS = { [PREPARED.prompt_file]: 'Review phase 1.', '/work/.arl/reviews/r1-001/repair-prompt.md': 'Repair it.' }
 
 function commandOf(args: readonly string[]): string {
-  return args[0] === 'review' || args[0] === 'clarify' ? `${args[0]} ${args[1]}` : (args[0] ?? '')
+  return args[0] === 'review' ? `${args[0]} ${args[1]}` : (args[0] ?? '')
 }
 
 export type World = {

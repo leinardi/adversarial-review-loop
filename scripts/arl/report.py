@@ -191,7 +191,7 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
     out.append(_usage_line(review))
     if review.error:
         out.append(f"- engine note: {review.error}\n")
-    out.extend(f"- engine note: {note}\n" for note in review.notes.splitlines())
+    out.extend(f"- engine note: {note}\n" for note in contract.records(review.notes))
 
     out.append(_findings_and_raw(review))
     return "".join(out)
@@ -236,6 +236,13 @@ def _footer(review: Review, *, waiting: bool) -> str:
     return _PROSE_FOOTER
 
 
+def _with_ids(review: Review, lines: str) -> list[str]:
+    """``lines``, each prefixed with its finding id once the round is recorded (``Review.ordinal``)."""
+    if not review.ordinal:
+        return contract.records(lines)
+    return [f"{ident} {line}" for ident, line in contract.finding_ids(review.ordinal, review.all_findings, lines)]
+
+
 def reason(review: Review, headline: str, *, config: Config, waiting: bool = False) -> str:
     """The message ``review record`` hands back to Claude when a review did not approve.
 
@@ -245,7 +252,7 @@ def reason(review: Review, headline: str, *, config: Config, waiting: bool = Fal
     out: list[str] = [f"{headline}\n"]
     if review.error:
         out.append(f"\nReview note: {review.error}\n")
-    out.extend(f"\nReview note: {note}\n" for note in review.notes.splitlines())
+    out.extend(f"\nReview note: {note}\n" for note in contract.records(review.notes))
     if review.repaired:
         out.append(
             "\nReview note: the reviewer's findings block was malformed, so the findings below were re-emitted by a "
@@ -253,8 +260,8 @@ def reason(review: Review, headline: str, *, config: Config, waiting: bool = Fal
         )
     if review.findings:
         out.append(f"\nBlocking findings (actionable, severity >= {config.as_str('block_severity')}) -- every one must be resolved:\n\n")
-        for line in review.findings.splitlines():
-            out.append(f"{line}\n")
+        for shown, line in zip(_with_ids(review, review.findings), contract.records(review.findings), strict=True):
+            out.append(f"{shown}\n")
             # The reviewer's evidence that the defect is gone; the next round judges the defect.
             check = contract.done_when(line)
             if check:
@@ -265,7 +272,12 @@ def reason(review: Review, headline: str, *, config: Config, waiting: bool = Fal
         out.append(f"\n{deferred_text(review, what='round')}")
     if review.all_findings and review.all_findings != review.findings:
         out.append("\nAll findings reported (non-blocking ones included, for context):\n\n")
-        out.append(review.all_findings)
+        out.extend(f"{line}\n" for line in _with_ids(review, review.all_findings))
+    if review.ordinal and review.all_findings:
+        out.append(
+            "\nEach finding's id (r<round>.<n>) is how the next review call names it: pass `dispositions` saying which "
+            "you fixed and which you reject, with a note citing the file and line that shows why.\n"
+        )
     if review.supersedes:
         out.append("\nReversals of earlier rounds (SUPERSEDES lines) -- recorded, not verdict-changing:\n\n")
         out.append(review.supersedes)

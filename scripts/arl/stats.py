@@ -36,7 +36,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 from arl import contract
-from arl.state import RunState
+from arl.state import DISPOSITION_STATUSES, RunState
 
 __all__ = ["SEVERITY_ORDER", "collect", "render"]
 
@@ -75,6 +75,14 @@ def _severities(findings: object) -> dict[str, int]:
         if match is not None:
             counts[match.group("severity")] += 1
     return {severity: counts[severity] for severity in SEVERITY_ORDER if counts[severity]}
+
+
+def _stated(run: RunState, label: str, revision: int, number: int) -> dict[str, int]:
+    """How many of round ``number``'s findings the implementer stated fixed or rejected."""
+    if revision != run.data["phases_revision"]:
+        return {}
+    counts = collections.Counter(entry["status"] for ident, entry in run.dispositions_of(label).items() if ident.startswith(f"r{number}."))
+    return {status: counts[status] for status in DISPOSITION_STATUSES if counts[status]}
 
 
 def _row(entry: Mapping[str, Any], *, failed: bool, number: int) -> dict[str, Any]:
@@ -117,9 +125,12 @@ def _rows(run: RunState) -> list[dict[str, Any]]:
     rows = []
     for entry, failed in entries:
         stage = (str(entry.get("label", "")), _int(entry.get("revision")) or 0)
-        rows.append(_row(entry, failed=failed, number=recorded[stage] + 1))
+        row = _row(entry, failed=failed, number=recorded[stage] + 1)
         if not failed:
             recorded[stage] += 1
+            # Ids number a stage's recorded rounds from 1, which is what `recorded` counts.
+            row["stated"] = _stated(run, stage[0], stage[1], recorded[stage])
+        rows.append(row)
     return rows
 
 
@@ -194,6 +205,8 @@ def _line(row: Mapping[str, Any]) -> str:
         parts.append(f"blocking {_figure(row['blocking'])}")
         if row["deferred"]:
             parts.append(f"deferred {row['deferred']}")
+        if row.get("stated"):
+            parts.append("stated " + ", ".join(f"{status} {count}" for status, count in row["stated"].items()))
     return "  " + " · ".join(parts)
 
 

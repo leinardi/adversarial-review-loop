@@ -61,7 +61,7 @@ export const TOOLS = {
   },
   review: {
     description:
-      "Ask for the adversarial review of the current phase (or of the final review stage) once the phase is implemented. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
+      "Ask for the adversarial review of the current phase (or of the final review stage) once the phase is implemented. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. After a review that asked for changes, pass dispositions too: for each finding of that review (by its id, r<round>.<n>), whether you fixed it or reject it, with a note citing the file and line that shows it. A finding you reject with no such citation stays open. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -80,16 +80,20 @@ export const TOOLS = {
             required: ['command', 'status'],
           },
         },
+        dispositions: {
+          type: 'array',
+          description: "What you did about the previous review's findings, one entry per finding. The next reviewer reads them as your claim, to check against the diff.",
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'The finding id the previous review gave it, such as r1.3.' },
+              status: { type: 'string', enum: ['fixed', 'rejected'] },
+              note: { type: 'string', description: 'Why: for a rejection, the file and line that show the finding is wrong.' },
+            },
+            required: ['id', 'status'],
+          },
+        },
       },
-    },
-  },
-  clarify: {
-    description:
-      "Ask the reviewer of the latest review one question about its findings, when a finding is unclear or you believe it is wrong. A few questions per review at most. The reply may retract a finding for the next round; it never changes this review's verdict, so fix or explain, then call review again.",
-    inputSchema: {
-      type: 'object',
-      properties: { question: { type: 'string' } },
-      required: ['question'],
     },
   },
 } as const

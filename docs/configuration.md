@@ -39,7 +39,6 @@ again when `/arl-config` sets it.
 | `max_failures` | `2` | reviewer failures (crash, broken contract) tolerated in a row: the next one makes the loop stop prompting Claude and ask you. Any answered review resets the count, and a `review` Claude calls anyway still runs |
 | `max_transient_failures` | `5` | timeouts and rate limits tolerated in a row, likewise |
 | `stall_rounds` | `5` | rounds a blocking finding may persist before the loop asks you; `0` disables |
-| `max_clarifications` | `2` | questions Claude may ask the reviewer about one review |
 | `ignore_globs` | `[]` | paths (inside their root) whose sole change approves a stage without a review. A change to `.adversarial-review-loop.json` itself is never ignored |
 | `final_review` | `false` | end every run with a review of all its changes, every root from where it joined the run |
 | `review_skill` | `auto` | each root's own review skill, attached as guidance for that root: `auto`, a skill name, or `off`. See below |

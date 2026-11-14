@@ -4,7 +4,7 @@
 
 ```text
 hooks/mod.ts (Claude Code mod: orchestrator, UI)    scripts/arl/ (engine: Python CLI, JSON in and out)
-  tools     set_phases, add_root, review, clarify     run state in <launch>/.arl/state.json, one lock
+  tools     set_phases, add_root, review              run state in <launch>/.arl/state.json, one lock
   agent     adversarial-review-loop:reviewer          workspace roots, git and shadow snapshots
   commands  /arl-implement ... /arl-remove-root       the bundle, prompt composition, review skills
   hooks     tool.call, tool.check, turn.complete,     contract parsing and the recomputed verdict
@@ -50,7 +50,7 @@ and asks the person when the engine says the run waits for them.
 | `cli.py`, `commands.py` | argv in, one JSON answer out; the command table |
 | `state.py` | the run document, its transitions, `next_action` and its continuation token |
 | `workspace.py`, `gitsnap.py` | roots, nested-repository discovery, late baselines; snapshots through a throwaway `GIT_INDEX_FILE` (git roots) or a shadow git dir (plain folders) |
-| `review.py` | `review prepare` / `record` / `run-external` / `abandon`, repair, failure budgets, stalls, `clarify` |
+| `review.py` | `review prepare` / `record` / `run-external` / `abandon`, dispositions, repair, failure budgets, stalls |
 | `bundle.py` | the bundle: diff chunks per root with alias-prefixed paths, `range.txt`, `prior-rounds.txt`, `verification.txt`, the composed prompt |
 | `contract.py` | the output contract: `FINDING` and `SUPERSEDES` lines, the verdict recomputed from them |
 | `guidance.py` | each root's review skill and `review_guide` |

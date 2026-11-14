@@ -152,7 +152,7 @@ test("the plugin's own tools are allowed on the main loop, whatever the session'
   world(on, { engine: {} })
   on('tool.check', () => ({ decision: 'ask', reason: 'the host asks' }))
   await start($)
-  for (const name of ['set_phases', 'add_root', 'review', 'clarify']) {
+  for (const name of ['set_phases', 'add_root', 'review']) {
     expect((await $.tool.check({ tool: tool(name), input: {} })).decision).toBe('allow')
   }
   expect((await $.tool.check({ tool: 'WebFetch', input: {} })).decision).toBe('ask')
