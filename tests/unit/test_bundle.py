@@ -163,12 +163,18 @@ def test_a_large_diff_is_chunked_named_in_order_and_reassembles(ws: Path, engine
         assert str(chunk) in prompt
 
 
-def test_past_max_chunks_the_diff_is_one_file_rather_than_cut_short(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(bundle, "MAX_CHUNKS", 2)
+def test_past_max_chunks_the_chunks_grow_rather_than_the_diff_being_cut_short(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not one file: a single read of a large file returns only its start."""
+    monkeypatch.setattr(bundle, "MAX_CHUNKS", 3)
     data = b"".join(f"line {i}\n".encode() for i in range(100))
     names = bundle._write_chunks(tmp_path, data, 64)
-    assert names == ["changes.00.diff"]
-    assert (tmp_path / "changes.00.diff").read_bytes() == data
+    assert 1 < len(names) <= 3
+    assert b"".join((tmp_path / name).read_bytes() for name in names) == data
+
+
+def test_the_default_chunk_fits_one_read_of_the_reviewer() -> None:
+    """Read returns at most 25,000 tokens of a file; a diff runs at about 2.4 bytes per token."""
+    assert config.DEFAULTS["chunk_diff_bytes"] <= 50_000
 
 
 # --------------------------------------------------------------------------

@@ -86,7 +86,9 @@ DEFAULTS: Final[dict[str, Any]] = {
     # what it reported reaches the reviewer as `verification.txt`.
     "verify_cmd": "",
     "disable_project_config": False,
-    "chunk_diff_bytes": 400000,
+    # One diff file of the bundle. Claude Code's Read returns at most 25,000 tokens of a file;
+    # 40 KB of diff is about 17,000, so one read takes in a whole chunk.
+    "chunk_diff_bytes": 40000,
     "hard_diff_ceiling": 8388608,
     "max_file_bytes": 16777216,
     "max_reason_bytes": 32768,

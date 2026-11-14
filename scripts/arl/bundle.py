@@ -320,7 +320,11 @@ def split_lines_by_size(data: bytes, limit: int) -> list[bytes]:
 
 
 def _write_chunks(dest: Path, diff: bytes, limit: int, gone: Sequence[str] = ()) -> list[str]:
-    """Write ``changes.NN.diff`` and answer their names."""
+    """Write ``changes.NN.diff`` and answer their names.
+
+    A chunk is at most ``limit`` bytes, except when that would take more than :data:`MAX_CHUNKS`
+    chunks: then the chunks grow until :data:`MAX_CHUNKS` hold the diff.
+    """
     if not diff:
         text = (
             "".join(f"(root {alias} was removed; its old content cannot be shown)\n" for alias in gone)
@@ -329,9 +333,14 @@ def _write_chunks(dest: Path, diff: bytes, limit: int, gone: Sequence[str] = ())
         write_private_file(dest / "changes.00.diff", encode(text))
         return ["changes.00.diff"]
     chunks = split_lines_by_size(diff, limit)
-    if len(chunks) > MAX_CHUNKS:
-        log(f"diff would need {len(chunks)} chunks; attaching it as a single file instead")
-        chunks = [diff]
+    if limit > 0 and len(chunks) > MAX_CHUNKS:
+        # Larger chunks rather than one file: a single read returns only part of a large file,
+        # and every chunk past the first read is one more chance for the reviewer to stop short.
+        wanted = len(chunks)
+        while len(chunks) > MAX_CHUNKS:
+            limit = max(limit + 1, limit * len(chunks) // MAX_CHUNKS)
+            chunks = split_lines_by_size(diff, limit)
+        log(f"diff would need {wanted} chunks of chunk_diff_bytes; written as {len(chunks)} chunks of up to {limit} bytes")
     names = [f"changes.{index:02d}.diff" for index in range(len(chunks))]
     for name, chunk in zip(names, chunks, strict=True):
         write_private_file(dest / name, chunk)
