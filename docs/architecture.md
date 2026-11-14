@@ -61,14 +61,17 @@ and asks the person when the engine says the run waits for them.
 
 ## A round, step by step
 
-1. `review prepare --session <id>` (verification on stdin) refuses when the run waits on a
-   decision only the user ends (a stall, the reviewer's call for a person), has no roots, or a
-   root's baseline is unknown; a wait for the failure budget does not refuse. Otherwise it scans
-   for new nested repositories, snapshots every root, and issues a **ticket**: review id, run id,
-   phase, phase-list revision, and every root's snapshot tree.
+1. `review prepare --session <id>` (verification and dispositions on stdin) refuses when the
+   run waits on a decision only the user ends (a stall, the reviewer's call for a person), has no
+   roots, or a root's baseline is unknown; a wait for the failure budget does not refuse.
+   Otherwise it scans for new nested repositories, snapshots every root, and issues a **ticket**:
+   review id, run id, phase, phase-list revision, and every root's snapshot tree. Dispositions
+   naming findings of the previous round are checked and stored on the run, not on the ticket, so
+   a review that fails keeps them for the next.
 2. The bundle is the diff from each root's `approved_tree` (or `start_tree`, for the final review)
    to that snapshot.
-3. The mod reads the prompt file, spawns the reviewer, writes its answer to the answer file, and
+3. The mod reads the prompt file, spawns the reviewer on the round's model (`late_model` from
+   round 2 of a phase, when set), writes its answer to the answer file, and
    runs `review record <id> --answer <file>` (or `--failed transient|operational`).
 4. `record` runs under the state lock and lands the result only if the ticket is still the pending
    one and every root still has the tree it was reviewed at. A stale ticket (the run was stopped,

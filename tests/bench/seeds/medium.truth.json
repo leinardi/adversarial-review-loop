@@ -43,7 +43,7 @@
     "id": "M5",
     "file": "scripts/arl/state.py",
     "line": 583,
-    "symbols": ["resume_context", "approved_phases"],
+    "symbols": ["resume_context", "approved_phases", "index < done"],
     "severity": "medium",
     "what": "Off-by-one: the last approved phase is not marked '(approved)' in the resume context, so a resumed session misreads progress.",
     "original": "if index <= done",

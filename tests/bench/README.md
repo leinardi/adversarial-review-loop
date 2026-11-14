@@ -191,6 +191,53 @@ of either phase (`M6`, `L6`).
 Both re-raises cite the line of a fixed defect and raise something next to it: a fix only half
 applied (`hooks/mod.ts:106`) and a test the fix did not add (`hooks/flow.ts:501`).
 
+## After: the final tree
+
+Measured 2026-11-14 on the plugin at `883a6e7`, with every change of this work in: efficiency
+guidance, 40 KB diff chunks, the contract hardening, `done when`, finding ids and the later-round
+prompt. Same cells and runs as the table under "Measured on this harness": Sonnet three runs per
+cell, Opus one, every run reading its whole diff. Units are cost units (k), Sonnet's as the mean
+with the range.
+
+### Round 1
+
+| Phase | Model | Kind | Baseline (`a9f8bc8`) requests | units | recall | Final requests | units | recall |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 93 KB | Sonnet | clean | 8 | 129 |  | 3 to 5 | 101 (93 to 112) |  |
+| 93 KB | Sonnet | seeded | 4 | 94 | 3/6 | 2 | 82 (79 to 84) | 4, 3, 4 |
+| 141 KB | Sonnet | clean | 15 | 283 |  | 4 to 7 | 161 (143 to 176) |  |
+| 141 KB | Sonnet | seeded | 6 | 146 | 3/6 | 3 to 4 | 126 (118 to 138) | 3, 2, 3 |
+| 93 KB | Opus | clean | 13 | 229 |  | 7 | 181 |  |
+| 93 KB | Opus | seeded | 8 | 138 | 5/6 | 4 | 119 | 5/6 |
+| 141 KB | Opus | clean | 16 | 290 |  | 6 | 214 |  |
+| 141 KB | Opus | seeded | 11 | 215 | 5/6 | 4 | 158 | 5/6 |
+
+Clean round 1 costs 21 to 43% less, not the half the plan expected; seeded round 1 costs 13 to
+27% less. Requests fell in every cell. Seeded recall is within the recorded spread in every cell.
+The Opus 93 KB run found `M5` but cited the wrong line of `state.py`; `M5`'s record gained the
+symbol `index < done`, the seeded comparison itself, and rescoring every earlier 93 KB seeded run
+with it changed none of them. The one Opus clean phase that asked for changes raised real issues
+of that commit, as the baseline did.
+
+### Round 2
+
+After the same Opus round 1 as under "Round 2 on this harness", three runs per cell, against the
+plugin at `ccb6605` (before finding ids, dispositions and the later-round prompt). The bench
+states no dispositions, so this measures the prompt, not what Claude says about the fixes.
+
+| Phase | Model | `ccb6605` units | Final units | Final requests | Final verdicts | Open | Regression |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 93 KB | Opus | 98 to 104 | 56 to 67 | 5 | 3 changes required | `*` `*` `*` | `*` `*` `*` |
+| 93 KB | Sonnet | 34 to 46 | 35 to 36 | 3 to 4 | 3 changes required | `*` `*` `*` | `*` `*` `*` |
+| 141 KB | Opus | 131 to 133 | 41 to 50 | 4 to 5 | 3 changes required | `*` `*` `*` | low, low, low |
+| 141 KB | Sonnet | 27 to 35 | 30 to 35 | 3 to 5 | 1 approved, 2 changes required | `*` `*` `-` | `-`, low, low |
+
+Opus round 2 now costs about half what it did, with the same recall (9 of 12 blocking, the 141 KB
+regression rated low every time) and no false re-raise, against one before. That leaves Sonnet
+(30 to 36) about a third cheaper rather than two thirds, so `late_model` buys less than it
+did. Sonnet is unchanged: 8 of 12, and again one run approved the 141 KB phase with `L4` open.
+Every round 2 read the increment and none of the phase diff, as the later-round prompt asks.
+
 ## Measured on this harness
 
 `make bench-baseline` cells on the 93 KB (`medium`) and 141 KB (`large1`) phases. The baseline is
