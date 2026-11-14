@@ -1162,6 +1162,65 @@ def test_a_disposition_on_round_1_has_nothing_to_answer(ws: Path, engine: Engine
     assert (refused["code"], refused["error"]) == ("bad-dispositions", "there is no earlier round of this stage for a disposition to answer")
 
 
+def test_round_2_gets_the_late_round_prompt_and_still_has_the_whole_diff(ws: Path, engine: Engine, answers: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    first = prepare(engine, ws)
+    prompt = Path(first["prompt_file"]).read_text()
+    assert prompt.startswith("# Phase review, round 1\n")
+    assert "Read every one of these files, `range.txt` first:" in prompt
+    record(engine, ws, first["review_id"], write_answer(answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED"))
+    edit(ws / "api" / "src" / "main.py", "print(3)\n")
+    second = prepare(engine, ws)
+    prompt = Path(second["prompt_file"]).read_text()
+    assert prompt.startswith("# Phase review, round 2 or later\n")
+    assert "Read every one of these files" not in prompt
+    assert "the review above says which to read in full:" in prompt
+    assert "not to be read whole" in prompt and "ARL:" not in prompt
+    # Rule 2: the complete diff is still in the bundle and named to the reviewer.
+    chunks = sorted(Path(second["bundle_dir"]).glob("changes.*.diff"))
+    assert chunks and all(f"- `{chunk}`" in prompt for chunk in chunks)
+    assert "print(3)" in bundle_text(second)
+    for name in ("prior-rounds.txt", "incremental.diff"):
+        assert f"/{name}`" in prompt
+
+
+def test_round_2_reads_the_whole_diff_when_the_increment_was_left_out(
+    ws: Path, engine: Engine, answers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The phase diff fits, the change since round 1 does not: round 2 cannot read only the increment."""
+    monkeypatch.setenv("ARL_HARD_DIFF_CEILING", "2048")
+    started(engine, ws)
+    original = (ws / "api" / "src" / "main.py").read_text()
+    edit(ws / "api" / "src" / "main.py", "x = 1\n" * 200)
+    first = prepare(engine, ws)
+    assert first["ok"], first
+    record(engine, ws, first["review_id"], write_answer(answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED"))
+    # Round 2 restores a and changes b: the phase diff is small, the increment past the ceiling.
+    edit(ws / "api" / "src" / "main.py", original)
+    edit(ws / "api" / "src" / "other.py", "y = 2\n" * 100)
+    second = prepare(engine, ws)
+    assert second["ok"], second
+    assert "incremental diff omitted" in bundle_text(second, "incremental.diff")
+    prompt = Path(second["prompt_file"]).read_text()
+    assert prompt.startswith("# Phase review, round 2 or later\n")
+    assert "This round has no complete record of what changed since the previous round" in prompt
+    assert "not to be read whole" not in prompt
+    assert "ARL:" not in prompt
+    assert "Read every one of these files, `range.txt` first:" in prompt
+    range_txt = bundle_text(second, "range.txt")
+    assert "## Changed since round 1: incomplete" in range_txt
+    assert "incremental.diff is past hard_diff_ceiling (2048 bytes)" in range_txt
+
+
+def test_the_bundle_inventory_leaves_what_to_read_to_the_prompt(ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    range_txt = bundle_text(prepare(engine, ws), "range.txt")
+    assert "Every file in the bundle directory. The review prompt says which to read in full." in range_txt
+    assert "Read every file listed here" not in range_txt
+
+
 def test_round_2_runs_on_late_model_and_says_so(ws: Path, engine: Engine, answers: Path) -> None:
     (ws / ".adversarial-review-loop.json").write_text(json.dumps({"model": "opus", "late_model": "sonnet"}))
     started(engine, ws)

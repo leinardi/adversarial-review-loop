@@ -29,6 +29,9 @@ that and asks again; only an approval moves the run to the next phase.
    bundle also holds `range.txt` (what is under review and how it is judged), the checks Claude
    reported, the earlier rounds of this phase, and the project's own review skill when it has one.
 6. **A fresh reviewer reads it.** By default a subagent the plugin registers and hides from Claude.
+   Round 1 of a phase reads the whole diff; a later round reads what changed since the previous
+   round and the earlier rounds' findings, and searches the whole diff, still in the bundle, as a
+   finding or a fix requires.
    It may read files and run read-only commands, nothing else. It answers in a strict contract:
    one `FINDING` line per problem, with severity, whether it is actionable, and the file. A
    finding that blocks ends with a suggested check (`|| done when: ...`) that would show it is

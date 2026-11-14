@@ -51,7 +51,7 @@ and asks the person when the engine says the run waits for them.
 | `state.py` | the run document, its transitions, `next_action` and its continuation token |
 | `workspace.py`, `gitsnap.py` | roots, nested-repository discovery, late baselines; snapshots through a throwaway `GIT_INDEX_FILE` (git roots) or a shadow git dir (plain folders) |
 | `review.py` | `review prepare` / `record` / `run-external` / `abandon`, dispositions, repair, failure budgets, stalls |
-| `bundle.py` | the bundle: diff chunks per root with alias-prefixed paths, `range.txt`, `prior-rounds.txt`, `verification.txt`, the composed prompt |
+| `bundle.py` | the bundle: diff chunks per root with alias-prefixed paths, `range.txt`, `prior-rounds.txt`, `verification.txt`, the composed prompt (`reviewer-phase` for round 1, `reviewer-phase-late` from round 2, `reviewer-final`) |
 | `contract.py` | the output contract: `FINDING` and `SUPERSEDES` lines, the verdict recomputed from them |
 | `guidance.py` | each root's review skill and `review_guide` |
 | `runner.py`, `harness/` | the bounded runner and the opencode harness |

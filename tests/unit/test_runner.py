@@ -367,7 +367,8 @@ def test_the_opencode_guidance_names_the_tools_its_read_only_agent_has() -> None
     assert "Budget:" in text
     assert "about 8" in text
     # A read cut short is finished; only the same range is never read twice.
-    assert "Finish every bundle file." in text
+    assert "Finish every file you are to read in full." in text
+    assert "whole diff" not in " ".join(text.split())
     assert "no budget below excuses leaving part of it unread" in " ".join(text.split())
     assert "Never read a file again" not in text
 

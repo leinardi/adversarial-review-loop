@@ -127,12 +127,15 @@ test('the reviewer is told to work in few messages, within a budget: its cost is
   await start($)
   const prompt = String((w.registered.agents[0] as { prompt?: string } | undefined)?.prompt ?? '')
   expect(prompt).toContain('Work in few messages.')
-  expect(prompt).toContain('read `range.txt` and every other bundle file together')
+  expect(prompt).toContain('read `range.txt` and every other bundle file your task message says to read in full, together')
   expect(prompt).toContain('If you are past 12, stop investigating outside the bundle')
   // A read cut short is finished: the budget never excuses leaving part of the diff unread.
   expect(prompt).toContain('read on from the line it stopped at')
   expect(prompt).toContain('no budget below excuses leaving part of it unread')
   expect(prompt).not.toContain('never re-read a file')
+  // What to read in full is the task message's to say: a later round reads the increment.
+  expect(prompt).not.toContain('whole diff')
+  expect(prompt).toContain('once you have read what your task message says to read in full')
   // Still a reviewer that only reads.
   expect(prompt).toContain('You only read.')
 })

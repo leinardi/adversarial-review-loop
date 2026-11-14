@@ -144,6 +144,10 @@ class Bundle:
     #: This review's round of its label: 1 for the first.
     round_number: int
     sources: tuple[guidance.Source, ...] = ()
+    #: Why ``incremental.diff`` does not hold the whole change since the previous round, one reason
+    #: per line; empty when it does, and on round 1. A later round told to read only the increment
+    #: would then miss part of the change, so it reads the whole diff instead.
+    incremental_gaps: tuple[str, ...] = ()
 
 
 # --------------------------------------------------------------------------
@@ -760,7 +764,10 @@ def build(  # noqa: PLR0912, PLR0913, PLR0915 - one independently meaningful pie
 
     incremental: list[str] = []
     joined: list[str] = []
+    gaps: list[str] = []
     previous = _round_trees(rounds[-1]) if rounds else None
+    if rounds and previous is None:
+        gaps.append(f"round {round_number - 1}'s trees are not recorded, so nothing can be diffed against them")
     if previous is not None:
         increments: list[bytes] = []
         for root in target.roots:
@@ -779,9 +786,12 @@ def build(  # noqa: PLR0912, PLR0913, PLR0915 - one independently meaningful pie
             if _root_diff(run, root, base, part):
                 increments.append(part.read_bytes())
                 part.unlink()
+            else:
+                gaps.append(f"root {root.alias}'s change since round {round_number - 1} could not be diffed")
         data = b"".join(increments)
         if len(data) > ceiling:
             data = encode(_INCREMENTAL_OMITTED.format(ceiling=ceiling))
+            gaps.append(f"incremental.diff is past hard_diff_ceiling ({ceiling} bytes) and was left out")
         write_private_file(dest / "incremental.diff", data or b"(no change since the previous round)\n")
         files.append("incremental.diff")
 
@@ -802,7 +812,7 @@ def build(  # noqa: PLR0912, PLR0913, PLR0915 - one independently meaningful pie
     out = ["# Review range\n\n", f"scope: {target.scope}\n", f"round: {round_number}\n", f"block_severity: {config.as_str('block_severity')}\n"]
     out.append(_roots_section(target, gone))
     out.append(_removed_roots(run))
-    out.append("\n## Bundle contents\n\nRead every file listed here; each is in the bundle directory.\n\n")
+    out.append("\n## Bundle contents\n\nEvery file in the bundle directory. The review prompt says which to read in full.\n\n")
     out.extend(f"- {name}\n" for name in files)
     out.append(_blocking_rules(target, config, round_number=round_number, scope=scope))
     out.append(_phase_section(run, target))
@@ -819,6 +829,10 @@ def build(  # noqa: PLR0912, PLR0913, PLR0915 - one independently meaningful pie
             for alias in joined
         )
         out.append("Everything else is byte-identical to what the previous round saw.\n")
+    if gaps:
+        out.append(f"\n## Changed since round {round_number - 1}: incomplete\n\n")
+        out.append("".join(f"- {gap}\n" for gap in gaps))
+        out.append("This round reads the complete diff in full, every chunk.\n")
     out.append("\n## Verification\n\n")
     out.append("See verification.txt, reported by the implementer.\n" if verification else "None was reported with this review.\n")
     out.append(_user_accepted(run))
@@ -828,7 +842,7 @@ def build(  # noqa: PLR0912, PLR0913, PLR0915 - one independently meaningful pie
     out.append("".join(f"{line}\n" for line in snapshot_warnings) or "(none)\n")
     out.append(PLAN_HEADING + _plan_text(run))
     write_private_file(dest / "range.txt", encode("".join(out)))
-    return Bundle(dir=dest, files=tuple(files), scope=scope, round_number=round_number, sources=tuple(sources))
+    return Bundle(dir=dest, files=tuple(files), scope=scope, round_number=round_number, sources=tuple(sources), incremental_gaps=tuple(gaps))
 
 
 # --------------------------------------------------------------------------
@@ -836,21 +850,56 @@ def build(  # noqa: PLR0912, PLR0913, PLR0915 - one independently meaningful pie
 # --------------------------------------------------------------------------
 
 
-def _file_listing(bundle_dir: Path, files: Sequence[str]) -> str:
-    return f"\n\n## The bundle\n\nThe bundle is the directory `{bundle_dir}`. Read every one of these files, `range.txt` first:\n\n" + "".join(
-        f"- `{bundle_dir / name}`\n" for name in files
+def _file_listing(bundle_dir: Path, files: Sequence[str], *, every: bool = True) -> str:
+    """The bundle's files, by absolute path. ``every`` says to read each one; a later round's prompt
+    says itself which to read in full, and the complete diff stays listed (Rule 2)."""
+    what = (
+        "Read every one of these files, `range.txt` first" if every else "Its files, `range.txt` first; the review above says which to read in full"
     )
+    return f"\n\n## The bundle\n\nThe bundle is the directory `{bundle_dir}`. {what}:\n\n" + "".join(f"- `{bundle_dir / name}`\n" for name in files)
+
+
+def _prompt_name(target: Target, bundle: Bundle) -> str:
+    """Round 1 of a phase reads everything; a later round checks the fixes (``reviewer-phase-late``)."""
+    if not target.is_phase:
+        return "reviewer-final"
+    return "reviewer-phase-late" if bundle.round_number > 1 else "reviewer-phase"
+
+
+#: The two reading modes of ``reviewer-phase-late``: the increment, or the whole diff when the
+#: increment is incomplete (``Bundle.incremental_gaps``).
+_IF_INCREMENTAL: Final = "<!-- ARL:IF-INCREMENTAL -->\n"
+_ELSE: Final = "<!-- ARL:ELSE -->\n"
+_END_IF: Final = "<!-- ARL:END-IF -->\n"
+
+
+def _reading_mode(text: str, *, incremental: bool) -> str:
+    """``text`` with only the reading instructions that apply; a prompt without the markers is
+    refused, since a late round told nothing about what to read could read too little."""
+    start, middle, end = text.find(_IF_INCREMENTAL), text.find(_ELSE), text.find(_END_IF)
+    if not 0 <= start < middle < end:
+        raise BundleError("the later-round reviewer prompt lacks its reading-mode markers")
+    kept = text[start + len(_IF_INCREMENTAL) : middle] if incremental else text[middle + len(_ELSE) : end]
+    return text[:start] + kept + text[end + len(_END_IF) :]
 
 
 def compose_prompt(target: Target, bundle: Bundle, dest: Path) -> str:
-    """Write this review's prompt to ``dest`` and answer it: the phase or final prompt, the
-    project guidance at its placeholder, and the list of the bundle's files."""
-    source = arl.prompt_path("reviewer-phase" if target.is_phase else "reviewer-final")
+    """Write this review's prompt to ``dest`` and answer it: the round-1, later-round or final
+    prompt, the project guidance at its placeholder, and the list of the bundle's files.
+
+    A later round reads only the increment when ``incremental.diff`` holds the whole change since
+    the previous round; when it does not, it reads the complete diff in full (Rule 2).
+    """
+    name = _prompt_name(target, bundle)
+    source = arl.prompt_path(name)
     try:
         text = guidance.compose(decode(source.read_bytes()), bundle.sources)
     except OSError as exc:
         raise BundleError(f"the reviewer prompt at {source} could not be read: {exc}") from exc
-    composed = text.rstrip("\n") + _file_listing(bundle.dir, bundle.files)
+    narrow = name == "reviewer-phase-late" and not bundle.incremental_gaps
+    if name == "reviewer-phase-late":
+        text = _reading_mode(text, incremental=narrow)
+    composed = text.rstrip("\n") + _file_listing(bundle.dir, bundle.files, every=not narrow)
     write_private_file(dest, encode(composed))
     return composed
 

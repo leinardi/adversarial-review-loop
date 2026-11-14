@@ -253,7 +253,8 @@ is the share of the whole phase diff (`changes.NN.diff`) the reviewer read.
 | 141 KB | Sonnet | 27 to 35 | 2 to 4 | none, 3 of 3 | 1 approved, 2 changes required | `-` `*` `*` | low, `-`, `-` |
 
 Blocking recall on the open defect and the regression: Opus 9 of 12, Sonnet 8 of 12, within the
-one miss the plan allowed. `late_model` still ships empty. Every Sonnet round 2 read only
-`incremental.diff` and `prior-rounds.txt`, never the phase diff, which is most of its lower cost,
-and one approved the 141 KB phase with its open medium defect (`L4`) unreported. One Opus run
+one miss the plan allowed. `late_model` still ships empty, because one Sonnet run approved the
+141 KB phase with its open medium defect (`L4`) unreported. Every Sonnet round 2 read only
+`incremental.diff` and `prior-rounds.txt`, as the round-2 prompt asked, and none of the phase
+diff; Opus read the phase diff as well, which is most of the difference in cost. One Opus run
 re-raised a fixed defect (`M4`, blocking). No untouched miss was found by either model.
