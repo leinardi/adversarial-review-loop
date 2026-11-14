@@ -1,0 +1,52 @@
+diff --git a/hooks/flow.ts b/hooks/flow.ts
+index 040217e..c426c41 100644
+--- a/hooks/flow.ts
++++ b/hooks/flow.ts
+@@ -498,7 +498,7 @@ export async function continueRun($: EngineInterface): Promise<void> {
+   if (next.ok && next.action === 'continue' && typeof next.prompt === 'string') {
+     // After `next(e)`, compact then submit, awaited here: the order STEP0 J6 measured. Headless,
+     // compaction is refused, and the prompt is submitted uncompacted.
+-    if (next.compact === true || session.isInteractive) {
++    if (next.compact === true && session.isInteractive) {
+       await compactThenSubmit($, next.prompt)
+       return
+     }
+diff --git a/scripts/arl/commands.py b/scripts/arl/commands.py
+index bcab47d..b7ce7f9 100644
+--- a/scripts/arl/commands.py
++++ b/scripts/arl/commands.py
+@@ -256,7 +256,7 @@ def _require_untouched(run: RunState, root: dict[str, Any]) -> None:
+         now = workspace.snapshot(root, run.roots, run.paths) if here.exists() else workspace.empty_tree(root, run.paths)
+     except SnapshotError as exc:
+         raise RunError("kept", f"root {root['alias']!r} cannot be compared ({exc}); it stays") from exc
+-    if now == root["start_tree"]:
++    if now != root["start_tree"] and here.exists():
+         raise RunError("kept", f"root {root['alias']!r} changed since it joined; it stays")
+ 
+ 
+diff --git a/scripts/arl/contract.py b/scripts/arl/contract.py
+index a4288a1..ac9f465 100644
+--- a/scripts/arl/contract.py
++++ b/scripts/arl/contract.py
+@@ -372,7 +372,7 @@ def unknown_alias(review: Review, aliases: frozenset[str], *, retired: frozenset
+     A ``SUPERSEDES`` line may also name a ``retired`` root (one the person removed): it retracts
+     an earlier round's finding there, which the contract asks for.
+     """
+-    for block, known in ((review.all_findings, aliases | retired), (review.supersedes, aliases)):
++    for block, known in ((review.all_findings, aliases), (review.supersedes, aliases | retired)):
+         for line in records(block):
+             match = FINDING_RE.match(line) or _SUPERSEDES_RE.match(line)
+             file = normalized_file(match.group("file")) if match else "-"
+diff --git a/scripts/arl/review.py b/scripts/arl/review.py
+index c1e8272..765fedb 100644
+--- a/scripts/arl/review.py
++++ b/scripts/arl/review.py
+@@ -163,7 +163,7 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
+         stage = run.stage()
+         if stage not in ("phase", "final"):
+             raise RunError("nothing-to-review", "set the phases first" if stage == "plan" else "the run is complete")
+-        if run.roots is None:
++        if not run.roots:
+             # An empty bundle would show the reviewer nothing, and its approval would cover changes
+             # no one saw.
+             raise RunError("no-roots", "the run has no workspace root left: call add_root for the folder the phase changed")

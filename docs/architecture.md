@@ -90,4 +90,7 @@ does not matter.
   (`tests/mod/world.ts`), because the test kit returns no agent id from `$.agent.spawn` and has no
   `process` or `fs`.
 - `tests/selftest.sh`: the launcher.
+- `tests/bench/`: the reviewer benchmark, which measures what a review costs and how many seeded
+  bugs it finds. It calls real models, so it is run by hand (`make bench-baseline`), never by
+  `make test` or CI.
 - `tests/STEP0.md`: the Claude Code behaviour the design rests on, measured in live sessions.

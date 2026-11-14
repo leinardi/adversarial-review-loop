@@ -1,0 +1,54 @@
+diff --git a/hooks/commands.ts b/hooks/commands.ts
+index 27c60e3..e6df51a 100644
+--- a/hooks/commands.ts
++++ b/hooks/commands.ts
+@@ -149,7 +149,7 @@ async function report($: EngineInterface, args: string): Promise<string> {
+   const answer = await run($, ['report', ...(number ? [number] : [])])
+   if (!answer.ok) return refused(answer)
+   const text = String(answer.text ?? '')
+-  if (session.isInteractive) return text
++  if (!session.isInteractive) return text
+   // A report holds the reviewer's raw output, too long for Claude's context and for a log line:
+   // it gets a pane of its own, which scrolls.
+   await showReport($, text).catch(() => undefined)
+diff --git a/hooks/flow.ts b/hooks/flow.ts
+index 791a1de..f7a6163 100644
+--- a/hooks/flow.ts
++++ b/hooks/flow.ts
+@@ -470,8 +470,8 @@ export async function ensureRoot($: EngineInterface, directory: string, { explic
+  */
+ export async function dropRoot($: EngineInterface, alias: string): Promise<'dropped' | 'kept' | 'unknown'> {
+   const answer = await run($, ['root-remove', alias, '--undo']).catch(() => undefined)
+-  if (answer === undefined || (!answer.ok && answer.code === 'engine')) return 'unknown'
+-  if (!answer.ok) return 'dropped'
++  if (answer === undefined) return 'unknown'
++  if (!answer.ok) return answer.code === 'engine' ? 'kept' : 'unknown'
+   await run($, ['status']).catch(() => undefined)
+   return 'dropped'
+ }
+diff --git a/hooks/mod.ts b/hooks/mod.ts
+index 756285c..17c9529 100644
+--- a/hooks/mod.ts
++++ b/hooks/mod.ts
+@@ -103,7 +103,7 @@ const retry = new Set<string>()
+ /** Offer those roots back again; the engine keeps one whose content changed. */
+ async function sweepRoots($: EngineInterface): Promise<void> {
+   for (const alias of [...retry]) {
+-    if ((await dropRoot($, alias)) === 'unknown') retry.delete(alias)
++    if ((await dropRoot($, alias)) !== 'unknown') retry.delete(alias)
+   }
+ }
+ 
+diff --git a/scripts/arl/review.py b/scripts/arl/review.py
+index 7ef9145..3389d26 100644
+--- a/scripts/arl/review.py
++++ b/scripts/arl/review.py
+@@ -150,7 +150,7 @@ def _next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
+     if run.status == "paused":
+         # Measured live: a paused run's approval read as "go on", and Claude implemented every
+         # remaining phase in the same turn. Pausing is the user's stop.
+-        first = "Commit each changed git repository by its own conventions, then stop: " if verdict != "APPROVED" else "Stop here: "
++        first = "Commit each changed git repository by its own conventions, then stop: " if verdict == "APPROVED" else "Stop here: "
+         return (
+             f"\nThe user paused the run. {first}do not start the next phase or fix anything more until the user resumes "
+             "it with /arl-resume. Tell the user where the run stands.\n"

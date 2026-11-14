@@ -1,0 +1,67 @@
+[
+  {
+    "id": "L4",
+    "class": "open",
+    "file": "hooks/mod.ts",
+    "line": 122,
+    "symbols": ["decision", "'allow'"],
+    "severity": "medium",
+    "what": "Left in by the fix patch: registration is skipped unless the tool check is exactly 'allow'."
+  },
+  {
+    "id": "LR",
+    "class": "regression",
+    "file": "scripts/arl/commands.py",
+    "line": 259,
+    "symbols": ["exists()", "deleted", "no longer exists"],
+    "severity": "high",
+    "what": "Planted by the fix of L1: the changed-since-joined check also requires the root to still exist, so a root whose folder was deleted after it joined is dropped and the deletion leaves review.",
+    "original": "    if now != root[\"start_tree\"]:",
+    "seeded": "    if now != root[\"start_tree\"] and here.exists():"
+  },
+  {
+    "id": "L1",
+    "class": "fixed",
+    "file": "scripts/arl/commands.py",
+    "line": 259,
+    "symbols": ["now ==", "== start_tree", "== root"],
+    "severity": "high",
+    "what": "Removed by the fix patch: the comparison is `!=` again. The regression LR is planted on the same line, so only the inverted comparison names this one."
+  },
+  {
+    "id": "L2",
+    "class": "fixed",
+    "file": "scripts/arl/review.py",
+    "line": 166,
+    "symbols": ["run.roots is None"],
+    "severity": "high",
+    "what": "Removed by the fix patch."
+  },
+  {
+    "id": "L3",
+    "class": "fixed",
+    "file": "scripts/arl/contract.py",
+    "line": 375,
+    "symbols": ["unknown_alias", "retired"],
+    "severity": "medium",
+    "what": "Removed by the fix patch."
+  },
+  {
+    "id": "L5",
+    "class": "fixed",
+    "file": "hooks/flow.ts",
+    "line": 501,
+    "symbols": ["continueRun", "next.compact"],
+    "severity": "medium",
+    "what": "Removed by the fix patch."
+  },
+  {
+    "id": "L6",
+    "class": "untouched-miss",
+    "file": "scripts/arl/workspace.py",
+    "line": 579,
+    "symbols": ["taken_aliases"],
+    "severity": "medium",
+    "what": "Missed by round 1 and in a file the fix patch does not change: late-discovered nested repos pick their alias from current roots only."
+  }
+]

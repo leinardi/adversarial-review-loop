@@ -1,0 +1,67 @@
+[
+  {
+    "id": "M5",
+    "class": "open",
+    "file": "scripts/arl/state.py",
+    "line": 583,
+    "symbols": ["resume_context", "approved_phases"],
+    "severity": "medium",
+    "what": "Left in by the fix patch: the last approved phase is not marked '(approved)' in the resume context."
+  },
+  {
+    "id": "MR",
+    "class": "regression",
+    "file": "hooks/flow.ts",
+    "line": 473,
+    "symbols": ["dropRoot", "engine error", "'engine'", "code === 'engine'"],
+    "severity": "high",
+    "what": "Planted by the fix of M2: an engine error now reads as 'kept' and every refusal as 'unknown', so a refused undo is retried every turn and an undo the engine could not answer is reported as kept.",
+    "original": "  if (answer === undefined || (!answer.ok && answer.code === 'engine')) return 'unknown'\n  if (!answer.ok) return 'kept'",
+    "seeded": "  if (answer === undefined) return 'unknown'\n  if (!answer.ok) return answer.code === 'engine' ? 'kept' : 'unknown'"
+  },
+  {
+    "id": "M1",
+    "class": "fixed",
+    "file": "scripts/arl/review.py",
+    "line": 153,
+    "symbols": ["_next_turn", "stop here", "paused"],
+    "severity": "high",
+    "what": "Removed by the fix patch."
+  },
+  {
+    "id": "M2",
+    "class": "fixed",
+    "file": "hooks/flow.ts",
+    "line": 474,
+    "symbols": ["'dropped'", "return 'dropped'"],
+    "severity": "high",
+    "what": "Removed by the fix patch. The regression MR is planted on the line above, so only `'dropped'` names this one."
+  },
+  {
+    "id": "M3",
+    "class": "fixed",
+    "file": "hooks/commands.ts",
+    "line": 152,
+    "symbols": ["/arl-report", "showReport", "report()", "isInteractive"],
+    "severity": "medium",
+    "what": "Removed by the fix patch."
+  },
+  {
+    "id": "M4",
+    "class": "fixed",
+    "file": "hooks/mod.ts",
+    "line": 106,
+    "symbols": ["sweepRoots", "retry.delete"],
+    "severity": "medium",
+    "what": "Removed by the fix patch."
+  },
+  {
+    "id": "M6",
+    "class": "untouched-miss",
+    "file": "scripts/arl/report.py",
+    "line": 229,
+    "symbols": ["_footer", "_PROSE_FOOTER"],
+    "severity": "medium",
+    "what": "Missed by round 1 and in a file the fix patch does not change: _footer checks review.deferred instead of all_findings."
+  }
+]

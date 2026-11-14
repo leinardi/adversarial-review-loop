@@ -1,0 +1,78 @@
+diff --git a/hooks/commands.ts b/hooks/commands.ts
+index e6df51a..27c60e3 100644
+--- a/hooks/commands.ts
++++ b/hooks/commands.ts
+@@ -149,7 +149,7 @@ async function report($: EngineInterface, args: string): Promise<string> {
+   const answer = await run($, ['report', ...(number ? [number] : [])])
+   if (!answer.ok) return refused(answer)
+   const text = String(answer.text ?? '')
+-  if (!session.isInteractive) return text
++  if (session.isInteractive) return text
+   // A report holds the reviewer's raw output, too long for Claude's context and for a log line:
+   // it gets a pane of its own, which scrolls.
+   await showReport($, text).catch(() => undefined)
+diff --git a/hooks/flow.ts b/hooks/flow.ts
+index 205c8da..791a1de 100644
+--- a/hooks/flow.ts
++++ b/hooks/flow.ts
+@@ -471,7 +471,7 @@ export async function ensureRoot($: EngineInterface, directory: string, { explic
+ export async function dropRoot($: EngineInterface, alias: string): Promise<'dropped' | 'kept' | 'unknown'> {
+   const answer = await run($, ['root-remove', alias, '--undo']).catch(() => undefined)
+   if (answer === undefined || (!answer.ok && answer.code === 'engine')) return 'unknown'
+-  if (!answer.ok) return 'kept'
++  if (!answer.ok) return 'dropped'
+   await run($, ['status']).catch(() => undefined)
+   return 'dropped'
+ }
+diff --git a/hooks/mod.ts b/hooks/mod.ts
+index 17c9529..756285c 100644
+--- a/hooks/mod.ts
++++ b/hooks/mod.ts
+@@ -103,7 +103,7 @@ const retry = new Set<string>()
+ /** Offer those roots back again; the engine keeps one whose content changed. */
+ async function sweepRoots($: EngineInterface): Promise<void> {
+   for (const alias of [...retry]) {
+-    if ((await dropRoot($, alias)) !== 'unknown') retry.delete(alias)
++    if ((await dropRoot($, alias)) === 'unknown') retry.delete(alias)
+   }
+ }
+ 
+diff --git a/scripts/arl/report.py b/scripts/arl/report.py
+index 6181d49..c076110 100644
+--- a/scripts/arl/report.py
++++ b/scripts/arl/report.py
+@@ -226,7 +226,7 @@ def _footer(review: Review) -> str:
+         return _HUMAN_FOOTER
+     if review.verdict == "OP_FAILURE":
+         return _FAILED_FOOTER
+-    if review.findings or review.all_findings:
++    if review.findings or review.deferred:
+         return _FOOTER
+     # A CHANGES_REQUIRED whose reasons are only in the reviewer's prose.
+     return _PROSE_FOOTER
+diff --git a/scripts/arl/review.py b/scripts/arl/review.py
+index 3389d26..7ef9145 100644
+--- a/scripts/arl/review.py
++++ b/scripts/arl/review.py
+@@ -150,7 +150,7 @@ def _next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
+     if run.status == "paused":
+         # Measured live: a paused run's approval read as "go on", and Claude implemented every
+         # remaining phase in the same turn. Pausing is the user's stop.
+-        first = "Commit each changed git repository by its own conventions, then stop: " if verdict == "APPROVED" else "Stop here: "
++        first = "Commit each changed git repository by its own conventions, then stop: " if verdict != "APPROVED" else "Stop here: "
+         return (
+             f"\nThe user paused the run. {first}do not start the next phase or fix anything more until the user resumes "
+             "it with /arl-resume. Tell the user where the run stands.\n"
+diff --git a/scripts/arl/state.py b/scripts/arl/state.py
+index 88b02fa..16cf79a 100644
+--- a/scripts/arl/state.py
++++ b/scripts/arl/state.py
+@@ -580,7 +580,7 @@ def resume_context(run: RunState, verify_cmd: str) -> str:
+     roots = "; ".join(f"{root['alias']} = {root['path']}" for root in run.roots)
+     checks = f"run the project's checks (`{verify_cmd}`)" if verify_cmd else "run the project's checks"
+     done = run.approved_phases
+-    phases = "; ".join(f"{index}. {title}{' (approved)' if index <= done else ''}" for index, title in enumerate(run.data["phases"], start=1))
++    phases = "; ".join(f"{index}. {title}{' (approved)' if index < done else ''}" for index, title in enumerate(run.data["phases"], start=1))
+     return (
+         f"This is the adversarial-review-loop run {run.run_id} on the plan {run.data['plan']['source']} "
+         f"(a copy is at {run.paths.plan_file}): read it if this conversation does not hold it.\n"

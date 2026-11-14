@@ -16,6 +16,7 @@ make test         # the pytest suite and the arl.sh smoke test; no model is call
 make test-mod     # the mod's tests under `claude plugin test`
 make check        # pre-commit on every file
 make check-stage  # pre-commit on the staged files only
+make bench-baseline  # the reviewer benchmark (tests/bench/README.md); calls models and costs money
 ```
 
 `make help` lists every target; see [Development](README.md#-development) for what each suite

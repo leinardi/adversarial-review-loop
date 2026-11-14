@@ -80,6 +80,7 @@ The architecture ([docs/architecture.md](docs/architecture.md) has the long form
 | `tests/unit/` | pytest unit tests; shared fixtures in `conftest.py`, run fixtures in `run_common.py`, reviewer stand-ins in `reviewer_common.py` |
 | `tests/mod/` | the mod's tests under `claude plugin test`; the scripted engine and user in `world.ts` |
 | `tests/selftest.sh` | smoke test for `scripts/arl.sh` |
+| `tests/bench/` | the reviewer benchmark: `bench.py`, the seeded phases in `seeds/`, the baseline in its `README.md`; calls models, never part of `make test` |
 | `tests/STEP0.md` | live-session measurements of the Claude Code host; Session J covers the v4 mod surface |
 
 ## Generated: never hand-edit
@@ -99,6 +100,7 @@ make test-accept  # tests/selftest.sh only
 make test-mod     # the mod under `claude plugin test`; needs the claude binary
 make check        # pre-commit: shellcheck, markdownlint, yamllint, actionlint, ruff, mypy, eslint, tsc, licence headers
 make sync-pins    # propagate requirements-dev.txt into .pre-commit-config.yaml
+make bench-baseline  # the reviewer benchmark's round-1 matrix (tests/bench/README.md); calls models and costs money
 ```
 
 `make test` must pass before any commit, and a behaviour change needs a test that fails on the old

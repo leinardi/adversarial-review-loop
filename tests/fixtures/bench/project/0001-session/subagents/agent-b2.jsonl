@@ -1,0 +1,1 @@
+{"type": "assistant", "message": {"id": "msg_x", "model": "claude-haiku-5-5", "usage": {"input_tokens": 5, "output_tokens": 5}, "content": []}}

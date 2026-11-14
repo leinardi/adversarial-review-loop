@@ -1,0 +1,192 @@
+# Reviewer benchmark
+
+`bench.py` measures what a review costs and how many known bugs it finds, so a change to a
+reviewer prompt, the bundle or a default can be compared with what came before it under the same
+conditions. It is not part of `make test` or CI: `run`, `matrix` and `make bench-baseline` call
+real models and cost money. `analyze` and `score` only read files that earlier runs left behind,
+and `tests/unit/test_bench.py` covers them.
+
+Everything the bench writes goes under `ARL_BENCH_DIR` (default `~/.local/share/arl-research`),
+never inside this repository.
+
+## What a cell is
+
+A **phase** is one real commit of this repository, named in `phases.json`. It may also be
+**seeded**: `seeds/<phase>.patch` plants six one-line bugs on top of the commit, and
+`seeds/<phase>.truth.json` describes them.
+
+A **case** is a scratch clone at `<commit>^`. A run is initialised in it through `scripts/arl.sh`,
+then its tree moves to `<commit>` (seeded or not). The next `review` therefore sees exactly that
+commit as its one phase. The bench keeps its own record of the case, `cases/<name>.bench.json`,
+beside the clone and not inside it, because anything inside the clone would be reviewed as a
+change.
+
+A **cell** is one combination of phase, reviewer model, plugin variant and kind (seeded or
+clean), run once in a fresh case by a headless session:
+
+```console
+claude -p '<call review once>' --plugin-dir <variant> --model haiku \
+  --setting-sources project,local --strict-mcp-config
+```
+
+The reviewer's model is set with `ARL_MODEL`, and the main session is Haiku because it only calls
+the tool. A **variant** is a plugin directory: this checkout by default, any other directory, or
+`@<rev>` for this repository's tree at that revision (exported once into `plugins/rev-<sha>`).
+
+`make bench-baseline` runs the round-1 matrix on this checkout: `medium` and `large1`, Opus and
+Sonnet, seeded and clean, one run each. That makes 8 cells, 4 at a time. It writes
+`runs/baseline.summary.json` and prints a table. Set `BENCH_PREFIX` to keep a second matrix apart
+from the first. For more runs or other variants, call the script directly:
+
+```console
+python3 -B tests/bench/bench.py matrix --runs 3 --plugin before=@main --plugin after=. --kind seeded
+```
+
+## Subcommands
+
+| Command | What it does |
+| --- | --- |
+| `case <commit> <name> [--seed P] [--phase N] [--plugin D]` | prepare a case |
+| `run <case> --model M [--plugin D] [--tag T]` | one headless review; output in `runs/<tag>/` |
+| `round2 <phase> <round-1 case> <name>` | copy a round-1 case that ended `CHANGES_REQUIRED` and apply `seeds/<phase>.round2.patch` |
+| `analyze <case>...` | one JSON row per reviewer transcript: requests, tool calls, reads, tokens, cost units |
+| `score <case>... [--round2]` | one JSON row per case: recall against its phase's truth |
+| `matrix [...]` | `case`, `run`, `analyze` and `score` over a grid |
+
+Case and run names are single path segments (letters, digits, `.`, `_`, `-`). `case`, `round2`
+and `matrix` refuse to overwrite an existing case unless given `--replace`, and `round2` refuses
+to use its source's name. `make bench-baseline` passes `BENCH_ARGS`, so a second baseline is
+`make bench-baseline BENCH_PREFIX=other` or `BENCH_ARGS=--replace`.
+
+Each `run` starts its session with a fresh `--session-id`, recorded in the case's `.bench.json`
+before the session starts. `analyze` reads the reviewer subagents' transcripts under only those
+sessions, in the bucket Claude Code keeps for the case directory (under `CLAUDE_CONFIG_DIR`,
+default `~/.claude`). The bucket outlives the case: a case name used again by a later matrix
+would otherwise add the earlier runs' cost to its own. Other subagents are skipped. A
+transcript is joined to its `round_history` entry through its task description
+(`Review <label>, round <n>`). The OpenCode harness leaves no transcript there.
+
+## Cost units
+
+Thousands of tokens, weighted by kind: input 1, cache write 1.25, cache read 0.1, output 5. Every
+model gets the same weights, so a unit compares requests and context. It is not a bill: Opus's
+per-token price is not applied.
+
+## Scoring
+
+A finding is a **candidate** for a defect when it cites the defect's file and either a line
+within 5 of the defect's line or one of its `symbols` (a case-insensitive substring of the
+finding's text). Both tests are needed because round-1 Claude reviewers often cite a line of the
+bundle's diff file, not of the source.
+
+A finding names at most one defect. When it is a candidate for several, only symbols can tell
+them apart, because a line is shared by every defect near it. The defect with strictly the most
+symbols in the finding wins. A tie, or several candidates matched by line alone, goes to
+`ambiguous` with the candidates' ids, for a person to judge. The scorer does not guess, because a
+guess between a fixed defect and a regression planted on the same line decides a round-2 figure.
+A defect named by several findings is credited once: first a blocking finding, then one with a
+near line, then the earlier one.
+
+Two figures per run:
+
+- **reported**: the defect was named at any severity;
+- **blocking**: it was named by an `actionable=yes` finding at or above `block_severity`
+  (`--block-severity`, default `medium`).
+
+`unmatched_blocking` lists every blocking finding that named no defect and is not ambiguous. Read
+these and `ambiguous` by hand. An unmatched finding is either a false positive or a real bug the
+seed did not plant.
+
+### Round 2
+
+`seeds/<phase>.round2.patch` fixes some round-1 defects and plants one regression in a fix.
+`seeds/<phase>.round2.truth.json` classifies every record:
+
+| Class | Meaning |
+| --- | --- |
+| `open` | a round-1 defect the fix patch leaves in |
+| `regression` | planted by the fix patch; its own file, line and symbols |
+| `fixed` | a round-1 defect the patch removes; a finding on it is a **false re-raise** |
+| `untouched-miss` | a round-1 defect in a file the patch does not change, which round 1 did not report |
+
+`score --round2` reports both figures per class, and counts false re-raises in total and as
+blocking. A regression planted on the line of a fixed defect shares that line, so each record's
+`symbols` must name what is specific to it: in `large1`, `L1`'s inverted `now ==` and `LR`'s
+`exists()`. A finding that names only the shared function is ambiguous. A finding near a fixed
+defect's line, with nothing that names another defect, still counts as a re-raise, even when it
+raises something new there.
+
+The round-2 manifests assume a round 1 by Opus, which reported every defect except the sixth
+(`M6`, `L6`). After a round 1 that found a different set, `untouched-miss` no longer means what
+it says, so build round-2 cases from a run like that one (`score` it first).
+
+## Adding a seeded phase
+
+1. Add the commit to `phases.json` under a new name.
+2. Write the bugs into a checkout at that commit and save `git diff` as `seeds/<name>.patch`. Keep
+   each bug to one line, and write them at several levels of difficulty.
+3. Write `seeds/<name>.truth.json`: one record per bug with `id`, `file`, `line` (in the seeded
+   tree), `symbols` (the enclosing function and a distinctive token of the bug), `severity` and
+   `what`. Choose symbols a reviewer would name for this bug and not for its neighbours. Then
+   check them against real findings: score a few runs and read every `unmatched_blocking`.
+4. For round 2, apply the seed, commit it in a scratch clone, revert some bugs, plant a
+   regression, and save `git diff HEAD` as `seeds/<name>.round2.patch`. Then write
+   `seeds/<name>.round2.truth.json` with a `class` on every record.
+
+## Baseline
+
+Measured 2026-11-13 on the plugin at 7524e30 (`base`) and with the efficiency prototype in the
+reviewer system prompt (`eff`). Recall was recomputed with this scorer. Blocking recall equals
+what was found by reading the findings, and reported recall differs in one run only. The full
+notes are in `RESULTS.md` under the bench directory.
+
+Phases: `small` = f6992b6, 24 KB diff; `medium` = 219159e, 93 KB; `large1` = 0b1bfc3, 141 KB.
+
+### Round 1, clean phases, one run per cell
+
+| Diff | Model | Prompt | Requests | Cache write | Cache read | Output | Units | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 24 KB | Sonnet | base | 5 | 28k | 85k | 2k | 52 | approved |
+| 24 KB | Opus | base | 9 | 34k | 224k | 5k | 91 | approved |
+| 93 KB | Sonnet | base | 6 | 58k | 208k | 4k | 114 | approved |
+| 93 KB | Sonnet | eff | 5 | 40k | 130k | 2k | 77 | approved |
+| 93 KB | Opus | base | 18 | 78k | 964k | 12k | 259 | approved |
+| 93 KB | Opus | eff | 7 | 65k | 295k | 9k | 158 | changes required (1 medium, not verified) |
+| 141 KB | Sonnet | base | 12 | 92k | 732k | 8k | 229 | approved |
+| 141 KB | Sonnet | eff | 5 | 60k | 171k | 5k | 118 | approved |
+| 141 KB | Opus | base | 33 | 111k | 2,847k | 22k | 534 | changes required (1 medium, real) |
+| 141 KB | Opus | eff | 9 | 95k | 553k | 15k | 251 | approved (rated the same issue low) |
+
+### Round 1, six seeded bugs, three runs per cell
+
+| Diff | Model | Prompt | Blocking recall | Reported recall | Requests | Mean units |
+| --- | --- | --- | --- | --- | --- | --- |
+| 93 KB | Opus | base | 5, 5, 5 | 5, 5, 5 | 6, 6, 7 | 123 |
+| 93 KB | Opus | eff | 5, 4, 5 | 5, 4, 5 | 5, 5, 4 | 113 |
+| 93 KB | Sonnet | base | 2, 3, 2 | 2, 3, 2 | 4, 4, 5 | 82 |
+| 93 KB | Sonnet | eff | 3, 2, 2 | 4, 2, 2 | 4, 5, 5 | 86 |
+| 141 KB | Opus | base | 5, 4, 5 | 5, 4, 5 | 8, 17, 6 | 187 |
+| 141 KB | Opus | eff | 4, 4, 5 | 4, 4, 5 | 6, 5, 9 | 164 |
+| 141 KB | Sonnet | base | 1, 2, 3 | 1, 2, 3 | 8, 8, 10 | 128 |
+| 141 KB | Sonnet | eff | 3, 1, 3 | 3, 1, 3 | 5, 3, 8 | 119 |
+
+None of the 24 runs had a blocking finding outside the seeded bugs. No run found the subtle bug
+of either phase (`M6`, `L6`).
+
+### Round 2 after an Opus round 1, one run per cell
+
+`late` is `eff` plus a round-2 prototype prompt. Each cell shows blocking recall for the class.
+
+| Diff | Model | Prompt | Units | Open | Regression | Untouched miss | False re-raises |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 93 KB | Opus | eff | 77 | 1/1 | 1/1 | 0/1 | 0 |
+| 93 KB | Opus | late | 46 | 1/1 | 1/1 | 0/1 | 1 (medium) |
+| 93 KB | Sonnet | eff | 43 | 1/1 | 1/1 | 0/1 | 0 |
+| 93 KB | Sonnet | late | 37 | 1/1 | 1/1 | 0/1 | 0 |
+| 141 KB | Opus | eff | 52 | 1/1 | 1/1 | 0/1 | 0 |
+| 141 KB | Opus | late | 47 | 1/1 | 0/1 (rated low) | 0/1 | 1 (low) |
+| 141 KB | Sonnet | eff | 29 | 1/1 | 0/1 (missed) | 0/1 | 0 |
+| 141 KB | Sonnet | late | 41 | 1/1 | 1/1 | 0/1 | 0 |
+
+Both re-raises cite the line of a fixed defect and raise something next to it: a fix only half
+applied (`hooks/mod.ts:106`) and a test the fix did not add (`hooks/flow.ts:501`).
