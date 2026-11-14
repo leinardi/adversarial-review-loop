@@ -37,6 +37,7 @@ from run_common import arl, make_repo, run_env, ws
 from arl import harness, runner, state
 from arl import review as review_module
 from arl.errors import StateLoadError
+from arl.harness import opencode
 
 __all__ = ["run_env", "ws"]  # fixtures, re-exported so pytest finds them
 
@@ -755,6 +756,30 @@ def test_clarify_run_external_asks_and_records(ws: Path, engine: Engine, answers
     assert outcome["retracted"] == []
 
 
+def test_an_external_clarify_of_round_2_runs_on_late_model(ws: Path, engine: Engine, answers: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The question goes to the model that ran the round it is about, on the command line too."""
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    monkeypatch.setenv("ARL_MODEL", "vendor/first")
+    monkeypatch.setenv("ARL_LATE_MODEL", "vendor/late")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(1)\n")
+    review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
+    models: list[str] = []
+
+    def answering(*_args: Any, config: Any, out_path: Path, **_kwargs: Any) -> None:
+        argv = opencode.review_argv("t", config=config)
+        models.append(argv[argv.index("-m") + 1])
+        out_path.write_text("It means the value is wrong.\n")
+
+    monkeypatch.setattr(runner, "run_clarify", answering)
+    outcome = engine(ws, "clarify", "run-external", stdin="What does the finding mean?")
+
+    assert outcome["reply"] == "It means the value is wrong.\n"
+    assert models == ["vendor/late"]
+
+
 # --------------------------------------------------------------------------
 # Project guidance
 # --------------------------------------------------------------------------
@@ -1145,6 +1170,35 @@ def test_prepare_tells_the_mod_how_to_run_the_subagent(ws: Path, engine: Engine)
     edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
     ticket = prepare(engine, ws)
     assert (ticket["reviewer_model"], ticket["timeout_sec"]) == ("haiku", 120)
+
+
+def test_round_2_runs_on_late_model_and_says_so(ws: Path, engine: Engine, answers: Path) -> None:
+    (ws / ".adversarial-review-loop.json").write_text(json.dumps({"model": "opus", "late_model": "sonnet"}))
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    first = prepare(engine, ws)
+    assert (first["round"], first["reviewer_model"], first["model"]) == (1, "opus", "opus")
+    record(engine, ws, first["review_id"], write_answer(answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED"))
+    edit(ws / "api" / "src" / "main.py", "print(3)\n")
+    second = prepare(engine, ws)
+    assert (second["round"], second["reviewer_model"], second["model"]) == (2, "sonnet", "sonnet")
+    outcome = record(engine, ws, second["review_id"], write_answer(answers, *APPROVE))
+    assert "- model: `sonnet`" in Path(outcome["report"]).read_text()
+    assert [entry["model"] for entry in load(ws).data["round_history"]] == ["opus", "sonnet"]
+    # The next phase starts at round 1 again.
+    edit(ws / "api" / "src" / "main.py", "print(4)\n")
+    assert prepare(engine, ws)["reviewer_model"] == "opus"
+
+
+def test_the_final_review_runs_on_model(ws: Path, engine: Engine, answers: Path) -> None:
+    (ws / ".adversarial-review-loop.json").write_text(json.dumps({"model": "opus", "late_model": "sonnet", "final_review": True}))
+    started(engine, ws, phases=1)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
+    edit(ws / "api" / "src" / "main.py", "print(3)\n")
+    assert review(engine, ws, answers, *APPROVE)["verdict"] == "APPROVED"
+    final = prepare(engine, ws)
+    assert (final["label"], final["reviewer_model"]) == ("final", "opus")
 
 
 def test_an_unset_model_is_passed_on_empty_not_as_its_display_text(ws: Path, engine: Engine) -> None:

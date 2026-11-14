@@ -32,7 +32,7 @@ import pytest
 from conftest import config_with
 
 from arl import harness, runner
-from arl.config import DEFAULTS
+from arl.config import DEFAULTS, for_round
 from arl.harness import opencode
 
 #: Payloads the stdin tests round-trip. Named because ruff counts a bytes literal in a
@@ -368,3 +368,19 @@ def test_a_variant_in_both_model_and_variant_is_refused(tmp_path: Path) -> None:
     )
     with pytest.raises(harness.PayloadError):
         opencode.HARNESS.review_command(spec)
+
+
+@pytest.mark.parametrize(
+    ("round_number", "final", "expected"),
+    [(1, False, "vendor/first"), (2, False, "vendor/late"), (5, False, "vendor/late"), (1, True, "vendor/first")],
+)
+def test_opencode_runs_late_model_from_round_2_of_a_phase(round_number: int, final: bool, expected: str) -> None:
+    cfg = for_round(config_with(harness="opencode", model="vendor/first", late_model="vendor/late"), round_number=round_number, final=final)
+    argv = opencode.review_argv("t", config=cfg)
+    assert argv[argv.index("-m") + 1] == expected
+    assert harness.display_model(cfg) == expected
+
+
+def test_an_empty_late_model_keeps_the_harnesss_default_on_every_round() -> None:
+    cfg = for_round(config_with(harness="opencode"), round_number=3, final=False)
+    assert harness.model(cfg) == opencode.HARNESS.default_model

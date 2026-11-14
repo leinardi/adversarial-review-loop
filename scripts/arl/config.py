@@ -48,6 +48,7 @@ __all__ = [
     "SEVERITY_KEYS",
     "SEVERITY_LABELS",
     "Config",
+    "for_round",
     "from_env",
     "late_threshold_rank",
     "load",
@@ -76,6 +77,8 @@ __all__ = [
 DEFAULTS: Final[dict[str, Any]] = {
     "harness": "subagent",
     "model": "",
+    # The reviewer's model from the second round of a phase on; empty means `model`.
+    "late_model": "",
     "variant": "",
     "block_severity": "medium",
     "late_block_severity": "high",
@@ -249,6 +252,19 @@ class Config:
         if isinstance(value, str) and value:
             return [part for part in value.split(",") if part]
         return []
+
+
+def for_round(config: Config, *, round_number: int, final: bool) -> Config:
+    """``config`` as one review round runs it: ``late_model`` in place of ``model`` from round 2.
+
+    A later round of a phase checks a fix against findings already recorded, a narrower job than
+    the first round's; the final review is one round over the whole run and always gets ``model``.
+    An empty ``late_model`` changes nothing.
+    """
+    late = config.as_str("late_model")
+    if final or round_number < 2 or not late:
+        return config
+    return Config({**config.values, "model": late})
 
 
 def _read_json(path: Path) -> Any:

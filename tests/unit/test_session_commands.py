@@ -221,6 +221,11 @@ def test_config_shows_every_key_and_its_layer(engine: Engine, ws: Path, monkeypa
     assert "false  (default)" in text
 
 
+def test_config_shows_an_unset_late_model_as_model(engine: Engine, ws: Path) -> None:
+    text = engine(ws, "config")["text"]
+    assert "late_model" in text and "(model)  (default)" in text
+
+
 def test_config_sets_and_unsets_the_user_config(engine: Engine, ws: Path) -> None:
     answer = engine(ws, "config", stdin="auto_compact on")
     assert answer["key"] == "auto_compact"

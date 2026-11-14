@@ -303,3 +303,18 @@ def test_the_harness_is_settable_from_the_environment(layers: dict[str, str], tm
     cfg = config.load(str(tmp_path / "repo"), layers)
 
     assert cfg.as_str("harness") == "some-other-harness"
+
+
+def test_late_model_replaces_model_only_from_round_2_of_a_phase() -> None:
+    base = config.Config({**config.DEFAULTS, "model": "opus", "late_model": "sonnet", "block_severity": "high"})
+    assert config.for_round(base, round_number=1, final=False).as_str("model") == "opus"
+    late = config.for_round(base, round_number=2, final=False)
+    assert (late.as_str("model"), late.as_str("block_severity")) == ("sonnet", "high")
+    # The final review is one round over the whole run.
+    assert config.for_round(base, round_number=2, final=True).as_str("model") == "opus"
+    assert base.as_str("model") == "opus"
+
+
+def test_an_empty_late_model_changes_nothing() -> None:
+    base = config.Config({**config.DEFAULTS, "model": "opus"})
+    assert config.for_round(base, round_number=4, final=False) is base

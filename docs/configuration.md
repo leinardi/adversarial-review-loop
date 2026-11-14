@@ -27,7 +27,8 @@ again when `/arl-config` sets it.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `harness` | `subagent` | who reviews: `subagent`, a hidden Claude Code subagent the plugin registers, or `opencode`, which the engine runs itself. An unknown name is refused, never replaced by the default |
-| `model` | empty: the session's subagent default, or `openai/gpt-5.6-sol` for `opencode` | the reviewer's model |
+| `model` | empty: the session's subagent default, or `openai/gpt-5.6-sol` for `opencode` | the reviewer's model for the first round of each phase and for the final review. `opus` is the recommended value for the subagent |
+| `late_model` | empty: `model` | the reviewer's model from the second round of a phase on, which checks the fixes against findings already recorded. The final review always uses `model`. Empty by default: Sonnet came within one miss of Opus on round 2, but read only the changes since round 1 and once approved with a known bug open ([measured](../tests/bench/README.md#round-2-on-this-harness)) |
 | `effort` | empty: the agent's default | the subagent reviewer's effort: `low`, `medium`, `high`, `xhigh` or `max`. A value that is no level is ignored, and said at session start |
 | `variant` | empty | OpenCode only: the model variant, passed as `-m <model>#<variant>`. A `model` containing `#` and a `variant` together are refused |
 | `disable_project_config` | `false` | OpenCode only: ignore the repository's own OpenCode config (`OPENCODE_DISABLE_PROJECT_CONFIG`) |

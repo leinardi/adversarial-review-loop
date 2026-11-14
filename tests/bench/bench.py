@@ -46,6 +46,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
@@ -606,12 +607,18 @@ def _plugin_dir(spec: str) -> Path:
     sha = _git("rev-parse", "--verify", f"{spec[1:]}^{{commit}}", cwd=REPO).strip()
     target = bench_dir() / "plugins" / f"rev-{sha[:12]}"
     if not target.exists():
-        staging = target.with_name(target.name + ".tmp")
-        shutil.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True)
+        # A staging directory of its own: several runs may extract the same revision at once.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f"{target.name}.tmp-", dir=target.parent))
         archive = subprocess.run(["git", "archive", sha], cwd=REPO, check=True, capture_output=True).stdout
         subprocess.run(["tar", "-x", "-C", str(staging)], input=archive, check=True)
-        staging.rename(target)
+        try:
+            staging.rename(target)
+        except OSError:
+            # Another run got there first; its copy is the same tree.
+            shutil.rmtree(staging, ignore_errors=True)
+            if not target.is_dir():
+                raise
     return target
 
 

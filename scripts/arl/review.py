@@ -91,6 +91,11 @@ def _load_config(paths: RunPaths) -> config.Config:
     return config.load(str(paths.launch_dir))
 
 
+def _for_ticket(cfg: config.Config, ticket: Mapping[str, Any]) -> config.Config:
+    """``cfg`` as the ticket's round runs it (:func:`arl.config.for_round`)."""
+    return config.for_round(cfg, round_number=int(ticket.get("round") or 1), final=ticket.get("stage") == "final")
+
+
 # --------------------------------------------------------------------------
 # prepare
 # --------------------------------------------------------------------------
@@ -234,6 +239,8 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             outcome = _count_failure(run, "bundle", str(exc), cfg)
             run.save()
             raise RunError("bundle", f"{exc}{outcome}") from exc
+        # The model this round runs on, from here to its report.
+        cfg = config.for_round(cfg, round_number=built.round_number, final=stage == "final")
         ticket = {
             "review_id": f"{run.run_id}-{seq}",
             "run_id": run.run_id,
@@ -450,6 +457,7 @@ def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about wh
     run: RunState, ticket: Mapping[str, Any], target: Target, review: Review, cfg: config.Config, *, answered_by: str = ""
 ) -> dict[str, Any]:
     """Record ``review`` on the run and answer what Claude is told."""
+    cfg = _for_ticket(cfg, ticket)
     seq = int(ticket["seq"])
     review.seq = seq
     review.guide = str(ticket.get("guidance") or "")
@@ -707,7 +715,7 @@ def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     for attempt in range(2):
         invocation = runner.Invocation(bundle_dir=review_dir / "bundle", prompt_file=prompt, title=f"arl {review_id} {attempt}", out_path=answer)
         try:
-            spent = harness.add_usage(spent, runner.invoke(target, invocation, config=cfg))
+            spent = harness.add_usage(spent, runner.invoke(target, invocation, config=_for_ticket(cfg, ticket)))
         except runner.LaunchError as exc:
             # A repair that could not start still leaves the review before it paid for.
             return record(paths, {"review_id": review_id, "failed": "operational", "error": str(exc), "usage": _usage_arg(spent)})
@@ -733,6 +741,11 @@ def _clarified_round(run: RunState) -> dict[str, Any]:
     if not rounds:
         raise RunError("nothing-to-clarify", "no review of the current stage has been recorded yet")
     return rounds[-1]
+
+
+def _asked_of(cfg: config.Config, round_number: int, label: str) -> config.Config:
+    """``cfg`` as a question about round ``round_number`` of ``label`` runs: on the model that ran it."""
+    return config.for_round(cfg, round_number=round_number, final=label == "final")
 
 
 def clarify_prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
@@ -762,12 +775,15 @@ def clarify_prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         files.append(f"question-{number}.txt")
         prompt = review_dir / f"clarify-{number}-prompt.md"
         bundle.compose_fixed("reviewer-clarify", bundle_dir, files, prompt)
+        round_number, label = int(entry.get("round") or 1), str(entry.get("label") or "")
         return {
             "ok": True,
             "run_id": run.run_id,
             "round_seq": seq,
+            "round": round_number,
+            "label": label,
             "question": number,
-            **_subagent_settings(cfg),
+            **_subagent_settings(_asked_of(cfg, round_number, label)),
             "prompt_file": str(prompt),
             "bundle_dir": str(bundle_dir),
             "roots": [str(root["path"]) for root in run.roots],
@@ -818,7 +834,7 @@ def clarify_run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, 
             prompt_file=Path(prepared["prompt_file"]),
             title=f"arl clarify {prepared['round_seq']}-{prepared['question']}",
             out_path=Path(prepared["answer_file"]),
-            config=cfg,
+            config=_asked_of(cfg, int(prepared["round"]), str(prepared["label"])),
             roots=tuple(prepared["roots"]),
         )
     except runner.ReviewerFailed as exc:

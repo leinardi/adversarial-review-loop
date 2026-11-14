@@ -117,6 +117,23 @@ test('the configured model and timeout reach the reviewer', async () => {
   expect([r.tasks[0]?.model, r.tasks[0]?.timeoutSec]).toEqual(['sonnet', 60])
 })
 
+test('round 2 spawns the reviewer on the late model the engine names', async () => {
+  at()
+  let prepares = 0
+  const late = { ...PREPARED, review_id: 'r1-2', round: 2, model: 'sonnet', reviewer_model: 'sonnet' }
+  const { $ } = fakeEngine({
+    engine: { 'review prepare': () => (++prepares === 1 ? { ...PREPARED, reviewer_model: 'opus' } : late), 'review record': RECORDED },
+    files: PROMPTS,
+  })
+  const r = reviewer([APPROVED, APPROVED])
+  await review($, {}, r.run)
+  await review($, {}, r.run)
+  expect(r.tasks.map(task => [task.description, task.model])).toEqual([
+    ['Review phase1, round 1', 'opus'],
+    ['Review phase1, round 2', 'sonnet'],
+  ])
+})
+
 test('a malformed answer gets one repair run, recorded under the same review with the usage of both', async () => {
   at()
   const repair = {

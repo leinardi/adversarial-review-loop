@@ -236,3 +236,24 @@ some read only part of the diff and a skipped part is cheap.
 - Revised wording, 400 KB chunks: all eight single runs read the whole diff, but seven 141 KB
   Sonnet seeded runs then read all of it in five (blocking recall 1, 2, 2, 2, 1) and stopped at
   1,751 and 1,704 lines in two (recall 2 and 3).
+
+### Round 2 on this harness
+
+Which model reviews from round 2 on (`late_model`). Each round 2 follows the same Opus round 1
+(the `p3d` seeded cell, which reported every defect but the sixth), three runs per cell, with
+the plugin at `ccb6605`. A cell lists, per run, the open defect and the regression: `*` when the
+finding blocked, the severity given when it did not, `-` when it was not reported. "Full diff"
+is the share of the whole phase diff (`changes.NN.diff`) the reviewer read.
+
+| Phase | Model | Units (k) | Requests | Full diff | Verdicts | Open | Regression |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 93 KB | Opus | 98 to 104 | 3 | all, 3 of 3 | 3 changes required | `*` `*` `*` | `*` `*` `*` |
+| 93 KB | Sonnet | 34 to 46 | 3 to 5 | none, 3 of 3 | 3 changes required | `*` `*` `*` | `*` `*` `*` |
+| 141 KB | Opus | 131 to 133 | 3 | all, 3 of 3 | 3 changes required | `*` `*` `*` | low, low, low |
+| 141 KB | Sonnet | 27 to 35 | 2 to 4 | none, 3 of 3 | 1 approved, 2 changes required | `-` `*` `*` | low, `-`, `-` |
+
+Blocking recall on the open defect and the regression: Opus 9 of 12, Sonnet 8 of 12, within the
+one miss the plan allowed. `late_model` still ships empty. Every Sonnet round 2 read only
+`incremental.diff` and `prior-rounds.txt`, never the phase diff, which is most of its lower cost,
+and one approved the 141 KB phase with its open medium defect (`L4`) unreported. One Opus run
+re-raised a fixed defect (`M4`, blocking). No untouched miss was found by either model.
