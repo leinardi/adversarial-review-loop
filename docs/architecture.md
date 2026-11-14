@@ -75,6 +75,8 @@ and asks the person when the engine says the run waits for them.
    replanned, restarted, or a newer review began) is refused and reported, never applied.
 5. The verdict is recomputed from the findings. An approval moves every root's `approved_tree`; a
    contract failure gets one repair round on the same ticket; failures count toward the budgets.
+   A block with no `VERDICT` is `CHANGES_REQUIRED` when a finding blocks and a contract failure
+   otherwise. A cited line past the end of its file adds a note to what Claude reads, nothing more.
 6. What the round cost goes with it: a recorded round's `round_history` entry, or a failed one's
    `failure_history` entry, keeps its usage (summed over a repair), the harness and the model
    that answered. The mod counts a subagent's model requests from its `turn.step`s; an external

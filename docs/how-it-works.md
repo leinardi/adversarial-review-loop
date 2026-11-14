@@ -32,8 +32,11 @@ that and asks again; only an approval moves the run to the next phase.
    It may read files and run read-only commands, nothing else. It answers in a strict contract:
    one `FINDING` line per problem, with severity, whether it is actionable, and the file.
 7. **The engine decides the verdict**, not the reviewer. An actionable finding at or above
-   `block_severity` blocks, whatever the reviewer concluded. An answer that breaks the contract
-   gets one repair attempt, then counts as a failure. A failure is never an approval.
+   `block_severity` blocks, whatever the reviewer concluded, even when it left out its `VERDICT`
+   line. An answer that breaks the contract (a missing `VERDICT` with nothing blocking included)
+   gets one repair attempt, then counts as a failure. A failure is never an approval. A finding
+   that cites a line past the end of its file still stands, with a note telling Claude to find
+   it by its description.
 8. **Claude reads the outcome.** Findings: fix them and call `review` again; the next reviewer is
    told what this one found. Approval: commit each changed repository by its own conventions.
 9. **The loop continues.** When Claude's turn ends, the plugin asks the engine whether work

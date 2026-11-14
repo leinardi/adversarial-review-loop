@@ -191,6 +191,7 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
     out.append(_usage_line(review))
     if review.error:
         out.append(f"- engine note: {review.error}\n")
+    out.extend(f"- engine note: {note}\n" for note in review.notes.splitlines())
 
     out.append(_findings_and_raw(review))
     return "".join(out)
@@ -244,6 +245,7 @@ def reason(review: Review, headline: str, *, config: Config, waiting: bool = Fal
     out: list[str] = [f"{headline}\n"]
     if review.error:
         out.append(f"\nReview note: {review.error}\n")
+    out.extend(f"\nReview note: {note}\n" for note in review.notes.splitlines())
     if review.repaired:
         out.append(
             "\nReview note: the reviewer's findings block was malformed, so the findings below were re-emitted by a "

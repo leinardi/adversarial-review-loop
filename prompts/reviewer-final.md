@@ -56,7 +56,7 @@ VERDICT CHANGES_REQUIRED
 
 Rules for the block:
 
-- One `FINDING` line per finding, on a single line. `severity` is one of `info`, `low`, `medium`, `high`, `critical`. `file` is `<alias>/path:line`, or `<alias>/path` alone, or `-` when there is no single location. The path must start with one of the aliases in `range.txt`'s **Roots** section, exactly as the diff shows it; a finding whose path names no root fails the review.
+- One `FINDING` line per finding, on a single line. `severity` is one of `info`, `low`, `medium`, `high`, `critical`. `file` is `<alias>/path:line`, or `<alias>/path` alone, or `-` when there is no single location. The path must start with one of the aliases in `range.txt`'s **Roots** section, exactly as the diff shows it; a finding whose path names no root fails the review. The line is that file's own line as it is now under its root, the numbering the `+` side of the diff's `@@` headers counts in, never a line of `changes.NN.diff`.
 - Severity rubric — pick the label the finding actually earns, not the one that feels safe:
     - `critical` / `high` — a wrong result, a crash, or a security issue on a reachable path.
     - `medium` — a contract break, lost test coverage, or a bug on plausible input.
@@ -65,4 +65,4 @@ Rules for the block:
 - `actionable=yes` means a specific, concrete change would fix it. If no concrete change would fix it, it is `actionable=no`.
 - `VERDICT` is `APPROVED` or `CHANGES_REQUIRED`, and must be `CHANGES_REQUIRED` whenever any finding is `actionable=yes` **and at or above the `block_severity` named in `range.txt`**; otherwise `APPROVED`, with the sub-threshold findings still listed. The engine recomputes the verdict from the `FINDING` lines and the threshold, and the stricter of the two wins.
 - Emit the block even when you found nothing: no `FINDING` lines, then `VERDICT APPROVED`.
-- Missing markers, a missing `VERDICT`, or an empty response is treated as a failed review, which never approves.
+- Missing markers or an empty response is treated as a failed review, which never approves, and so is a missing `VERDICT` when no finding blocks.

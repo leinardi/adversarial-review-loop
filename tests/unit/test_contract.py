@@ -756,3 +756,77 @@ def test_unknown_alias_lets_supersedes_name_a_removed_root() -> None:
 def test_unknown_alias_never_lets_a_finding_name_a_removed_root() -> None:
     review = Review(verdict="CHANGES_REQUIRED", all_findings="FINDING severity=high actionable=yes file=web/x.ts | bug\n")
     assert contract.unknown_alias(review, frozenset({"api"}), retired=frozenset({"web"})) == "web/x.ts"
+
+
+# --------------------------------------------------------------------------
+# A missing VERDICT
+# --------------------------------------------------------------------------
+
+
+def test_no_verdict_with_a_blocking_finding_is_changes_required_with_a_note(tmp_path: Path) -> None:
+    parsed = parse_text(tmp_path, contract_text("FINDING severity=high actionable=yes file=a/x.py:3 | broken"))
+    assert (parsed.verdict, parsed.kind, parsed.error) == ("CHANGES_REQUIRED", "", "")
+    assert parsed.findings == "FINDING severity=high actionable=yes file=a/x.py:3 | broken\n"
+    assert parsed.notes == "the reviewer gave no VERDICT line; its 1 blocking finding(s) make this CHANGES_REQUIRED\n"
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        (),
+        ("FINDING severity=low actionable=yes file=a/x.py:3 | nit",),
+        ("FINDING severity=critical actionable=no file=a/x.py:3 | nothing to change",),
+    ],
+)
+def test_no_verdict_with_nothing_blocking_is_a_contract_failure_never_an_approval(tmp_path: Path, lines: tuple[str, ...]) -> None:
+    parsed = parse_text(tmp_path, contract_text(*lines))
+    assert (parsed.verdict, parsed.kind) == ("OP_FAILURE", "contract")
+    assert parsed.error == "the reviewer emitted no VERDICT line, and no finding blocks"
+    # Half-read evidence would suggest the parse succeeded.
+    assert (parsed.findings, parsed.all_findings, parsed.notes) == ("", "", "")
+
+
+def test_no_verdict_with_only_deferred_findings_is_a_contract_failure(tmp_path: Path) -> None:
+    scope = contract.LateScope(changed_paths=frozenset(), prior_files=frozenset())
+    out = tmp_path / "o"
+    out.write_text(contract_text("FINDING severity=medium actionable=yes file=a/x.py:3 | late"))
+    parsed = contract.parse(out, config=config_with(), allow_supersedes=True, scope=scope)
+    assert parsed.verdict == "OP_FAILURE"
+
+
+# --------------------------------------------------------------------------
+# Citations
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("file", "cited"),
+    [("a/x.py:12", ("a/x.py", 12)), ("./a/x.py:1", ("a/x.py", 1)), ("a/x.py", None), ("-", None), ("a/x:y.py", None)],
+)
+def test_cited_line(file: str, cited: tuple[str, int] | None) -> None:
+    assert contract.cited_line(file) == cited
+
+
+def test_a_citation_past_the_end_of_its_file_gets_a_note() -> None:
+    findings = (
+        "FINDING severity=high actionable=yes file=a/x.py:900 | past the end\n"
+        "FINDING severity=low actionable=no file=a/x.py:10 | inside\n"
+        "FINDING severity=low actionable=no file=a/gone.py:5 | unknown file\n"
+        "FINDING severity=low actionable=no file=- | nowhere\n"
+    )
+    lengths = {"a/x.py": 10}
+    assert contract.citation_notes(findings, lengths.get) == (
+        "a/x.py: cited line 900 is past the end of the file (10 lines); locate it by the description\n"
+    )
+
+
+@pytest.mark.parametrize(("digits", "number"), [("9" * 5000, contract.CITED_LINE_CAP), ("0" * 4000 + "7", 7), ("9" * 18, 10**18 - 1)])
+def test_a_cited_line_of_any_length_is_read_without_raising(digits: str, number: int) -> None:
+    assert contract.cited_line(f"a/x.py:{digits}") == ("a/x.py", number)
+
+
+def test_a_huge_cited_line_is_noted_without_its_digits() -> None:
+    findings = f"FINDING severity=high actionable=yes file=a/x.py:{'9' * 5000} | huge\n"
+    assert contract.citation_notes(findings, {"a/x.py": 10}.get) == (
+        "a/x.py: cited a line number is past the end of the file (10 lines); locate it by the description\n"
+    )

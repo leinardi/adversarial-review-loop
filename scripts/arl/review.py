@@ -332,6 +332,32 @@ def _repair(run: RunState, ticket: dict[str, Any], answer: Path, review_dir: Pat
     }
 
 
+def _cited(line: str) -> tuple[str, int] | None:
+    match = contract.FINDING_RE.match(line)
+    return contract.cited_line(match.group("file")) if match else None
+
+
+def _line_count(target: Target, file: str, limit: int) -> int | None:
+    """How many lines ``<alias>/<path>`` has under its root now, or ``None`` when that cannot be told.
+
+    ``None`` for no such root or file, a path that leaves its root, and a file past ``limit``
+    bytes: a citation the engine cannot check is left as the reviewer wrote it.
+    """
+    alias, _, relative = file.partition("/")
+    root = next((root for root in target.roots if root.alias == alias), None)
+    if root is None or not relative:
+        return None
+    base = Path(root.path).resolve()
+    path = (base / relative).resolve()
+    try:
+        if not path.is_relative_to(base) or not path.is_file() or path.stat().st_size > limit:
+            return None
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+
+
 def _parsed(run: RunState, ticket: Mapping[str, Any], target: Target, answer: Path, cfg: config.Config) -> Review:
     repairing = bool(ticket.get("repair"))
     scope = bundle.late_scope(run, target)
@@ -341,6 +367,8 @@ def _parsed(run: RunState, ticket: Mapping[str, Any], target: Target, answer: Pa
     stray = contract.unknown_alias(review, target.aliases, retired=retired) if review.verdict in ("APPROVED", "CHANGES_REQUIRED") else ""
     if stray:
         review = Review(verdict="OP_FAILURE", kind="contract", raw=str(answer), error=f"file={stray} names no root; every location is <alias>/<path>")
+    elif review.verdict in ("APPROVED", "CHANGES_REQUIRED"):
+        review.notes += contract.citation_notes(review.all_findings, lambda file: _line_count(target, file, cfg.as_int("max_file_bytes")))
     if repairing:
         if review.verdict == "APPROVED":
             # A tail cannot show that nothing was found, so a repair never approves.
@@ -484,7 +512,10 @@ def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about wh
             run.invalidate_ticket("needs-human")
             run.wait_for_user("needs-human", review.error or "the review needs the user")
     if review.verdict == "APPROVED":
-        message = f"{_headline(target, review.verdict)}\n\n{report.deferred_text(review, what='approval')}Full report: {review.report}\n"
+        # A note is about a finding, and an approval shows Claude only the deferred ones.
+        shown = {cited[0] for cited in map(_cited, contract.records(review.deferred)) if cited is not None}
+        notes = "".join(f"Review note: {note}\n\n" for note in review.notes.splitlines() if note.partition(": ")[0] in shown)
+        message = f"{_headline(target, review.verdict)}\n\n{notes}{report.deferred_text(review, what='approval')}Full report: {review.report}\n"
     else:
         message = report.reason(review, _headline(target, review.verdict), config=cfg, waiting=run.data["waiting"] is not None) + note
     message += next_turn(run, cfg, review.verdict)

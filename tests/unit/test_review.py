@@ -210,6 +210,58 @@ def test_a_finding_whose_path_names_no_root_goes_to_repair(ws: Path, engine: Eng
     assert outcome["status"] == "repair"
 
 
+def test_a_citation_past_the_end_of_the_file_keeps_the_finding_and_adds_a_note(ws: Path, engine: Engine, answers: Path) -> None:
+    """A diff line number cited as a source line: the finding still blocks, with no repair call."""
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    outcome = review(engine, ws, answers, finding("api/src/main.py:812"), finding("api/src/main.py:1", detail="inside"), "VERDICT CHANGES_REQUIRED")
+    assert (outcome["status"], outcome["verdict"]) == ("recorded", "CHANGES_REQUIRED")
+    assert load(ws).data["round_history"][-1]["blocking"] == 2
+    assert "Review note: api/src/main.py: cited line 812 is past the end of the file (1 lines); locate it by the description" in outcome["message"]
+    assert "cited line 1 " not in outcome["message"]
+    assert "- engine note: api/src/main.py: cited line 812" in Path(outcome["report"]).read_text()
+
+
+def test_a_citation_with_thousands_of_digits_is_still_recorded(ws: Path, engine: Engine, answers: Path) -> None:
+    """The citation check is advisory: it must never keep the round from being recorded."""
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    outcome = review(engine, ws, answers, finding(f"api/src/main.py:{'9' * 5000}"), "VERDICT CHANGES_REQUIRED")
+    assert (outcome["ok"], outcome["status"], outcome["verdict"]) == (True, "recorded", "CHANGES_REQUIRED")
+    assert load(ws).data["round_history"][-1]["blocking"] == 1
+    assert "api/src/main.py: cited a line number is past the end of the file (1 lines)" in outcome["message"]
+
+
+def test_a_citation_past_the_end_of_a_deferred_finding_is_noted_on_the_approval(ws: Path, engine: Engine, answers: Path) -> None:
+    edit(ws / "api" / "notes.md", "a\nb\n")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
+    edit(ws / "api" / "src" / "main.py", "print(3)\n")
+    # Round 2: a medium finding in a file no round raised and this round did not change is deferred.
+    outcome = review(engine, ws, answers, finding("api/notes.md:400", severity="medium", detail="late"), "VERDICT APPROVED")
+    assert outcome["verdict"] == "APPROVED", outcome
+    assert "Review note: api/notes.md: cited line 400 is past the end of the file (2 lines)" in outcome["message"]
+
+
+def test_no_verdict_with_a_blocking_finding_is_recorded_as_changes_required(ws: Path, engine: Engine, answers: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    outcome = review(engine, ws, answers, finding("api/src/main.py:1"))
+    assert (outcome["status"], outcome["verdict"]) == ("recorded", "CHANGES_REQUIRED")
+    assert "Review note: the reviewer gave no VERDICT line; its 1 blocking finding(s) make this CHANGES_REQUIRED" in outcome["message"]
+    assert load(ws).data["round_history"][-1]["verdict"] == "CHANGES_REQUIRED"
+
+
+@pytest.mark.parametrize("lines", [(), (finding("api/src/main.py:1", severity="low"),)])
+def test_no_verdict_with_nothing_blocking_goes_to_repair_never_approves(ws: Path, engine: Engine, answers: Path, lines: tuple[str, ...]) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    outcome = review(engine, ws, answers, *lines)
+    assert outcome["status"] == "repair"
+    assert load(ws).data["round_history"] == []
+
+
 def test_the_same_answer_cannot_be_recorded_twice(ws: Path, engine: Engine, answers: Path) -> None:
     started(engine, ws)
     edit(ws / "api" / "src" / "main.py", "print(2)\n")

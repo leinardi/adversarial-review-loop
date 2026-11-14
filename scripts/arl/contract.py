@@ -27,7 +27,7 @@ at or above ``block_severity`` blocks regardless of what it concluded.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -40,6 +40,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from arl import harness
 
 __all__ = [
+    "CITED_LINE_CAP",
     "END_MARKER",
     "FINDINGS_MARKER",
     "FINDING_RE",
@@ -52,6 +53,8 @@ __all__ = [
     "Review",
     "RootRange",
     "Target",
+    "citation_notes",
+    "cited_line",
     "is_single_stored_line",
     "normalized_file",
     "parse",
@@ -216,6 +219,10 @@ class Review:
     deferred: str = ""
     #: Every ``FINDING`` line, newline-terminated.
     all_findings: str = ""
+    #: What the engine adds for Claude, one line each, newline-terminated: a ``VERDICT`` it
+    #: supplied, a cited line past the end of its file. Shown, recorded in the report, and never
+    #: read for the verdict.
+    notes: str = ""
     #: Every ``SUPERSEDES`` line, newline-terminated. Recorded only -- it never changes
     #: ``verdict`` (a reversal still blocks exactly as its ``FINDING`` lines say).
     supersedes: str = ""
@@ -483,11 +490,10 @@ def _scan_block(block_lines: list[str], *, allow_supersedes: bool) -> tuple[list
             verdicts.append(_TRAILING_SPACE.sub("", _VERDICT_PREFIX.sub("", line)))
             continue
         raise ContractError(f"the reviewer emitted a line the contract does not allow: {line[:CONTRACT_ECHO_CHARS]}")
-    if not verdicts:
-        raise ContractError("the reviewer emitted no VERDICT line")
     if len(verdicts) > 1:
         raise ContractError("the reviewer emitted more than one VERDICT line")
-    return findings, supersedes, verdicts[0]
+    # No VERDICT is decided by the caller: a finding that blocks makes it moot, nothing else does.
+    return findings, supersedes, verdicts[0] if verdicts else ""
 
 
 def _ceiling_exceeded(count: int, block_bytes: int, config: Config) -> str:
@@ -538,6 +544,10 @@ def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False, sco
     a missing, doubled or inverted marker pair, a malformed ``FINDING``, an unknown severity, an
     ``actionable`` that is neither ``yes`` nor ``no``, a second ``VERDICT`` -- is ``OP_FAILURE``,
     which blocks (Rule 1).
+
+    A block with no ``VERDICT`` line is ``CHANGES_REQUIRED`` when a finding blocks, since the
+    engine's verdict would be that whatever the reviewer had written, with a note saying so. With
+    nothing blocking it stays a contract failure: no verdict is never an approval.
 
     ``allow_supersedes`` defaults to false and is true only for a phase review.
 
@@ -602,12 +612,63 @@ def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False, sco
         review.error = ceiling
         return review
 
-    # The stricter of the two verdicts wins.
+    return _concluded(review, verdict, blocking=len(blocking))
+
+
+def _concluded(review: Review, verdict: str, *, blocking: int) -> Review:
+    """The stricter of the reviewer's verdict and the engine's wins; no verdict approves nothing."""
     if blocking:
         review.verdict = "CHANGES_REQUIRED"
+        if not verdict:
+            review.notes += f"the reviewer gave no VERDICT line; its {blocking} blocking finding(s) make this CHANGES_REQUIRED\n"
         return review
+    if not verdict:
+        # Findings and prose dropped as for every other contract failure.
+        return _fail(Review(), "the reviewer emitted no VERDICT line, and no finding blocks")
     _classify(review, verdict)
     return review
+
+
+#: A cited line number at or past this is past the end of any file the engine would count;
+#: :func:`cited_line` answers it in place of the number written. Converting thousands of digits
+#: raises, and an advisory check must never stop a review from being recorded.
+CITED_LINE_CAP: Final = 10**18
+
+
+def cited_line(file: str) -> tuple[str, int] | None:
+    """The path and line a ``file=`` value cites, or ``None`` when it names no line.
+
+    A line number of more digits than :data:`CITED_LINE_CAP` has is answered as the cap.
+    """
+    file = normalized_file(file)
+    match = LINE_SUFFIX_RE.search(file)
+    if file == "-" or match is None:
+        return None
+    digits = match.group()[1:].lstrip("0") or "0"
+    number = int(digits) if len(digits) < len(str(CITED_LINE_CAP)) else CITED_LINE_CAP
+    return file[: match.start()], number
+
+
+def citation_notes(findings: str, line_count: Callable[[str], int | None]) -> str:
+    """A note for each finding whose cited line is past the end of its file, newline-terminated.
+
+    ``line_count`` answers how many lines the file at an ``<alias>/<path>`` has, or ``None`` when
+    the engine cannot tell (no such file, outside its root, too large): then nothing is said. The
+    finding itself stands either way, blocking as it did: a wrong line number is a reviewer's slip
+    about where, not evidence that nothing is there (Rule 1).
+    """
+    notes: list[str] = []
+    for line in records(findings):
+        match = FINDING_RE.match(line)
+        cited = cited_line(match.group("file")) if match else None
+        if cited is None:
+            continue
+        path, number = cited
+        length = line_count(path)
+        if length is not None and number > length:
+            which = f"line {number}" if number < CITED_LINE_CAP else "a line number"
+            notes.append(f"{path}: cited {which} is past the end of the file ({length} lines); locate it by the description\n")
+    return "".join(notes)
 
 
 @dataclass(frozen=True)
