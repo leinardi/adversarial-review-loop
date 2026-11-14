@@ -32,7 +32,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Final
 
-from arl import config, configcmd, report, review, workspace
+from arl import config, configcmd, report, review, stats, workspace
 from arl.atomic import ensure_private_dir, write_private_atomic
 from arl.configcmd import cmd_config
 from arl.errors import StateLoadError
@@ -311,6 +311,13 @@ def cmd_report(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     return {"ok": True, "text": report.render(reports_dir, number if isinstance(number, int) else None), "reports": report.list_reports(reports_dir)}
 
 
+def cmd_stats(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
+    """What each review round of the run cost and found (``/arl-stats``): the text and the figures."""
+    with locked_state(paths) as loaded:
+        figures = stats.collect(_require(loaded))
+    return {"ok": True, "text": stats.render(figures), "stats": figures}
+
+
 def cmd_status(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
     with locked_state(paths) as run:
         return {"ok": True, "run": run.summary() if run is not None else None}
@@ -377,6 +384,7 @@ COMMANDS: Final[Mapping[str, Command]] = {
     "attach": cmd_attach,
     "report": cmd_report,
     "config": cmd_config,
+    "stats": cmd_stats,
     "status": cmd_status,
     "pause": _transition("pause"),
     "stop": _transition("stop"),

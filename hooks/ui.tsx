@@ -28,6 +28,7 @@ export const PANE = 'arl'
 export const PANE_TITLE = 'Adversarial review'
 export const REPORT_PANE = 'arl-report'
 export const REPORT_TITLE = 'Review report'
+export const STATS_TITLE = 'Review statistics'
 
 /**
  * Whether the person closed the review pane in this session: the loop then stops opening it by

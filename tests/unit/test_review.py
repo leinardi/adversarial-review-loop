@@ -34,8 +34,9 @@ from typing import Any
 import pytest
 from run_common import arl, make_repo, run_env, ws
 
+from arl import harness, runner, state
 from arl import review as review_module
-from arl import state
+from arl.errors import StateLoadError
 
 __all__ = ["run_env", "ws"]  # fixtures, re-exported so pytest finds them
 
@@ -1365,3 +1366,148 @@ def test_a_paused_review_that_waits_for_the_user_leaves_the_instruction_to_their
 
     assert outcome["verdict"] == "NEEDS_HUMAN"
     assert "The user paused the run" not in outcome["message"]
+
+
+# --------------------------------------------------------------------------
+# What each round cost, for /arl-stats
+# --------------------------------------------------------------------------
+
+USAGE = {"turns": 6, "input_tokens": 10, "cache_creation_tokens": 2000, "cache_read_tokens": 30000, "output_tokens": 400, "duration_ms": 9000}
+
+
+def test_a_recorded_round_keeps_what_it_cost_who_ran_it_and_what_blocked(ws: Path, engine: Engine, answers: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws)
+    answer = write_answer(answers, finding("api/src/main.py:1"), finding("api/src/main.py:1", "low"), "VERDICT CHANGES_REQUIRED")
+    usage = json.dumps({**USAGE, "model": "claude-opus-5-5"})
+    assert engine(ws, "review", "record", ticket["review_id"], "--answer", str(answer), "--usage", usage)["verdict"] == "CHANGES_REQUIRED"
+
+    entry = load(ws).data["round_history"][-1]
+    assert entry["usage"] == {**USAGE, "cost_usd": None}
+    assert (entry["model"], entry["harness"], entry["round"]) == ("claude-opus-5-5", "subagent", 1)
+    assert (entry["blocking"], entry["deferred"]) == (1, 0)
+
+
+def test_without_a_reported_model_a_round_names_the_configured_one(ws: Path, engine: Engine, answers: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ARL_MODEL", "sonnet")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    review(engine, ws, answers, *APPROVE)
+    entry = load(ws).data["round_history"][-1]
+    assert (entry["model"], entry["usage"]) == ("sonnet", None)
+
+
+def test_a_failed_round_is_counted_apart_with_its_cost_and_records_no_round(ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws)
+    outcome = engine(ws, "review", "record", ticket["review_id"], "--failed", "transient", "--error", "API error", "--usage", json.dumps(USAGE))
+    assert outcome["verdict"] == "OP_FAILURE"
+
+    run = load(ws)
+    assert run.data["round_history"] == []
+    [failure] = run.data["failure_history"]
+    assert (failure["verdict"], failure["kind"], failure["error"], failure["round"]) == ("OP_FAILURE", "transient", "API error", 1)
+    assert failure["usage"]["turns"] == 6
+    # Still a failure, never an approval.
+    assert run.data["approvals"] == []
+
+
+def test_run_external_records_the_usage_of_the_review_and_its_repair(
+    ws: Path, engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**Fails on the old code**, which dropped what ``runner.invoke`` returned: an external round
+    recorded no usage at all."""
+    calls: list[Path] = []
+
+    def invoke(_target: object, run: Any, *, config: object, environ: object = None) -> harness.Usage:
+        calls.append(run.out_path)
+        if len(calls) == 1:
+            run.out_path.write_text("It is bad.\n")
+        else:
+            run.out_path.write_text(
+                "<<<ARL-FINDINGS>>>\nFINDING severity=high actionable=yes file=api/src/main.py:1 | bad\nVERDICT CHANGES_REQUIRED\n<<<ARL-END>>>\n"
+            )
+        return harness.Usage(turns=3, input_tokens=100, cost_usd=0.25)
+
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    monkeypatch.setattr(runner, "invoke", invoke)
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws)
+
+    assert engine(ws, "review", "run-external", ticket["review_id"])["verdict"] == "CHANGES_REQUIRED"
+
+    assert len(calls) == 2
+    entry = load(ws).data["round_history"][-1]
+    assert entry["harness"] == "opencode"
+    assert (entry["usage"]["turns"], entry["usage"]["input_tokens"], entry["usage"]["cost_usd"]) == (6, 200, 0.5)
+    assert entry["usage"]["output_tokens"] is None
+
+
+def test_a_state_written_before_failure_history_existed_still_loads(ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    paths = state.run_paths(ws)
+    document = json.loads(paths.state_file.read_text())
+    del document["failure_history"]
+    paths.state_file.write_text(json.dumps(document))
+    assert load(ws).data["failure_history"] == []
+    document["failure_history"] = "nope"
+    paths.state_file.write_text(json.dumps(document))
+    with pytest.raises(StateLoadError, match="failure_history"):
+        state.RunState.load(paths)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('{"cost_usd": 1.5, "turns": 2}', (1.5, 2)),
+        ('{"cost_usd": -1, "turns": true}', None),
+        ('{"cost_usd": "free"}', None),
+    ],
+)
+def test_reported_usage_reads_a_cost_only_when_it_is_a_number(raw: str, expected: tuple[float, int] | None) -> None:
+    usage = review_module.reported_usage(raw)
+    assert (usage.cost_usd, usage.turns) == expected if usage is not None else expected is None
+
+
+def test_reported_model_is_display_text_or_nothing() -> None:
+    assert review_module.reported_model('{"model": "opus"}') == "opus"
+    assert review_module.reported_model('{"model": 3}') == ""
+    assert review_module.reported_model("not json") == ""
+    assert len(review_module.reported_model(json.dumps({"model": "x" * 500}))) == 120
+
+
+@pytest.mark.parametrize("failure", ["launch", "reviewer"])
+def test_a_repair_that_fails_keeps_the_cost_of_the_review_before_it(ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    """**Fails on the old code**, whose failure exits recorded no usage: the malformed review's
+    requests were lost from the stats once its repair failed."""
+    calls: list[Path] = []
+
+    def invoke(_target: object, run: Any, *, config: object, environ: object = None) -> harness.Usage:
+        calls.append(run.out_path)
+        if len(calls) == 2:
+            if failure == "launch":
+                raise runner.LaunchError("opencode: not found")
+            raise runner.ReviewerFailed("exited with status 3")
+        run.out_path.write_text("It is bad.\n")
+        return harness.Usage(turns=3, input_tokens=100)
+
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    monkeypatch.setattr(runner, "invoke", invoke)
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws)
+
+    assert engine(ws, "review", "run-external", ticket["review_id"])["verdict"] == "OP_FAILURE"
+
+    [failed] = load(ws).data["failure_history"]
+    assert (failed["usage"]["turns"], failed["usage"]["input_tokens"]) == (3, 100)
+
+
+@pytest.mark.parametrize("cost", ["1e309", "Infinity", "-Infinity", "NaN"])
+def test_a_cost_that_is_not_finite_is_not_read(cost: str) -> None:
+    usage = review_module.reported_usage(f'{{"cost_usd": {cost}, "turns": 1}}')
+    assert usage is not None
+    assert (usage.cost_usd, usage.turns) == (None, 1)

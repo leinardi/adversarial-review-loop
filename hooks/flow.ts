@@ -229,17 +229,23 @@ export async function addRoot($: EngineInterface, input: Record<string, unknown>
   return `Registered root ${String(answer.alias)}, but it already holds changes, so its baseline is unknown and nothing in it can be reviewed until the user picks one. Tell the user.`
 }
 
-/** Reviewer usage as the engine's `--usage` reads it. */
-function usageArgs(usage: TurnUsage | undefined, durationMs: number | undefined): string[] {
-  if (usage === undefined && durationMs === undefined) return []
+/** What a review round's runs cost so far, summed over the review and its repair. */
+type Spent = { usage?: TurnUsage; durationMs?: number; requests?: number }
+
+/** Reviewer usage as the engine's `--usage` reads it; `model` is the one that answered. */
+export function usageArgs(spent: Spent): string[] {
+  const { usage, durationMs, requests } = spent
+  if (usage === undefined && durationMs === undefined && requests === undefined) return []
   return [
     '--usage',
     JSON.stringify({
+      turns: requests,
       input_tokens: usage?.input_tokens,
       output_tokens: usage?.output_tokens,
       cache_read_tokens: usage?.cache_read_input_tokens,
       cache_creation_tokens: usage?.cache_creation_input_tokens,
       duration_ms: durationMs,
+      model: usage?.model,
     }),
   ]
 }
@@ -296,22 +302,22 @@ const INTERRUPTED = 'The review was interrupted, and nothing was recorded. Call 
 async function reviewBySubagent($: EngineInterface, reviewer: Reviewer, prepared: Prepared): Promise<Answer> {
   const id = String(prepared.review_id)
   let step: { prompt_file: string; answer_file: string } = prepared
-  let usage: TurnUsage | undefined
-  let durationMs: number | undefined
+  const spent: Spent = {}
   let recorded: Answer = { ok: false, code: 'engine', error: 'no review ran' }
   for (const attempt of [1, 2]) {
     const ran = await ask($, reviewer, prepared, step, `Review ${String(prepared.label)}, round ${String(prepared.round)}${attempt > 1 ? ' (repair)' : ''}`)
-    usage = sum(usage, ran.usage)
-    if (ran.durationMs !== undefined) durationMs = (durationMs ?? 0) + ran.durationMs
+    spent.usage = sum(spent.usage, ran.usage)
+    if (ran.durationMs !== undefined) spent.durationMs = (spent.durationMs ?? 0) + ran.durationMs
+    if (ran.requests !== undefined) spent.requests = (spent.requests ?? 0) + ran.requests
     if (!ran.ok) {
-      return run($, ['review', 'record', id, '--failed', ran.kind, '--error', ran.error, ...usageArgs(usage, durationMs)])
+      return run($, ['review', 'record', id, '--failed', ran.kind, '--error', ran.error, ...usageArgs(spent)])
     }
     try {
       await $.fs.write(step.answer_file, ran.answer)
     } catch (error) {
-      return run($, ['review', 'record', id, '--failed', 'operational', '--error', `the answer could not be saved: ${String(error)}`])
+      return run($, ['review', 'record', id, '--failed', 'operational', '--error', `the answer could not be saved: ${String(error)}`, ...usageArgs(spent)])
     }
-    recorded = await run($, ['review', 'record', id, '--answer', step.answer_file, ...usageArgs(usage, durationMs)])
+    recorded = await run($, ['review', 'record', id, '--answer', step.answer_file, ...usageArgs(spent)])
     if (recorded.status !== 'repair') return recorded
     step = recorded as Answer & { prompt_file: string; answer_file: string }
   }

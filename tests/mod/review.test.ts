@@ -60,7 +60,46 @@ test('a review runs one fresh reviewer on the prepared prompt and records its an
     cache_read_tokens: 3,
     cache_creation_tokens: 4,
     duration_ms: 1000,
+    // The model that answered: what /arl-stats names the round by.
+    model: 'haiku',
   })
+})
+
+test('the model requests a round made reach the engine, summed over its repair', async () => {
+  at()
+  const repair = {
+    ok: true,
+    status: 'repair',
+    review_id: 'r1-1',
+    prompt_file: '/work/.arl/reviews/r1-001/repair-prompt.md',
+    bundle_dir: PREPARED.bundle_dir,
+    answer_file: '/work/.arl/reviews/r1-001/repair-answer.md',
+  }
+  let records = 0
+  const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': () => (++records === 1 ? repair : RECORDED) }, files: PROMPTS })
+  await review($, {}, reviewer([{ ...APPROVED, answer: 'no block', requests: 7 }, { ...APPROVED, requests: 2 }]).run)
+  const [first, second] = w.calls.filter(call => call.args[1] === 'record').map(call => JSON.parse(call.args.at(-1) ?? '{}'))
+  expect(first.turns).toBe(7)
+  expect(second.turns).toBe(9)
+})
+
+test('an answer that cannot be saved is a failure that still reports what the round cost', async () => {
+  at()
+  const failed = { ...RECORDED, verdict: 'OP_FAILURE', message: 'The reviewer failed.' }
+  const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': failed }, files: PROMPTS })
+  const broken = { ...$, fs: { ...$.fs, write: () => Promise.reject(new Error('disk full')) } } as typeof $
+  await review(broken, {}, reviewer([{ ...APPROVED, requests: 4 }]).run)
+  const last = w.calls.at(-1)?.args ?? []
+  expect(last.slice(0, 5)).toEqual(['review', 'record', 'r1-1', '--failed', 'operational'])
+  expect(JSON.parse(last.at(-1) ?? '{}')).toEqual(expect.objectContaining({ turns: 4, output_tokens: 2, model: 'haiku' }))
+})
+
+test('a failed round reports what it cost too', async () => {
+  at()
+  const failed = { ...RECORDED, verdict: 'OP_FAILURE', message: 'The reviewer failed.' }
+  const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': failed }, files: PROMPTS })
+  await review($, {}, reviewer([{ ok: false, kind: 'transient', error: 'API error', requests: 3, durationMs: 50 }]).run)
+  expect(JSON.parse(w.calls.at(-1)?.args.at(-1) ?? '{}')).toEqual({ turns: 3, duration_ms: 50 })
 })
 
 test('a review with no verification sends an empty list, never nothing', async () => {

@@ -25,13 +25,14 @@ import type { RunView } from '../types'
 import { type Answer } from './engine'
 import { announce, proceed, refused, resetWrites, run, session, stageEnded } from './flow'
 import { registerReviewer } from './reviewer'
-import { briefly, pane, PANE, PANE_TITLE, phasesText, REPORT_PANE, REPORT_TITLE, showLast, showReport, statusText } from './ui'
+import { briefly, pane, PANE, PANE_TITLE, phasesText, REPORT_PANE, REPORT_TITLE, showLast, showReport, STATS_TITLE, statusText } from './ui'
 
 export const COMMANDS: readonly CommandSpec[] = [
   { name: 'arl-implement', description: 'Implement a plan phase by phase, each phase reviewed before the next', argumentHint: '[--new] [--root DIR]... <plan.md>' },
   { name: 'arl-resume', description: 'Continue the adversarial-review-loop run in this session' },
   { name: 'arl-status', description: 'Show the adversarial-review-loop run and open its pane', immediate: true },
   { name: 'arl-report', description: 'Show the newest review report, or the N-th', argumentHint: '[N]', immediate: true },
+  { name: 'arl-stats', description: 'Show what each review round of the run cost and found', immediate: true },
   { name: 'arl-phases', description: 'List every phase of the adversarial-review-loop run', immediate: true },
   { name: 'arl-pane', description: 'Open or close the adversarial-review-loop review pane', immediate: true },
   { name: 'arl-pause', description: 'Pause the run: Claude is not prompted again until /arl-resume', immediate: true },
@@ -184,6 +185,17 @@ async function report($: EngineInterface, args: string): Promise<string> {
   return `Report ${number || '(newest)'} is in the report pane.`
 }
 
+async function stats($: EngineInterface): Promise<string> {
+  const answer = await run($, ['stats'])
+  if (!answer.ok) return refused(answer)
+  const text = String(answer.text ?? '')
+  if (!session.isInteractive) return text
+  // One line per round: as long as a report, so it takes the report pane, which scrolls.
+  await showReport($, text).catch(() => undefined)
+  await $.ui.open({ id: REPORT_PANE, title: STATS_TITLE, focus: true, closeOnEscape: true }).catch(() => undefined)
+  return 'The run statistics are in the report pane.'
+}
+
 async function transition($: EngineInterface, command: 'pause' | 'stop'): Promise<string> {
   const answer = await run($, [command])
   if (!answer.ok) return refused(answer)
@@ -247,6 +259,8 @@ export async function runCommand($: EngineInterface, name: string, args: string)
       return status($)
     case 'arl-report':
       return report($, args)
+    case 'arl-stats':
+      return stats($)
     case 'arl-phases':
       return phases($)
     case 'arl-pane':

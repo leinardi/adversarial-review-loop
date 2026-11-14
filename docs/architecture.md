@@ -57,6 +57,7 @@ and asks the person when the engine says the run waits for them.
 | `runner.py`, `harness/` | the bounded runner and the opencode harness |
 | `oscillation.py` | stall detection across rounds |
 | `report.py`, `configcmd.py`, `config.py` | reports, `/arl-config`, configuration layers |
+| `stats.py` | `/arl-stats`: each round's model, usage and findings; display only |
 
 ## A round, step by step
 
@@ -74,6 +75,10 @@ and asks the person when the engine says the run waits for them.
    replanned, restarted, or a newer review began) is refused and reported, never applied.
 5. The verdict is recomputed from the findings. An approval moves every root's `approved_tree`; a
    contract failure gets one repair round on the same ticket; failures count toward the budgets.
+6. What the round cost goes with it: a recorded round's `round_history` entry, or a failed one's
+   `failure_history` entry, keeps its usage (summed over a repair), the harness and the model
+   that answered. The mod counts a subagent's model requests from its `turn.step`s; an external
+   harness reports its own. `/arl-stats` reads these and nothing decides on them.
 
 ## Two trees per root
 

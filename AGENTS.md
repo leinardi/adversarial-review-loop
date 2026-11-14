@@ -62,9 +62,9 @@ The architecture ([docs/architecture.md](docs/architecture.md) has the long form
 | `scripts/arl.sh` | launcher: finds a Python 3.12 or newer and runs the bootstrap |
 | `scripts/arl-bootstrap.py` | trusted absolute entrypoint; establishes `sys.path` and `sys.pycache_prefix` before `arl` is imported |
 | `scripts/arl/cli.py` | subcommand dispatch: argv in, one JSON answer on stdout |
-| `scripts/arl/commands.py` | the command table: `init`, `resume`, `set-phases`, `root-add`, `root-remove`, `root-baseline`, `attach`, `status`, `report`, `config`, `pause`, `stop`, `finish`, `accept`, `next-action`, and the `review`/`clarify` subcommands |
+| `scripts/arl/commands.py` | the command table: `init`, `resume`, `set-phases`, `root-add`, `root-remove`, `root-baseline`, `attach`, `status`, `report`, `config`, `stats`, `pause`, `stop`, `finish`, `accept`, `next-action`, and the `review`/`clarify` subcommands |
 | `scripts/arl/configcmd.py` | `config`: every key with its layer, or set or unset one key |
-| `scripts/arl/state.py` | the run state in `<launch dir>/.arl/state.json`: stages, approvals, tickets, `next_action` |
+| `scripts/arl/state.py` | the run state in `<launch dir>/.arl/state.json`: stages, approvals, tickets, the rounds and failed rounds with their usage, `next_action` |
 | `scripts/arl/workspace.py` | workspace roots: git and shadow snapshots, nested-repository discovery, late baselines |
 | `scripts/arl/contract.py` | the reviewer output contract: `FINDING`/`SUPERSEDES` grammar, `parse`, the recomputed verdict, the late-round scope type, `parse_clarify` |
 | `scripts/arl/review.py` | the review pipeline: `review prepare`/`record`/`run-external`, repair, failure budgets, stalls, `clarify` |
@@ -75,6 +75,7 @@ The architecture ([docs/architecture.md](docs/architecture.md) has the long form
 | `scripts/arl/oscillation.py` | stall detection across rounds |
 | `scripts/arl/guidance.py` | project review guidance: each root's review skill and the `review_guide` file |
 | `scripts/arl/report.py` | report storage and the text Claude sees |
+| `scripts/arl/stats.py` | `stats` (`/arl-stats`): each round's model, usage and findings from `round_history` and `failure_history`; display only |
 | `scripts/arl/atomic.py`, `config.py`, `globmatch.py`, `util.py`, `errors.py` | shared plumbing |
 | `prompts/*.md` | the reviewer prompts |
 | `tests/unit/` | pytest unit tests; shared fixtures in `conftest.py`, run fixtures in `run_common.py`, reviewer stand-ins in `reviewer_common.py` |

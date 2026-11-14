@@ -32,7 +32,7 @@ touches ``state.json``, and nothing may turn a failure into an approval (AGENTS.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
@@ -52,11 +52,13 @@ __all__ = [
     "TranscriptError",
     "UnknownHarness",
     "Usage",
+    "add_usage",
     "display_model",
     "get",
     "model",
     "names",
     "selected",
+    "usage_record",
 ]
 
 
@@ -168,6 +170,34 @@ class Usage:
     #: What the CLI itself says the run cost, in US dollars.
     cost_usd: float | None = None
     duration_ms: int | None = None
+
+
+def add_usage(first: Usage | None, second: Usage | None) -> Usage | None:
+    """Two invocations' cost together (a review and its repair call).
+
+    A figure either one reported is summed; one missing from both stays missing rather than
+    becoming ``0``.
+    """
+    if first is None or second is None:
+        return first or second
+    return Usage(
+        turns=_plus(first.turns, second.turns),
+        input_tokens=_plus(first.input_tokens, second.input_tokens),
+        cache_creation_tokens=_plus(first.cache_creation_tokens, second.cache_creation_tokens),
+        cache_read_tokens=_plus(first.cache_read_tokens, second.cache_read_tokens),
+        output_tokens=_plus(first.output_tokens, second.output_tokens),
+        cost_usd=None if first.cost_usd is None and second.cost_usd is None else (first.cost_usd or 0.0) + (second.cost_usd or 0.0),
+        duration_ms=_plus(first.duration_ms, second.duration_ms),
+    )
+
+
+def _plus(first: int | None, second: int | None) -> int | None:
+    return None if first is None and second is None else (first or 0) + (second or 0)
+
+
+def usage_record(usage: Usage | None) -> dict[str, int | float | None] | None:
+    """``usage`` as the JSON object the run state stores, or ``None``."""
+    return None if usage is None else {item.name: getattr(usage, item.name) for item in fields(Usage)}
 
 
 @runtime_checkable

@@ -144,6 +144,8 @@ def new_document(*, plan_source: str, final_review: bool) -> dict[str, Any]:
         "approvals": [],
         "rounds": 0,
         "round_history": [],
+        # Rounds that failed (OP_FAILURE, NEEDS_HUMAN): what they cost, for /arl-stats only.
+        "failure_history": [],
         "clarify_history": [],
         "review_seq": 0,
         "stall_floor": 0,
@@ -192,11 +194,20 @@ _SCHEMA: Final[Mapping[str, type | tuple[type, ...]]] = {
 }
 
 
+#: Keys added after the first v4 states were written, and what a document without one holds.
+#: Absent is read as empty; present, the key must still hold its type.
+_LATER_KEYS: Final[Mapping[str, type]] = {"failure_history": list}
+
+
 def _validated(document: object) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise StateLoadError("state.json does not hold an object")
     if document.get("version") != STATE_VERSION:
         raise StateLoadError(f"state.json is version {document.get('version')!r}, this engine reads {STATE_VERSION}")
+    for key, later in _LATER_KEYS.items():
+        document.setdefault(key, later())
+        if not isinstance(document[key], later):
+            raise StateLoadError(f"state.json field {key!r} is malformed")
     for key, kind in _SCHEMA.items():
         if not isinstance(document.get(key), kind) or (kind is int and isinstance(document.get(key), bool)):
             raise StateLoadError(f"state.json field {key!r} is missing or malformed")

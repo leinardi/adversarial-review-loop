@@ -19,10 +19,24 @@
 // end is classified, and what it may do.
 
 import { expect, test } from 'claude-code/testing'
-import { answerOf, classify, deliver, normalize, permit, REVIEWER_TOOLS, reviewerDecision, runReviewer, within } from '../../hooks/reviewer'
+import { answerOf, classify, countStep, deliver, normalize, permit, REVIEWER_TOOLS, reviewerDecision, runReviewer, within } from '../../hooks/reviewer'
 import { fakeEngine, PLUGIN, start, tool, world } from './world'
 
 const DONE = { answer: 'VERDICT APPROVED', reason: 'answer', durationMs: 10 }
+
+test("a subagent's model requests are counted until its answer, which carries them", async () => {
+  const { $ } = fakeEngine({ engine: {} })
+  countStep('agent-steps')
+  countStep('agent-steps')
+  countStep('agent-other')
+  deliver('agent-steps', DONE)
+  expect(await answerOf($, 'agent-steps', 900)).toEqual({ ...DONE, requests: 2 })
+  // Delivered, the count is gone: a later run of the same id starts from nothing.
+  deliver('agent-steps', DONE)
+  expect(await answerOf($, 'agent-steps', 900)).toEqual(DONE)
+  deliver('agent-other', DONE)
+  expect(await answerOf($, 'agent-other', 900)).toEqual({ ...DONE, requests: 1 })
+})
 
 // --------------------------------------------------------------------------
 // Waiting for the answer

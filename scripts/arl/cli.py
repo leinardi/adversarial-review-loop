@@ -51,6 +51,7 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
   report [N]                                 the newest stored report, or the N-th
   config                                     show, set or unset a key; arguments as text on stdin
   status [--json]                            the run summary
+  stats [--json]                             what each review round cost and found
   pause | stop | finish | accept             user decisions
   next-action                                whether the loop continues after a turn
   review prepare [--session ID]              prepare the current stage's review; optional JSON
@@ -100,6 +101,8 @@ def _parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", add_help=False)
     # Accepted and ignored: every answer is JSON already, and the plan's spelling is `status --json`.
     status.add_argument("--json", action="store_true", dest="_json")
+    # The same: the answer carries the text and the figures both.
+    sub.add_parser("stats", add_help=False).add_argument("--json", action="store_true", dest="_json")
     resume = sub.add_parser("resume", add_help=False)
     resume.add_argument("--session", default="")
     for name in ("pause", "stop", "finish", "accept", "next-action"):

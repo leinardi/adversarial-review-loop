@@ -34,6 +34,7 @@ budget, the run waits for the user.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
@@ -55,6 +56,7 @@ __all__ = [
     "next_turn",
     "prepare",
     "record",
+    "reported_model",
     "reported_usage",
     "run_external",
 ]
@@ -65,6 +67,9 @@ REPAIR_TAIL_BYTES: Final = 65536
 #: The detail of the one finding ``prompts/reviewer-repair.md`` prescribes when the transcript
 #: tail states no findings: a repair carrying only it recovered nothing.
 _INCOMPLETE: Final = "| review transcript incomplete"
+
+#: How much of a failed round's error ``failure_history`` keeps; the report holds all of it.
+_FAILURE_ERROR_CHARS: Final = 500
 
 #: Failure kinds the mod may report for a subagent that did not answer.
 FAILURE_KINDS: Final = ("transient", "operational")
@@ -243,6 +248,9 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             "repair": "",
             # What a stored report names as the guidance this round ran under.
             "guidance": guidance.disclosure(sources),
+            # Who reviews it, as configured now: what /arl-stats shows the round ran on.
+            "harness": cfg.as_str("harness"),
+            "model": harness.display_model(cfg),
         }
         run.issue_ticket(ticket)
         run.save()
@@ -399,17 +407,34 @@ def _keep_answer(answer: Path, bundle_dir: Path) -> None:
     write_private_file(bundle_dir / "review.md", text)
 
 
-def _apply(run: RunState, ticket: Mapping[str, Any], target: Target, review: Review, cfg: config.Config) -> dict[str, Any]:
+def _accounting(ticket: Mapping[str, Any], review: Review, answered_by: str) -> dict[str, Any]:
+    """What a recorded round or failure cost and who ran it, for ``/arl-stats``; never read for a decision."""
+    return {
+        "round": int(ticket.get("round") or 0),
+        "harness": str(ticket.get("harness") or ""),
+        # The model that answered when the harness said so, else the one configured.
+        "model": answered_by or str(ticket.get("model") or ""),
+        "usage": harness.usage_record(review.usage),
+    }
+
+
+def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about who answered it
+    run: RunState, ticket: Mapping[str, Any], target: Target, review: Review, cfg: config.Config, *, answered_by: str = ""
+) -> dict[str, Any]:
     """Record ``review`` on the run and answer what Claude is told."""
     seq = int(ticket["seq"])
     review.seq = seq
     review.guide = str(ticket.get("guidance") or "")
     report.store(review, target, seq=f"{seq:03d}", reports_dir=run.paths.run_dir / "reports", config=cfg)
     note = ""
+    accounting = _accounting(ticket, review, answered_by)
     if review.verdict in ("APPROVED", "CHANGES_REQUIRED"):
         _keep_answer(Path(review.raw), _review_dir(run.paths, run.run_id, seq) / "bundle")
         run.data["round_history"].append(
             {
+                **accounting,
+                "blocking": len(contract.records(review.findings)),
+                "deferred": len(contract.records(review.deferred)),
                 "label": target.label,
                 "revision": ticket["revision"],
                 "seq": seq,
@@ -439,12 +464,25 @@ def _apply(run: RunState, ticket: Mapping[str, Any], target: Target, review: Rev
             if stalled:
                 run.wait_for_user("stall", oscillation.render_persisting(stalled))
                 note = f"\nThe same findings have persisted for {cfg.as_int('stall_rounds')} rounds; the run now waits for the user.\n"
-    elif review.verdict == "OP_FAILURE":
-        run.invalidate_ticket("failed")
-        note = _count_failure(run, review.kind or "operational", review.error, cfg)
     else:
-        run.invalidate_ticket("needs-human")
-        run.wait_for_user("needs-human", review.error or "the review needs the user")
+        # A round that failed still cost what it cost: counted apart, since it decided nothing.
+        run.data["failure_history"].append(
+            {
+                **accounting,
+                "label": target.label,
+                "revision": ticket["revision"],
+                "seq": seq,
+                "verdict": review.verdict,
+                "kind": review.kind,
+                "error": review.error[:_FAILURE_ERROR_CHARS],
+            }
+        )
+        if review.verdict == "OP_FAILURE":
+            run.invalidate_ticket("failed")
+            note = _count_failure(run, review.kind or "operational", review.error, cfg)
+        else:
+            run.invalidate_ticket("needs-human")
+            run.wait_for_user("needs-human", review.error or "the review needs the user")
     if review.verdict == "APPROVED":
         message = f"{_headline(target, review.verdict)}\n\n{report.deferred_text(review, what='approval')}Full report: {review.report}\n"
     else:
@@ -512,6 +550,7 @@ def _record_answer(  # noqa: PLR0913 - the pieces `record` already validated
 ) -> dict[str, Any]:
     review_dir = _review_dir(run.paths, run.run_id, int(ticket["seq"]))
     usage = reported_usage(str(args.get("usage") or ""))
+    answered_by = reported_model(str(args.get("usage") or ""))
     if failed:
         # Whatever a failed run printed (a CLI's usage text, an auth error) is kept in the report:
         # it is how the person finds out why, and it is never read for a verdict.
@@ -527,17 +566,39 @@ def _record_answer(  # noqa: PLR0913 - the pieces `record` already validated
         if not ticket.get("repair") and not _has_output(answer):
             # A reviewer that said nothing has nothing to repair: it failed, and the budget counts it.
             review = Review(verdict="OP_FAILURE", kind="operational", raw=str(answer), error="the reviewer produced no output", usage=usage)
-            return _apply(run, ticket, target, review, cfg)
+            return _apply(run, ticket, target, review, cfg, answered_by=answered_by)
         review = _parsed(run, ticket, target, answer, cfg)
         if review.verdict == "OP_FAILURE" and review.kind == "contract" and not ticket.get("repair"):
             return _repair(run, ticket, answer, review_dir)
         if usage is not None:
             review.usage = usage
-    return _apply(run, ticket, target, review, cfg)
+    return _apply(run, ticket, target, review, cfg, answered_by=answered_by)
 
 
 #: The figures ``record --usage`` reads, each a :class:`arl.harness.Usage` field.
 _USAGE_FIELDS: Final = ("turns", "input_tokens", "cache_creation_tokens", "cache_read_tokens", "output_tokens", "duration_ms")
+
+
+def _usage_object(raw: str) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        log(f"record: --usage is not JSON and is ignored: {raw[:200]!r}")
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def reported_model(raw: str) -> str:
+    """The model ``record --usage`` says answered, or ``""``; display only, like the usage."""
+    value = _usage_object(raw)
+    model = value.get("model") if value is not None else None
+    return model[:_MODEL_CHARS] if isinstance(model, str) else ""
+
+
+#: How long a reported model id may be; anything longer is cut.
+_MODEL_CHARS: Final = 120
 
 
 def reported_usage(raw: str) -> harness.Usage | None:
@@ -546,16 +607,16 @@ def reported_usage(raw: str) -> harness.Usage | None:
     Observability, never a decision: anything unreadable is dropped, and a figure that is not a
     whole non-negative number is left missing rather than guessed.
     """
-    if not raw:
+    value = _usage_object(raw)
+    if value is None:
         return None
-    try:
-        value = json.loads(raw)
-    except ValueError:
-        log(f"record: --usage is not JSON and is ignored: {raw[:200]!r}")
-        return None
-    if not isinstance(value, dict):
-        return None
-    figures = {key: value[key] for key in _USAGE_FIELDS if isinstance(value.get(key), int) and not isinstance(value[key], bool) and value[key] >= 0}
+    figures: dict[str, Any] = {
+        key: value[key] for key in _USAGE_FIELDS if isinstance(value.get(key), int) and not isinstance(value[key], bool) and value[key] >= 0
+    }
+    cost = value.get("cost_usd")
+    # JSON's 1e309 reads as infinity, which no strict JSON reader takes back: finite only.
+    if isinstance(cost, int | float) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0:
+        figures["cost_usd"] = float(cost)
     return harness.Usage(**figures) if figures else None
 
 
@@ -587,6 +648,11 @@ def _external_harness(cfg: config.Config) -> None:
         raise RunError("unknown-harness", str(exc)) from exc
 
 
+def _usage_arg(spent: harness.Usage | None) -> str:
+    """``spent`` as ``record --usage`` reads it, ``""`` for nothing reported."""
+    return json.dumps(harness.usage_record(spent)) if spent is not None else ""
+
+
 def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     """Run the configured external reviewer for the pending review, then record its answer.
 
@@ -606,16 +672,19 @@ def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         target = _target(run, ticket)
     review_dir = _review_dir(paths, str(ticket["run_id"]), int(ticket["seq"]))
     prompt, answer = review_dir / "prompt.md", review_dir / "answer.md"
+    spent: harness.Usage | None = None
     for attempt in range(2):
         invocation = runner.Invocation(bundle_dir=review_dir / "bundle", prompt_file=prompt, title=f"arl {review_id} {attempt}", out_path=answer)
         try:
-            runner.invoke(target, invocation, config=cfg)
+            spent = harness.add_usage(spent, runner.invoke(target, invocation, config=cfg))
         except runner.LaunchError as exc:
-            return record(paths, {"review_id": review_id, "failed": "operational", "error": str(exc)})
+            # A repair that could not start still leaves the review before it paid for.
+            return record(paths, {"review_id": review_id, "failed": "operational", "error": str(exc), "usage": _usage_arg(spent)})
         except runner.ReviewerFailed as exc:
             failure = runner.classify_op_failure(exc, answer)
-            return record(paths, {"review_id": review_id, "failed": failure, "error": str(exc), "answer": str(answer)})
-        outcome = record(paths, {"review_id": review_id, "answer": str(answer)})
+            return record(paths, {"review_id": review_id, "failed": failure, "error": str(exc), "answer": str(answer), "usage": _usage_arg(spent)})
+        # The round's cost so far, the repair call's included, as the mod reports a subagent's.
+        outcome = record(paths, {"review_id": review_id, "answer": str(answer), "usage": _usage_arg(spent)})
         if outcome.get("status") != "repair":
             return outcome
         prompt, answer = Path(outcome["prompt_file"]), Path(outcome["answer_file"])
