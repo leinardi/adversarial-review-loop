@@ -72,7 +72,8 @@ and asks the person when the engine says the run waits for them.
 2. The bundle is the diff from each root's `approved_tree` (or `start_tree`, for the final review)
    to that snapshot.
 3. The mod reads the prompt file, spawns the reviewer on the round's model (`late_model` from
-   round 2 of a phase: `sonnet` by default on the subagent, `model` when set to `""`), writes
+   round 2 of a phase: the weak tier, `sonnet`, by default on the subagent, `model` when set to
+   `""`), writes
    its answer to the answer file, and runs `review record <id> --answer <file>` (or
    `--failed transient|operational`).
 4. `record` runs under the state lock and lands the result only if the ticket is still the pending

@@ -53,7 +53,7 @@ def test_defaults_stand_when_nothing_else_exists(layers: dict[str, str], tmp_pat
     cfg = config.load(str(tmp_path / "repo"), layers)
     assert cfg.as_str("harness") == harness.SUBAGENT
     # Empty: the subagent runs on the session's model unless one is configured.
-    assert cfg.as_str("model") == ""
+    assert cfg.as_str("model") == "default"
     assert cfg.as_int("stall_rounds") == 5
     assert cfg.as_str("review_skill") == "auto"
     assert cfg.as_bool("final_review") is False
@@ -76,7 +76,7 @@ def test_all_four_layers_in_order(layers: dict[str, str], tmp_path: Path) -> Non
 
 def test_a_missing_repo_argument_skips_the_repo_layer(layers: dict[str, str], tmp_path: Path) -> None:
     write_repo_config(tmp_path / "repo", {"model": "repo-model"})
-    assert config.load("", layers).as_str("model") == "", "the repo layer's model must not have been read"
+    assert config.load("", layers).as_str("model") == "default", "the repo layer's model must not have been read"
 
 
 # -- the activation overlay --------------------------------------------------
@@ -125,7 +125,7 @@ def test_an_unparseable_file_drops_the_whole_file_layer(layers: dict[str, str], 
 
     cfg = config.load(str(repo), layers)
 
-    assert cfg.as_str("model") == "", "the good file must not survive alone"
+    assert cfg.as_str("model") == "default", "the good file must not survive alone"
     assert cfg.as_str("block_severity") == "critical", "the environment still applies"
 
 
@@ -315,18 +315,18 @@ def test_late_model_replaces_model_only_from_round_2_of_a_phase() -> None:
     assert base.as_str("model") == "opus"
 
 
-def test_an_unset_late_model_is_sonnet_on_the_subagent_from_round_2() -> None:
+def test_an_unset_late_model_is_the_weak_tier_on_the_subagent_from_round_2() -> None:
     base = config.Config({**config.DEFAULTS, "model": "opus"})
-    assert config.late_model(base) == "sonnet"
     assert config.for_round(base, round_number=1, final=False).as_str("model") == "opus"
-    assert config.for_round(base, round_number=2, final=False).as_str("model") == "sonnet"
+    assert config.for_round(base, round_number=2, final=False).as_str("model") == "weak"
+    assert config.reviewer_model(base, round_number=2) == config.ModelChoice(value="weak", tier="weak", id="sonnet")
     assert config.for_round(base, round_number=3, final=True).as_str("model") == "opus"
 
 
 def test_an_unset_late_model_on_opencode_keeps_model() -> None:
     base = config.Config({**config.DEFAULTS, "harness": "opencode", "model": "vendor/x"})
-    assert config.late_model(base) == ""
     assert config.for_round(base, round_number=4, final=False) is base
+    assert config.reviewer_model(base, round_number=4).id == "vendor/x"
 
 
 def test_an_empty_late_model_is_the_opt_out_and_changes_nothing() -> None:
@@ -334,7 +334,7 @@ def test_an_empty_late_model_is_the_opt_out_and_changes_nothing() -> None:
     assert config.for_round(base, round_number=4, final=False) is base
 
 
-@pytest.mark.parametrize(("layer", "expected"), [("file", ""), ("env", ""), ("null", "sonnet"), ("none", "sonnet")])
+@pytest.mark.parametrize(("layer", "expected"), [("file", "opus"), ("env", "opus"), ("null", "sonnet"), ("none", "sonnet")])
 def test_late_model_layers_tell_unset_from_empty(tmp_path: Path, layer: str, expected: str) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -343,4 +343,64 @@ def test_late_model_layers_tell_unset_from_empty(tmp_path: Path, layer: str, exp
         (repo / config.REPO_CONFIG_NAME).write_text(json.dumps({"late_model": "" if layer == "file" else None}))
     if layer == "env":
         env["ARL_LATE_MODEL"] = ""
-    assert config.late_model(config.load(str(repo), env)) == expected
+    assert config.reviewer_model(config.load(str(repo), env), round_number=2).id == expected
+
+
+SUBAGENT_TIERS = {"strong": "opus", "weak": "sonnet"}
+OPENCODE_TIERS = {"strong": "openai/gpt-6.1-sol", "weak": "openai/gpt-6.1-terra"}
+
+
+@pytest.mark.parametrize("harness_name", ["subagent", "opencode"])
+@pytest.mark.parametrize(
+    ("model", "late_model", "first", "late"),
+    [
+        # Nothing set: strong first, the harness's late default after.
+        (None, None, ("strong", None), {"subagent": ("weak", None), "opencode": ("strong", None)}),
+        ("", None, ("strong", None), {"subagent": ("weak", None), "opencode": ("strong", None)}),
+        ("default", "default", ("strong", None), {"subagent": ("weak", None), "opencode": ("strong", None)}),
+        ("weak", None, ("weak", None), {"subagent": ("weak", None), "opencode": ("weak", None)}),
+        ("strong", "weak", ("strong", None), {"subagent": ("weak", None), "opencode": ("weak", None)}),
+        ("weak", "strong", ("weak", None), {"subagent": ("strong", None), "opencode": ("strong", None)}),
+        # `""` for late_model is `model` on every round.
+        ("weak", "", ("weak", None), {"subagent": ("weak", None), "opencode": ("weak", None)}),
+        # A literal passes through, with no tier.
+        ("lit/first", "lit/late", ("", "lit/first"), {"subagent": ("", "lit/late"), "opencode": ("", "lit/late")}),
+        ("lit/first", "", ("", "lit/first"), {"subagent": ("", "lit/first"), "opencode": ("", "lit/first")}),
+        ("lit/first", None, ("", "lit/first"), {"subagent": ("weak", None), "opencode": ("", "lit/first")}),
+    ],
+)
+def test_reviewer_model_resolves_every_value_form_on_every_round(
+    harness_name: str, model: str | None, late_model: str | None, first: tuple[str, str | None], late: dict[str, tuple[str, str | None]]
+) -> None:
+    values: dict[str, object] = {**config.DEFAULTS, "harness": harness_name, "late_model": late_model}
+    if model is not None:
+        values["model"] = model
+    cfg = config.Config(values)
+    tiers = SUBAGENT_TIERS if harness_name == "subagent" else OPENCODE_TIERS
+
+    def expected(tier: str, literal: str | None) -> tuple[str, str]:
+        return (tier, tiers[tier]) if tier else ("", literal or "")
+
+    for round_number, final, want in ((1, False, first), (2, False, late[harness_name]), (3, False, late[harness_name]), (2, True, first)):
+        choice = config.reviewer_model(cfg, round_number=round_number, final=final)
+        assert (choice.tier, choice.id) == expected(*want), (round_number, final)
+
+
+def test_a_tier_key_changes_what_the_tier_means() -> None:
+    cfg = config.Config({**config.DEFAULTS, "subagent_weak_model": "haiku", "opencode_strong_model": "vendor/big"})
+    assert config.reviewer_model(cfg, round_number=2).display() == "weak (haiku)"
+    assert config.reviewer_model(config.Config({**cfg.values, "harness": "opencode"})).display() == "strong (vendor/big)"
+
+
+def test_a_tier_key_is_read_from_every_layer(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / config.REPO_CONFIG_NAME).write_text(json.dumps({"model": "weak", "subagent_weak_model": "haiku"}))
+    env = {"HOME": str(tmp_path / "home"), "ARL_SUBAGENT_STRONG_MODEL": "fable"}
+    cfg = config.load(str(repo), env)
+    assert (config.reviewer_model(cfg).id, config.model_choice(config.Config({**cfg.values, "model": "strong"})).id) == ("haiku", "fable")
+
+
+def test_an_empty_tier_key_keeps_its_built_in_model() -> None:
+    cfg = config.Config({**config.DEFAULTS, "subagent_strong_model": ""})
+    assert config.reviewer_model(cfg).display() == "strong (opus)"

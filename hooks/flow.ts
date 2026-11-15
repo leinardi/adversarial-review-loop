@@ -268,7 +268,7 @@ type Prepared = Answer & {
   bundle_dir: string
   roots: string[]
   answer_file: string
-  /** The configured model, empty for the session's subagent default. */
+  /** The round's model: a Claude Code alias for the subagent (`opus`), never empty. */
   reviewer_model?: string
   timeout_sec?: number
 }

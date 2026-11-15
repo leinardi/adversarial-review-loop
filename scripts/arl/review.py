@@ -100,9 +100,9 @@ def _for_ticket(cfg: config.Config, ticket: Mapping[str, Any]) -> config.Config:
 
 
 def _subagent_settings(cfg: config.Config) -> dict[str, Any]:
-    """What the mod spawns the reviewer subagent with: the configured model, empty for the
-    session's own subagent default, and how long it waits for the answer."""
-    return {"reviewer_model": cfg.as_str("model"), "timeout_sec": cfg.as_int("timeout_sec")}
+    """What the mod spawns the reviewer subagent with: the round's model id (``cfg`` already
+    through :func:`arl.config.for_round`), and how long it waits for the answer."""
+    return {"reviewer_model": config.model_choice(cfg).id, "timeout_sec": cfg.as_int("timeout_sec")}
 
 
 def _validated_verification(raw: object) -> list[dict[str, Any]]:

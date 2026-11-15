@@ -36,6 +36,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
+from arl.config import model_choice
 from arl.errors import OcrlError
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
@@ -190,9 +191,8 @@ def usage_record(usage: Usage | None) -> dict[str, int | float | None] | None:
 class Harness(Protocol):
     """What :mod:`arl.runner` requires of an external reviewer CLI.
 
-    ``binary`` is the executable to look for on ``PATH``. ``default_model`` is what
-    ``model`` resolves to when configuration leaves it unset -- per harness, because a
-    provider-qualified id that is meaningful to one CLI is meaningless to another.
+    ``binary`` is the executable to look for on ``PATH``. Its models are configuration
+    (``<name>_strong_model``, ``<name>_weak_model``), read through :func:`model`.
     """
 
     @property
@@ -202,10 +202,6 @@ class Harness(Protocol):
     @property
     def binary(self) -> str:
         """The executable this harness runs."""
-
-    @property
-    def default_model(self) -> str:
-        """``model``'s default when configuration does not set one."""
 
     def review_command(self, spec: ReviewSpec) -> Command:
         """The command that runs one review."""
@@ -283,17 +279,17 @@ def selected(config: Config) -> Harness:
 def model(config: Config, implementation: Harness | None = None) -> str:
     """The model id one invocation actually runs with.
 
-    ``model`` is per-harness by default (:data:`arl.config.DEFAULTS`), so "the configured
-    model" is not something ``Config`` can answer on its own -- and four commands print it
-    while a fifth passes it to the CLI. This is the single reader they all go through.
+    ``model`` may name a tier (:func:`arl.config.model_choice`), whose id is per harness, so "the
+    configured model" is not something ``Config`` can answer on its own. This is the single reader
+    every command goes through. Pass a round's model through :func:`arl.config.for_round` first.
 
     ``implementation`` is passed by a harness composing its *own* command, where the answer
     must come from that module rather than from whatever the configuration happens to select
-    -- a directly-called ``review_argv`` must not pick up another harness's default. Everyone
+    -- a directly-called ``review_argv`` must not pick up another harness's tier models. Everyone
     else omits it and gets :func:`selected`'s answer, raising :class:`UnknownHarness` with it.
     """
     chosen = selected(config) if implementation is None else implementation
-    return config.as_str("model") or chosen.default_model
+    return model_choice(config, chosen.name).id
 
 
 #: What :func:`display_model` shows when the configured harness is not one this build has.
@@ -308,16 +304,17 @@ SUBAGENT: Final = "subagent"
 
 
 def display_model(config: Config) -> str:
-    """:func:`model`, for the two callers that must render rather than raise.
+    """:func:`model` with its tier, ``weak (sonnet)``, for callers that must render rather than raise.
 
     ``status`` and ``config`` describe a configuration; they are how a user *finds* a bad
     ``harness`` value, so crashing on one would take away the tool that diagnoses it. Every
-    caller that decides something -- arming, resuming, composing a command -- uses
-    :func:`model` and takes the refusal.
+    caller that decides something -- resuming, composing a command -- uses :func:`model` and
+    takes the refusal.
     """
-    if config.as_str("harness") == SUBAGENT:
-        return config.as_str("model") or "the session's default"
-    try:
-        return model(config)
-    except UnknownHarness:
-        return UNIMPLEMENTED_MODEL
+    name = config.as_str("harness")
+    if name != SUBAGENT:
+        try:
+            get(name)
+        except UnknownHarness:
+            return UNIMPLEMENTED_MODEL
+    return model_choice(config, name).display()

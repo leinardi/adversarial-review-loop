@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
@@ -43,17 +44,21 @@ __all__ = [
     "DEFAULTS",
     "EFFORT_LEVELS",
     "INT_KEYS",
-    "LATE_MODEL_DEFAULTS",
+    "LATE_DEFAULT_TIERS",
     "LIST_KEYS",
+    "MODEL_TIERS",
+    "MODEL_WORDS",
     "REPO_CONFIG_NAME",
     "SEVERITY_KEYS",
     "SEVERITY_LABELS",
     "Config",
+    "ModelChoice",
     "for_round",
     "from_env",
-    "late_model",
     "late_threshold_rank",
     "load",
+    "model_choice",
+    "reviewer_model",
     "severity_rank",
     "threshold_rank",
     "user_config_path",
@@ -61,16 +66,17 @@ __all__ = [
 
 #: Every supported key, with its default.
 #:
-#: ``model`` defaults to the empty string rather than to a name, because a provider-qualified
-#: id that is meaningful to one reviewer CLI is meaningless to another: the real default is
-#: per-harness (``arl.harness.Harness.default_model``) and is resolved through
-#: ``arl.harness.model``, the one reader every command shares. An empty ``model`` therefore
-#: means "whatever this harness calls its default", never "no model".
+#: ``model`` and ``late_model`` take a tier word (``strong``, ``weak``), ``default`` (the built-in
+#: choice) or a literal model id, because a provider-qualified id that is meaningful to one
+#: reviewer CLI is meaningless to another: a tier names the harness's own model,
+#: ``<harness>_strong_model`` or ``<harness>_weak_model``. Read them through
+#: :func:`reviewer_model`, the one resolver every command shares. ``default`` (and an empty
+#: ``model``) is ``strong``.
 #:
 #: ``late_model`` defaults to ``None``, not ``""``, because the two mean different things: ``None``
-#: (the key set nowhere, or ``null``) is the harness's own late default
-#: (:data:`LATE_MODEL_DEFAULTS`), while an explicit ``""`` is the user's opt-out, ``model`` on every
-#: round. Read it through :func:`late_model`.
+#: (the key set nowhere, or ``null``) is ``default``, the harness's late tier
+#: (:data:`LATE_DEFAULT_TIERS`), while an explicit ``""`` is the user's opt-out, ``model`` on every
+#: round.
 #:
 #: ``harness`` defaults to ``subagent``: the mod spawns a fresh Claude Code subagent per round, and
 #: the engine only prepares and records. ``opencode`` is the one reviewer CLI the engine runs
@@ -83,10 +89,16 @@ __all__ = [
 #: launch directory, ``--root`` arguments and the paths the plan names (``arl init``).
 DEFAULTS: Final[dict[str, Any]] = {
     "harness": "subagent",
-    "model": "",
-    # The reviewer's model from the second round of a phase on: unset is the harness's default
-    # (`LATE_MODEL_DEFAULTS`), an explicit empty string means `model`. See `late_model`.
+    "model": "default",
+    # The reviewer's model from the second round of a phase on: unset is `default`, the harness's
+    # late tier (`LATE_DEFAULT_TIERS`); an explicit empty string means `model`. See `for_round`.
     "late_model": None,
+    # What `strong` and `weak` name on each harness. The subagent takes only Claude Code's model
+    # aliases: `$.agent.spawn` refuses a full id (tests/STEP0.md, L2).
+    "subagent_strong_model": "opus",
+    "subagent_weak_model": "sonnet",
+    "opencode_strong_model": "openai/gpt-6.1-sol",
+    "opencode_weak_model": "openai/gpt-6.1-terra",
     "variant": "",
     "block_severity": "medium",
     "late_block_severity": "high",
@@ -260,35 +272,75 @@ class Config:
         return []
 
 
-#: ``late_model`` when no layer sets it, per harness. Only the subagent has one: Sonnet matched Opus
-#: on the round-2 benchmark at lower cost (``tests/bench/README.md``). OpenCode's model names are
-#: the provider's own and nothing was measured there, so it keeps ``model`` on every round.
-LATE_MODEL_DEFAULTS: Final[Mapping[str, str]] = {"subagent": "sonnet"}
+#: The tiers ``model`` and ``late_model`` may name, each a ``<harness>_<tier>_model`` key.
+MODEL_TIERS: Final = ("strong", "weak")
+
+#: Every word ``model`` and ``late_model`` read as something other than a literal model id.
+MODEL_WORDS: Final = ("default", *MODEL_TIERS)
+
+#: The tier ``late_model``'s ``default`` names, per harness. Only the subagent has one: Sonnet matched
+#: Opus on the round-2 benchmark at lower cost (``tests/bench/README.md``). OpenCode's models are the
+#: provider's own and nothing was measured there, so a harness not listed keeps ``model`` on every
+#: round (the strong model, unless ``model`` names another).
+LATE_DEFAULT_TIERS: Final[Mapping[str, str]] = {"subagent": "weak"}
 
 
-def late_model(config: Config) -> str:
-    """The model a later round of a phase runs on, or ``""`` for ``model``.
+@dataclass(frozen=True)
+class ModelChoice:
+    """The model one review round runs on: the value configured, its tier and the id it names.
 
-    ``late_model`` as configured when any layer sets it, an empty string included (the opt-out);
-    otherwise the harness's default from :data:`LATE_MODEL_DEFAULTS`, ``""`` for one with none.
+    ``tier`` is ``strong`` or ``weak`` for a tier word or ``default``, empty for a literal id.
+    ``id`` is what the harness is given; empty only for a tier of a harness this build does not have.
     """
-    value = config.values.get("late_model")
-    if value is None:
-        return LATE_MODEL_DEFAULTS.get(config.as_str("harness"), "")
-    return config.as_str("late_model")
+
+    value: str
+    tier: str
+    id: str
+
+    def display(self) -> str:
+        """``weak (sonnet)`` for a tier, the bare id for a literal."""
+        return f"{self.tier} ({self.id})" if self.tier else self.id
+
+
+def model_choice(config: Config, harness_name: str | None = None) -> ModelChoice:
+    """What ``model`` names on ``harness_name`` (the configured harness when omitted).
+
+    ``default`` and an empty or unset ``model`` are ``strong``; a tier word reads the harness's
+    ``<harness>_<tier>_model`` key, its built-in value when a layer set it empty; anything else is
+    a literal id, passed through.
+    """
+    name = config.as_str("harness") if harness_name is None else harness_name
+    value = config.as_str("model") or "default"
+    tier = "strong" if value == "default" else value if value in MODEL_TIERS else ""
+    if not tier:
+        return ModelChoice(value=value, tier="", id=value)
+    key = f"{name}_{tier}_model"
+    return ModelChoice(value=value, tier=tier, id=config.as_str(key) or str(DEFAULTS.get(key, "")))
 
 
 def for_round(config: Config, *, round_number: int, final: bool) -> Config:
-    """``config`` as one review round runs it: :func:`late_model` in place of ``model`` from round 2.
+    """``config`` as one review round runs it: ``late_model`` in place of ``model`` from round 2.
 
     A later round of a phase checks a fix against findings already recorded, a narrower job than
     the first round's; the final review is one round over the whole run and always gets ``model``.
-    An empty late model (the opt-out, or a harness with no late default) changes nothing.
+    ``late_model`` unset or ``default`` is the harness's late tier (:data:`LATE_DEFAULT_TIERS`), and
+    ``model`` on a harness with none; an explicit ``""`` (the opt-out) changes nothing either. Read
+    the result through :func:`model_choice`.
     """
-    late = late_model(config)
-    if final or round_number < 2 or not late:
+    if final or round_number < 2:
+        return config
+    raw = config.values.get("late_model")
+    late = "default" if raw is None else config.as_str("late_model")
+    if late == "default":
+        late = LATE_DEFAULT_TIERS.get(config.as_str("harness"), "")
+    if not late:
         return config
     return Config({**config.values, "model": late})
+
+
+def reviewer_model(config: Config, *, round_number: int = 1, final: bool = False) -> ModelChoice:
+    """The model a review round runs on: :func:`for_round` read through :func:`model_choice`."""
+    return model_choice(for_round(config, round_number=round_number, final=final))
 
 
 def _read_json(path: Path) -> Any:

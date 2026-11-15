@@ -27,8 +27,12 @@ again when `/arl-config` sets it.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `harness` | `subagent` | who reviews: `subagent`, a hidden Claude Code subagent the plugin registers, or `opencode`, which the engine runs itself. An unknown name is refused, never replaced by the default |
-| `model` | empty: the session's subagent default, or `openai/gpt-5.6-sol` for `opencode` | the reviewer's model for the first round of each phase and for the final review. `opus` is the recommended value for the subagent |
-| `late_model` | `sonnet` on `subagent`; `model` on `opencode` | the reviewer's model from the second round of a phase on, which checks the fixes against findings already recorded. The final review always uses `model`. With the round-2 accounting, Sonnet and Opus each blocked on 12 of 12 seeded defects (24 of 24 combined), at 36 to 45 cost units against Opus's 41 to 69, and no run approved ([measured](../tests/bench/README.md#round-2-with-resolved-accounting)). OpenCode keeps `model`: its model names are the provider's own, and nothing was measured there. Set it to `""` to use `model` on every round; unset it to get the harness default back |
+| `model` | `default`: the strong tier | the reviewer's model for the first round of each phase and for the final review: `default`, `strong`, `weak`, or a model id passed to the harness as written. `default` (and an empty value) is `strong`. On `subagent` an id is one of Claude Code's aliases (`opus`, `sonnet`, `haiku`, `fable`): a full id such as `claude-opus-5-5` is refused by the host |
+| `late_model` | `default`: `weak` on `subagent`, `model` on `opencode` | the reviewer's model from the second round of a phase on, which checks the fixes against findings already recorded; the same values as `model`. The final review always uses `model`. With the round-2 accounting, Sonnet and Opus each blocked on 12 of 12 seeded defects (24 of 24 combined), at 36 to 45 cost units against Opus's 41 to 69, and no run approved ([measured](../tests/bench/README.md#round-2-with-resolved-accounting)). OpenCode keeps `model`: its model names are the provider's own, and nothing was measured there. Set it to `""` to use `model` on every round; unset it to get the harness default back |
+| `subagent_strong_model` | `opus` | what `strong` names on `subagent` |
+| `subagent_weak_model` | `sonnet` | what `weak` names on `subagent` |
+| `opencode_strong_model` | `openai/gpt-6.1-sol` | what `strong` names on `opencode` |
+| `opencode_weak_model` | `openai/gpt-6.1-terra` | what `weak` names on `opencode` |
 | `effort` | empty: the agent's default | the subagent reviewer's effort: `low`, `medium`, `high`, `xhigh` or `max`. A value that is no level is ignored, and said at session start |
 | `variant` | empty | OpenCode only: the model variant, passed as `-m <model>#<variant>`. A `model` containing `#` and a `variant` together are refused |
 | `disable_project_config` | `false` | OpenCode only: ignore the repository's own OpenCode config (`OPENCODE_DISABLE_PROJECT_CONFIG`) |
@@ -51,6 +55,17 @@ again when `/arl-config` sets it.
 | `max_reason_bytes` | `32768` | the reviewer's prose kept in the text Claude reads; findings are exempt |
 | `max_findings` | `200` | more findings than this makes the loop ask you (the phase is too large to judge), never a trimmed list |
 | `max_findings_bytes` | `65536` | the same cap, by size |
+
+### Choosing the reviewer's model
+
+`model` and `late_model` name a tier or a model. `strong` and `weak` are each harness's own pair,
+set by the four `*_strong_model` and `*_weak_model` keys, so `weak` means Sonnet on the subagent
+and `openai/gpt-6.1-terra` on OpenCode without either config spelling the other's names.
+`default` is the built-in choice: `strong` for `model`, and for `late_model` `weak` on the
+subagent and `model` on OpenCode. Anything else is a model id, passed through as written.
+
+The subagent reviewer runs `opus` unless `model` says otherwise. Before this, an unset `model`
+ran the session's own subagent default.
 
 ## Reading and writing it
 

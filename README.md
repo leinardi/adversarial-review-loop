@@ -96,7 +96,7 @@ The settings most people touch:
 | Key | Default | What it does |
 | --- | --- | --- |
 | `harness` | `subagent` | who reviews: a Claude Code subagent, or `opencode` |
-| `model` | the session's subagent default | the reviewer's model |
+| `model` | `default`: the strong model (`opus` on the subagent) | the reviewer's model: `default`, `strong`, `weak` or a model id |
 | `effort` | the agent's default | the subagent reviewer's effort, `low` to `max` |
 | `verify_cmd` | unset | the checks Claude is told to run before each review, named in every prompt |
 | `block_severity` | `medium` | an actionable finding at or above this blocks the approval |

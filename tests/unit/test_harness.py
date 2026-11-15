@@ -125,7 +125,7 @@ def test_a_child_that_exits_early_is_not_an_error(tmp_path: Path) -> None:
 @pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
 def test_every_harness_satisfies_the_protocol(implementation: harness.Harness) -> None:
     assert isinstance(implementation, harness.Harness)
-    assert implementation.name and implementation.binary and implementation.default_model
+    assert implementation.name and implementation.binary
 
 
 @pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
@@ -179,12 +179,14 @@ def test_the_harness_key_selects_the_implementation_of_that_name(implementation:
 
 
 @pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
-def test_an_unset_model_resolves_to_the_harnesss_own_default(implementation: harness.Harness) -> None:
-    """``DEFAULTS["model"]`` is "" on purpose: a provider-qualified id meaningful to one CLI is
-    meaningless to another, so the default belongs to the harness and is read through one helper."""
-    assert DEFAULTS["model"] == ""
-    assert harness.model(config_with(harness=implementation.name)) == implementation.default_model
-    assert implementation.default_model, f"{implementation.name} offers no default model to fall back to"
+def test_an_unset_model_resolves_to_the_harnesss_strong_tier(implementation: harness.Harness) -> None:
+    """``DEFAULTS["model"]`` is ``default`` on purpose: a provider-qualified id meaningful to one CLI is
+    meaningless to another, so ``default`` names the harness's own strong model, read through one helper."""
+    assert DEFAULTS["model"] == "default"
+    strong = DEFAULTS[f"{implementation.name}_strong_model"]
+    assert strong, f"{implementation.name} has no strong model to fall back to"
+    assert harness.model(config_with(harness=implementation.name)) == strong
+    assert harness.model(config_with(harness=implementation.name, model="")) == strong
 
 
 @pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
@@ -193,14 +195,15 @@ def test_a_configured_model_beats_the_harnesss_default(implementation: harness.H
 
 
 @pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
-def test_a_harness_composing_its_own_command_uses_its_own_default(implementation: harness.Harness) -> None:
+def test_a_harness_composing_its_own_command_uses_its_own_tier_models(implementation: harness.Harness) -> None:
     """A harness passes itself to ``model``, so a directly-called command builder cannot pick up
-    a *different* harness's default when configuration selects one and this module spells the
-    other -- which is exactly what the dry run and these tests do."""
+    a *different* harness's tier models when configuration selects one and this module spells the
+    other -- which is exactly what these tests do."""
     other = next((candidate for candidate in every_harness() if candidate is not implementation), None)
     if other is None:  # pragma: no cover - only with a single registered harness
         pytest.skip("a second harness is needed to tell the two defaults apart")
-    assert harness.model(config_with(harness=other.name), implementation) == implementation.default_model
+    assert harness.model(config_with(harness=other.name), implementation) == DEFAULTS[f"{implementation.name}_strong_model"]
+    assert harness.model(config_with(harness=other.name, model="weak"), implementation) == DEFAULTS[f"{implementation.name}_weak_model"]
 
 
 def test_an_unimplemented_harness_is_refused_rather_than_replaced() -> None:
@@ -222,7 +225,7 @@ def test_display_model_renders_an_unimplemented_harness_instead_of_raising() -> 
     shown = harness.display_model(config_with(harness="not-a-harness"))
 
     assert shown == harness.UNIMPLEMENTED_MODEL
-    assert shown not in {implementation.default_model for implementation in every_harness()}
+    assert shown not in {value for key, value in DEFAULTS.items() if key.endswith("_model")}
 
 
 @pytest.mark.parametrize("implementation", every_harness(), ids=lambda h: h.name)
@@ -336,7 +339,9 @@ def test_an_opencode_review_is_spelled_for_opencode_2(variant: str, tmp_path: Pa
     assert not {"--pure", "--dir", "--variant"} & set(built.argv)
     assert built.cwd == spec.repo
     chosen = built.argv[built.argv.index("-m") + 1]
-    assert chosen == (f"{opencode.DEFAULT_MODEL}#high" if variant else opencode.DEFAULT_MODEL)
+    strong = DEFAULTS["opencode_strong_model"]
+    assert strong == "openai/gpt-6.1-sol"
+    assert chosen == (f"{strong}#high" if variant else strong)
     assert "OPENCODE_PERMISSION" not in built.env
     content = json.loads(built.env["OPENCODE_CONFIG_CONTENT"])
     expected = json.loads(opencode.permission(spec.bundle_dir, spec.roots))
@@ -375,6 +380,21 @@ def test_opencode_runs_late_model_from_round_2_of_a_phase(round_number: int, fin
     assert harness.display_model(cfg) == expected
 
 
-def test_an_empty_late_model_keeps_the_harnesss_default_on_every_round() -> None:
+def test_an_unset_late_model_keeps_the_strong_model_on_every_opencode_round() -> None:
     cfg = for_round(config_with(harness="opencode"), round_number=3, final=False)
-    assert harness.model(cfg) == opencode.HARNESS.default_model
+    assert harness.model(cfg) == DEFAULTS["opencode_strong_model"]
+    assert harness.display_model(cfg) == "strong (openai/gpt-6.1-sol)"
+
+
+def test_a_weak_late_model_runs_opencodes_weak_tier_from_round_2() -> None:
+    cfg = config_with(harness="opencode", late_model="weak", variant="high")
+    argv = opencode.review_argv("t", config=for_round(cfg, round_number=2, final=False))
+    assert argv[argv.index("-m") + 1] == "openai/gpt-6.1-terra#high"
+    argv = opencode.review_argv("t", config=for_round(cfg, round_number=2, final=True))
+    assert argv[argv.index("-m") + 1] == "openai/gpt-6.1-sol#high"
+
+
+def test_the_subagent_shows_its_tier_and_alias() -> None:
+    assert harness.display_model(config_with(harness="subagent")) == "strong (opus)"
+    assert harness.display_model(for_round(config_with(harness="subagent"), round_number=2, final=False)) == "weak (sonnet)"
+    assert harness.display_model(config_with(harness="subagent", model="haiku")) == "haiku"

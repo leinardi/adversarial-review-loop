@@ -46,7 +46,7 @@ test('a review runs one fresh reviewer on the prepared prompt and records its an
 
   expect(text).toBe(RECORDED.message)
   expect(r.tasks).toEqual([
-    { prompt: 'Review phase 1.', description: 'Review phase1, round 1', model: '', timeoutSec: 900, dirs: [PREPARED.bundle_dir, ...PREPARED.roots] },
+    { prompt: 'Review phase 1.', description: 'Review phase1, round 1', model: 'opus', timeoutSec: 900, dirs: [PREPARED.bundle_dir, ...PREPARED.roots] },
   ])
   expect(w.written.get(PREPARED.answer_file)).toBe(APPROVED.answer)
   expect(w.commands()).toEqual(['review prepare', 'review record'])
@@ -466,6 +466,6 @@ test('the review tool answers through the mod, and a reviewer the kit cannot sta
   await start($)
 
   expect(await callTool($, 'review')).toBe('The reviewer failed.')
-  expect(w.spawns).toEqual([{ prompt: 'Review phase 1.', type: 'adversarial-review-loop:reviewer', model: undefined }])
+  expect(w.spawns).toEqual([{ prompt: 'Review phase 1.', type: 'adversarial-review-loop:reviewer', model: 'opus' }])
   expect(w.calls.at(-1)?.args.slice(3, 5)).toEqual(['--failed', 'operational'])
 })

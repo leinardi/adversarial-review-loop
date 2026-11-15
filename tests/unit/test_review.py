@@ -1631,17 +1631,17 @@ def test_round_2_runs_on_late_model_and_says_so(ws: Path, engine: Engine, answer
     assert prepare(engine, ws)["reviewer_model"] == "opus"
 
 
-def test_round_2_runs_on_sonnet_by_default_and_the_final_review_on_model(ws: Path, engine: Engine, answers: Path) -> None:
+def test_round_2_runs_on_the_weak_tier_by_default_and_the_final_review_on_model(ws: Path, engine: Engine, answers: Path) -> None:
     (ws / ".adversarial-review-loop.json").write_text(json.dumps({"model": "opus", "final_review": True}))
     started(engine, ws, phases=1)
     edit(ws / "api" / "src" / "main.py", "print(2)\n")
     review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
     edit(ws / "api" / "src" / "main.py", "print(3)\n")
     second = prepare(engine, ws)
-    assert (second["round"], second["reviewer_model"], second["model"]) == (2, "sonnet", "sonnet")
+    assert (second["round"], second["reviewer_model"], second["model"]) == (2, "sonnet", "weak (sonnet)")
     outcome = record(engine, ws, second["review_id"], write_answer(answers, "RESOLVED id=r1.1 | prints 3", *APPROVE))
-    assert "- model: `sonnet`" in Path(outcome["report"]).read_text()
-    assert engine(ws, "stats")["stats"]["stages"][0]["rounds"][1]["model"] == "sonnet"
+    assert "- model: `weak (sonnet)`" in Path(outcome["report"]).read_text()
+    assert engine(ws, "stats")["stats"]["stages"][0]["rounds"][1]["model"] == "weak (sonnet)"
     final = prepare(engine, ws)
     assert (final["label"], final["reviewer_model"]) == ("final", "opus")
 
@@ -1667,13 +1667,12 @@ def test_the_final_review_runs_on_model(ws: Path, engine: Engine, answers: Path)
     assert (final["label"], final["reviewer_model"]) == ("final", "opus")
 
 
-def test_an_unset_model_is_passed_on_empty_not_as_its_display_text(ws: Path, engine: Engine) -> None:
-    """``model`` is what the band shows ("the session's default"); the spawn must get nothing."""
+def test_an_unset_model_is_passed_on_as_its_id_not_its_display_text(ws: Path, engine: Engine) -> None:
+    """``model`` is what the band shows ("strong (opus)"); the spawn gets the alias alone."""
     started(engine, ws)
     edit(ws / "api" / "src" / "main.py", "print('api 2')\n")
     ticket = prepare(engine, ws)
-    assert ticket["reviewer_model"] == ""
-    assert ticket["model"] != ""
+    assert (ticket["reviewer_model"], ticket["model"]) == ("opus", "strong (opus)")
 
 
 def test_the_usage_the_mod_reports_reaches_the_report(ws: Path, engine: Engine, answers: Path) -> None:

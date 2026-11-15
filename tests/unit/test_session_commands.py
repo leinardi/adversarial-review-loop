@@ -222,12 +222,18 @@ def test_config_shows_every_key_and_its_layer(engine: Engine, ws: Path, monkeypa
 
 
 def test_config_shows_the_late_model_round_2_runs_on(engine: Engine, ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    assert "  late_model              sonnet  (default)" in engine(ws, "config")["text"]
+    text = engine(ws, "config")["text"]
+    assert "  model                   strong (opus)  (default)" in text
+    assert "  late_model              weak (sonnet)  (default)" in text
+    assert "  subagent_weak_model     sonnet  (default)" in text
     monkeypatch.setenv("ARL_LATE_MODEL", "")
     assert "  late_model              (model)  (env)" in engine(ws, "config")["text"]
     monkeypatch.delenv("ARL_LATE_MODEL")
     monkeypatch.setenv("ARL_HARNESS", "opencode")
-    assert "  late_model              (model)  (default)" in engine(ws, "config")["text"]
+    assert "  late_model              strong (openai/gpt-6.1-sol)  (default)" in engine(ws, "config")["text"]
+    monkeypatch.setenv("ARL_SUBAGENT_WEAK_MODEL", "haiku")
+    monkeypatch.setenv("ARL_HARNESS", "subagent")
+    assert "  late_model              weak (haiku)  (default)" in engine(ws, "config")["text"]
 
 
 def test_config_sets_and_unsets_the_user_config(engine: Engine, ws: Path) -> None:

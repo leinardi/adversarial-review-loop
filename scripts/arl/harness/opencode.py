@@ -43,7 +43,6 @@ from arl.harness import Command, PayloadError, ReviewSpec, Usage, model
 
 __all__ = [
     "AGENT",
-    "DEFAULT_MODEL",
     "HARNESS",
     "OpenCodeHarness",
     "config_content",
@@ -52,9 +51,6 @@ __all__ = [
     "permission",
     "review_argv",
 ]
-
-#: ``model``'s default under this harness.
-DEFAULT_MODEL: Final = "openai/gpt-5.6-sol"
 
 
 def isolation_argv(config: Config) -> list[str]:
@@ -81,7 +77,7 @@ def review_argv(title: str, *, config: Config) -> list[str]:
     ``variant`` is spelled into the model, ``provider/model#variant``.
     """
     argv: list[str] = [*isolation_argv(config)]
-    # `HARNESS`, not the configured harness: an OpenCode argv carries OpenCode's default model
+    # `HARNESS`, not the configured harness: an OpenCode argv carries OpenCode's tier models
     # even when this is called directly.
     chosen = model(config, HARNESS)
     variant = config.as_str("variant")
@@ -152,7 +148,6 @@ class OpenCodeHarness:
 
     name: Final = "opencode"
     binary: Final = "opencode"
-    default_model: Final = DEFAULT_MODEL
 
     def review_command(self, spec: ReviewSpec) -> Command:
         """``opencode run <prompt> …`` plus the permission document as an env override."""

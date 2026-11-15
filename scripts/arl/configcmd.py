@@ -128,8 +128,9 @@ def _show(launch_dir: Path) -> str:
     for key in sorted(config.DEFAULTS):
         value = harness.display_model(resolved) if key == "model" else resolved.values.get(key)
         if key == "late_model":
-            # What round 2 runs on: the harness's default when unset, `model` for an empty value.
-            value = config.late_model(resolved) or "(model)"
+            # What round 2 runs on: the harness's late tier when unset, `model` for an empty value.
+            opted_out = resolved.values.get(key) == ""
+            value = "(model)" if opted_out else harness.display_model(config.for_round(resolved, round_number=2, final=False))
         lines.append(f"  {key.ljust(width)}  {_display(value)}  ({source[key]})")
     lines.append(f"User config: {config.user_config_path()}; this directory's: {launch_dir / config.REPO_CONFIG_NAME}")
     return "\n".join(lines)
