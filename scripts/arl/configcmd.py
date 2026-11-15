@@ -33,9 +33,9 @@ from pathlib import Path
 from typing import Any, Final
 
 from arl import atomic, config, harness
-from arl.state import RunError, RunPaths
+from arl.state import RunError, RunPaths, run_overlay
 
-__all__ = ["USAGE", "cmd_config", "effort_level"]
+__all__ = ["USAGE", "cmd_config", "effort_level", "layers"]
 
 USAGE: Final = (
     "usage: /arl-config                         every key, its value and the layer that set it\n"
@@ -103,9 +103,10 @@ def _write(path: Path, document: Mapping[str, Any]) -> None:
     atomic.write_atomic(path, json.dumps(document, indent=2, sort_keys=True) + "\n")
 
 
-def _layers(launch_dir: Path) -> dict[str, str]:
+def layers(launch_dir: Path, overlay: Mapping[str, str] | None = None) -> dict[str, str]:
     """The layer that last set each key, in ``config.load``'s order; a file that does not parse
-    sets nothing, as ``load`` drops the whole file layer then."""
+    sets nothing, as ``load`` drops the whole file layer then. ``overlay`` is the run's own
+    (``run``), between the files and the environment."""
     source = dict.fromkeys(config.DEFAULTS, "default")
     try:
         files = [(name, _read(path)) for name, path in (("user", config.user_config_path()), ("repo", launch_dir / config.REPO_CONFIG_NAME))]
@@ -115,21 +116,25 @@ def _layers(launch_dir: Path) -> dict[str, str]:
         for key in document:
             if key in source:
                 source[key] = name
+    for key in overlay or {}:
+        if key in source:
+            source[key] = "run"
     for key in config.from_env():
         source[key] = "env"
     return source
 
 
-def _show(launch_dir: Path) -> str:
-    resolved = config.load(str(launch_dir))
-    source = _layers(launch_dir)
+def _show(launch_dir: Path, overlay: Mapping[str, str]) -> str:
+    resolved = config.load(str(launch_dir), overrides=overlay)
+    source = layers(launch_dir, overlay)
     width = max(len(key) for key in config.DEFAULTS)
     lines = [f"adversarial-review-loop configuration for {launch_dir}"]
     for key in sorted(config.DEFAULTS):
         value = harness.display_model(resolved) if key == "model" else resolved.values.get(key)
         if key == "late_model":
-            # What round 2 runs on: the harness's default when unset, `model` for an empty value.
-            value = config.late_model(resolved) or "(model)"
+            # What round 2 runs on: the harness's late tier when unset, `model` for an empty value.
+            opted_out = resolved.values.get(key) == ""
+            value = "(model)" if opted_out else harness.display_model(config.for_round(resolved, round_number=2, final=False))
         lines.append(f"  {key.ljust(width)}  {_display(value)}  ({source[key]})")
     lines.append(f"User config: {config.user_config_path()}; this directory's: {launch_dir / config.REPO_CONFIG_NAME}")
     return "\n".join(lines)
@@ -183,11 +188,12 @@ def cmd_config(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         raise RunError("config", f"cannot split the arguments: {exc}") from exc
     launch_dir = paths.launch_dir
     if not tokens:
-        return {"ok": True, "text": _show(launch_dir), "effort": _effort(launch_dir)}
+        return {"ok": True, "text": _show(launch_dir, run_overlay(paths)), "effort": _effort(launch_dir)}
     key, values, repo, unset = _parse(tokens)
     target = _target(launch_dir, repo=repo)
     document = _read(target)
-    before = config.load(str(launch_dir)).values.get(key)
+    overlay = run_overlay(paths)
+    before = config.load(str(launch_dir), overrides=overlay).values.get(key)
     if unset:
         if key not in document:
             return {
@@ -205,9 +211,9 @@ def cmd_config(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         document[key] = value
         _write(target, document)
         written = _display(value)
-    after = config.load(str(launch_dir)).values.get(key)
+    after = config.load(str(launch_dir), overrides=overlay).values.get(key)
     text = f"{key}: {_display(before)} -> {_display(after)} (wrote {written} to {target})"
-    winner = _layers(launch_dir)[key]
+    winner = layers(launch_dir, overlay)[key]
     layer = "repo" if repo else "user"
     if not unset and winner != layer:
         text += f"\nNote: the {winner} layer overrides it, so {_display(after)} is what a run uses."

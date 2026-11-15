@@ -19,7 +19,7 @@
 // phase, and the root a refused write leaves behind.
 
 import { expect, test } from 'claude-code/testing'
-import { implementArgs, openPane, runCommand } from '../../hooks/commands'
+import { implementArgs, modelArgs, openPane, runCommand } from '../../hooks/commands'
 import { pane } from '../../hooks/ui'
 import { announce, continueRun, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
 import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, settle, start, summary, world } from './world'
@@ -56,6 +56,7 @@ test('every command is registered with the arl- prefix: Claude Code ships /statu
     'arl-finish',
     'arl-stop',
     'arl-config',
+    'arl-model',
     'arl-remove-root',
   ])
 })
@@ -107,12 +108,15 @@ test('a command runs through the kit and answers its text', async ($, on) => {
 // --------------------------------------------------------------------------
 
 test('/arl-implement parses its flags and refuses what it cannot read', () => {
-  expect(implementArgs('--new --root ../web plan.md')).toEqual({ plan: 'plan.md', isNew: true, roots: ['../web'] })
+  expect(implementArgs('--new --root ../web plan.md')).toEqual({ plan: 'plan.md', isNew: true, roots: ['../web'], model: '' })
+  expect(implementArgs('--model weak plan.md')).toEqual({ plan: 'plan.md', isNew: false, roots: [], model: 'weak' })
+  expect(implementArgs('plan.md --model')).toContain('--model needs a model')
+  expect(implementArgs('--model weak --model strong plan.md')).toContain('One model at a time')
   expect(implementArgs('')).toContain('Usage')
   expect(implementArgs('--root')).toBe('--root needs a directory.')
   expect(implementArgs('--fast plan.md')).toBe('Unknown flag --fast.')
   expect(implementArgs('a.md b.md')).toContain('One plan at a time')
-  expect(implementArgs('--root "my web" "my plan.md"')).toEqual({ plan: 'my plan.md', isNew: false, roots: ['my web'] })
+  expect(implementArgs('--root "my web" "my plan.md"')).toEqual({ plan: 'my plan.md', isNew: false, roots: ['my web'], model: '' })
   expect(implementArgs('"open.md')).toContain('Unbalanced quote')
 })
 
@@ -133,6 +137,45 @@ test('/arl-implement starts the run, opens the pane, and starts Claude on the pl
   expect(w.submitted).toEqual([])
   await settle()
   expect(w.submitted).toEqual(['Implement the plan.'])
+})
+
+test('/arl-implement --model passes the run its model', async () => {
+  at()
+  const { $, w } = fakeEngine({ engine: { init: { ok: true, run: summary(), archived: '', prompt: 'Implement the plan.' } } })
+  await runCommand($, 'arl-implement', '--model weak plan.md')
+  expect(w.calls[0]?.args).toEqual(['init', '--plan', 'plan.md', '--model', 'weak'])
+  await settle()
+})
+
+test('/arl-model reads which rounds and the model, and refuses anything else', () => {
+  expect(modelArgs('')).toEqual([])
+  expect(modelArgs('weak')).toEqual(['set', 'all', 'weak'])
+  expect(modelArgs('first opus')).toEqual(['set', 'first', 'opus'])
+  expect(modelArgs('late default')).toEqual(['set', 'late', 'default'])
+  expect(modelArgs('reset')).toEqual(['reset'])
+  expect(modelArgs('reset late')).toEqual(['reset', 'late'])
+  expect(modelArgs('reset sometimes')).toContain('Usage')
+  expect(modelArgs('weak strong')).toContain('Usage')
+  expect(modelArgs('first')).toContain('Usage')
+  expect(modelArgs('all weak extra')).toContain('Usage')
+})
+
+test('/arl-model sets the run model, says when it applies and passes on the warnings', async () => {
+  at()
+  const { $, w } = fakeEngine({ engine: { model: { ok: true, text: 'Reviewer model for this run (subagent):', overlay: {}, warnings: ['ARL_MODEL is set, so it beats this run\'s model'] } } })
+  const text = await runCommand($, 'arl-model', 'first weak')
+  expect(w.calls[0]?.args).toEqual(['model', 'set', 'first', 'weak'])
+  expect(text).toContain('Reviewer model for this run')
+  expect(text).toContain('from the next review on')
+  expect(text).toContain("Note: ARL_MODEL is set, so it beats this run's model.")
+  expect(await runCommand($, 'arl-model', '')).not.toContain('next review')
+  expect(w.calls[1]?.args).toEqual(['model'])
+})
+
+test('/arl-model passes on a refusal', async () => {
+  at()
+  const { $ } = fakeEngine({ engine: { model: { ok: false, code: 'bad-model', error: 'the subagent reviewer runs on one of the aliases' } } })
+  expect(await runCommand($, 'arl-model', 'claude-opus-5-5')).toContain('bad-model')
 })
 
 test('/arl-implement over an active run is refused, and nothing starts', async () => {

@@ -70,7 +70,9 @@ _INCOMPLETE: Final = "| review transcript incomplete"
 _FAILURE_ERROR_CHARS: Final = 500
 
 #: Failure kinds the mod may report for a subagent that did not answer.
-FAILURE_KINDS: Final = ("transient", "operational")
+#: How a reviewer that gave no answer failed. ``model``: its model is unknown, not accessible, or
+#: was replaced by the session; the run waits for the user at once, with no retry and no budget.
+FAILURE_KINDS: Final = ("transient", "operational", "model")
 
 
 def _require(run: RunState | None) -> RunState:
@@ -85,13 +87,32 @@ def _review_dir(paths: RunPaths, run_id: str, seq: int) -> Path:
     return paths.run_dir / "reviews" / f"{run_id}-{seq:03d}"
 
 
-def _load_config(paths: RunPaths) -> config.Config:
-    return config.load(str(paths.launch_dir))
+def _load_config(paths: RunPaths, run: RunState | None = None) -> config.Config:
+    """The configuration, with ``run``'s own model choice (``/arl-model``) when one is given."""
+    return config.load(str(paths.launch_dir), overrides=run.model_overlay if run is not None else None)
+
+
+def _pinned(cfg: config.Config) -> dict[str, str]:
+    """What a ticket records of the reviewer that runs it: ``cfg`` already through ``for_round``."""
+    choice = config.model_choice(cfg)
+    return {"harness": cfg.as_str("harness"), "model_id": choice.id, "model_tier": choice.tier, "variant": cfg.as_str("variant")}
 
 
 def _for_ticket(cfg: config.Config, ticket: Mapping[str, Any]) -> config.Config:
-    """``cfg`` as the ticket's round runs it (:func:`arl.config.for_round`)."""
-    return config.for_round(cfg, round_number=int(ticket.get("round") or 1), final=ticket.get("stage") == "final")
+    """``cfg`` as the ticket's round runs it: the reviewer it recorded at ``prepare``.
+
+    A model changed since (``/arl-model``, a config file, ``variant``) is the next review's: the
+    one in flight keeps what it was prepared with. A ticket from before the model was recorded
+    falls back to resolving it again (:func:`arl.config.for_round`).
+    """
+    if "model_id" not in ticket:
+        return config.for_round(cfg, round_number=int(ticket.get("round") or 1), final=ticket.get("stage") == "final")
+    name = str(ticket.get("harness") or "")
+    tier = str(ticket.get("model_tier") or "")
+    pinned: dict[str, Any] = {"harness": name, "late_model": "", "variant": str(ticket.get("variant") or "")}
+    # A tier is pinned by its key, so the report still says which tier ran.
+    pinned.update({"model": tier, f"{name}_{tier}_model": str(ticket["model_id"])} if tier else {"model": str(ticket["model_id"])})
+    return config.Config({**cfg.values, **pinned})
 
 
 # --------------------------------------------------------------------------
@@ -100,9 +121,9 @@ def _for_ticket(cfg: config.Config, ticket: Mapping[str, Any]) -> config.Config:
 
 
 def _subagent_settings(cfg: config.Config) -> dict[str, Any]:
-    """What the mod spawns the reviewer subagent with: the configured model, empty for the
-    session's own subagent default, and how long it waits for the answer."""
-    return {"reviewer_model": cfg.as_str("model"), "timeout_sec": cfg.as_int("timeout_sec")}
+    """What the mod spawns the reviewer subagent with: the round's model id (``cfg`` already
+    through :func:`arl.config.for_round`), and how long it waits for the answer."""
+    return {"reviewer_model": config.model_choice(cfg).id, "timeout_sec": cfg.as_int("timeout_sec")}
 
 
 def _validated_verification(raw: object) -> list[dict[str, Any]]:
@@ -241,10 +262,10 @@ def _skip(run: RunState, trees: Mapping[str, str], cfg: config.Config, *, note: 
 
 def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     """Prepare the review of the current stage and make it the pending ticket."""
-    cfg = _load_config(paths)
     verification = _validated_verification(args.get("verification"))
     with locked_state(paths) as loaded:
         run = _require(loaded)
+        cfg = _load_config(paths, run)
         # Paused means the loop stops prompting Claude, not that a review Claude asks for is refused.
         run.require_status("active", "paused")
         decision = run.pending_decision()
@@ -312,8 +333,10 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             # What a stored report names as the guidance this round ran under.
             "guidance": guidance.disclosure(sources),
             # Who reviews it, as configured now: what /arl-stats shows the round ran on.
-            "harness": cfg.as_str("harness"),
             "model": harness.display_model(cfg),
+            # ... and what runs it, from here to its record: a model changed meanwhile is the next
+            # review's (`_for_ticket`).
+            **_pinned(cfg),
             # For Claude only, with whatever the round answers; never part of the bundle.
             "note": _ignored_note(ignored),
         }
@@ -373,6 +396,17 @@ def _count_failure(run: RunState, kind: str, error: str, cfg: config.Config) -> 
         run.wait_for_user("failures", f"{run.data[key]} {kind} failures in a row; the last: {error}")
         return f" The run now waits for the user ({budget} exceeded)."
     return ""
+
+
+def _model_refusal(ticket: Mapping[str, Any], target: Target, error: str) -> str:
+    """Why a model failure stops the run, and what the user can do: it names the model and the round."""
+    shown = str(ticket.get("model") or ticket.get("model_id") or "the configured model")
+    stage = "the final review" if ticket.get("stage") == "final" else f"round {int(ticket.get('round') or 1)} of {target.label}"
+    which = "first" if ticket.get("stage") == "final" or int(ticket.get("round") or 1) < 2 else "late"
+    return (
+        f"The reviewer's model {shown} cannot be used for {stage}: {error}. "
+        f"Nothing was retried. Choose another model (/arl-model {which} default, or /arl-model {which} <model>), then /arl-resume."
+    )
 
 
 def _repair_reason(unaccounted: tuple[str, ...]) -> str:
@@ -732,7 +766,12 @@ def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about wh
                 "error": review.error[:_FAILURE_ERROR_CHARS],
             }
         )
-        if review.verdict == "OP_FAILURE":
+        if review.verdict == "OP_FAILURE" and review.kind == "model":
+            run.invalidate_ticket("failed")
+            detail = _model_refusal(ticket, target, review.error)
+            run.wait_for_user("model", detail)
+            note = f"\n{detail}\n"
+        elif review.verdict == "OP_FAILURE":
             run.invalidate_ticket("failed")
             note = _count_failure(run, review.kind or "operational", review.error, cfg)
         else:
@@ -768,7 +807,6 @@ def record(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     pending and every root still has the tree it was reviewed at; a root that changed during the
     review makes the answer stale -- it judged content that is no longer there.
     """
-    cfg = _load_config(paths)
     review_id = str(args["review_id"])
     failed = str(args.get("failed") or "")
     if failed and failed not in FAILURE_KINDS:
@@ -777,6 +815,7 @@ def record(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         raise RunError("no-answer", "record takes the reviewer's answer file, or --failed")
     with locked_state(paths) as loaded:
         run = _require(loaded)
+        cfg = _load_config(paths, run)
         try:
             ticket = _pending(run, review_id)
         except RunError:
@@ -919,8 +958,6 @@ def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     The state lock is not held while the reviewer runs: ``/arl-stop`` or a replan meanwhile retires
     the ticket, and the late answer is then refused by :func:`record`.
     """
-    cfg = _load_config(paths)
-    _external_harness(cfg)
     review_id = str(args["review_id"])
     with locked_state(paths) as loaded:
         run = _require(loaded)
@@ -930,13 +967,21 @@ def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             run.save()
             raise
         target = _target(run, ticket)
+        # The reviewer the ticket was prepared for, not whatever is configured now.
+        cfg = _for_ticket(_load_config(paths, run), ticket)
+    _external_harness(cfg)
     review_dir = _review_dir(paths, str(ticket["run_id"]), int(ticket["seq"]))
     prompt, answer = review_dir / "prompt.md", review_dir / "answer.md"
+    try:
+        # Before anything runs: a model the reviewer does not list fails here, once, and asks the user.
+        runner.check_model(cfg)
+    except runner.ReviewerFailed as exc:
+        return record(paths, {"review_id": review_id, "failed": runner.classify_op_failure(exc, answer), "error": str(exc)})
     spent: harness.Usage | None = None
     for attempt in range(2):
         invocation = runner.Invocation(bundle_dir=review_dir / "bundle", prompt_file=prompt, title=f"arl {review_id} {attempt}", out_path=answer)
         try:
-            spent = harness.add_usage(spent, runner.invoke(target, invocation, config=_for_ticket(cfg, ticket)))
+            spent = harness.add_usage(spent, runner.invoke(target, invocation, config=cfg))
         except runner.LaunchError as exc:
             # A repair that could not start still leaves the review before it paid for.
             return record(paths, {"review_id": review_id, "failed": "operational", "error": str(exc), "usage": _usage_arg(spent)})

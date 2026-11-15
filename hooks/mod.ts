@@ -24,7 +24,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import { COMMANDS, openPane, registerCommands, runCommand } from './commands'
 import { engine } from './engine'
 import { addRoot, continueRun, ensureRoot, parentOf, type Registration, review, session, resetWrites, setPhases, sweepRoots, track, unregistered, writeIn } from './flow'
-import { countStep, deliver, registerReviewer, REVIEWER, reviewerDecision } from './reviewer'
+import { countStep, deliver, registerReviewer, resetCheckedModels, REVIEWER, reviewerDecision } from './reviewer'
 import { TOOLS, type ToolName } from './text'
 import { pane, registerUi, showBusy } from './ui'
 
@@ -95,6 +95,8 @@ export const register: Register = on => {
     session.id = await $.session.id()
     // A reload starts the session's hooks again: what an earlier session wrote is not this one's.
     resetWrites()
+    // A model checked by an earlier session is checked again: access can change between sessions.
+    resetCheckedModels()
     // A pane the person closed stays closed for their session, not for the next one (`/clear`).
     pane.dismissed = false
     // A session that ended mid-turn left the flag set; this one has run no turn yet.

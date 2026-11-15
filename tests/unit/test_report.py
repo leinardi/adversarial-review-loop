@@ -99,7 +99,7 @@ def test_the_report_records_what_decided_it(reports_dir: Path) -> None:
     assert "- verdict (recomputed by the engine): **CHANGES_REQUIRED**\n" in text
     assert "- root `ws` (/launch/ws): `basetree` -> `headtree`\n" in text
     assert "- harness: `subagent`\n" in text
-    assert "- model: `the session's default` (variant `thinking`)\n" in text
+    assert "- model: `strong (opus)` (variant `thinking`)\n" in text
     assert "- block_severity: `medium`\n" in text
     assert "- engine note: the reviewer timed out after 900s\n" in text
     assert "Returns success on a failed lookup" in text

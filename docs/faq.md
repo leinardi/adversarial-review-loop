@@ -89,11 +89,19 @@ A stopped or complete run is archived without `--new`.
 
 ## Cost
 
+### The loop says the reviewer's model cannot be used
+
+The model was refused before the reviewer could answer: unknown, not available to your account, or
+replaced by the session (an `availableModels` allowlist, for example). The message names the model,
+the round and the provider's reason. Nothing was retried, and no failure budget was spent. Choose
+another with `/arl-model` (`/arl-model default` goes back to the built-in models) or fix the
+access, then `/arl-resume`. The check is described in [how it works](how-it-works.md#the-reviewers-model).
+
 ### What does a review cost?
 
 One reviewer run per round, plus at most one repair when an answer breaks the contract. Each report's
 `- cost:` line gives the tokens and the time; `/arl-report` shows them, and `/arl-stats` lists
 every round of the run with its model, requests, tokens, findings and what Claude stated about
-them. To spend less: a cheaper `model` or a lower `effort`, a cheaper `late_model` for the rounds
-after the first, `ignore_globs` for paths that need no review, and smaller phases. The measured
-trade-offs are in `tests/bench/README.md`.
+them. To spend less: `weak` (or another cheaper model) for `model` or a lower `effort`, a cheaper
+`late_model` for the rounds after the first, `ignore_globs` for paths that need no review, and
+smaller phases. The measured trade-offs are in `tests/bench/README.md`.

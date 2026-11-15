@@ -67,7 +67,7 @@ tells Claude to stop and tell you.
 
 | Command | What it does |
 | --- | --- |
-| `/arl-implement [--new] [--root DIR]... <plan.md>` | start a run. `--root` adds a folder the plan does not name; `--new` archives the active run under `.arl/runs/` |
+| `/arl-implement [--new] [--root DIR]... [--model M] <plan.md>` | start a run. `--root` adds a folder the plan does not name; `--new` archives the active run under `.arl/runs/`; `--model` reviews every round of this run on `M` (`strong`, `weak`, `default` or a model id) |
 | `/arl-resume` | continue the run in this session: unpause, clear a decision the run waited on, abandon a review nothing is running. It opens the review pane, unless you closed it |
 | `/arl-status` | open the review pane, and show the run with every phase and every root's path |
 | `/arl-phases` | list every phase of the run |
@@ -79,6 +79,7 @@ tells Claude to stop and tell you.
 | `/arl-finish` | require a final review of the whole run before it completes |
 | `/arl-stop` | end the run |
 | `/arl-config [<key> <value> [--repo] \| <key> --unset [--repo]]` | show the configuration, or set or unset one key |
+| `/arl-model [all\|first\|late] <M> \| reset [all\|first\|late]` | this run's reviewer model, shown with no arguments. `first` is round 1 of each phase and the final review, `late` every later round; `reset` hands the choice back to the config files. Never written to a file |
 | `/arl-remove-root <alias or path>` | drop a workspace root registered by mistake |
 
 The `arl-` prefix is not decoration: Claude Code ships `/status`, `/resume` and `/config`, and
@@ -96,7 +97,7 @@ The settings most people touch:
 | Key | Default | What it does |
 | --- | --- | --- |
 | `harness` | `subagent` | who reviews: a Claude Code subagent, or `opencode` |
-| `model` | the session's subagent default | the reviewer's model |
+| `model` | `default`: the strong model (`opus` on the subagent) | the reviewer's model: `default`, `strong`, `weak` or a model id |
 | `effort` | the agent's default | the subagent reviewer's effort, `low` to `max` |
 | `verify_cmd` | unset | the checks Claude is told to run before each review, named in every prompt |
 | `block_severity` | `medium` | an actionable finding at or above this blocks the approval |

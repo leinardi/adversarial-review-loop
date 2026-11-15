@@ -8,7 +8,9 @@ Lowest to highest:
 2. the user config, `$XDG_CONFIG_HOME/adversarial-review-loop/config.json` (by default
    `~/.config/adversarial-review-loop/config.json`);
 3. the launch folder's `.adversarial-review-loop.json`, the folder you ran `/arl-implement` in;
-4. `ARL_*` environment variables: the upper-cased key with an `ARL_` prefix (`ARL_MODEL`,
+4. the run's own `model` and `late_model`, from `/arl-implement --model` and `/arl-model`; kept in
+   the run state, never in a file, and gone with the run;
+5. `ARL_*` environment variables: the upper-cased key with an `ARL_` prefix (`ARL_MODEL`,
    `ARL_BLOCK_SEVERITY`).
 
 A config file that cannot be parsed discards the whole file layer, not just itself, so a broken
@@ -27,8 +29,12 @@ again when `/arl-config` sets it.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `harness` | `subagent` | who reviews: `subagent`, a hidden Claude Code subagent the plugin registers, or `opencode`, which the engine runs itself. An unknown name is refused, never replaced by the default |
-| `model` | empty: the session's subagent default, or `openai/gpt-5.6-sol` for `opencode` | the reviewer's model for the first round of each phase and for the final review. `opus` is the recommended value for the subagent |
-| `late_model` | `sonnet` on `subagent`; `model` on `opencode` | the reviewer's model from the second round of a phase on, which checks the fixes against findings already recorded. The final review always uses `model`. With the round-2 accounting, Sonnet and Opus each blocked on 12 of 12 seeded defects (24 of 24 combined), at 36 to 45 cost units against Opus's 41 to 69, and no run approved ([measured](../tests/bench/README.md#round-2-with-resolved-accounting)). OpenCode keeps `model`: its model names are the provider's own, and nothing was measured there. Set it to `""` to use `model` on every round; unset it to get the harness default back |
+| `model` | `default`: the strong tier | the reviewer's model for the first round of each phase and for the final review: `default`, `strong`, `weak`, or a model id passed to the harness as written. `default` (and an empty value) is `strong`. On `subagent` an id is one of Claude Code's aliases (`opus`, `sonnet`, `haiku`, `fable`): a full id such as `claude-opus-5-5` is refused by the host |
+| `late_model` | `default`: `weak` on `subagent`, `model` on `opencode` | the reviewer's model from the second round of a phase on, which checks the fixes against findings already recorded; the same values as `model`. The final review always uses `model`. With the round-2 accounting, Sonnet and Opus each blocked on 12 of 12 seeded defects (24 of 24 combined), at 36 to 45 cost units against Opus's 41 to 69, and no run approved ([measured](../tests/bench/README.md#round-2-with-resolved-accounting)). OpenCode keeps `model`: its model names are the provider's own, and nothing was measured there. Set it to `""` to use `model` on every round; unset it to get the harness default back |
+| `subagent_strong_model` | `opus` | what `strong` names on `subagent` |
+| `subagent_weak_model` | `sonnet` | what `weak` names on `subagent` |
+| `opencode_strong_model` | `openai/gpt-6.1-sol` | what `strong` names on `opencode` |
+| `opencode_weak_model` | `openai/gpt-6.1-terra` | what `weak` names on `opencode` |
 | `effort` | empty: the agent's default | the subagent reviewer's effort: `low`, `medium`, `high`, `xhigh` or `max`. A value that is no level is ignored, and said at session start |
 | `variant` | empty | OpenCode only: the model variant, passed as `-m <model>#<variant>`. A `model` containing `#` and a `variant` together are refused |
 | `disable_project_config` | `false` | OpenCode only: ignore the repository's own OpenCode config (`OPENCODE_DISABLE_PROJECT_CONFIG`) |
@@ -51,6 +57,40 @@ again when `/arl-config` sets it.
 | `max_reason_bytes` | `32768` | the reviewer's prose kept in the text Claude reads; findings are exempt |
 | `max_findings` | `200` | more findings than this makes the loop ask you (the phase is too large to judge), never a trimmed list |
 | `max_findings_bytes` | `65536` | the same cap, by size |
+
+### Choosing the reviewer's model
+
+`model` and `late_model` name a tier or a model. `strong` and `weak` are each harness's own pair,
+set by the four `*_strong_model` and `*_weak_model` keys, so `weak` means Sonnet on the subagent
+and `openai/gpt-6.1-terra` on OpenCode without either config spelling the other's names.
+`default` is the built-in choice: `strong` for `model`, and for `late_model` `weak` on the
+subagent and `model` on OpenCode. Anything else is a model id, passed through as written.
+
+For one run alone, `/arl-implement --model weak plan.md` reviews every round on the weak model,
+round 1 and the final review included, and `/arl-model` changes it mid-run:
+
+```text
+> /arl-model                  # each kind of round's model, and the layer that chose it
+> /arl-model weak             # every round of this run
+> /arl-model first strong     # round 1 of each phase and the final review
+> /arl-model late default     # later rounds: the built-in choice, whatever a config file says
+> /arl-model reset            # drop the run's choice: the config files decide again
+```
+
+`default` and `reset` differ when a config file sets a model: with `model: weak` in the launch
+folder's config, `/arl-model default` runs `strong`, and `/arl-model reset` runs `weak`. A change
+applies from the next review on; one already prepared keeps the model it was prepared with, its
+repair call included. An `ARL_MODEL` or `ARL_LATE_MODEL` in the environment still wins, and
+`/arl-model` says so.
+
+A model id is checked before it is kept. On the subagent it must be one of Claude Code's aliases
+(`opus`, `sonnet`, `haiku`, `fable`): the host refuses a full id. On OpenCode it must be a model
+`opencode models` lists; for `provider/model#variant` the part before `#` is checked, and a
+configured `variant` alongside it is refused. When `opencode models` does not answer, the id is
+not kept.
+
+The subagent reviewer runs `opus` unless `model` says otherwise. Before this, an unset `model`
+ran the session's own subagent default.
 
 ## Reading and writing it
 

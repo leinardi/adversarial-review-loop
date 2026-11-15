@@ -62,8 +62,9 @@ The architecture ([docs/architecture.md](docs/architecture.md) has the long form
 | `scripts/arl.sh` | launcher: finds a Python 3.12 or newer and runs the bootstrap |
 | `scripts/arl-bootstrap.py` | trusted absolute entrypoint; establishes `sys.path` and `sys.pycache_prefix` before `arl` is imported |
 | `scripts/arl/cli.py` | subcommand dispatch: argv in, one JSON answer on stdout |
-| `scripts/arl/commands.py` | the command table: `init`, `resume`, `set-phases`, `root-add`, `root-remove`, `root-baseline`, `attach`, `status`, `report`, `config`, `stats`, `pause`, `stop`, `finish`, `accept`, `next-action`, and the `review` subcommands |
+| `scripts/arl/commands.py` | the command table: `init`, `resume`, `set-phases`, `root-add`, `root-remove`, `root-baseline`, `attach`, `status`, `report`, `config`, `model`, `stats`, `pause`, `stop`, `finish`, `accept`, `next-action`, and the `review` subcommands |
 | `scripts/arl/configcmd.py` | `config`: every key with its layer, or set or unset one key |
+| `scripts/arl/modelcmd.py` | `model` (`/arl-model`): this run's own reviewer model, its checks, never written to a file |
 | `scripts/arl/state.py` | the run state in `<launch dir>/.arl/state.json`: stages, approvals, tickets, the rounds and failed rounds with their usage, the dispositions stated, `next_action` |
 | `scripts/arl/workspace.py` | workspace roots: git and shadow snapshots, nested-repository discovery, late baselines |
 | `scripts/arl/contract.py` | the reviewer output contract: `FINDING`/`SUPERSEDES`/`RESOLVED` grammar, `parse`, the recomputed verdict, the replay of a phase's earlier blocking findings (what is still open, what closed each), the late-round scope type, finding ids, `done when` |

@@ -27,6 +27,25 @@ import type { EngineInterface, On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 import { type Completion, deliver, type Ran, type Task } from '../../hooks/reviewer'
 
+/** A `$.model.complete` result, as a check of the reviewer's model sees it. */
+export type ModelCheck =
+  | { isAnswered: true; text: string; usage: Record<string, number> }
+  | { isAnswered: false; reason: 'api-error'; status: number | null; error: string; usage: Record<string, number> }
+  | { isAnswered: false; reason: 'empty-reply' | 'aborted'; usage: Record<string, number> }
+
+const NO_USAGE = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+export const ANSWERED: ModelCheck = { isAnswered: true, text: 'OK.', usage: NO_USAGE }
+
+/** A check the API answered with an error. */
+export function apiError(status: number | null, error: string): ModelCheck {
+  return { isAnswered: false, reason: 'api-error', status, error, usage: NO_USAGE }
+}
+
+/** The full id a spawn reports for an alias, as the session resolves it (tests/STEP0.md, L2). */
+export function resolved(alias: string | undefined): string {
+  return alias ? `claude-${alias}-5-5` : 'inherit'
+}
+
 // The test runtime has timers; the hooks' type library (ES only) does not declare them.
 declare function setTimeout(callback: () => void, ms: number): unknown
 
@@ -68,8 +87,8 @@ export const PREPARED = {
   label: 'phase1',
   round: 1,
   harness: 'subagent',
-  model: "the session's default",
-  reviewer_model: '',
+  model: 'strong (opus)',
+  reviewer_model: 'opus',
   timeout_sec: 900,
   prompt_file: '/work/.arl/reviews/r1-001/prompt.md',
   bundle_dir: '/work/.arl/reviews/r1-001/bundle',
@@ -106,6 +125,8 @@ export type World = {
   asked: { question: string; options: string[] }[]
   /** Reviewer spawns through the kit. */
   spawns: { prompt: string; type: string; model?: string }[]
+  /** The models `$.model.complete` checked, in order. */
+  checked: string[]
   /** The engine commands run, by name. */
   commands: () => string[]
   /** Reviewer clocks that ran out. */
@@ -153,6 +174,13 @@ export type WorldOptions = {
    * would be. `undefined` never answers; `'deny'` refuses the spawn; `'throw'` rejects it.
    */
   agents?: (Completion | undefined | 'deny' | 'throw')[]
+  /**
+   * What each `$.model.complete` check answers, in order; `'reject'` rejects it, as a model the
+   * session blocks does. Past the list, every check answers.
+   */
+  checks?: (ModelCheck | 'reject')[]
+  /** The model each spawn reports, in order; past the list, the alias's own (`opus`: `claude-opus-5-5`). */
+  ranOn?: string[]
   /** Called with each spawned agent's id before it answers, as its tool calls would come. */
   whileRunning?: (agentId: string) => Promise<void>
   /** The session's permission verdict for a write (`$.tool.check`); left out, no stand-in answers. */
@@ -172,6 +200,7 @@ function scripted(options: WorldOptions): { state: World; answer: (argv: readonl
     submitted: [],
     asked: [],
     spawns: [],
+    checked: [],
     commands: () => state.calls.map(call => commandOf(call.args)),
     expired: 0,
     logged: [],
@@ -267,7 +296,11 @@ export function world(on: On, options: WorldOptions): World {
     // The kit hands the Agent tool's own spelling of the type.
     const fields = e as unknown as Record<string, string | undefined>
     state.spawns.push({ prompt: e.prompt, type: fields.subagent_type ?? e.subagentType, model: e.model })
-    return { model: e.model ?? 'inherit' }
+    return { model: resolved(e.model) }
+  })
+  on('model.complete', (_, e) => {
+    state.checked.push(e.model)
+    return { value: ANSWERED } as never
   })
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('agent.offer', () => ({ isOffered: true }))
@@ -316,7 +349,17 @@ export function world(on: On, options: WorldOptions): World {
 export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: World } {
   const { state, answer, choose } = scripted(options)
   const agents = [...(options.agents ?? [])]
+  const checks = [...(options.checks ?? [])]
+  const ranOn = [...(options.ranOn ?? [])]
   const fake = {
+    model: {
+      complete: async (request: { model: string }) => {
+        state.checked.push(request.model)
+        const check = checks.shift() ?? ANSWERED
+        if (check === 'reject') throw new Error(`model "${request.model}" is not in this organization's allowlist`)
+        return check
+      },
+    },
     plugin: { name: PLUGIN, root: '/plugin' },
     process: {
       run: async (argv: readonly string[], init?: { stdin?: string }) => ({ exitCode: 0, stdout: answer(argv.slice(1), init?.stdin ?? ''), stderr: '' }),
@@ -422,7 +465,7 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
             void (options.whileRunning?.(agentId) ?? Promise.resolve()).then(() => deliver(agentId, end))
           }, 0)
         }
-        return { model: args.model ?? 'inherit', agentId }
+        return { model: ranOn.shift() ?? resolved(args.model), agentId }
       },
       list: async () => [],
     },

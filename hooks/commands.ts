@@ -28,7 +28,7 @@ import { registerReviewer } from './reviewer'
 import { briefly, pane, PANE, PANE_TITLE, phasesText, REPORT_PANE, REPORT_TITLE, showLast, showReport, STATS_TITLE, statusText } from './ui'
 
 export const COMMANDS: readonly CommandSpec[] = [
-  { name: 'arl-implement', description: 'Implement a plan phase by phase, each phase reviewed before the next', argumentHint: '[--new] [--root DIR]... <plan.md>' },
+  { name: 'arl-implement', description: 'Implement a plan phase by phase, each phase reviewed before the next', argumentHint: '[--new] [--root DIR]... [--model M] <plan.md>' },
   { name: 'arl-resume', description: 'Continue the adversarial-review-loop run in this session' },
   { name: 'arl-status', description: 'Show the adversarial-review-loop run and open its pane', immediate: true },
   { name: 'arl-report', description: 'Show the newest review report, or the N-th', argumentHint: '[N]', immediate: true },
@@ -40,6 +40,12 @@ export const COMMANDS: readonly CommandSpec[] = [
   { name: 'arl-finish', description: 'Require a final review of the whole run before it completes' },
   { name: 'arl-stop', description: 'Stop the run; it cannot be resumed', immediate: true },
   { name: 'arl-config', description: 'Show the adversarial-review-loop configuration, or set or unset a key', argumentHint: '[<key> <value> [--repo] | <key> --unset [--repo]]' },
+  {
+    name: 'arl-model',
+    description: "Show or set this run's reviewer model (default, strong, weak or a model id)",
+    argumentHint: '[all|first|late] <model> | reset [all|first|late]',
+    immediate: true,
+  },
   { name: 'arl-remove-root', description: 'Drop a workspace root registered by mistake', argumentHint: '<alias or path>' },
 ]
 
@@ -91,32 +97,56 @@ export function words(args: string): string[] | string {
   return tokens
 }
 
-/** `/arl-implement` arguments: `--new`, `--root DIR` (repeated), and the plan. */
-export function implementArgs(args: string): { plan: string; isNew: boolean; roots: string[] } | string {
+/** `/arl-implement` arguments: `--new`, `--root DIR` (repeated), `--model M`, and the plan. */
+export function implementArgs(args: string): { plan: string; isNew: boolean; roots: string[]; model: string } | string {
   const tokens = words(args)
   if (typeof tokens === 'string') return tokens
   const roots: string[] = []
   let plan = ''
   let isNew = false
+  let model = ''
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index] ?? ''
     if (token === '--new') isNew = true
-    else if (token === '--root') {
-      const root = tokens[index + 1]
-      if (root === undefined) return '--root needs a directory.'
-      roots.push(root)
+    else if (token === '--root' || token === '--model') {
+      const value = tokens[index + 1]
+      if (value === undefined || value === '') return token === '--root' ? '--root needs a directory.' : '--model needs a model: default, strong, weak or a model id.'
+      if (token === '--root') roots.push(value)
+      else if (model !== '') return `One model at a time: ${model} and ${value} were given.`
+      else model = value
       index += 1
     } else if (token.startsWith('--')) return `Unknown flag ${token}.`
     else if (plan === '') plan = token
     else return `One plan at a time: ${plan} and ${token} were given.`
   }
-  return plan === '' ? 'Usage: /arl-implement [--new] [--root DIR]... <plan.md>' : { plan, isNew, roots }
+  return plan === '' ? 'Usage: /arl-implement [--new] [--root DIR]... [--model M] <plan.md>' : { plan, isNew, roots, model }
+}
+
+const MODEL_USAGE = 'Usage: /arl-model [all|first|late] <default|strong|weak|model id>, /arl-model reset [all|first|late], or /arl-model alone to show it.'
+const ROUND_KINDS = ['all', 'first', 'late']
+
+/** `/arl-model` arguments as the engine's `model` takes them: nothing (show), `reset [which]` or `set <which> <model>`. */
+export function modelArgs(args: string): string[] | string {
+  const tokens = words(args)
+  if (typeof tokens === 'string') return tokens
+  const [first, second, ...rest] = tokens
+  if (first === undefined) return []
+  if (first === 'reset') return rest.length === 0 && (second === undefined || ROUND_KINDS.includes(second)) ? ['reset', ...(second === undefined ? [] : [second])] : MODEL_USAGE
+  if (ROUND_KINDS.includes(first)) return second !== undefined && rest.length === 0 ? ['set', first, second] : MODEL_USAGE
+  return second === undefined ? ['set', 'all', first] : MODEL_USAGE
 }
 
 async function implement($: EngineInterface, args: string): Promise<string> {
   const parsed = implementArgs(args)
   if (typeof parsed === 'string') return parsed
-  const answer = await run($, ['init', '--plan', parsed.plan, ...(parsed.isNew ? ['--new'] : []), ...parsed.roots.flatMap(root => ['--root', root])])
+  const answer = await run($, [
+    'init',
+    '--plan',
+    parsed.plan,
+    ...(parsed.isNew ? ['--new'] : []),
+    ...parsed.roots.flatMap(root => ['--root', root]),
+    ...(parsed.model ? ['--model', parsed.model] : []),
+  ])
   if (!answer.ok) return refused(answer)
   const view = summaryOf(answer)
   // Roots the old run's writes left to offer back are not this run's, whatever their aliases.
@@ -240,6 +270,17 @@ async function configure($: EngineInterface, args: string): Promise<string> {
   return text
 }
 
+async function chooseModel($: EngineInterface, args: string): Promise<string> {
+  const argv = modelArgs(args)
+  if (typeof argv === 'string') return argv
+  const answer = await run($, ['model', ...argv])
+  if (!answer.ok) return refused(answer)
+  const warnings = Array.isArray(answer.warnings) ? answer.warnings.map(String) : []
+  // A review already prepared keeps its model: the change is the next review's.
+  const when = argv.length === 0 ? '' : '\nIt applies from the next review on; one already under way keeps its model.'
+  return `${String(answer.text ?? '')}${when}${warnings.map(warning => `\nNote: ${warning}.`).join('')}`
+}
+
 async function removeRoot($: EngineInterface, args: string): Promise<string> {
   const root = args.trim()
   if (root === '') return 'Usage: /arl-remove-root <alias or path>'
@@ -275,6 +316,8 @@ export async function runCommand($: EngineInterface, name: string, args: string)
       return finish($)
     case 'arl-config':
       return configure($, args)
+    case 'arl-model':
+      return chooseModel($, args)
     case 'arl-remove-root':
       return removeRoot($, args)
     default:

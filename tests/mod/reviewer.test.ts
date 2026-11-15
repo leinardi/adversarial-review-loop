@@ -19,8 +19,8 @@
 // end is classified, and what it may do.
 
 import { expect, test } from 'claude-code/testing'
-import { answerOf, classify, countStep, deliver, normalize, permit, REVIEWER_TOOLS, reviewerDecision, runReviewer, within } from '../../hooks/reviewer'
-import { fakeEngine, PLUGIN, start, tool, world } from './world'
+import { answerOf, classify, countStep, deliver, isModelOf, normalize, permit, resetCheckedModels, REVIEWER_TOOLS, reviewerDecision, runReviewer, within } from '../../hooks/reviewer'
+import { apiError, fakeEngine, PLUGIN, start, tool, world } from './world'
 
 const DONE = { answer: 'VERDICT APPROVED', reason: 'answer', durationMs: 10 }
 
@@ -250,4 +250,100 @@ test("an interrupt that ends the reviewer's own run first is still an interrupt,
 
 test('handing the report back is allowed: some sessions deliver a subagent answer that way', () => {
   expect(permit(DIRS, { tool: 'SubagentHandback', input: {} })).toEqual(expect.objectContaining({ decision: 'allow' }))
+})
+
+// --------------------------------------------------------------------------
+// The reviewer's model is checked before it may answer
+// --------------------------------------------------------------------------
+
+test("a model's first spawn in a session is checked once, and a second spawn is not checked again", async () => {
+  resetCheckedModels()
+  const { $, w } = fakeEngine({ engine: {}, agents: [DONE, DONE, DONE, DONE] })
+  expect(await runReviewer($, TASK)).toEqual(expect.objectContaining({ ok: true }))
+  expect(await runReviewer($, TASK)).toEqual(expect.objectContaining({ ok: true }))
+  expect(w.checked).toEqual(['haiku'])
+  expect(await runReviewer($, { ...TASK, model: 'opus' })).toEqual(expect.objectContaining({ ok: true }))
+  expect(w.checked).toEqual(['haiku', 'opus'])
+  // A new session checks again.
+  resetCheckedModels()
+  await runReviewer($, TASK)
+  expect(w.checked).toEqual(['haiku', 'opus', 'haiku'])
+})
+
+for (const [status, error] of [
+  [404, 'model_not_found'],
+  [403, 'permission_denied'],
+  [401, 'authentication_failed'],
+  [400, 'invalid_request'],
+] as const) {
+  test(`a check the API answers ${status} is a model failure, and nothing is spawned`, async () => {
+    resetCheckedModels()
+    const { $, w } = fakeEngine({ engine: {}, agents: [DONE], checks: [apiError(status, error)] })
+    const ran = await runReviewer($, TASK)
+    expect(ran).toEqual(expect.objectContaining({ ok: false, kind: 'model', error: expect.stringContaining(`haiku (${status} ${error})`) }))
+    expect(w.spawns).toEqual([])
+  })
+}
+
+test('a model the session refuses to send to is a model failure', async () => {
+  resetCheckedModels()
+  const { $, w } = fakeEngine({ engine: {}, agents: [DONE], checks: ['reject'] })
+  expect(await runReviewer($, TASK)).toEqual(expect.objectContaining({ ok: false, kind: 'model', error: expect.stringContaining('allowlist') }))
+  expect(w.spawns).toEqual([])
+})
+
+for (const [name, check] of [
+  ['429', apiError(429, 'rate_limit')],
+  ['529', apiError(529, 'overloaded')],
+  ['with no response', apiError(null, 'unknown')],
+  ['aborted', { isAnswered: false as const, reason: 'aborted' as const, usage: {} }],
+] as const) {
+  test(`a check that ends ${name} is transient and is tried again next time`, async () => {
+    resetCheckedModels()
+    const { $, w } = fakeEngine({ engine: {}, agents: [DONE, DONE], checks: [check] })
+    expect(await runReviewer($, TASK)).toEqual(expect.objectContaining({ ok: false, kind: 'transient' }))
+    expect(w.spawns).toEqual([])
+    expect(await runReviewer($, TASK)).toEqual(expect.objectContaining({ ok: true }))
+    expect(w.checked).toEqual(['haiku', 'haiku'])
+  })
+}
+
+test('a check that answers with no text still shows the model is there', async () => {
+  resetCheckedModels()
+  const { $ } = fakeEngine({ engine: {}, agents: [DONE], checks: [{ isAnswered: false, reason: 'empty-reply', usage: {} }] })
+  expect(await runReviewer($, TASK)).toEqual(expect.objectContaining({ ok: true }))
+})
+
+test('a check interrupted by the person is an interrupt, not a failure', async () => {
+  resetCheckedModels()
+  const aborted = new AbortController()
+  aborted.abort()
+  const { $ } = fakeEngine({ engine: {}, agents: [DONE], checks: [{ isAnswered: false, reason: 'aborted', usage: {} }] })
+  await expect(runReviewer($, { ...TASK, signal: aborted.signal })).rejects.toThrow('interrupted')
+})
+
+test('a reviewer the session started on another model is a model failure: its answer is never read, and it may do nothing', async () => {
+  resetCheckedModels()
+  const { $, w } = fakeEngine({ engine: {}, agents: [DONE], ranOn: ['claude-haiku-5-5'] })
+  const ran = await runReviewer($, { ...TASK, model: 'opus' })
+  expect(ran).toEqual({ ok: false, kind: 'model', error: 'the session started the reviewer on claude-haiku-5-5, not opus', usage: undefined, durationMs: undefined, requests: undefined })
+  expect(w.spawns).toHaveLength(1)
+  expect(await reviewerDecision($, { tool: 'Read', input: { file_path: '/work/a.py' }, agentId: 'agent-1' })).toEqual(expect.objectContaining({ decision: 'deny' }))
+})
+
+test('a model that is no alias is never spawned: the host would refuse it, and nothing could check it', async () => {
+  resetCheckedModels()
+  const { $, w } = fakeEngine({ engine: {}, agents: [DONE] })
+  for (const model of ['claude-opus-5-5', '']) {
+    expect(await runReviewer($, { ...TASK, model })).toEqual(expect.objectContaining({ ok: false, kind: 'model' }))
+  }
+  expect([w.checked, w.spawns]).toEqual([[], []])
+})
+
+test("a reported model is the alias's own only under its family's prefix", () => {
+  expect(isModelOf('opus', 'claude-opus-5-5')).toBe(true)
+  expect(isModelOf('sonnet', 'claude-sonnet-4-5-20250929')).toBe(true)
+  expect(isModelOf('opus', 'claude-haiku-5-5')).toBe(false)
+  expect(isModelOf('opus', 'opus')).toBe(false)
+  expect(isModelOf('opus', '')).toBe(false)
 })
