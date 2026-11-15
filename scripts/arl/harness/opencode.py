@@ -170,6 +170,16 @@ def events(raw: bytes, *, strict: bool = False) -> list[dict[str, object]]:
     return found
 
 
+def _figure(part: dict[str, object], path: tuple[str, ...]) -> int | None:
+    """The whole number at ``path`` in an event's ``part``; ``None`` for anything else (a bool too)."""
+    value: object = part
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _error_of(event: dict[str, object]) -> tuple[str, str]:
     error = event.get("error")
     if not isinstance(error, dict):
@@ -248,11 +258,31 @@ class OpenCodeHarness:
         return None
 
     def usage(self, raw: bytes) -> Usage | None:
-        """``None``: not read yet. The ``step_finish`` events carry token counts; reading them
-        belongs here, and a guessed cost printed beside a measured one is worse than none.
+        """What the run cost, summed over its ``step_finish`` events; ``None`` without one.
+
+        Each event is one model request (a turn) with ``part.tokens`` (``input``, ``output``,
+        ``reasoning``, ``cache.read``, ``cache.write``) and ``part.cost``. Reasoning is billed as
+        output and counted in it. A figure no event reported as a number stays ``None``, and so
+        does a cost of ``0``: a subscription reports that, and it would read as a free round.
         """
-        del raw
-        return None
+        steps = [part for event in events(raw) if event.get("type") == "step_finish" and isinstance(part := event.get("part"), dict)]
+        if not steps:
+            return None
+
+        def total(*path: str) -> int | None:
+            found = [value for part in steps if isinstance(value := _figure(part, ("tokens", *path)), int)]
+            return sum(found) if found else None
+
+        output = [figure for figure in (total("output"), total("reasoning")) if figure is not None]
+        costs = [cost for part in steps if isinstance(cost := part.get("cost"), int | float) and not isinstance(cost, bool)]
+        return Usage(
+            turns=len(steps),
+            input_tokens=total("input"),
+            cache_creation_tokens=total("cache", "write"),
+            cache_read_tokens=total("cache", "read"),
+            output_tokens=sum(output) if output else None,
+            cost_usd=float(sum(costs)) if any(cost > 0 for cost in costs) else None,
+        )
 
 
 #: The single instance the registry hands out. Stateless, so one is enough.
