@@ -161,6 +161,23 @@ def test_phases_are_replaced_freely_until_one_is_approved(ws: Path, engine: Engi
     assert replanned["run"]["phase"] == 2
 
 
+def test_a_replan_that_sends_the_whole_plan_again_is_refused_and_changes_nothing(ws: Path, engine: Engine) -> None:
+    """**Fails on the old code**, which kept the approved phase and appended the list after it: the
+    approved phase came twice, and was due for review again (seen in a gx52 run)."""
+    started(engine, ws)
+    engine(ws, "set-phases", stdin='["Pure core", "Loop thread", "Docs"]')
+    engine(ws, "accept")
+    refused = engine(ws, "set-phases", "--replan", stdin='["pure core ", "Loop thread and wiring", "Docs"]')
+    assert refused["code"] == "replan-repeats-approved"
+    assert "only the phases after the 1 approved one(s)" in refused["error"]
+    assert "(Pure core)" in refused["error"]
+    run = state.RunState.load(state.run_paths(ws))
+    assert run is not None
+    assert (run.phases, run.data["phases_revision"]) == (["Pure core", "Loop thread", "Docs"], 1)
+    replanned = engine(ws, "set-phases", "--replan", stdin='["Loop thread and wiring", "Docs"]')
+    assert replanned["run"]["phases"] == ["Pure core", "Loop thread and wiring", "Docs"]
+
+
 @pytest.mark.parametrize("stdin", ["", "{}", '["ok", ""]', "[]", '["a", 1]'])
 def test_a_malformed_phase_list_is_refused(ws: Path, engine: Engine, stdin: str) -> None:
     started(engine, ws)

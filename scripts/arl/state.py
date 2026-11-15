@@ -392,6 +392,15 @@ class RunState:
         approved = self.approved_phases
         if approved and not replan:
             raise RunError("phases-approved", f"{approved} phase(s) are already approved; changing the list needs --replan")
+        kept = self.data["phases"][:approved]
+        if approved and [phase.casefold() for phase in cleaned[:approved]] == [phase.casefold() for phase in kept]:
+            # The whole plan sent again: kept phases followed by themselves would be reviewed twice.
+            listed = "; ".join(kept)
+            raise RunError(
+                "replan-repeats-approved",
+                f"a replan lists only the phases after the {approved} approved one(s), which are kept as they are ({listed}); "
+                "this list starts with them. Send it again without them",
+            )
         self.data["phases"] = [*self.data["phases"][:approved], *cleaned]
         self.data["phases_revision"] += 1
         # The rounds they answered no longer count (``rounds_of``), and nor do they.

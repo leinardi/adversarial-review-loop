@@ -40,12 +40,12 @@ Your answer is your final message (or the report you hand back, where your sessi
 export const TOOLS = {
   set_phases: {
     description:
-      'Record the phases of the plan you are implementing under adversarial-review-loop, in order, one short title per phase. Call it once after reading the plan, before changing any file. While no phase is approved you may call it again to revise the list; once a phase is approved, revising needs replan: true.',
+      'Record the phases of the plan you are implementing under adversarial-review-loop, in order, one short title per phase. Call it once after reading the plan, before changing any file. While no phase is approved you may call it again to revise the list. Once a phase is approved, revising needs replan: true, and phases then lists only the phases after the approved ones: those are kept as they are.',
     inputSchema: {
       type: 'object',
       properties: {
         phases: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Phase titles, in order.' },
-        replan: { type: 'boolean', description: 'Revise the phases after one was approved.' },
+        replan: { type: 'boolean', description: 'Revise the phases after one was approved: phases is then the list of the remaining phases only.' },
       },
       required: ['phases'],
     },
