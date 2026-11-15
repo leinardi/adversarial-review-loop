@@ -49,6 +49,30 @@ export const COMMANDS: readonly CommandSpec[] = [
   { name: 'arl-remove-root', description: 'Drop a workspace root registered by mistake', argumentHint: '<alias or path>' },
 ]
 
+/** Commands that already put their output in a pane, or are about the pane itself. */
+const SHOWN_IN_A_PANE: ReadonlySet<string> = new Set(['arl-report', 'arl-stats', 'arl-pane'])
+
+/** The title of the pane a command's output is shown in while Claude's turn runs. */
+export const commandTitle = (name: string): string => `/${name}`
+
+/**
+ * Show an immediate command's `text` at once when Claude's turn is running.
+ *
+ * The host runs such a command at once, but prints its text only when the turn ends, which may be
+ * many minutes later (measured: typed at 15:29, printed at 15:56). One line goes to the log; more
+ * takes the report pane, as `/arl-report` does, since the log draws a single line. The text is
+ * still returned, so it is printed after the turn as well. Nothing headless, nothing at rest.
+ */
+export async function showNow($: EngineInterface, name: string, text: string): Promise<void> {
+  if (!session.isInteractive || !session.turnRunning || SHOWN_IN_A_PANE.has(name) || text.trim() === '') return
+  if (!text.trim().includes('\n')) {
+    $.ui.log(text.trim())
+    return
+  }
+  await showReport($, text).catch(() => undefined)
+  await $.ui.open({ id: REPORT_PANE, title: commandTitle(name), focus: true, closeOnEscape: true }).catch(() => undefined)
+}
+
 /** Register each command; one the host refuses is said, and the rest still register. */
 export async function registerCommands($: EngineInterface): Promise<void> {
   for (const spec of COMMANDS) {

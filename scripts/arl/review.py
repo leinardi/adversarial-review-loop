@@ -36,11 +36,11 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
-from arl import bundle, config, contract, globmatch, guidance, harness, oscillation, report, runner, workspace
+from arl import bundle, config, contract, globmatch, guidance, harness, modelcmd, oscillation, report, runner, workspace
 from arl.atomic import write_private_file
 from arl.bundle import BundleError, BundleTooLarge
 from arl.contract import Review, Target
@@ -250,9 +250,15 @@ def next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
     return ""
 
 
+def _approve(run: RunState, trees: Mapping[str, str], *, by: Literal["review", "ignored"]) -> None:
+    """Approve the stage at ``trees``, and note the branch each root is on with its new base."""
+    run.approve(trees, by=by)
+    workspace.remember_branches(run.roots)
+
+
 def _skip(run: RunState, trees: Mapping[str, str], cfg: config.Config, *, note: str = "") -> dict[str, Any]:
     what = "the final review" if run.stage() == "final" else f"phase {run.current_phase()}"
-    run.approve(trees, by="ignored")
+    _approve(run, trees, by="ignored")
     run.save()
     message = f"Every change of {what} matches ignore_globs ({', '.join(cfg.as_list('ignore_globs'))}), so it was approved without a review.\n"
     message += note
@@ -305,6 +311,8 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         target = bundle.target_for(run, trees, final=stage == "final")
         changed = {root.alias for root in target.roots if root.base != root.head}
         sources, warnings = guidance.collect([root for root in run.roots if root["alias"] in changed], cfg, paths.launch_dir)
+        moved = workspace.branch_moves(run, final=stage == "final")
+        warnings = [*warnings, *moved]
         try:
             built = bundle.build(run, target, review_dir / "bundle", config=cfg, verification=verification, sources=sources, warnings=warnings)
             bundle.compose_prompt(target, built, review_dir / "prompt.md")
@@ -338,7 +346,7 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             # review's (`_for_ticket`).
             **_pinned(cfg),
             # For Claude only, with whatever the round answers; never part of the bundle.
-            "note": _ignored_note(ignored),
+            "note": _ignored_note(ignored) + "".join(f"Note: {line}\n" for line in moved),
         }
         run.issue_ticket(ticket)
         run.save()
@@ -398,15 +406,47 @@ def _count_failure(run: RunState, kind: str, error: str, cfg: config.Config) -> 
     return ""
 
 
-def _model_refusal(ticket: Mapping[str, Any], target: Target, error: str) -> str:
-    """Why a model failure stops the run, and what the user can do: it names the model and the round."""
+def _model_choices(ticket: Mapping[str, Any], which: str, configured: Callable[[str], config.Config]) -> list[str]:
+    """The ``/arl-model`` words that would name another model than the refused one, best first.
+
+    ``configured(word)`` is the configuration once ``/arl-model <which> <word>`` ran. ``default``
+    alone is offered when it names another model; otherwise each tier that does. ``<model>`` is
+    always left to the caller.
+    """
+    refused = (str(ticket.get("harness") or ""), str(ticket.get("model_id") or ""))
+    round_number = 1 if which == "first" else 2
+    choices = []
+    for word in config.MODEL_WORDS:
+        cfg = configured(word)
+        choice = config.reviewer_model(cfg, round_number=round_number)
+        if choice.id and (cfg.as_str("harness"), choice.id) != refused:
+            choices.append(word)
+    return ["default"] if "default" in choices else choices
+
+
+def _model_refusal(
+    ticket: Mapping[str, Any], target: Target, error: str, configured: Callable[[str, str], config.Config]
+) -> tuple[str, dict[str, str] | None]:
+    """Why a model failure stops the run, what the user can do, and the switch offered first.
+
+    The text names the model and the round. ``configured(which, word)`` is the configuration once
+    ``/arl-model <which> <word>`` ran; a choice that names the refused model again is not offered.
+    The switch is ``{"which", "word"}`` of the first choice offered, ``None`` when none is.
+    """
     shown = str(ticket.get("model") or ticket.get("model_id") or "the configured model")
     stage = "the final review" if ticket.get("stage") == "final" else f"round {int(ticket.get('round') or 1)} of {target.label}"
     which = "first" if ticket.get("stage") == "final" or int(ticket.get("round") or 1) < 2 else "late"
-    return (
-        f"The reviewer's model {shown} cannot be used for {stage}: {error}. "
-        f"Nothing was retried. Choose another model (/arl-model {which} default, or /arl-model {which} <model>), then /arl-resume."
-    )
+
+    # The default puts every round back on the built-in models, as it did before a tier existed;
+    # a tier is offered for the rounds that failed only. Each word is judged at that scope.
+    def scope(word: str) -> str:
+        return "all" if word == "default" else which
+
+    words = _model_choices(ticket, which, lambda word: configured(scope(word), word))
+    switches = [{"which": scope(word), "word": word} for word in words]
+    offered = [f"/arl-model {word}" if word == "default" else f"/arl-model {which} {word}" for word in words] + [f"/arl-model {which} <model>"]
+    text = f"The reviewer's model {shown} cannot be used for {stage}: {error}. Nothing was retried. Choose another model ({', or '.join(offered)}), then /arl-resume."
+    return text, (switches[0] if switches else None)
 
 
 def _repair_reason(unaccounted: tuple[str, ...]) -> str:
@@ -744,7 +784,7 @@ def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about wh
         points = oscillation.reversals(rounds, target.label, block_severity=cfg.as_str("block_severity"))
         review.oscillating = oscillation.render(points) if points else ""
         if review.verdict == "APPROVED":
-            run.approve(ticket["trees"], by="review")
+            _approve(run, ticket["trees"], by="review")
         else:
             run.record_changes_required()
             run.invalidate_ticket("recorded")
@@ -768,8 +808,13 @@ def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about wh
         )
         if review.verdict == "OP_FAILURE" and review.kind == "model":
             run.invalidate_ticket("failed")
-            detail = _model_refusal(ticket, target, review.error)
-            run.wait_for_user("model", detail)
+            detail, switch = _model_refusal(
+                ticket,
+                target,
+                review.error,
+                lambda which, word: config.load(str(run.paths.launch_dir), overrides=modelcmd.overlay_for(which, word, run.model_overlay)),
+            )
+            run.wait_for_user("model", detail, switch=switch)
             note = f"\n{detail}\n"
         elif review.verdict == "OP_FAILURE":
             run.invalidate_ticket("failed")

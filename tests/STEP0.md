@@ -1105,6 +1105,12 @@ folder. Three plans, 13 phases, run by the user and read back here.
 - **Command output.** `$.ui.log` draws one line: the newlines of a multi-line status came out as
   stray characters. `/arl-status`, `/arl-phases` and `/arl-config` answer as the command's own text,
   and `/arl-report` opens a pane of its own.
+- **An immediate command's text waits for the turn (2026-11-15, Claude Code 2.1.325).** In a
+  runhold session, `/arl-phases` typed during a turn ran at once: the transcript stamps its
+  command and its output with the time it was typed (14:10:20, 15:29:18). The host wrote both
+  only when the turn ended (14:12:07, 15:56:47), so the person saw nothing for up to 27 minutes.
+  While a turn runs, a command's text now also goes to the log (one line) or the report pane
+  (more), which draw at once.
 - **A prompt from a command's timer: pass.** `/arl-resume` and `/arl-accept` at a phase boundary
   started Claude.
 - **Compaction: pass through a command, never after a review.** `/arl-accept` compacted (64k to 49k

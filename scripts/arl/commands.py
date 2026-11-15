@@ -359,6 +359,7 @@ def cmd_accept(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
                 "oversized", f"{exc}\nAccepting cannot get past this: remove the file(s), or ignore them in the root's .gitignore."
             ) from exc
         run.approve(trees, by="user")
+        workspace.remember_branches(run.roots)
         run.save()
         # What Claude is told when the user accepted from a dialog in the middle of its turn: the
         # same as after a review's approval (stop when paused, end the turn under auto_compact).

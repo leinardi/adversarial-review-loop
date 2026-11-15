@@ -228,7 +228,13 @@ test('the external harness is run by the engine, streamed', async () => {
 const STALLED = { ...RECORDED, verdict: 'CHANGES_REQUIRED', message: 'Findings.', run: summary({ waiting: { kind: 'stall', detail: 'the same finding for 5 rounds' } }) }
 
 const MODEL_REFUSED: Ran = { ok: false, kind: 'model', error: 'the API refused the model opus (404 model_not_found)' }
-const MODEL_WAIT = { ...RECORDED, verdict: 'OP_FAILURE', message: 'The review failed.', run: summary({ waiting: { kind: 'model', detail: "The reviewer's model strong (opus) cannot be used" } }) }
+const modelWait = (detail: string, switched?: { which: string; word: string }) => ({
+  ...RECORDED,
+  verdict: 'OP_FAILURE',
+  message: 'The review failed.',
+  run: summary({ waiting: { kind: 'model', detail, ...(switched ? { switch: switched } : {}) } }),
+})
+const MODEL_WAIT = modelWait("The reviewer's model weak (sonnet) cannot be used (/arl-model default, or /arl-model first <model>)", { which: 'all', word: 'default' })
 
 test('a model failure is recorded as one, and headless Claude is told to hand over with /arl-model', async () => {
   at(false)
@@ -249,7 +255,35 @@ test('the user choosing the default model sets it for the run and Claude calls r
   const text = await review($, {}, reviewer([MODEL_REFUSED]).run)
   expect(w.asked[0]?.options).toEqual(['Use the default model', 'Accept', 'Keep going', 'Stop'])
   expect(w.calls.at(-1)?.args).toEqual(['model', 'set', 'all', 'default'])
-  expect(text).toContain('switched this run to the default reviewer model: call review again')
+  expect(text).toContain("switched this run's all-round reviewer to the default model: call review again")
+})
+
+test('when the default is the refused model, the user is offered the other tier, for the rounds that failed', async () => {
+  at(true)
+  const { $, w } = fakeEngine({
+    engine: {
+      'review prepare': PREPARED,
+      'review record': modelWait("The reviewer's model strong (opus) cannot be used (/arl-model first weak, or /arl-model first <model>)", { which: 'first', word: 'weak' }),
+      model: { ok: true, text: 'Reviewer model', overlay: { model: 'weak' } },
+    },
+    files: PROMPTS,
+    choices: ['Use the weak model'],
+  })
+  const text = await review($, {}, reviewer([MODEL_REFUSED]).run)
+  expect(w.asked[0]?.options).toEqual(['Use the weak model', 'Accept', 'Keep going', 'Stop'])
+  expect(w.calls.at(-1)?.args).toEqual(['model', 'set', 'first', 'weak'])
+  expect(text).toContain("switched this run's first-round reviewer to the weak model")
+})
+
+test('a model wait that offers no other model has no button for one', async () => {
+  at(true)
+  const { $, w } = fakeEngine({
+    engine: { 'review prepare': PREPARED, 'review record': modelWait("The reviewer's model x cannot be used (/arl-model first <model>)") },
+    files: PROMPTS,
+    choices: ['Stop'],
+  })
+  await review($, {}, reviewer([MODEL_REFUSED]).run)
+  expect(w.asked[0]?.options).toEqual(['Accept', 'Keep going', 'Stop'])
 })
 
 test('headless, a stall tells Claude to stop and hand over, and asks nobody', async () => {

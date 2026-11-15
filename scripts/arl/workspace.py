@@ -77,10 +77,13 @@ __all__ = [
     "WALK_LIMIT",
     "Oversized",
     "alias_for",
+    "branch_moves",
+    "current_branch",
     "discover",
     "empty_tree",
     "git_command",
     "register",
+    "remember_branches",
     "resolve",
     "scan_nested",
     "set_baseline",
@@ -503,6 +506,52 @@ def _exclude_run_dir(root: dict[str, Any], paths: RunPaths) -> None:
         raise SnapshotError(f"could not add {line} to {exclude}: {exc}") from exc
 
 
+# --------------------------------------------------------------------------
+# The branch a baseline was taken on
+# --------------------------------------------------------------------------
+
+
+def current_branch(root: dict[str, Any]) -> str:
+    """The branch a git root's checkout is on; ``""`` for a folder, a detached HEAD or an error."""
+    if root.get("kind") != "git" or not Path(root["path"]).is_dir():
+        return ""
+    proc = git_run(root["path"], ["symbolic-ref", "--short", "-q", "HEAD"])
+    return proc.stdout.decode("utf-8", errors="replace").strip() if proc.returncode == 0 else ""
+
+
+def remember_branches(roots: Sequence[dict[str, Any]], *, start: bool = False) -> None:
+    """Record the branch each git root is on with its approved snapshot (and, ``start``, with its
+    starting one). Display only: a diff is between trees, and no branch decides anything."""
+    for root in roots:
+        branch = current_branch(root)
+        root["approved_branch"] = branch
+        if start:
+            root["start_branch"] = branch
+
+
+def branch_moves(run: RunState, *, final: bool) -> list[str]:
+    """One line per git root whose checkout left the branch its base was taken on.
+
+    The diff is from that base, so whatever differs between the two branches shows in it as if
+    this stage made it: a fix only the old branch has reads as removed. The reviewer and Claude
+    are told; nothing else changes.
+    """
+    key = "start_branch" if final else "approved_branch"
+    lines = []
+    for root in run.roots:
+        was = root.get(key)
+        if not isinstance(was, str) or not was:
+            continue
+        now = current_branch(root)
+        if now != was:
+            where = f"branch {now!r}" if now else "a detached HEAD"
+            lines.append(
+                f"{root['alias']}: its base was taken on branch {was!r}, and it is now on {where}. Whatever differs between "
+                "the two shows in this diff as if this stage changed it, so a change only the old branch has reads as removed."
+            )
+    return lines
+
+
 def _add(run: RunState, path: Path, kind: str, *, late: bool) -> dict[str, Any]:
     roots = run.data["roots"]
     root: dict[str, Any] = {
@@ -532,6 +581,7 @@ def _add(run: RunState, path: Path, kind: str, *, late: bool) -> dict[str, Any]:
     else:
         tree = snapshot(root, roots, run.paths)
     root["start_tree"] = root["approved_tree"] = tree
+    remember_branches([root], start=True)
     return root
 
 
@@ -622,4 +672,9 @@ def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") ->
     root["start_tree"] = root["approved_tree"] = tree
     root["baseline"] = "set"
     root["proposed"] = ""
+    # A baseline from a commit was not taken on any branch: no branch is claimed for it.
+    if choice == "commit":
+        root["start_branch"] = root["approved_branch"] = ""
+    else:
+        remember_branches([root], start=True)
     return tree

@@ -19,7 +19,7 @@
 // phase, and the root a refused write leaves behind.
 
 import { expect, test } from 'claude-code/testing'
-import { implementArgs, modelArgs, openPane, runCommand } from '../../hooks/commands'
+import { implementArgs, modelArgs, openPane, runCommand, showNow } from '../../hooks/commands'
 import { pane } from '../../hooks/ui'
 import { announce, continueRun, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
 import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, settle, start, summary, world } from './world'
@@ -31,6 +31,7 @@ function at(isInteractive = false): void {
   // The flows' module is shared by every test: no test sees another's writes.
   resetWrites()
   pane.dismissed = false
+  session.turnRunning = false
 }
 
 const CONTINUE = { ok: true, action: 'continue', stage: 'phase', phase: 2, prompt: 'Implement phase 2 of 2: two', token: 't', compact: false }
@@ -101,6 +102,56 @@ test('a command runs through the kit and answers its text', async ($, on) => {
   await start($)
   const { text } = await $.command.run({ command: 'arl-status' } as never)
   expect(text).toContain('Run r1 · active · phase 1/2: one')
+})
+
+// --------------------------------------------------------------------------
+// An immediate command while Claude's turn runs
+// --------------------------------------------------------------------------
+
+test("while Claude's turn runs, a command's lines are shown in the pane at once: the host prints its text only when the turn ends", async () => {
+  at(true)
+  session.turnRunning = true
+  const { $, w } = fakeEngine({ engine: {} })
+  await showNow($, 'arl-phases', '✓ 1. one\n▶ 2. two')
+  expect(w.opened).toEqual(['arl-report'])
+  expect(w.openArgs.get('arl-report')).toEqual(expect.objectContaining({ title: '/arl-phases', focus: true }))
+  expect([...w.state.values()]).toContain('✓ 1. one\n▶ 2. two')
+})
+
+test("while Claude's turn runs, a one-line answer goes to the log, and a pane command is left alone", async () => {
+  at(true)
+  session.turnRunning = true
+  const { $, w } = fakeEngine({ engine: {} })
+  await showNow($, 'arl-pause', 'Paused.\n')
+  await showNow($, 'arl-report', 'Report (newest) is in the report pane.')
+  expect(w.logged).toEqual(['Paused.'])
+  expect(w.opened).toEqual([])
+})
+
+test('at rest, or headless, a command only answers its text: the host prints it at once', async () => {
+  for (const [interactive, running] of [[true, false], [false, true]] as const) {
+    at(interactive)
+    session.turnRunning = running
+    const { $, w } = fakeEngine({ engine: {} })
+    await showNow($, 'arl-phases', 'a\nb')
+    expect(w.opened).toEqual([])
+    expect(w.logged).toEqual([])
+  }
+})
+
+test("/arl-phases typed while Claude's turn runs opens the pane at once, and not once the turn ended", async ($, on) => {
+  const w = world(on, { engine: { attach: { ok: true, run: summary(), foreign_review: false, effort: '' }, status: { ok: true, run: summary() }, 'next-action': { ok: true, action: 'yield', reason: 'unchanged' } } })
+  on('turn.start', (_, e) => e as never)
+  await start($, true)
+  const reports = (): number => w.opened.filter(id => id === 'arl-report').length
+  await $.turn.start({ text: 'go', turnId: 't1' } as never)
+  const { text } = await $.command.run({ command: 'arl-phases' } as never)
+  expect(reports()).toBe(1)
+  // Still answered as its text: the host prints that once the turn ends.
+  expect(text).toContain('1. one')
+  await $.turn.complete({ answer: 'done', reason: 'aborted', durationMs: 5, isAborted: true, turnId: 't1' } as never)
+  await $.command.run({ command: 'arl-phases' } as never)
+  expect(reports()).toBe(1)
 })
 
 // --------------------------------------------------------------------------

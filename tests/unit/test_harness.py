@@ -312,6 +312,30 @@ def test_opencodes_json_events_are_reduced_to_the_answer_and_the_envelope_kept(t
     assert (tmp_path / "raw" / "001-phase.out.envelope").read_bytes() == raw
 
 
+def step_finish(tokens: dict[str, object], cost: object = 0) -> dict[str, object]:
+    return {"type": "step_finish", "part": {"type": "step-finish", "reason": "stop", "tokens": tokens, "cost": cost}}
+
+
+def test_opencodes_usage_is_summed_over_its_step_finish_events() -> None:
+    """**Fails on the old code**, which read no usage from OpenCode at all."""
+    raw = b"INFO a log line\n" + opencode_events(
+        STEP_START,
+        step_finish({"total": 71182, "input": 2497, "output": 210, "reasoning": 123, "cache": {"write": 0, "read": 68352}}),
+        text_event("Fine."),
+        step_finish({"total": 73434, "input": 2059, "output": 719, "reasoning": 0, "cache": {"write": 5, "read": 70656}}, cost=0.25),
+    )
+    assert opencode.HARNESS.usage(raw) == harness.Usage(
+        turns=2, input_tokens=4556, cache_creation_tokens=5, cache_read_tokens=139008, output_tokens=1052, cost_usd=0.25
+    )
+
+
+def test_opencode_figures_it_did_not_report_stay_missing_never_zero() -> None:
+    # A subscription reports a cost of 0: shown as unknown, not as a free round.
+    raw = opencode_events(step_finish({"input": 10, "output": True, "cache": "n/a"}), step_finish({"input": "x"}))
+    assert opencode.HARNESS.usage(raw) == harness.Usage(turns=2, input_tokens=10)
+    assert opencode.HARNESS.usage(opencode_events(STEP_START, text_event("Fine."))) is None
+
+
 def test_an_error_event_in_a_run_that_exited_0_is_no_answer() -> None:
     raw = opencode_events(
         STEP_START, text_event("<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>"), error_event("provider.transport", "ECONNRESET")
