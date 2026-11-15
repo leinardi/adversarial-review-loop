@@ -40,7 +40,12 @@ The architecture ([docs/architecture.md](docs/architecture.md) has the long form
    actionable finding at or above `block_severity` blocks whatever it concluded.
 2. **The reviewer sees the whole phase.** The evidence is the diff from the last approved snapshot
    to the current one, for every root, including untracked files. A path left out of the bundle
-   is a change nobody reviewed.
+   is a change nobody reviewed. The one exception is a git root's starting base when its checkout
+   left the base's line of history: a starting base that was a clean checkout of commit C moves
+   to the merge-base of C and `HEAD` (`workspace.follow_moves`), since what C's line has since is
+   the repository before the run, in neither the result nor the base. Only a starting base, only
+   with the commit `HEAD` was as it was taken, and never an empty one: an approved base is the
+   run's own work and never moves. Every move is said to the reviewer and to Claude.
 3. **The engine's stdout is its answer.** Subcommands write their result to stdout; diagnostics go
    to stderr through `arl.util.log`. A stray `print` corrupts what the mod reads.
 4. **Nothing is written inside a reviewed repository's tracked content.** Snapshots use a

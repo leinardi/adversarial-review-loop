@@ -111,9 +111,19 @@ reads the report the call delivered as the reviewer's answer, since the reviewer
 then often only a note about the handback. A handback the session refuses delivers nothing, and
 the reviewer's last message is read as before.
 
-A git root whose checkout is on another branch than the one its base was taken on is named in
-`range.txt` (under "Snapshot warnings") and to Claude: whatever differs between the two branches
-shows in the diff as if the stage changed it, so a fix only the old branch has reads as removed.
+A git root's starting base follows its checkout to another line of history. Say a repository
+was on a fix branch when the run started, and the work then went on a new branch from `main`:
+diffed from the fix branch, its fixes would read as removed by the run. When the starting base was
+a clean checkout of a commit, and that commit is no longer in `HEAD`'s history, the base moves to
+the commit the two lines share. A phase moves it while nothing in that root has been approved
+since; the final review moves it whenever. A switch to a branch built on the base changes nothing.
+
+Nothing else moves. An approved base is the run's own work: when the checkout leaves it for a line
+without it, that work reads as removed, as it is. A starting base with uncommitted changes, an
+empty base (`--empty`, or a root the run created), and a line with no shared history stay too.
+When a base stays while the checkout changed branch (and the approved snapshot is not in `HEAD`'s
+history), or shares no history with `HEAD`, the root is named in `range.txt` (under "Snapshot
+warnings") and to Claude, as is every move, in every review until the base changes.
 
 ## What it does not do
 

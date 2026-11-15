@@ -251,9 +251,9 @@ def next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
 
 
 def _approve(run: RunState, trees: Mapping[str, str], *, by: Literal["review", "ignored"]) -> None:
-    """Approve the stage at ``trees``, and note the branch each root is on with its new base."""
+    """Approve the stage at ``trees``, and note the branch and commit of each root's new base."""
     run.approve(trees, by=by)
-    workspace.remember_branches(run.roots)
+    workspace.remember_heads(run.roots)
 
 
 def _skip(run: RunState, trees: Mapping[str, str], cfg: config.Config, *, note: str = "") -> dict[str, Any]:
@@ -301,8 +301,11 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         trees = _snapshot_or_wait(run)
         # Every root snapshotted, so nothing is oversized any more.
         run.clear_wait("oversized")
+        # Before anything reads a base: one the checkout left behind follows it.
+        moved = workspace.follow_moves(run, final=stage == "final")
+        moved_note = "".join(f"Note: {line}\n" for line in moved)
         if _only_ignored(run, trees, cfg):
-            return _skip(run, trees, cfg, note=_ignored_note(ignored))
+            return _skip(run, trees, cfg, note=_ignored_note(ignored) + moved_note)
         seq = run.next_review_seq()
         if stated:
             # On the run, not the ticket: a review that fails or is abandoned keeps them for the next.
@@ -311,7 +314,6 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         target = bundle.target_for(run, trees, final=stage == "final")
         changed = {root.alias for root in target.roots if root.base != root.head}
         sources, warnings = guidance.collect([root for root in run.roots if root["alias"] in changed], cfg, paths.launch_dir)
-        moved = workspace.branch_moves(run, final=stage == "final")
         warnings = [*warnings, *moved]
         try:
             built = bundle.build(run, target, review_dir / "bundle", config=cfg, verification=verification, sources=sources, warnings=warnings)
@@ -346,7 +348,7 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             # review's (`_for_ticket`).
             **_pinned(cfg),
             # For Claude only, with whatever the round answers; never part of the bundle.
-            "note": _ignored_note(ignored) + "".join(f"Note: {line}\n" for line in moved),
+            "note": _ignored_note(ignored) + moved_note,
         }
         run.issue_ticket(ticket)
         run.save()

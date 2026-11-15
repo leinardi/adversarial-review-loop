@@ -72,18 +72,20 @@ from arl.util import log
 __all__ = [
     "EMPTY_TREE_SHA1",
     "EMPTY_TREE_SHA256",
+    "HISTORY_SEARCH",
     "SCAN_DEPTH",
     "TOUCH_TOLERANCE_NS",
     "WALK_LIMIT",
     "Oversized",
     "alias_for",
-    "branch_moves",
     "current_branch",
     "discover",
     "empty_tree",
+    "follow_moves",
     "git_command",
     "register",
-    "remember_branches",
+    "remember_commit",
+    "remember_heads",
     "resolve",
     "scan_nested",
     "set_baseline",
@@ -113,6 +115,8 @@ class Oversized(SnapshotError):
 #: The empty tree's id in a SHA-1 and in a SHA-256 repository.
 EMPTY_TREE_SHA1: Final = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 EMPTY_TREE_SHA256: Final = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"
+#: Both object formats' empty tree: a base that holds nothing.
+EMPTY_TREES: Final = frozenset({EMPTY_TREE_SHA1, EMPTY_TREE_SHA256})
 SHA256_HEX_LEN: Final = 64
 
 #: How many directory levels below a root :func:`scan_nested` descends.
@@ -507,7 +511,7 @@ def _exclude_run_dir(root: dict[str, Any], paths: RunPaths) -> None:
 
 
 # --------------------------------------------------------------------------
-# The branch a baseline was taken on
+# The commit and branch a base was taken on, and a checkout that left them
 # --------------------------------------------------------------------------
 
 
@@ -519,37 +523,158 @@ def current_branch(root: dict[str, Any]) -> str:
     return proc.stdout.decode("utf-8", errors="replace").strip() if proc.returncode == 0 else ""
 
 
-def remember_branches(roots: Sequence[dict[str, Any]], *, start: bool = False) -> None:
-    """Record the branch each git root is on with its approved snapshot (and, ``start``, with its
-    starting one). Display only: a diff is between trees, and no branch decides anything."""
+def _clean_head(root: dict[str, Any], tree: str) -> str:
+    """HEAD's commit when its tree is ``tree`` (the base is a clean checkout of it), else ``""``."""
+    if root.get("kind") != "git" or not tree or tree in EMPTY_TREES or not Path(root["path"]).is_dir():
+        return ""
+    commit = gitsnap.head_commit(root["path"])
+    return commit if commit and gitsnap.rev_parse(root["path"], f"{commit}^{{tree}}") == tree else ""
+
+
+def remember_heads(roots: Sequence[dict[str, Any]], *, start: bool = False) -> None:
+    """Record the branch each git root is on with its approved base and, ``start``, with its
+    starting one, and the commit that starting base is a clean checkout of (``""`` when it holds
+    uncommitted changes, or holds nothing). A new base drops what was said about the old one.
+
+    Only a starting base gets a commit, and only the one HEAD was as it was taken: that commit is
+    what lets it follow the checkout (:func:`follow_moves`). No commit is ever inferred later.
+    """
     for root in roots:
         branch = current_branch(root)
-        root["approved_branch"] = branch
+        sides = ("approved", "start") if start else ("approved",)
+        for side in sides:
+            root[f"{side}_branch"] = branch
+            root.pop(f"{side}_moved", None)
         if start:
-            root["start_branch"] = branch
+            root["start_commit"] = _clean_head(root, str(root.get("start_tree") or ""))
 
 
-def branch_moves(run: RunState, *, final: bool) -> list[str]:
-    """One line per git root whose checkout left the branch its base was taken on.
+def remember_commit(root: dict[str, Any], commit: str) -> None:
+    """Record a starting base the user chose as ``commit``: on no branch, and a clean checkout of it."""
+    remember_heads([root], start=True)
+    root["start_branch"] = root["approved_branch"] = ""
+    root["start_commit"] = commit
 
-    The diff is from that base, so whatever differs between the two branches shows in it as if
-    this stage made it: a fix only the old branch has reads as removed. The reviewer and Claude
-    are told; nothing else changes.
+
+def _is_ancestor(repo: str, commit: str) -> bool:
+    return git_run(repo, ["merge-base", "--is-ancestor", commit, "HEAD"]).returncode == 0
+
+
+def _merge_base(repo: str, commit: str) -> str:
+    proc = git_run(repo, ["merge-base", commit, "HEAD"])
+    return proc.stdout.decode("utf-8", errors="replace").strip().splitlines()[0] if proc.returncode == 0 and proc.stdout.strip() else ""
+
+
+#: How far back HEAD's own history is searched for an approved base, to say nothing needlessly.
+HISTORY_SEARCH: Final = 1000
+
+
+def _in_history(repo: str, tree: str) -> bool:
+    """Whether one of HEAD's last :data:`HISTORY_SEARCH` commits holds exactly ``tree``.
+
+    Only ever silences a warning: an approved base committed on the current line is still there.
     """
-    key = "start_branch" if final else "approved_branch"
+    proc = git_run(repo, ["log", f"--max-count={HISTORY_SEARCH}", "--format=%T", "HEAD"])
+    return proc.returncode == 0 and tree in proc.stdout.decode("utf-8", errors="replace").split()
+
+
+def _where(branch: str) -> str:
+    return f"branch {branch!r}" if branch else "a detached HEAD"
+
+
+def follow_moves(run: RunState, *, final: bool) -> list[str]:
+    """Move a git root's starting base along when its checkout left the base's line of history;
+    one line per root moved, or per base that cannot follow and whose diff may show more.
+
+    Only a starting base moves, and only one that was a clean checkout of a commit C as it was
+    taken (:func:`remember_heads`): when C is no longer an ancestor of HEAD, the base moves to the
+    merge-base of C and HEAD. What C's line has since is the repository as it was before the run,
+    in neither the base nor the result, and it would otherwise read as removed by the run. A phase
+    moves it only while it is still the approved base too (nothing approved since); the final
+    review moves it whenever.
+
+    Nothing else moves. An approved base is the run's own approved work: one the checkout left
+    behind stays, so work that vanished from the current line reads as removed, as it is. An empty
+    base (``--empty``, a root the run created) means every file is the run's own work, and one with
+    uncommitted changes has no commit to follow. A base that stays while the checkout changed
+    branch, or that shares no history with HEAD, gets a line saying why its diff may show more.
+
+    A move is said again to every review until the base changes (``<side>_moved``), since the
+    review that first saw it may never have reached the reviewer or Claude.
+    """
+    side = "start" if final else "approved"
     lines = []
     for root in run.roots:
-        was = root.get(key)
-        if not isinstance(was, str) or not was:
+        if root.get("kind") != "git" or root.get("baseline") != "set" or not Path(root["path"]).is_dir():
             continue
-        now = current_branch(root)
-        if now != was:
-            where = f"branch {now!r}" if now else "a detached HEAD"
-            lines.append(
-                f"{root['alias']}: its base was taken on branch {was!r}, and it is now on {where}. Whatever differs between "
-                "the two shows in this diff as if this stage changed it, so a change only the old branch has reads as removed."
-            )
+        said = [line for line in root.get(f"{side}_moved") or [] if isinstance(line, str)]
+        line, moved = _follow(root, final=final)
+        if moved:
+            # The starting base moved: the final review is told too, and the approved base, while
+            # it is the same snapshot, moved with it.
+            for which in ("start", "approved") if not final else ("start",):
+                root[f"{which}_moved"] = [*[kept for kept in root.get(f"{which}_moved") or [] if isinstance(kept, str)], line]
+            said.append(line)
+        lines.extend(said if moved or not line else [*said, line])
     return lines
+
+
+def _why_it_stays(root: dict[str, Any], *, approved: bool, was_branch: str, now: str) -> str:
+    """What to say of a base with no commit to follow, the checkout now on ``now``; ``""`` when
+    nothing was lost (the same branch, or the approved snapshot still in HEAD's history)."""
+    alias = root["alias"]
+    if not was_branch or now == was_branch:
+        return ""
+    if approved:
+        # A branch made after the approval, its commit on it, has lost nothing.
+        if _in_history(root["path"], str(root.get("approved_tree") or "")):
+            return ""
+        return (
+            f"{alias}: its base, the snapshot approved last, was taken on branch {was_branch!r}, and it is now on "
+            f"{_where(now)}. An approved base does not follow the checkout, so whatever differs between the two shows in "
+            "this diff as if this stage changed it: approved work only the old branch has reads as removed."
+        )
+    return (
+        f"{alias}: its base was taken on branch {was_branch!r} with uncommitted changes, and it is now on {_where(now)}. "
+        "The base could not follow it, so whatever differs between the two shows in this diff as if this stage changed "
+        "it: a change only the old branch has reads as removed."
+    )
+
+
+def _follow(root: dict[str, Any], *, final: bool) -> tuple[str, bool]:
+    """Move one root's starting base along if it can (:func:`follow_moves`): what to say (``""``
+    for nothing), and whether the base moved."""
+    repo, alias, now = root["path"], root["alias"], current_branch(root)
+    start = str(root.get("start_tree") or "")
+    still_start = final or root.get("approved_tree") == start
+    side = "start" if still_start else "approved"
+    was_branch = str(root.get(f"{side}_branch") or "")
+    commit = str(root.get("start_commit") or "") if still_start else ""
+    if (commit and _is_ancestor(repo, commit)) or (root.get(f"{side}_tree") or "") in EMPTY_TREES:
+        return "", False
+    if not commit:
+        return _why_it_stays(root, approved=not still_start, was_branch=was_branch, now=now), False
+    merge_base = _merge_base(repo, commit)
+    tree = gitsnap.rev_parse(repo, f"{merge_base}^{{tree}}") if merge_base else ""
+    if not tree:
+        return (
+            f"{alias}: its base, commit {commit[:12]}, is not in the history of HEAD (now on {_where(now)}), and the two share "
+            "no commit. The base could not follow it, so whatever differs between them shows in this diff as if this stage "
+            "changed it."
+        ), False
+    root["start_tree"] = tree
+    root["start_commit"] = merge_base
+    root["start_branch"] = now
+    if not final:
+        root["approved_tree"] = tree
+        root["approved_branch"] = now
+    on = f" on branch {was_branch!r}" if was_branch else ""
+    line = (
+        f"{alias}: the checkout left its starting base, commit {commit[:12]}{on}, for {_where(now)}, so the base moved to the "
+        f"commit the two lines share, {merge_base[:12]}. Commits only the old line has are in neither the base nor this "
+        "tree, and are not in this diff."
+    )
+    return line, True
 
 
 def _add(run: RunState, path: Path, kind: str, *, late: bool) -> dict[str, Any]:
@@ -581,7 +706,7 @@ def _add(run: RunState, path: Path, kind: str, *, late: bool) -> dict[str, Any]:
     else:
         tree = snapshot(root, roots, run.paths)
     root["start_tree"] = root["approved_tree"] = tree
-    remember_branches([root], start=True)
+    remember_heads([root], start=True)
     return root
 
 
@@ -672,9 +797,8 @@ def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") ->
     root["start_tree"] = root["approved_tree"] = tree
     root["baseline"] = "set"
     root["proposed"] = ""
-    # A baseline from a commit was not taken on any branch: no branch is claimed for it.
     if choice == "commit":
-        root["start_branch"] = root["approved_branch"] = ""
+        remember_commit(root, gitsnap.rev_parse(root["path"], f"{spec}^{{commit}}"))
     else:
-        remember_branches([root], start=True)
+        remember_heads([root], start=True)
     return tree
