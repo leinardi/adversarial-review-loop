@@ -32,7 +32,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Final
 
-from arl import config, configcmd, report, review, stats, workspace
+from arl import config, configcmd, modelcmd, report, review, stats, workspace
 from arl.atomic import ensure_private_dir, write_private_atomic
 from arl.configcmd import cmd_config
 from arl.errors import StateLoadError
@@ -126,6 +126,10 @@ def cmd_init(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError) as exc:
         raise RunError("no-plan", f"cannot read the plan {plan_source}: {exc}") from exc
     cfg = config.load(str(paths.launch_dir))
+    chosen = str(args.get("model") or "")
+    if chosen:
+        # Before anything is archived or written: a model that cannot be checked starts no run.
+        modelcmd.check_value(chosen, cfg)
     with locked_run_dir(paths):
         archived = ""
         try:
@@ -153,6 +157,9 @@ def cmd_init(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
 
 def _start(paths: RunPaths, plan_source: Path, plan_text: str, args: Mapping[str, Any], cfg: config.Config) -> RunState:
     run = RunState(paths, new_document(plan_source=str(plan_source), final_review=cfg.as_bool("final_review")))
+    if args.get("model"):
+        # `/arl-implement --model`: every round of this run, the first, the later ones and the final.
+        run.set_model_overlay(modelcmd.overlay_for("all", str(args["model"]), {}))
     write_private_atomic(paths.plan_file, plan_text, root=paths.run_dir)
     home = Path(os.environ.get("HOME", str(Path.home()))).resolve()
     candidates = [
@@ -190,7 +197,7 @@ def cmd_resume(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         run = _require(loaded)
         outcome = run.resume(session=str(args.get("session") or ""))
         run.save()
-        cfg = config.load(str(paths.launch_dir))
+        cfg = config.load(str(paths.launch_dir), overrides=run.model_overlay)
         return {"ok": True, "run": run.summary(), "context": resume_context(run, cfg.as_str("verify_cmd")), **outcome}
 
 
@@ -355,13 +362,13 @@ def cmd_accept(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
         run.save()
         # What Claude is told when the user accepted from a dialog in the middle of its turn: the
         # same as after a review's approval (stop when paused, end the turn under auto_compact).
-        cfg = config.load(str(paths.launch_dir))
+        cfg = config.load(str(paths.launch_dir), overrides=run.model_overlay)
         return {"ok": True, "run": run.summary(), "next": review.next_turn(run, cfg, "APPROVED"), "repositories": repositories(run)}
 
 
 def cmd_next_action(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
     with locked_state(paths) as run:
-        cfg = config.load(str(paths.launch_dir))
+        cfg = config.load(str(paths.launch_dir), overrides=run.model_overlay if run is not None else None)
         answer = next_action(run, verify_cmd=cfg.as_str("verify_cmd"))
         if run is not None and answer["action"] == "continue":
             # A new stage after an approval starts on a compacted conversation when asked: what
@@ -384,6 +391,7 @@ COMMANDS: Final[Mapping[str, Command]] = {
     "attach": cmd_attach,
     "report": cmd_report,
     "config": cmd_config,
+    "model": modelcmd.cmd_model,
     "stats": cmd_stats,
     "status": cmd_status,
     "pause": _transition("pause"),

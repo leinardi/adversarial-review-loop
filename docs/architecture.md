@@ -57,6 +57,7 @@ and asks the person when the engine says the run waits for them.
 | `runner.py`, `harness/` | the bounded runner and the opencode harness |
 | `oscillation.py` | stall detection across rounds |
 | `report.py`, `configcmd.py`, `config.py` | reports, `/arl-config`, configuration layers |
+| `modelcmd.py` | `/arl-model`: the run's own reviewer model, checked before it is kept |
 | `stats.py` | `/arl-stats`: each round's model, usage and findings; display only |
 
 ## A round, step by step

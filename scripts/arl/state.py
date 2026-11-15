@@ -56,6 +56,7 @@ from arl.errors import OcrlError, StateLoadError
 
 __all__ = [
     "DISPOSITION_STATUSES",
+    "MODEL_OVERLAY_KEYS",
     "RUN_DIR_NAME",
     "STATE_VERSION",
     "STATUSES",
@@ -69,6 +70,7 @@ __all__ = [
     "next_action",
     "repositories",
     "resume_context",
+    "run_overlay",
     "run_paths",
     "start_prompt",
 ]
@@ -129,6 +131,10 @@ def run_paths(launch_dir: Path) -> RunPaths:
     """The run layout under ``launch_dir``, which is resolved so every stored path is absolute."""
     resolved = launch_dir.resolve()
     return RunPaths(launch_dir=resolved, run_dir=resolved / RUN_DIR_NAME)
+
+
+#: The keys a run's model overlay may hold.
+MODEL_OVERLAY_KEYS: Final = ("model", "late_model")
 
 
 def new_document(*, plan_source: str, final_review: bool) -> dict[str, Any]:
@@ -517,6 +523,21 @@ class RunState:
 
     # -- reporting ----------------------------------------------------------
 
+    @property
+    def model_overlay(self) -> dict[str, str]:
+        """This run's own ``model`` and ``late_model`` (``/arl-model``), as ``config.load`` overrides.
+
+        Never written to a config file: a new run starts without it. A run from before it, or a
+        value that is not text, contributes nothing.
+        """
+        stored = self.data.get("model_overlay")
+        if not isinstance(stored, dict):
+            return {}
+        return {key: value for key, value in stored.items() if key in MODEL_OVERLAY_KEYS and isinstance(value, str)}
+
+    def set_model_overlay(self, overlay: Mapping[str, str]) -> None:
+        self.data["model_overlay"] = {key: overlay[key] for key in MODEL_OVERLAY_KEYS if key in overlay}
+
     def summary(self) -> dict[str, Any]:
         """What ``status`` prints and the mod draws: no tree ids, no history."""
         return {
@@ -534,6 +555,19 @@ class RunState:
             "waiting": self.data["waiting"],
             "roots": [{key: root.get(key, "") for key in ("alias", "path", "kind", "baseline", "proposed")} for root in self.data["roots"]],
         }
+
+
+def run_overlay(paths: RunPaths) -> dict[str, str]:
+    """The current run's model overlay (:attr:`RunState.model_overlay`), ``{}`` with no readable run.
+
+    For commands that only describe the configuration (``config``): an unreadable run is reported
+    by the commands that act on it, not here.
+    """
+    try:
+        with locked_state(paths) as run:
+            return run.model_overlay if run is not None else {}
+    except StateLoadError:
+        return {}
 
 
 @contextmanager

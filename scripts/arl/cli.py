@@ -40,7 +40,9 @@ __all__ = ["USAGE", "end_on_sigterm", "main"]
 
 USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
 
-  init --plan FILE [--root DIR]... [--new]   start a run (--new archives the current one)
+  init --plan FILE [--root DIR]... [--new] [--model M]
+                                             start a run (--new archives the current one;
+                                             --model: this run's reviewer model on every round)
   resume [--session ID]                      continue the run in this session
   set-phases [--replan]                      read a JSON array of phase descriptions on stdin
   root-add PATH                              register a root before changing it
@@ -50,6 +52,8 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
   attach [--session ID]                      a session starts: the run, and another session's review
   report [N]                                 the newest stored report, or the N-th
   config                                     show, set or unset a key; arguments as text on stdin
+  model [set all|first|late M | reset [all|first|late]]
+                                             this run's reviewer model, never written to a file
   status [--json]                            the run summary
   stats [--json]                             what each review round cost and found
   pause | stop | finish | accept             user decisions
@@ -79,6 +83,7 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--plan", required=True)
     init.add_argument("--root", action="append", dest="roots", default=[])
     init.add_argument("--new", action="store_true")
+    init.add_argument("--model", default="")
     phases = sub.add_parser("set-phases", add_help=False)
     phases.add_argument("--replan", action="store_true")
     root_add = sub.add_parser("root-add", add_help=False)
@@ -95,6 +100,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("attach", add_help=False).add_argument("--session", default="")
     sub.add_parser("report", add_help=False).add_argument("number", nargs="?", type=int, default=None)
     sub.add_parser("config", add_help=False)
+    sub.add_parser("model", add_help=False).add_argument("words", nargs="*")
     status = sub.add_parser("status", add_help=False)
     # Accepted and ignored: every answer is JSON already, and the plan's spelling is `status --json`.
     status.add_argument("--json", action="store_true", dest="_json")

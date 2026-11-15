@@ -1231,11 +1231,22 @@ def test_a_reported_failure_counts_even_if_a_root_moved_meanwhile(ws: Path, engi
     assert load(ws).data["transient_failures"] == 1
 
 
+def test_run_external_runs_the_harness_the_ticket_was_prepared_for(ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A harness changed after ``prepare`` is the next review's: this one stays the subagent's."""
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws)
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    assert engine(ws, "review", "run-external", ticket["review_id"])["code"] == "not-external"
+
+
 def test_run_external_refuses_a_harness_this_build_does_not_implement(ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
     started(engine, ws)
     edit(ws / "api" / "src" / "main.py", "print(2)\n")
     ticket = prepare(engine, ws)
-    monkeypatch.setenv("ARL_HARNESS", "opencod")
+    run = load(ws)
+    run.data["pending_ticket"]["harness"] = "opencod"
+    run.save()
     assert engine(ws, "review", "run-external", ticket["review_id"])["code"] == "unknown-harness"
 
 

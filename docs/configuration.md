@@ -8,7 +8,9 @@ Lowest to highest:
 2. the user config, `$XDG_CONFIG_HOME/adversarial-review-loop/config.json` (by default
    `~/.config/adversarial-review-loop/config.json`);
 3. the launch folder's `.adversarial-review-loop.json`, the folder you ran `/arl-implement` in;
-4. `ARL_*` environment variables: the upper-cased key with an `ARL_` prefix (`ARL_MODEL`,
+4. the run's own `model` and `late_model`, from `/arl-implement --model` and `/arl-model`; kept in
+   the run state, never in a file, and gone with the run;
+5. `ARL_*` environment variables: the upper-cased key with an `ARL_` prefix (`ARL_MODEL`,
    `ARL_BLOCK_SEVERITY`).
 
 A config file that cannot be parsed discards the whole file layer, not just itself, so a broken
@@ -63,6 +65,29 @@ set by the four `*_strong_model` and `*_weak_model` keys, so `weak` means Sonnet
 and `openai/gpt-6.1-terra` on OpenCode without either config spelling the other's names.
 `default` is the built-in choice: `strong` for `model`, and for `late_model` `weak` on the
 subagent and `model` on OpenCode. Anything else is a model id, passed through as written.
+
+For one run alone, `/arl-implement --model weak plan.md` reviews every round on the weak model,
+round 1 and the final review included, and `/arl-model` changes it mid-run:
+
+```text
+> /arl-model                  # each kind of round's model, and the layer that chose it
+> /arl-model weak             # every round of this run
+> /arl-model first strong     # round 1 of each phase and the final review
+> /arl-model late default     # later rounds: the built-in choice, whatever a config file says
+> /arl-model reset            # drop the run's choice: the config files decide again
+```
+
+`default` and `reset` differ when a config file sets a model: with `model: weak` in the launch
+folder's config, `/arl-model default` runs `strong`, and `/arl-model reset` runs `weak`. A change
+applies from the next review on; one already prepared keeps the model it was prepared with, its
+repair call included. An `ARL_MODEL` or `ARL_LATE_MODEL` in the environment still wins, and
+`/arl-model` says so.
+
+A model id is checked before it is kept. On the subagent it must be one of Claude Code's aliases
+(`opus`, `sonnet`, `haiku`, `fable`): the host refuses a full id. On OpenCode it must be a model
+`opencode models` lists; for `provider/model#variant` the part before `#` is checked, and a
+configured `variant` alongside it is refused. When `opencode models` does not answer, the id is
+not kept.
 
 The subagent reviewer runs `opus` unless `model` says otherwise. Before this, an unset `model`
 ran the session's own subagent default.

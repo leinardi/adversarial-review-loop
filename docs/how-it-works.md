@@ -33,7 +33,9 @@ that and asks again; only an approval moves the run to the next phase.
    round and the earlier rounds' findings, and searches the whole diff, still in the bundle, as a
    finding or a fix requires. A later round runs on `late_model`, the weak model (Sonnet) by
    default on the subagent (set it to `""` to keep `model`); round 1 and the final review always
-   run on `model`, the strong model (Opus) by default.
+   run on `model`, the strong model (Opus) by default. `/arl-implement --model weak` or
+   `/arl-model` picks the model for one run alone, from the next review on
+   ([configuration](configuration.md#choosing-the-reviewers-model)).
    It may read files and run read-only commands, nothing else. It answers in a strict contract:
    one `FINDING` line per problem, with severity, whether it is actionable, and the file. A
    finding that blocks ends with a suggested check (`|| done when: ...`) that would show it is
