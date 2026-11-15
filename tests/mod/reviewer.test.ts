@@ -19,7 +19,7 @@
 // end is classified, and what it may do.
 
 import { expect, test } from 'claude-code/testing'
-import { answerOf, classify, countStep, deliver, isModelOf, normalize, permit, resetCheckedModels, REVIEWER_TOOLS, reviewerDecision, runHandback, runReviewer, within } from '../../hooks/reviewer'
+import { answerOf, classify, countStep, deliver, HANDBACK_REFUSALS, isModelOf, normalize, permit, resetCheckedModels, REVIEWER_TOOLS, reviewerDecision, runHandback, runReviewer, within } from '../../hooks/reviewer'
 import { REVIEWER_SYSTEM_PROMPT } from '../../hooks/text'
 import { apiError, fakeEngine, PLUGIN, start, tool, world } from './world'
 
@@ -262,6 +262,20 @@ test("an interrupt that ends the reviewer's own run first is still an interrupt,
 
 test("handing the report back is left to the session: auto mode refuses a hook's allow of it", () => {
   expect(permit(DIRS, { tool: 'SubagentHandback', input: {} })).toBe('theirs')
+  expect(permit(DIRS, { tool: 'SubagentHandback', input: { message: 'Prose.\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>' }, agentId: 'whole' })).toBe('theirs')
+})
+
+// In live runs a reviewer handed back its prose alone, and a review that had approved became a
+// failed round. A hook may refuse a handback, so the reviewer is sent back to hand in the block.
+test('a handback without the findings block is sent back, a bounded number of times', () => {
+  const call = { tool: 'SubagentHandback', input: { message: 'Both findings are fixed.' }, agentId: 'prose-only' }
+  for (let refusal = 0; refusal < HANDBACK_REFUSALS; refusal++) {
+    expect(permit(DIRS, call)).toEqual(expect.objectContaining({ decision: 'deny', reason: expect.stringContaining('<<<ARL-FINDINGS>>>') }))
+  }
+  // Past the bound the session decides, and the round fails on the missing block.
+  expect(permit(DIRS, call)).toBe('theirs')
+  // Another reviewer has its own count.
+  expect(permit(DIRS, { ...call, agentId: 'another' })).toEqual(expect.objectContaining({ decision: 'deny' }))
 })
 
 /** Let pending promise callbacks run (the model check before a spawn). */

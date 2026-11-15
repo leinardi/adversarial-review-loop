@@ -109,7 +109,9 @@ In auto mode the session tells the reviewer to deliver its report with `Subagent
 only auto mode's own classifier may allow that call. The loop leaves it to the classifier, and
 reads the report the call delivered as the reviewer's answer, since the reviewer's last message is
 then often only a note about the handback. A handback the session refuses delivers nothing, and
-the reviewer's last message is read as before.
+the reviewer's last message is read as before. A handback whose report has no findings block is
+refused by the loop itself, with a reason that asks for the report again, whole: up to twice per
+reviewer, after which it goes through and the round fails on the missing block.
 
 A git root's starting base follows its checkout to another line of history. Say a repository
 was on a fix branch when the run started, and the work then went on a new branch from `main`:
