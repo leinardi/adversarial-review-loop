@@ -111,6 +111,10 @@ reads the report the call delivered as the reviewer's answer, since the reviewer
 then often only a note about the handback. A handback the session refuses delivers nothing, and
 the reviewer's last message is read as before.
 
+A git root whose checkout is on another branch than the one its base was taken on is named in
+`range.txt` (under "Snapshot warnings") and to Claude: whatever differs between the two branches
+shows in the diff as if the stage changed it, so a fix only the old branch has reads as removed.
+
 ## What it does not do
 
 It does not enforce anything. Claude can commit without a review, ignore a finding, or write

@@ -38,7 +38,7 @@ import json
 import math
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from arl import bundle, config, contract, globmatch, guidance, harness, modelcmd, oscillation, report, runner, workspace
 from arl.atomic import write_private_file
@@ -250,9 +250,15 @@ def next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
     return ""
 
 
+def _approve(run: RunState, trees: Mapping[str, str], *, by: Literal["review", "ignored"]) -> None:
+    """Approve the stage at ``trees``, and note the branch each root is on with its new base."""
+    run.approve(trees, by=by)
+    workspace.remember_branches(run.roots)
+
+
 def _skip(run: RunState, trees: Mapping[str, str], cfg: config.Config, *, note: str = "") -> dict[str, Any]:
     what = "the final review" if run.stage() == "final" else f"phase {run.current_phase()}"
-    run.approve(trees, by="ignored")
+    _approve(run, trees, by="ignored")
     run.save()
     message = f"Every change of {what} matches ignore_globs ({', '.join(cfg.as_list('ignore_globs'))}), so it was approved without a review.\n"
     message += note
@@ -305,6 +311,8 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         target = bundle.target_for(run, trees, final=stage == "final")
         changed = {root.alias for root in target.roots if root.base != root.head}
         sources, warnings = guidance.collect([root for root in run.roots if root["alias"] in changed], cfg, paths.launch_dir)
+        moved = workspace.branch_moves(run, final=stage == "final")
+        warnings = [*warnings, *moved]
         try:
             built = bundle.build(run, target, review_dir / "bundle", config=cfg, verification=verification, sources=sources, warnings=warnings)
             bundle.compose_prompt(target, built, review_dir / "prompt.md")
@@ -338,7 +346,7 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             # review's (`_for_ticket`).
             **_pinned(cfg),
             # For Claude only, with whatever the round answers; never part of the bundle.
-            "note": _ignored_note(ignored),
+            "note": _ignored_note(ignored) + "".join(f"Note: {line}\n" for line in moved),
         }
         run.issue_ticket(ticket)
         run.save()
@@ -776,7 +784,7 @@ def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about wh
         points = oscillation.reversals(rounds, target.label, block_severity=cfg.as_str("block_severity"))
         review.oscillating = oscillation.render(points) if points else ""
         if review.verdict == "APPROVED":
-            run.approve(ticket["trees"], by="review")
+            _approve(run, ticket["trees"], by="review")
         else:
             run.record_changes_required()
             run.invalidate_ticket("recorded")
