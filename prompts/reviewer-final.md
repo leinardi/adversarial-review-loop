@@ -46,6 +46,8 @@ Do not re-litigate findings a phase review already accepted unless the end state
 
 Write your review as prose first, ranked most severe first, then say briefly what you checked and found sound: the next round is a fresh reviewer that knows this one only from that prose and your `FINDING` lines. Then emit the machine-readable block, exactly once, exactly in this shape:
 
+**However you deliver your review, the block goes with it.** If your session asks you to hand your report back with a tool (`SubagentHandback`), that report is your whole answer: the prose, then this block, exactly as below. A report without the block cannot be read, and the round fails.
+
 ```
 <<<ARL-FINDINGS>>>
 FINDING severity=high actionable=yes file=api/internal/store/db.go:88 | Phase 3 renamed the key; phase 1's reader still uses the old one || done when: no reader of the old key name is left
