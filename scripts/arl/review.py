@@ -70,7 +70,9 @@ _INCOMPLETE: Final = "| review transcript incomplete"
 _FAILURE_ERROR_CHARS: Final = 500
 
 #: Failure kinds the mod may report for a subagent that did not answer.
-FAILURE_KINDS: Final = ("transient", "operational")
+#: How a reviewer that gave no answer failed. ``model``: its model is unknown, not accessible, or
+#: was replaced by the session; the run waits for the user at once, with no retry and no budget.
+FAILURE_KINDS: Final = ("transient", "operational", "model")
 
 
 def _require(run: RunState | None) -> RunState:
@@ -394,6 +396,17 @@ def _count_failure(run: RunState, kind: str, error: str, cfg: config.Config) -> 
         run.wait_for_user("failures", f"{run.data[key]} {kind} failures in a row; the last: {error}")
         return f" The run now waits for the user ({budget} exceeded)."
     return ""
+
+
+def _model_refusal(ticket: Mapping[str, Any], target: Target, error: str) -> str:
+    """Why a model failure stops the run, and what the user can do: it names the model and the round."""
+    shown = str(ticket.get("model") or ticket.get("model_id") or "the configured model")
+    stage = "the final review" if ticket.get("stage") == "final" else f"round {int(ticket.get('round') or 1)} of {target.label}"
+    which = "first" if ticket.get("stage") == "final" or int(ticket.get("round") or 1) < 2 else "late"
+    return (
+        f"The reviewer's model {shown} cannot be used for {stage}: {error}. "
+        f"Nothing was retried. Choose another model (/arl-model {which} default, or /arl-model {which} <model>), then /arl-resume."
+    )
 
 
 def _repair_reason(unaccounted: tuple[str, ...]) -> str:
@@ -753,7 +766,12 @@ def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about wh
                 "error": review.error[:_FAILURE_ERROR_CHARS],
             }
         )
-        if review.verdict == "OP_FAILURE":
+        if review.verdict == "OP_FAILURE" and review.kind == "model":
+            run.invalidate_ticket("failed")
+            detail = _model_refusal(ticket, target, review.error)
+            run.wait_for_user("model", detail)
+            note = f"\n{detail}\n"
+        elif review.verdict == "OP_FAILURE":
             run.invalidate_ticket("failed")
             note = _count_failure(run, review.kind or "operational", review.error, cfg)
         else:
@@ -954,6 +972,11 @@ def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     _external_harness(cfg)
     review_dir = _review_dir(paths, str(ticket["run_id"]), int(ticket["seq"]))
     prompt, answer = review_dir / "prompt.md", review_dir / "answer.md"
+    try:
+        # Before anything runs: a model the reviewer does not list fails here, once, and asks the user.
+        runner.check_model(cfg)
+    except runner.ReviewerFailed as exc:
+        return record(paths, {"review_id": review_id, "failed": runner.classify_op_failure(exc, answer), "error": str(exc)})
     spent: harness.Usage | None = None
     for attempt in range(2):
         invocation = runner.Invocation(bundle_dir=review_dir / "bundle", prompt_file=prompt, title=f"arl {review_id} {attempt}", out_path=answer)

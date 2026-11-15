@@ -89,6 +89,14 @@ A stopped or complete run is archived without `--new`.
 
 ## Cost
 
+### The loop says the reviewer's model cannot be used
+
+The model was refused before the reviewer could answer: unknown, not available to your account, or
+replaced by the session (an `availableModels` allowlist, for example). The message names the model,
+the round and the provider's reason. Nothing was retried, and no failure budget was spent. Choose
+another with `/arl-model` (`/arl-model default` goes back to the built-in models) or fix the
+access, then `/arl-resume`. The check is described in [how it works](how-it-works.md#the-reviewers-model).
+
 ### What does a review cost?
 
 One reviewer run per round, plus at most one repair when an answer breaks the contract. Each report's

@@ -83,10 +83,11 @@ STATUSES: Final = ("active", "paused", "stopped", "complete")
 
 #: The decisions a run can be waiting on the user for, besides a root's baseline (which is read
 #: off the roots themselves, so it cannot go stale).
-WAIT_KINDS: Final = ("stall", "failures", "oversized", "needs-human")
+WAIT_KINDS: Final = ("stall", "failures", "oversized", "needs-human", "model")
 
-#: The waits only the user ends; the others clear once their condition is gone.
-_DECISIONS: Final = frozenset({"stall", "needs-human"})
+#: The waits only the user ends; the others clear once their condition is gone. ``model`` is a
+#: reviewer model that cannot be used: another review on it would fail the same way.
+_DECISIONS: Final = frozenset({"stall", "needs-human", "model"})
 
 Stage = Literal["plan", "phase", "final", "done"]
 

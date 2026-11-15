@@ -232,6 +232,15 @@ class Harness(Protocol):
         display concern fail a review that had already succeeded.
         """
 
+    def refusal(self, raw: bytes) -> tuple[str, str] | None:
+        """What a failed run's output says about why it failed, or ``None`` when it says nothing known.
+
+        ``("model", reason)`` for a model or credential the provider refused (unknown model, no
+        credentials, a bad key): another try fails the same way, so the run asks the user.
+        ``("transient", reason)`` for a failure worth retrying (the network). Read from the
+        output's tail; never raises, and never reads an answer.
+        """
+
     def probe_models(self, timeout: float) -> list[str] | None:
         """The models this reviewer reports, or ``None`` when it cannot enumerate them.
 

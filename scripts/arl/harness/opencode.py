@@ -11,6 +11,10 @@ environment and config, not the run's: **without** ``--standalone`` the permissi
 never seen and the reviewer gets the user's permissions (measured: it wrote a file and ran a
 shell command). 2.x also dropped ``--pure``, ``--dir``, ``--variant`` and
 ``OPENCODE_PERMISSION``.
+
+The run writes JSON events (``--format json``): measured on 2.3.0 (tests/STEP0.md, L4), a refused
+model or credential exits 1 like a network failure, and only the ``error`` event's ``type`` tells
+them apart. :meth:`OpenCodeHarness.transcript` joins the ``text`` events into the answer.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -39,13 +43,16 @@ from typing import Final
 
 from arl import reviewer_probe
 from arl.config import Config
-from arl.harness import Command, PayloadError, ReviewSpec, Usage, model
+from arl.harness import Command, PayloadError, ReviewSpec, TranscriptError, Usage, model
 
 __all__ = [
     "AGENT",
     "HARNESS",
+    "MODEL_REFUSALS",
+    "TRANSIENT_ERRORS",
     "OpenCodeHarness",
     "config_content",
+    "events",
     "isolation_argv",
     "isolation_env",
     "permission",
@@ -85,7 +92,8 @@ def review_argv(title: str, *, config: Config) -> list[str]:
         raise PayloadError(f"model {chosen!r} already names a variant; unset variant ({variant!r}) or drop it from model")
     argv += ["-m", f"{chosen}#{variant}" if variant else chosen]
     # `--archived`: a review is not a session the person goes back to, so it stays out of their list.
-    argv += ["--agent", AGENT, "--title", title, "--archived"]
+    # `--format json`: the only output that says why a run failed (see the module docstring).
+    argv += ["--agent", AGENT, "--title", title, "--archived", "--format", "json"]
     return argv
 
 
@@ -129,6 +137,47 @@ def config_content(bundle_dir: Path, roots: Sequence[str] = ()) -> str:
     return json.dumps(content, separators=(",", ":"), ensure_ascii=False)
 
 
+#: ``error.type`` values that refuse the model itself: an unknown model or a provider with no
+#: credentials (``provider.no-route``), a key the provider refused (``provider.auth``).
+MODEL_REFUSALS: Final = frozenset({"provider.no-route", "provider.auth"})
+
+#: ``error.type`` values worth another try: the provider could not be reached.
+TRANSIENT_ERRORS: Final = frozenset({"provider.transport"})
+
+
+def events(raw: bytes, *, strict: bool = False) -> list[dict[str, object]]:
+    """The JSON events of a run's output, one per line; a line that does not open with ``{`` (a log
+    on stderr) is skipped.
+
+    ``strict``: a line that opens with ``{`` or ``[`` and is not a whole JSON object raises
+    :class:`TranscriptError`. A damaged event may be the error that ends the run, so an answer is
+    never read past one. Without it (reading why a run failed, from a tail that may start mid-line)
+    such a line is skipped.
+    """
+    found: list[dict[str, object]] = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{") and not (strict and stripped.startswith("[")):
+            continue
+        try:
+            event = json.loads(stripped)
+        except ValueError:
+            event = None
+        if isinstance(event, dict):
+            found.append(event)
+        elif strict:
+            raise TranscriptError(f"opencode wrote an event that is not a JSON object: {stripped[:200]!r}")
+    return found
+
+
+def _error_of(event: dict[str, object]) -> tuple[str, str]:
+    error = event.get("error")
+    if not isinstance(error, dict):
+        return "", ""
+    kind, message = error.get("type"), error.get("message")
+    return (kind if isinstance(kind, str) else "", message if isinstance(message, str) else "")
+
+
 def _with_system_prompt(prompt_text: str, system_prompt: str) -> str:
     """The prompt with the plugin's working guidance appended, or unchanged when there is none.
 
@@ -167,20 +216,40 @@ class OpenCodeHarness:
         return reviewer_probe.list_models(timeout)
 
     def transcript(self, raw: bytes) -> bytes:
-        """``raw``, unchanged: ``opencode run`` writes the answer and nothing around it.
+        """The ``text`` events' text, joined: the answer :func:`arl.contract.parse` reads.
 
-        There is no wrapper to unwrap and no second channel of failure to inspect -- what this
-        CLI reports about the run, it reports through its exit status, which
-        :func:`arl.runner.invoke` has already checked by the time this is called.
+        An ``error`` event in a run that exited 0 is refused (:class:`TranscriptError`): whatever
+        text came before it is not a whole review; :func:`arl.runner.invoke` then reads it through
+        :meth:`refusal`. So is an event that does not parse (``events(strict=True)``). No text at all
+        is an empty answer, which the engine counts as a reviewer that said nothing.
         """
-        return raw
+        texts: list[str] = []
+        for event in events(raw, strict=True):
+            if event.get("type") == "error":
+                kind, message = _error_of(event)
+                raise TranscriptError(f"opencode reported an error ({kind or 'unknown'}): {message or 'no message'}")
+            part = event.get("part")
+            if event.get("type") == "text" and isinstance(part, dict) and isinstance(part.get("text"), str):
+                texts.append(str(part["text"]))
+        return "\n".join(texts).encode("utf-8") + (b"\n" if texts else b"")
+
+    def refusal(self, raw: bytes) -> tuple[str, str] | None:
+        """The last ``error`` event's verdict on the run: see :data:`MODEL_REFUSALS`."""
+        for event in reversed(events(raw)):
+            if event.get("type") != "error":
+                continue
+            kind, message = _error_of(event)
+            reason = f"{message or 'no message'} ({kind or 'no type'})"
+            if kind in MODEL_REFUSALS:
+                return ("model", reason)
+            if kind in TRANSIENT_ERRORS:
+                return ("transient", reason)
+            return None
+        return None
 
     def usage(self, raw: bytes) -> Usage | None:
-        """``None``: the transcript is the answer text, with no accounting around it.
-
-        Not a gap to be filled by estimating from the payload -- a guessed cost printed beside
-        a measured one in the same report is worse than no figure at all. If this CLI grows a
-        machine-readable output mode, this is where reading it belongs.
+        """``None``: not read yet. The ``step_finish`` events carry token counts; reading them
+        belongs here, and a guessed cost printed beside a measured one is worse than none.
         """
         del raw
         return None

@@ -21,7 +21,7 @@
 import type { EngineInterface } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 import { reviewWith, session } from '../../hooks/flow'
-import { Interrupted } from '../../hooks/reviewer'
+import { Interrupted, type Ran } from '../../hooks/reviewer'
 import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, start, summary, world } from './world'
 
 function at(isInteractive = false): void {
@@ -226,6 +226,31 @@ test('the external harness is run by the engine, streamed', async () => {
 // --------------------------------------------------------------------------
 
 const STALLED = { ...RECORDED, verdict: 'CHANGES_REQUIRED', message: 'Findings.', run: summary({ waiting: { kind: 'stall', detail: 'the same finding for 5 rounds' } }) }
+
+const MODEL_REFUSED: Ran = { ok: false, kind: 'model', error: 'the API refused the model opus (404 model_not_found)' }
+const MODEL_WAIT = { ...RECORDED, verdict: 'OP_FAILURE', message: 'The review failed.', run: summary({ waiting: { kind: 'model', detail: "The reviewer's model strong (opus) cannot be used" } }) }
+
+test('a model failure is recorded as one, and headless Claude is told to hand over with /arl-model', async () => {
+  at(false)
+  const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': MODEL_WAIT }, files: PROMPTS })
+  const text = await review($, {}, reviewer([MODEL_REFUSED]).run)
+  expect(w.calls.at(-1)?.args.slice(3, 7)).toEqual(['--failed', 'model', '--error', MODEL_REFUSED.error])
+  expect(text).toContain('The run now waits for the user (model)')
+  expect(text).toContain('/arl-model default')
+})
+
+test('the user choosing the default model sets it for the run and Claude calls review again', async () => {
+  at(true)
+  const { $, w } = fakeEngine({
+    engine: { 'review prepare': PREPARED, 'review record': MODEL_WAIT, model: { ok: true, text: 'Reviewer model', overlay: { model: 'default', late_model: 'default' } } },
+    files: PROMPTS,
+    choices: ['Use the default model'],
+  })
+  const text = await review($, {}, reviewer([MODEL_REFUSED]).run)
+  expect(w.asked[0]?.options).toEqual(['Use the default model', 'Accept', 'Keep going', 'Stop'])
+  expect(w.calls.at(-1)?.args).toEqual(['model', 'set', 'all', 'default'])
+  expect(text).toContain('switched this run to the default reviewer model: call review again')
+})
 
 test('headless, a stall tells Claude to stop and hand over, and asks nobody', async () => {
   at(false)

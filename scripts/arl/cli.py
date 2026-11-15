@@ -60,7 +60,7 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
   next-action                                whether the loop continues after a turn
   review prepare [--session ID]              prepare the current stage's review; optional JSON
                                              {"verification": [...], "dispositions": [...]} on stdin
-  review record ID (--answer FILE | --failed transient|operational [--error TEXT])
+  review record ID (--answer FILE | --failed transient|operational|model [--error TEXT])
                    [--usage JSON]            what the subagent round cost, for the report
   review run-external ID                     run the opencode reviewer and record its answer
   review abandon ID                          retire an interrupted review; no failure is counted
@@ -117,7 +117,7 @@ def _parser() -> argparse.ArgumentParser:
     record.add_argument("review_id")
     outcome = record.add_mutually_exclusive_group(required=True)
     outcome.add_argument("--answer")
-    outcome.add_argument("--failed", choices=("transient", "operational"))
+    outcome.add_argument("--failed", choices=("transient", "operational", "model"))
     record.add_argument("--error", default="")
     record.add_argument("--usage", default="")
     review.add_parser("run-external", add_help=False).add_argument("review_id")

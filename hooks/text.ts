@@ -104,3 +104,5 @@ export type ToolName = keyof typeof TOOLS
 export const ACCEPT = 'Accept'
 export const KEEP_GOING = 'Keep going'
 export const STOP = 'Stop'
+/** A fourth answer when the reviewer's model cannot be used: this run goes back to the built-in models. */
+export const USE_DEFAULT_MODEL = 'Use the default model'

@@ -71,6 +71,7 @@ The loop stops prompting Claude and asks you (or, headless, tells Claude to stop
 - the same blocking findings persist for `stall_rounds` rounds;
 - the reviewer keeps failing (`max_failures`, `max_transient_failures`);
 - the reviewer itself asks for a person;
+- the reviewer's model cannot be used (below): at once, with nothing retried;
 - a changed file or the whole diff is too large to review;
 - a folder joined the run with changes already in it, so its baseline cannot be known. You pick:
   the changes since a proposed commit, everything in it is new, or its current content is the
@@ -78,6 +79,28 @@ The loop stops prompting Claude and asks you (or, headless, tells Claude to stop
 
 You can accept the stage as it stands (`/arl-accept`), keep going (`/arl-resume`), or stop
 (`/arl-stop`).
+
+### The reviewer's model
+
+A review never runs on a model other than the one chosen for it, and never quietly on a fallback.
+The checks, and what each costs:
+
+- **On the subagent**, the model must be one of Claude Code's aliases (`opus`, `sonnet`, `haiku`,
+  `fable`). Before a model's first review in a session, the plugin sends it one tiny request
+  ("Reply OK.", one output token) through the session's own credentials. A model the API refuses
+  (400, 401, 403, 404) or the session does not allow stops the run; a rate limit, a server error
+  or no response counts as a transient failure, and the check runs again next time. After the
+  spawn, the model the session reports must be the alias's own: an allowlist that silently runs
+  another model stops the run too, and that reviewer's answer is never read.
+- **On OpenCode**, the model (the part before any `#variant`) must be one `opencode models`
+  lists, checked before each run. A run the provider refuses (an unknown model, no credentials, a
+  key it rejects) stops the run; a network failure is transient. `opencode models` lists models
+  whether or not you have credentials, so a missing key is caught by the run itself, a few
+  seconds in.
+
+When the model cannot be used, the loop says which model, for which round, and why, and asks you
+to choose another (`/arl-model default`, or `/arl-model <model>`; choosing ends the wait), accept
+the stage, keep going on the same model, or stop. Headless, Claude is told to stop and tell you.
 
 ## What it does not do
 

@@ -22,6 +22,11 @@
 // awaits a plain promise: only a `$` call in flight stops the clock. So the wait is raced against
 // a `sleep <timeout>` child: its pull is the `$` call in flight, its exit is the review's
 // timeout, and an interrupt (`next.signal`) kills it and ends the wait.
+//
+// The model is checked before the reviewer may answer (tests/STEP0.md, L1 to L3): a spawn takes
+// only an alias, the first spawn of a model in this session is preceded by one tiny completion on
+// it, and the model the spawn reports must be the alias's own. A model that fails any of these is
+// a `model` failure: the run asks the user, nothing is retried, and no answer of it is read.
 
 import type { EngineInterface, TurnUsage } from 'claude-code'
 import { REVIEWER_DESCRIPTION, REVIEWER_SYSTEM_PROMPT } from './text'
@@ -45,10 +50,19 @@ export type Completion = {
   requests?: number
 }
 
+/** How a reviewer that gave no answer failed: retried, counted, or (`model`) put to the user at once. */
+export type FailureKind = 'transient' | 'operational' | 'model'
+
 /** A reviewer run: its answer, or why it gave none and how the failure budget counts it. */
 export type Ran =
   | { ok: true; answer: string; usage?: TurnUsage; durationMs: number; requests?: number }
-  | { ok: false; kind: 'transient' | 'operational'; error: string; usage?: TurnUsage; durationMs?: number; requests?: number }
+  | { ok: false; kind: FailureKind; error: string; usage?: TurnUsage; durationMs?: number; requests?: number }
+
+/** The models a spawn takes (`$.agent.spawn` refuses a full id: tests/STEP0.md, L2). */
+export const ALIASES: readonly string[] = ['opus', 'sonnet', 'haiku', 'fable']
+
+/** HTTP statuses of a check that refuse the model itself; any other error may pass on a retry. */
+const REFUSING_STATUSES: readonly number[] = [400, 401, 403, 404]
 
 /** One review round's run. */
 export type Task = {
@@ -73,6 +87,8 @@ const running = new Map<string, readonly string[]>()
  * once its review is over it may do nothing at all, rather than fall back on the session's rules.
  */
 const everSpawned = new Set<string>()
+/** Models this session's check answered for: each is checked once, before its first spawn. */
+const checkedModels = new Set<string>()
 /** Model requests per reviewer, counted from its `turn.step`s until its answer is delivered. */
 const steps = new Map<string, number>()
 /** Spawns not resolved yet: a reviewer's first tool call can come before its id is known. */
@@ -156,7 +172,7 @@ export async function answerOf($: EngineInterface, agentId: string, timeoutSec: 
   }
 }
 
-function failed(kind: 'transient' | 'operational', error: string, completion?: Completion): Ran {
+function failed(kind: FailureKind, error: string, completion?: Completion): Ran {
   return { ok: false, kind, error, usage: completion?.usage, durationMs: completion?.durationMs, requests: completion?.requests }
 }
 
@@ -167,20 +183,61 @@ export class Interrupted extends Error {
   }
 }
 
+/** Forget which models were checked: a session that starts again checks them again. */
+export function resetCheckedModels(): void {
+  checkedModels.clear()
+}
+
+/**
+ * Whether `model` can be used, by one tiny completion on it, once per session: `undefined` when
+ * it answered, else why not. A refusal of the model (404, 403, 401, 400, or a model the session
+ * blocks) is a `model` failure; a rate limit, a server error or no response is transient.
+ */
+export async function checkModel($: EngineInterface, model: string, signal?: AbortSignal): Promise<Ran | undefined> {
+  if (checkedModels.has(model)) return undefined
+  let result: Awaited<ReturnType<EngineInterface['model']['complete']>>
+  try {
+    result = await $.model.complete({ model, prompt: 'Reply OK.', maxTokens: 1, timeoutMs: 30000 }, signal ? { signal } : undefined)
+  } catch (error) {
+    // Only a request the engine refuses to send rejects: a model the session does not allow.
+    return failed('model', `the session refused the model ${model}: ${String(error)}`)
+  }
+  if (result.isAnswered || result.reason === 'empty-reply') {
+    checkedModels.add(model)
+    return undefined
+  }
+  if (result.reason === 'aborted') {
+    if (signal?.aborted) throw new Interrupted()
+    return failed('transient', `the check of the model ${model} did not answer in time`)
+  }
+  const status = result.status
+  if (status !== null && REFUSING_STATUSES.includes(status)) {
+    return failed('model', `the API refused the model ${model} (${status} ${result.error})`)
+  }
+  return failed('transient', `the check of the model ${model} failed (${status ?? 'no response'} ${result.error})`)
+}
+
+/** Whether the model a spawn reports (a full id) is the alias's own: `opus` runs `claude-opus-…`. */
+export function isModelOf(alias: string, reported: string): boolean {
+  return reported.startsWith(`claude-${alias}-`)
+}
+
 /** Run one fresh reviewer on `task` and answer what it said, or why it said nothing. */
 export async function runReviewer($: EngineInterface, task: Task): Promise<Ran> {
+  if (!ALIASES.includes(task.model)) {
+    return failed('model', `the subagent reviewer runs on one of ${ALIASES.join(', ')}, not ${task.model ? `'${task.model}'` : 'no model'}`)
+  }
+  const refused = await checkModel($, task.model, task.signal)
+  if (refused !== undefined) return refused
   spawning += 1
   spawningDirs = task.dirs
   let agentId: string | undefined
+  let ranOn: string
   try {
-    const spawned = await $.agent.spawn({
-      subagentType: reviewerType($),
-      prompt: task.prompt,
-      description: task.description,
-      ...(task.model ? { model: task.model } : {}),
-    })
+    const spawned = await $.agent.spawn({ subagentType: reviewerType($), prompt: task.prompt, description: task.description, model: task.model })
     if (spawned.deny !== undefined) return failed('operational', `the reviewer could not be started: ${spawned.deny}`)
     agentId = spawned.agentId
+    ranOn = spawned.model
   } catch (error) {
     return failed('operational', `the reviewer could not be started: ${String(error)}`)
   } finally {
@@ -188,6 +245,11 @@ export async function runReviewer($: EngineInterface, task: Task): Promise<Ran> 
   }
   if (agentId === undefined) return failed('operational', 'the reviewer could not be started: no agent id came back')
   everSpawned.add(agentId)
+  if (!isModelOf(task.model, ranOn)) {
+    // The session put another model in its place (an allowlist does, silently). Its answer is
+    // never read, and once it is not running, its every tool call is denied.
+    return failed('model', `the session started the reviewer on ${ranOn || 'an unnamed model'}, not ${task.model}`)
+  }
   running.set(agentId, task.dirs)
   try {
     const completion = await answerOf($, agentId, task.timeoutSec, task.signal)

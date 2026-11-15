@@ -2006,6 +2006,7 @@ def test_run_external_records_the_usage_of_the_review_and_its_repair(
 
     monkeypatch.setenv("ARL_HARNESS", "opencode")
     monkeypatch.setattr(runner, "invoke", invoke)
+    monkeypatch.setattr(runner, "check_model", lambda _config: None)
     started(engine, ws)
     edit(ws / "api" / "src" / "main.py", "print(2)\n")
     ticket = prepare(engine, ws)
@@ -2069,6 +2070,7 @@ def test_a_repair_that_fails_keeps_the_cost_of_the_review_before_it(ws: Path, en
 
     monkeypatch.setenv("ARL_HARNESS", "opencode")
     monkeypatch.setattr(runner, "invoke", invoke)
+    monkeypatch.setattr(runner, "check_model", lambda _config: None)
     started(engine, ws)
     edit(ws / "api" / "src" / "main.py", "print(2)\n")
     ticket = prepare(engine, ws)

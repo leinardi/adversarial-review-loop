@@ -4,7 +4,8 @@ A run may hold its own ``model`` and ``late_model`` (:attr:`arl.state.RunState.m
 they beat the config files but not ``ARL_*`` (``config.load``'s ``overrides``). ``init`` writes
 one from ``/arl-implement --model``, ``model set`` changes it and ``model reset`` removes it;
 ``resume`` and a replan keep it, and a new run starts without one. A change takes effect at the
-next ``review prepare``: a review already prepared keeps the model its ticket recorded.
+next ``review prepare``: a review already prepared keeps the model its ticket recorded. A run
+waiting on a model the reviewer could not use (the ``model`` wait) stops waiting on a change.
 
 ``set ... default`` stores the word ``default``, so the run uses the built-in choice whatever a
 config file says; ``reset`` removes the entry, so the run inherits the config layers again.
@@ -154,6 +155,9 @@ def cmd_model(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         keys = WHICH[which]
         updated = {key: stored for key, stored in overlay.items() if key not in keys} if action == "reset" else overlay_for(which, value, overlay)
         run.set_model_overlay(updated)
+        # A model the reviewer could not use is what the run waited on: the choice just made is
+        # the user's answer, and the next review tries it.
+        run.clear_wait("model")
         run.save()
         cfg = config.load(launch, overrides=updated)
         return {"ok": True, "text": _show(run, cfg, updated), "overlay": updated, "warnings": _warnings(keys)}

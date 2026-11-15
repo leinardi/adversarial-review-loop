@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import IO, Final
 
 import arl
-from arl import harness
+from arl import harness, reviewer_probe
 from arl.atomic import FILE_MODE, read_verified_file, write_private_file
 from arl.config import Config
 from arl.contract import Target
@@ -49,6 +49,7 @@ __all__ = [
     "Invocation",
     "LaunchError",
     "ReviewerFailed",
+    "check_model",
     "classify_op_failure",
     "efficiency_text",
     "invoke",
@@ -79,6 +80,10 @@ _TIMEOUT_STATUSES: Final = frozenset({124, 137})
 #: when the process's own output says so, and only the head of it is read, bounded, so a
 #: reviewer transcript large enough to be truncated is never scanned in full for this.
 _TRANSIENT_OUTPUT_HEAD_BYTES: Final = 4096
+
+#: How much of a failed run's output :meth:`arl.harness.Harness.refusal` reads, from the end: the
+#: error event comes last, after any retries the CLI printed.
+_REFUSAL_TAIL_BYTES: Final = 65536
 
 
 #: Known provider/CLI phrasing for a rate or usage limit, case-insensitive. Deliberately
@@ -119,15 +124,18 @@ class LaunchError(OcrlError):
 class ReviewerFailed(OcrlError):
     """The reviewer did not run to completion. Always ``OP_FAILURE``, never an approval."""
 
-    def __init__(self, message: str, *, status: int | None = None) -> None:
+    def __init__(self, message: str, *, status: int | None = None, kind: str | None = None) -> None:
         """``status`` is the exit code ``invoke`` observed (124/137 for a timeout, the
         process's own for anything else). :func:`classify_op_failure` reads this rather than
         pattern-matching ``message`` -- the status is the fact; the message is prose. ``None``
-        only for a caller that has no status to give, which no call site in this module does
-        today.
+        for a failure before anything ran (:func:`check_model`).
+
+        ``kind`` is set when the failure already says how it counts: the harness read it from the
+        run's own output (:meth:`arl.harness.Harness.refusal`), or :func:`check_model` found it.
         """
         super().__init__(message)
         self.status = status
+        self.kind = kind
 
 
 @dataclass(frozen=True)
@@ -410,6 +418,9 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
     if status in _TIMEOUT_STATUSES:
         raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s", status=status)
     if status != 0:
+        refused = None if reviewer_cmd else _refusal(_harness(config), run.out_path)
+        if refused is not None:
+            raise ReviewerFailed(f"the reviewer exited with status {status}: {refused[1]}", status=status, kind=refused[0])
         raise ReviewerFailed(f"the reviewer exited with status {status}", status=status)
     if reviewer_cmd:
         # The stub wrote the contract itself; there was no model call to account for.
@@ -417,17 +428,53 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
     try:
         return _reduce_transcript(_harness(config), run.out_path)
     except harness.TranscriptError as exc:
-        # A zero exit the harness refuses to read as an answer. `status=0` keeps
-        # `classify_op_failure` on its "operational" path, which is what this is: the
-        # reviewer reported something about its own run that no verdict may be read past.
-        raise ReviewerFailed(str(exc)) from exc
+        # A zero exit the harness refuses to read as an answer: no verdict may be read past it.
+        # What the run says about why (a refused model, the network) counts as it would on a
+        # non-zero exit; anything else is operational.
+        refused = _refusal(_harness(config), run.out_path)
+        raise ReviewerFailed(str(exc) if refused is None else f"{exc}: {refused[1]}", kind=refused[0] if refused else None) from exc
+
+
+def _refusal(implementation: harness.Harness, out_path: Path) -> tuple[str, str] | None:
+    """What the harness reads in the tail of a failed run's output (:meth:`harness.Harness.refusal`)."""
+    try:
+        with out_path.open("rb") as handle:
+            handle.seek(max(0, out_path.stat().st_size - _REFUSAL_TAIL_BYTES))
+            tail = handle.read(_REFUSAL_TAIL_BYTES)
+    except OSError:
+        return None
+    return implementation.refusal(tail)
+
+
+def check_model(config: Config, environ: dict[str, str] | None = None, timeout: float = reviewer_probe.MODELS_PROBE_TIMEOUT) -> None:
+    """Before a run: the model's base id (before any ``#variant``) must be one the reviewer lists.
+
+    Raises :class:`ReviewerFailed` of kind ``model`` when it is not listed, and of kind
+    ``transient`` when the list cannot be had (another try may get it). A harness that cannot
+    list its models is not checked here; what its run says is (:func:`invoke`). Nothing is
+    checked under ``ARL_REVIEWER_CMD``, the test seam, which runs no model.
+    """
+    env = os.environ if environ is None else environ
+    if env.get("ARL_REVIEWER_CMD", ""):
+        return
+    implementation = _harness(config)
+    base = harness.model(config).partition("#")[0]
+    try:
+        listed = implementation.probe_models(timeout)
+    except reviewer_probe.ProbeFailed as exc:
+        raise ReviewerFailed(f"the model {base!r} could not be checked: {exc}", kind="transient") from exc
+    if listed is not None and base not in listed:
+        raise ReviewerFailed(f"`{implementation.binary} models` does not list {base!r}", kind="model")
 
 
 def classify_op_failure(exc: ReviewerFailed, out_path: Path) -> str:
     """ "transient" for a timeout or a matched rate/usage-limit signal, "operational" for
-    every other non-zero exit -- ``126``/``127``, a bad ``--model``, a rejected ``-m model#variant``
-    and an expired credential all included. See ``Review.kind`` for why the split matters.
+    every other non-zero exit -- ``126``/``127``, a rejected ``-m model#variant`` included --
+    and ``exc.kind`` when the failure already says how it counts (a refused model is ``model``).
+    See ``Review.kind`` for why the split matters.
     """
+    if exc.kind is not None:
+        return exc.kind
     if exc.status in _TIMEOUT_STATUSES:
         return "transient"
     try:

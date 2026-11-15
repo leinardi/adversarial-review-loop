@@ -279,17 +279,83 @@ def test_a_huge_configured_timeout_is_clamped_to_the_ceiling() -> None:
     assert runner._timeout_sec(config_with(timeout_sec=60)) == 60
 
 
-def test_a_harness_that_needs_no_reduction_leaves_no_envelope(tmp_path: Path) -> None:
-    """OpenCode writes the answer and nothing around it, so nothing is rewritten."""
-    answer = b"Fine.\n\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>\n"
+def opencode_events(*events: dict[str, object]) -> bytes:
+    """An ``opencode run --format json`` output, as 2.3.0 writes it (tests/STEP0.md, L4)."""
+    return b"".join(json.dumps(event).encode() + b"\n" for event in events)
+
+
+def text_event(text: str) -> dict[str, object]:
+    return {"type": "text", "sessionID": "ses_1", "part": {"type": "text", "text": text}}
+
+
+def error_event(kind: str, message: str, **extra: object) -> dict[str, object]:
+    return {"type": "error", "sessionID": "ses_1", "error": {"type": kind, "message": message, **extra}}
+
+
+REDUCED = b"Fine.\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>\n"
+STEP_START: dict[str, object] = {"type": "step_start", "part": {"type": "step-start"}}
+STEP_FINISH: dict[str, object] = {"type": "step_finish", "part": {"type": "step-finish", "reason": "stop", "tokens": {"input": 9285, "output": 6}}}
+
+
+def test_opencodes_json_events_are_reduced_to_the_answer_and_the_envelope_kept(tmp_path: Path) -> None:
+    """**Fails on the old code**, which read OpenCode's output as the answer itself."""
+    raw = b"INFO a log line on stderr\n" + opencode_events(
+        STEP_START, text_event("Fine."), text_event("<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>"), STEP_FINISH
+    )
     out = tmp_path / "raw" / "001-phase.out"
     out.parent.mkdir()
-    out.write_bytes(answer)
+    out.write_bytes(raw)
 
     runner._reduce_transcript(harness.get("opencode"), out)
 
-    assert out.read_bytes() == answer
-    assert not (tmp_path / "raw" / "001-phase.out.envelope").exists()
+    assert out.read_bytes() == REDUCED
+    assert (tmp_path / "raw" / "001-phase.out.envelope").read_bytes() == raw
+
+
+def test_an_error_event_in_a_run_that_exited_0_is_no_answer() -> None:
+    raw = opencode_events(
+        STEP_START, text_event("<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>"), error_event("provider.transport", "ECONNRESET")
+    )
+    with pytest.raises(harness.TranscriptError, match=r"provider\.transport"):
+        opencode.HARNESS.transcript(raw)
+
+
+@pytest.mark.parametrize("line", [b'{"type":"error","error":', b"{oops", b'{"type":"text"} trailing'])
+def test_a_damaged_event_is_no_answer_but_does_not_hide_why_a_run_failed(line: bytes) -> None:
+    raw = opencode_events(STEP_START, text_event("<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>")) + line + b"\n"
+    with pytest.raises(harness.TranscriptError, match="not a JSON object"):
+        opencode.HARNESS.transcript(raw)
+    # Reading why a run failed is tolerant: a tail may start mid-line.
+    refused = opencode.HARNESS.refusal(line + b"\n" + opencode_events(error_event("provider.auth", "bad key")))
+    assert refused is not None
+    assert refused[0] == "model"
+
+
+def test_a_run_with_no_text_is_an_empty_answer() -> None:
+    assert not opencode.HARNESS.transcript(opencode_events(STEP_START, STEP_FINISH))
+
+
+@pytest.mark.parametrize(
+    ("events", "expected"),
+    [
+        ([error_event("provider.no-route", "Model unavailable: openai/gpt-bogus")], "model"),
+        ([STEP_START, error_event("provider.auth", "Incorrect API key provided", status=401)], "model"),
+        ([STEP_START, error_event("provider.transport", "ECONNREFUSED: Unable to connect")], "transient"),
+        ([error_event("provider.something-new", "?")], None),
+        ([STEP_START, text_event("half an answer")], None),
+    ],
+    ids=["no-route", "auth", "transport", "unknown-type", "no-error"],
+)
+def test_opencode_reads_why_a_run_failed_from_its_error_event(events: list[dict[str, object]], expected: str | None) -> None:
+    refused = opencode.HARNESS.refusal(opencode_events(*events))
+    assert (refused[0] if refused is not None else None) == expected
+    if refused is not None:
+        assert str(events[-1]["error"]["message"]) in refused[1]  # type: ignore[index]
+
+
+def test_opencode_runs_with_json_output() -> None:
+    argv = opencode.review_argv("t", config=config_with())
+    assert argv[argv.index("--format") + 1] == "json"
 
 
 def test_the_permission_reads_the_bundle_and_every_root_and_nothing_else(tmp_path: Path) -> None:

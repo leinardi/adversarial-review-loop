@@ -339,3 +339,177 @@ def test_opencode_refuses_an_empty_side_of_a_hash(ws: Path, engine: Engine, monk
     assert model(engine, ws, "set", "first", value)["code"] == "bad-model"
     assert load(ws).model_overlay == {"model": "weak", "late_model": "weak"}
     del listed
+
+
+# --------------------------------------------------------------------------
+# A model the reviewer cannot use stops the run and asks the user
+# --------------------------------------------------------------------------
+
+
+def test_a_model_failure_waits_for_the_user_at_once_and_spends_no_budget(ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    ticket = prepared(engine, ws)
+    outcome = engine(ws, "review", "record", ticket["review_id"], "--failed", "model", "--error", "claude-opus-5-5 answered 404 model_not_found")
+    assert outcome["verdict"] == "OP_FAILURE"
+    run = load(ws)
+    assert (run.data["failures"], run.data["transient_failures"]) == (0, 0)
+    assert run.data["waiting"]["kind"] == "model"
+    for text in (outcome["message"], run.data["waiting"]["detail"]):
+        assert "strong (opus)" in text
+        assert "round 1 of phase1" in text
+        assert "404 model_not_found" in text
+        assert "/arl-model first default" in text
+    assert run.data["failure_history"][-1]["kind"] == "model"
+    # No retry: another review is refused until the user decides.
+    edit(ws / "api" / "src" / "main.py", "print(3)\n")
+    assert engine(ws, "review", "prepare")["code"] == "waiting"
+
+
+def test_a_late_rounds_model_failure_points_at_late(ws: Path, engine: Engine, tmp_path: Path) -> None:
+    started(engine, ws)
+    answered(engine, ws, prepared(engine, ws), tmp_path, BLOCK)
+    second = prepared(engine, ws, "print(3)\n")
+    outcome = engine(ws, "review", "record", second["review_id"], "--failed", "model", "--error", "refused")
+    assert "round 2 of phase1" in outcome["message"]
+    assert "/arl-model late default" in outcome["message"]
+
+
+@pytest.mark.parametrize("words", [["set", "all", "default"], ["reset"]])
+def test_choosing_a_model_ends_the_wait(ws: Path, engine: Engine, words: list[str]) -> None:
+    started(engine, ws)
+    ticket = prepared(engine, ws)
+    engine(ws, "review", "record", ticket["review_id"], "--failed", "model", "--error", "refused")
+    assert model(engine, ws, *words)["ok"]
+    assert load(ws).data["waiting"] is None
+    assert prepared(engine, ws, "print(3)\n")["ok"]
+
+
+def test_resume_ends_the_wait_too(ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    ticket = prepared(engine, ws)
+    engine(ws, "review", "record", ticket["review_id"], "--failed", "model", "--error", "refused")
+    assert engine(ws, "resume")["ok"]
+    assert load(ws).data["waiting"] is None
+
+
+# --------------------------------------------------------------------------
+# OpenCode: the listing before the run, and what the run says
+# --------------------------------------------------------------------------
+
+ANSWER_EVENTS = (
+    '{"type":"step_start","part":{"type":"step-start"}}\n'
+    '{"type":"text","part":{"type":"text","text":"Read it.\\n\\n<<<ARL-FINDINGS>>>\\nVERDICT APPROVED\\n<<<ARL-END>>>"}}\n'
+)
+
+
+@pytest.fixture
+def fake_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A fake ``opencode`` first on ``PATH``: ``models`` lists, ``run`` writes what the test says."""
+    bindir = tmp_path / "fake-bin"
+    bindir.mkdir()
+    calls = tmp_path / "opencode-calls"
+
+    def install(
+        *, models: str = "openai/gpt-6.1-sol\nvendor/other\n", models_exit: int = 0, run_output: str = ANSWER_EVENTS, run_exit: int = 0
+    ) -> Path:
+        (tmp_path / "models.txt").write_text(models)
+        (tmp_path / "run.txt").write_text(run_output)
+        script = bindir / "opencode"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            # A run's prompt holds newlines: what follows it is what the test reads.
+            f'if [ "$1" = models ]; then echo models >> "{calls}"; cat "{tmp_path / "models.txt"}"; exit {models_exit}; fi\n'
+            f'printf "run %s\\n" "${{*:3}}" >> "{calls}"\n'
+            f'cat "{tmp_path / "run.txt"}"; exit {run_exit}\n'
+        )
+        script.chmod(0o755)
+        return calls
+
+    import os  # noqa: PLC0415 - only to prepend the fake
+
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    return install
+
+
+def run_calls(calls: Path) -> list[str]:
+    return [line for line in calls.read_text().splitlines() if line.startswith("run ")] if calls.exists() else []
+
+
+def test_a_model_opencode_does_not_list_fails_before_any_run(ws: Path, engine: Engine, fake_opencode: Any) -> None:
+    calls = fake_opencode(models="vendor/other\n")
+    started(engine, ws)
+    ticket = prepared(engine, ws)
+    outcome = engine(ws, "review", "run-external", ticket["review_id"])
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert load(ws).data["waiting"]["kind"] == "model"
+    assert "does not list 'openai/gpt-6.1-sol'" in outcome["message"]
+    assert run_calls(calls) == []
+
+
+def test_a_listing_that_fails_is_transient(ws: Path, engine: Engine, fake_opencode: Any) -> None:
+    calls = fake_opencode(models_exit=1)
+    started(engine, ws)
+    outcome = engine(ws, "review", "run-external", prepared(engine, ws)["review_id"])
+    run = load(ws)
+    assert (outcome["verdict"], run.data["transient_failures"], run.data["waiting"]) == ("OP_FAILURE", 1, None)
+    assert run_calls(calls) == []
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ('{"type":"error","error":{"type":"provider.no-route","message":"Model unavailable: openai/gpt-6.1-sol"}}', "model"),
+        ('{"type":"step_start"}\n{"type":"error","error":{"type":"provider.auth","message":"Incorrect API key provided","status":401}}', "model"),
+        ('{"type":"step_start"}\n{"type":"error","error":{"type":"provider.transport","message":"ECONNREFUSED: Unable to connect"}}', "transient"),
+    ],
+    ids=["no-route", "auth", "transport"],
+)
+@pytest.mark.parametrize("run_exit", [1, 0])
+def test_what_a_failed_opencode_run_says_decides_how_it_counts(
+    ws: Path, engine: Engine, fake_opencode: Any, case: tuple[str, str], run_exit: int
+) -> None:
+    """**Fails on the old code**, which counted every exit 1 as operational and retried it, and an
+    error event after exit 0 as operational too."""
+    event, kind = case
+    fake_opencode(run_output=f"{ANSWER_EVENTS if run_exit == 0 else ''}{event}\n", run_exit=run_exit)
+    started(engine, ws)
+    outcome = engine(ws, "review", "run-external", prepared(engine, ws)["review_id"])
+    run = load(ws)
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert run.data["failure_history"][-1]["kind"] == kind
+    if kind == "model":
+        assert (run.data["waiting"]["kind"], run.data["failures"]) == ("model", 0)
+        assert json.loads(event.splitlines()[-1])["error"]["message"] in outcome["message"]
+    else:
+        assert (run.data["waiting"], run.data["transient_failures"]) == (None, 1)
+
+
+def test_a_variant_qualified_model_passes_the_check_and_runs(ws: Path, engine: Engine, fake_opencode: Any, listed: list[str]) -> None:
+    calls = fake_opencode()
+    started(engine, ws)
+    # `listed` stands in for `opencode models` at both checks: setting it and running it.
+    assert model(engine, ws, "set", "all", "vendor/other#high")["ok"]
+    del listed
+    outcome = engine(ws, "review", "run-external", prepared(engine, ws)["review_id"])
+    assert outcome["verdict"] == "APPROVED", outcome
+    [run] = run_calls(calls)
+    assert " -m vendor/other#high " in f" {run} "
+    assert "--format json" in run
+
+
+@pytest.mark.parametrize(
+    "tail",
+    ['{"type":"error","error":', '{"type":"text","part":{"type":"text","text":"more"', "{not json}", '["an", "array"]'],
+    ids=["truncated-error", "truncated-text", "not-json", "not-an-object"],
+)
+def test_an_approval_followed_by_a_damaged_event_is_never_approved(ws: Path, engine: Engine, fake_opencode: Any, tail: str) -> None:
+    """**Fails on the old code**, which skipped the damaged line and recorded APPROVED: the event
+    it could not read may be the error that ended the run."""
+    fake_opencode(run_output=f"{ANSWER_EVENTS}{tail}\n", run_exit=0)
+    started(engine, ws)
+    outcome = engine(ws, "review", "run-external", prepared(engine, ws)["review_id"])
+    run = load(ws)
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert run.data["approvals"] == []
+    assert run.data["failure_history"][-1]["kind"] == "operational"

@@ -23,7 +23,7 @@ import type { EngineInterface, TurnUsage } from 'claude-code'
 import type { RunView } from '../types'
 import { type Answer, engine, engineStream } from './engine'
 import { Interrupted, normalize, type Ran, runReviewer, type Task, within } from './reviewer'
-import { ACCEPT, KEEP_GOING, STOP } from './text'
+import { ACCEPT, KEEP_GOING, STOP, USE_DEFAULT_MODEL } from './text'
 import { showActivity, showLast, showRun } from './ui'
 
 /** What the session told the mod at its start. */
@@ -107,6 +107,14 @@ const QUESTIONS: Record<string, string> = {
   failures: 'The reviewer keeps failing. How should the loop go on?',
   'needs-human': 'The reviewer asked for your judgement. How should the loop go on?',
   oversized: 'A file is too large to review. How should the loop go on?',
+  model: "The reviewer's model cannot be used. How should the loop go on?",
+}
+
+/** What the user may answer to each wait. */
+function optionsFor(kind: string): string[] {
+  if (kind === 'oversized') return [KEEP_GOING, STOP]
+  if (kind === 'model') return [USE_DEFAULT_MODEL, ACCEPT, KEEP_GOING, STOP]
+  return [ACCEPT, KEEP_GOING, STOP]
 }
 
 /**
@@ -115,10 +123,15 @@ const QUESTIONS: Record<string, string> = {
  */
 export async function decide($: EngineInterface, waiting: { kind: string; detail?: string }): Promise<string> {
   const detail = waiting.detail ?? ''
-  const choices = waiting.kind === 'oversized' ? 'whether to keep going once the file is removed or ignored, or to stop the run' : 'whether to accept this stage as it stands, keep going, or stop the run'
+  const choices =
+    waiting.kind === 'oversized'
+      ? 'whether to keep going once the file is removed or ignored, or to stop the run'
+      : waiting.kind === 'model'
+        ? 'which model reviews instead (/arl-model default, or /arl-model <model>), whether to accept this stage as it stands, or to stop the run'
+        : 'whether to accept this stage as it stands, keep going, or stop the run'
   const handOver = `\n\nThe run now waits for the user (${waiting.kind}). Stop working on the plan and tell the user what happened${detail ? `: ${detail}` : '.'} They decide ${choices}.`
   if (!session.isInteractive) return handOver
-  const options = waiting.kind === 'oversized' ? [KEEP_GOING, STOP] : [ACCEPT, KEEP_GOING, STOP]
+  const options = optionsFor(waiting.kind)
   void $.ui.notify(`adversarial-review-loop needs you: ${QUESTIONS[waiting.kind] ?? waiting.kind}`).catch(() => undefined)
   // Dismissed, or "Chat about this": no decision.
   const choice = await $.ui
@@ -143,6 +156,12 @@ export async function decide($: EngineInterface, waiting: { kind: string; detail
     const repos = typeof accepted.repositories === 'string' ? accepted.repositories : ''
     return `\n\nThe user accepted this stage as it stands. Commit each changed git repository by its own conventions${repos}${next}`
   }
+  if (choice === USE_DEFAULT_MODEL) {
+    // The run's own choice, back to the built-in models: that ends the wait.
+    const chosen = await run($, ['model', 'set', 'all', 'default'])
+    if (!chosen.ok) return `\n\nThe user chose the default model, but setting it failed: ${chosen.error ?? ''}${handOver}`
+    return '\n\nThe user switched this run to the default reviewer model: call review again.'
+  }
   if (choice === KEEP_GOING) {
     // Resuming clears the decision and would also undo a pause the user set: keep that.
     const paused = (await run($, ['status'])).run as RunSummary | null | undefined
@@ -151,7 +170,7 @@ export async function decide($: EngineInterface, waiting: { kind: string; detail
     if (paused?.status === 'paused') await run($, ['pause'])
     return waiting.kind === 'oversized'
       ? '\n\nThe user wants you to keep going: remove the oversized file, or ignore it in its root, then call review again.'
-      : waiting.kind === 'failures'
+      : waiting.kind === 'failures' || waiting.kind === 'model'
         ? '\n\nThe user wants you to keep going: call review again.'
         : '\n\nThe user wants you to keep going: address the findings, then call review again.'
   }
