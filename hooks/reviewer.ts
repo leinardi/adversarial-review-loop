@@ -378,12 +378,44 @@ export async function reviewerDecision($: EngineInterface, call: Check): Promise
   return dirs === undefined ? undefined : permit(dirs, call)
 }
 
+/** How many times a reviewer's handback can be sent back for its findings block. */
+export const HANDBACK_REFUSALS = 2
+/** Handbacks sent back so far, by agent id; bounded like the other per-agent maps. */
+const refusedHandbacks = new Map<string, number>()
+
+/** Whether a handback's report lacks the findings block the engine parses. */
+function blockMissing(call: Check): boolean {
+  const input = call.input as { message?: unknown } | null
+  const message = typeof input === 'object' && input !== null ? input.message : undefined
+  return typeof message === 'string' && !(message.includes('<<<ARL-FINDINGS>>>') && message.includes('<<<ARL-END>>>'))
+}
+
+/**
+ * Send a handback without the findings block back to its reviewer, or, past the bound, leave it to
+ * the session: the report then arrives without the block and the round fails, never approves.
+ */
+function refuseHandback(agentId: string | undefined): Decision {
+  if (agentId !== undefined) {
+    const count = refusedHandbacks.get(agentId) ?? 0
+    if (count >= HANDBACK_REFUSALS) return 'theirs'
+    refusedHandbacks.set(agentId, count + 1)
+    if (refusedHandbacks.size > EARLY_LIMIT) {
+      const oldest = refusedHandbacks.keys().next().value
+      if (oldest !== undefined && oldest !== agentId) refusedHandbacks.delete(oldest)
+    }
+  }
+  return {
+    decision: 'deny',
+    reason: 'This report has no findings block, so it cannot be read and the round would fail. Hand it back again, whole: your prose, then the <<<ARL-FINDINGS>>> ... <<<ARL-END>>> block exactly as your task message gives it.',
+  }
+}
+
 /** What a reviewer that may read `dirs` may do: read, and run read-only commands. */
 export function permit(dirs: readonly string[], call: Check): Decision {
   if (call.tool === 'Bash') {
     return call.isReadOnly
       ? { decision: 'allow', reason: 'a read-only command of the review' }
-      : { decision: 'deny', reason: 'The reviewer only reads: this command is not read-only. Use Read, or a read-only command such as grep, find, ls or git show.' }
+      : { decision: 'deny', reason: 'The reviewer only reads: this command is not read-only. Use Read, Grep or Glob, or one plain read-only command per call, with no cd, git -C, variables, echo or redirection.' }
   }
   if (call.tool === 'Read' || call.tool === 'Grep' || call.tool === 'Glob') {
     const path = pathOf(call.input)
@@ -392,6 +424,8 @@ export function permit(dirs: readonly string[], call: Check): Decision {
   }
   // Handing the report back is how auto mode delivers a subagent's answer, not a write. Only auto
   // mode's own classifier may allow it: a hook's allow is refused, and the report never arrives.
-  if (call.tool === 'SubagentHandback') return 'theirs'
+  // A hook may refuse one, though: a report without the findings block cannot be read, so the
+  // reviewer is sent back to hand it in whole, a bounded number of times.
+  if (call.tool === 'SubagentHandback') return blockMissing(call) ? refuseHandback(call.agentId) : 'theirs'
   return { decision: 'deny', reason: 'The reviewer only reads.' }
 }

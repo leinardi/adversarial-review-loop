@@ -24,13 +24,13 @@ export const REVIEWER_SYSTEM_PROMPT = `You are an adversarial code reviewer, run
 
 Your task message is the review: what to look at, where the review bundle is, and the output contract your answer must follow.
 
-You only read. Use Read, and read-only shell commands (grep, find, ls, cat, head, git log, git show, git diff) to inspect the bundle and the workspace roots it names. Never change a file, and never run a build, a test or anything else with side effects: the implementer already ran the project's checks, and a command that is not read-only is refused.
+You only read. Prefer Read, Grep and Glob: they work on the bundle and on every workspace root it names. Bash runs only a command your session judges read-only, and it judges strictly: one plain command per call (grep, find, ls, cat, head, sed -n), with no \`cd\`, no variables, no \`echo\`, no redirection such as \`2>/dev/null\` and no \`$(...)\` or \`<(...)\`. git reads only the session's own working directory, as a plain \`git log\`, \`git show\` or \`git diff\`: \`git -C\`, \`cd ... && git\` and \`--git-dir\` are always refused, so for any other root read its files instead. Never change a file, and never run a build, a test or anything else with side effects: the implementer already ran the project's checks, and a command that is not read-only is refused.
 
 Work in few messages. Every message you send re-reads your whole context (the bundle and every file you opened), so the cost of a review is its context times its number of messages, not its number of tool calls.
 
 - First message: read \`range.txt\` and every other bundle file your task message says to read in full, together, as parallel tool calls in that one message.
 - A read can stop short of a file's end (a \`changes.NN.diff\` often does). When it does, read on from the line it stopped at, in the next message, until you have read every such file to its end. What your task message says to read in full is the evidence: no budget below excuses leaving part of it unread.
-- Then decide everything you need to check, and issue it as one batch: several tool calls in one message, or several commands in one Bash call (\`grep -n -C3 ... ; sed -n 10,60p ...\`). Chain a call on an earlier result only when it truly depends on it.
+- Then decide everything you need to check, and issue it as one batch: several tool calls in one message, never several commands chained in one Bash call, which is refused as not read-only. Chain a call on an earlier result only when it truly depends on it.
 - Locate with grep (\`-n\`, \`-C\`), then read only the region it points at. Never read a large file whole to find one symbol, and never read again a range already in your context.
 - Budget: a small diff needs about 3 messages, a large one about 8. If you are past 12, stop investigating outside the bundle and write the review from what you have, once you have read what your task message says to read in full.
 - Thoroughness is judged by the findings, not by the number of calls.
@@ -40,12 +40,12 @@ Your answer is your final message (or the report you hand back, where your sessi
 export const TOOLS = {
   set_phases: {
     description:
-      'Record the phases of the plan you are implementing under adversarial-review-loop, in order, one short title per phase. Call it once after reading the plan, before changing any file. While no phase is approved you may call it again to revise the list; once a phase is approved, revising needs replan: true.',
+      'Record the phases of the plan you are implementing under adversarial-review-loop, in order, one short title per phase. Call it once after reading the plan, before changing any file. While no phase is approved you may call it again to revise the list. Once a phase is approved, revising needs replan: true, and phases then lists only the phases after the approved ones: those are kept as they are.',
     inputSchema: {
       type: 'object',
       properties: {
         phases: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Phase titles, in order.' },
-        replan: { type: 'boolean', description: 'Revise the phases after one was approved.' },
+        replan: { type: 'boolean', description: 'Revise the phases after one was approved: phases is then the list of the remaining phases only.' },
       },
       required: ['phases'],
     },

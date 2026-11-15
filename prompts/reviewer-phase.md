@@ -41,6 +41,8 @@ Do not report pure taste. Do not report formatting a linter would catch. Do not 
 
 Write your review as prose first, ranked most severe first — what is wrong, where, why it matters, and what would fix it. Then say briefly what you checked and found sound. A later round is a fresh reviewer that knows this review only from that prose and your `FINDING` lines, so keep it short and concrete: it is what stops the next round re-checking the same ground. Then emit the machine-readable block, exactly once, exactly in this shape:
 
+**However you deliver your review, the block goes with it.** If your session asks you to hand your report back with a tool (`SubagentHandback`), that report is your whole answer: the prose, then this block, exactly as below. A report without the block cannot be read, and the round fails.
+
 ```
 <<<ARL-FINDINGS>>>
 FINDING severity=critical actionable=yes file=api/internal/x.go:42 | Nil deref when token absent || done when: Load returns ErrNoToken before dereferencing token, and a test covers the absent token

@@ -19,7 +19,8 @@
 // end is classified, and what it may do.
 
 import { expect, test } from 'claude-code/testing'
-import { answerOf, classify, countStep, deliver, isModelOf, normalize, permit, resetCheckedModels, REVIEWER_TOOLS, reviewerDecision, runHandback, runReviewer, within } from '../../hooks/reviewer'
+import { answerOf, classify, countStep, deliver, HANDBACK_REFUSALS, isModelOf, normalize, permit, resetCheckedModels, REVIEWER_TOOLS, reviewerDecision, runHandback, runReviewer, within } from '../../hooks/reviewer'
+import { REVIEWER_SYSTEM_PROMPT } from '../../hooks/text'
 import { apiError, fakeEngine, PLUGIN, start, tool, world } from './world'
 
 const DONE = { answer: 'VERDICT APPROVED', reason: 'answer', durationMs: 10 }
@@ -93,6 +94,17 @@ const DIRS = ['/work/.arl/reviews/r1-001/bundle', '/work', '/elsewhere/web']
 test('a read-only command is allowed, any other refused', () => {
   expect(permit(DIRS, { tool: 'Bash', input: { command: 'git show HEAD' }, isReadOnly: true })).toEqual(expect.objectContaining({ decision: 'allow' }))
   expect(permit(DIRS, { tool: 'Bash', input: { command: 'rm -rf src' } })).toEqual(expect.objectContaining({ decision: 'deny' }))
+})
+
+// In live runs every git command a reviewer sent at another root (`git -C`, `cd ... && git`,
+// `--git-dir`) and every chained command was refused as not read-only, while the prompt offered
+// both. The prompt and the refusal now say what is refused.
+test('the reviewer is told which commands are refused, and never told to chain them', () => {
+  expect(REVIEWER_SYSTEM_PROMPT).toContain('`git -C`, `cd ... && git` and `--git-dir` are always refused')
+  expect(REVIEWER_SYSTEM_PROMPT).toContain('one plain command per call')
+  expect(REVIEWER_SYSTEM_PROMPT).not.toContain('several commands in one Bash call (')
+  const refusal = permit(DIRS, { tool: 'Bash', input: { command: 'git -C /elsewhere/web log' } })
+  expect(refusal).toEqual(expect.objectContaining({ decision: 'deny', reason: expect.stringContaining('git -C') }))
 })
 
 test('a read inside the bundle or a root is allowed; outside, the session decides', () => {
@@ -250,6 +262,20 @@ test("an interrupt that ends the reviewer's own run first is still an interrupt,
 
 test("handing the report back is left to the session: auto mode refuses a hook's allow of it", () => {
   expect(permit(DIRS, { tool: 'SubagentHandback', input: {} })).toBe('theirs')
+  expect(permit(DIRS, { tool: 'SubagentHandback', input: { message: 'Prose.\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>' }, agentId: 'whole' })).toBe('theirs')
+})
+
+// In live runs a reviewer handed back its prose alone, and a review that had approved became a
+// failed round. A hook may refuse a handback, so the reviewer is sent back to hand in the block.
+test('a handback without the findings block is sent back, a bounded number of times', () => {
+  const call = { tool: 'SubagentHandback', input: { message: 'Both findings are fixed.' }, agentId: 'prose-only' }
+  for (let refusal = 0; refusal < HANDBACK_REFUSALS; refusal++) {
+    expect(permit(DIRS, call)).toEqual(expect.objectContaining({ decision: 'deny', reason: expect.stringContaining('<<<ARL-FINDINGS>>>') }))
+  }
+  // Past the bound the session decides, and the round fails on the missing block.
+  expect(permit(DIRS, call)).toBe('theirs')
+  // Another reviewer has its own count.
+  expect(permit(DIRS, { ...call, agentId: 'another' })).toEqual(expect.objectContaining({ decision: 'deny' }))
 })
 
 /** Let pending promise callbacks run (the model check before a spawn). */
