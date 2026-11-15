@@ -315,6 +315,32 @@ def test_late_model_replaces_model_only_from_round_2_of_a_phase() -> None:
     assert base.as_str("model") == "opus"
 
 
-def test_an_empty_late_model_changes_nothing() -> None:
+def test_an_unset_late_model_is_sonnet_on_the_subagent_from_round_2() -> None:
     base = config.Config({**config.DEFAULTS, "model": "opus"})
+    assert config.late_model(base) == "sonnet"
+    assert config.for_round(base, round_number=1, final=False).as_str("model") == "opus"
+    assert config.for_round(base, round_number=2, final=False).as_str("model") == "sonnet"
+    assert config.for_round(base, round_number=3, final=True).as_str("model") == "opus"
+
+
+def test_an_unset_late_model_on_opencode_keeps_model() -> None:
+    base = config.Config({**config.DEFAULTS, "harness": "opencode", "model": "vendor/x"})
+    assert config.late_model(base) == ""
     assert config.for_round(base, round_number=4, final=False) is base
+
+
+def test_an_empty_late_model_is_the_opt_out_and_changes_nothing() -> None:
+    base = config.Config({**config.DEFAULTS, "model": "opus", "late_model": ""})
+    assert config.for_round(base, round_number=4, final=False) is base
+
+
+@pytest.mark.parametrize(("layer", "expected"), [("file", ""), ("env", ""), ("null", "sonnet"), ("none", "sonnet")])
+def test_late_model_layers_tell_unset_from_empty(tmp_path: Path, layer: str, expected: str) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {"HOME": str(tmp_path / "home")}
+    if layer in ("file", "null"):
+        (repo / config.REPO_CONFIG_NAME).write_text(json.dumps({"late_model": "" if layer == "file" else None}))
+    if layer == "env":
+        env["ARL_LATE_MODEL"] = ""
+    assert config.late_model(config.load(str(repo), env)) == expected

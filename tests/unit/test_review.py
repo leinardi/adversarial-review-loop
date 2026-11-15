@@ -1631,6 +1631,31 @@ def test_round_2_runs_on_late_model_and_says_so(ws: Path, engine: Engine, answer
     assert prepare(engine, ws)["reviewer_model"] == "opus"
 
 
+def test_round_2_runs_on_sonnet_by_default_and_the_final_review_on_model(ws: Path, engine: Engine, answers: Path) -> None:
+    (ws / ".adversarial-review-loop.json").write_text(json.dumps({"model": "opus", "final_review": True}))
+    started(engine, ws, phases=1)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
+    edit(ws / "api" / "src" / "main.py", "print(3)\n")
+    second = prepare(engine, ws)
+    assert (second["round"], second["reviewer_model"], second["model"]) == (2, "sonnet", "sonnet")
+    outcome = record(engine, ws, second["review_id"], write_answer(answers, "RESOLVED id=r1.1 | prints 3", *APPROVE))
+    assert "- model: `sonnet`" in Path(outcome["report"]).read_text()
+    assert engine(ws, "stats")["stats"]["stages"][0]["rounds"][1]["model"] == "sonnet"
+    final = prepare(engine, ws)
+    assert (final["label"], final["reviewer_model"]) == ("final", "opus")
+
+
+def test_an_empty_late_model_keeps_model_on_round_2(ws: Path, engine: Engine, answers: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (ws / ".adversarial-review-loop.json").write_text(json.dumps({"model": "opus"}))
+    monkeypatch.setenv("ARL_LATE_MODEL", "")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
+    edit(ws / "api" / "src" / "main.py", "print(3)\n")
+    assert prepare(engine, ws)["reviewer_model"] == "opus"
+
+
 def test_the_final_review_runs_on_model(ws: Path, engine: Engine, answers: Path) -> None:
     (ws / ".adversarial-review-loop.json").write_text(json.dumps({"model": "opus", "late_model": "sonnet", "final_review": True}))
     started(engine, ws, phases=1)

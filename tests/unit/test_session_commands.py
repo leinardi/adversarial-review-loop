@@ -221,9 +221,13 @@ def test_config_shows_every_key_and_its_layer(engine: Engine, ws: Path, monkeypa
     assert "false  (default)" in text
 
 
-def test_config_shows_an_unset_late_model_as_model(engine: Engine, ws: Path) -> None:
-    text = engine(ws, "config")["text"]
-    assert "late_model" in text and "(model)  (default)" in text
+def test_config_shows_the_late_model_round_2_runs_on(engine: Engine, ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert "  late_model              sonnet  (default)" in engine(ws, "config")["text"]
+    monkeypatch.setenv("ARL_LATE_MODEL", "")
+    assert "  late_model              (model)  (env)" in engine(ws, "config")["text"]
+    monkeypatch.delenv("ARL_LATE_MODEL")
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    assert "  late_model              (model)  (default)" in engine(ws, "config")["text"]
 
 
 def test_config_sets_and_unsets_the_user_config(engine: Engine, ws: Path) -> None:

@@ -259,7 +259,8 @@ regression, so the 141 KB regression column is not comparable with the tables ab
 
 Blocking recall was 24 of 24, Sonnet's included, and no run approved. Every run stated
 `RESOLVED` for three or four round-1 findings, and none for the defect left open. No round
-failed and no repair call ran, so the accounting repair was never exercised here.
+failed and no repair call ran, so the accounting repair was never exercised here. On this result
+`late_model` defaults to `sonnet` on the subagent harness.
 
 ## Measured on this harness
 

@@ -43,6 +43,7 @@ __all__ = [
     "DEFAULTS",
     "EFFORT_LEVELS",
     "INT_KEYS",
+    "LATE_MODEL_DEFAULTS",
     "LIST_KEYS",
     "REPO_CONFIG_NAME",
     "SEVERITY_KEYS",
@@ -50,6 +51,7 @@ __all__ = [
     "Config",
     "for_round",
     "from_env",
+    "late_model",
     "late_threshold_rank",
     "load",
     "severity_rank",
@@ -65,6 +67,11 @@ __all__ = [
 #: ``arl.harness.model``, the one reader every command shares. An empty ``model`` therefore
 #: means "whatever this harness calls its default", never "no model".
 #:
+#: ``late_model`` defaults to ``None``, not ``""``, because the two mean different things: ``None``
+#: (the key set nowhere, or ``null``) is the harness's own late default
+#: (:data:`LATE_MODEL_DEFAULTS`), while an explicit ``""`` is the user's opt-out, ``model`` on every
+#: round. Read it through :func:`late_model`.
+#:
 #: ``harness`` defaults to ``subagent``: the mod spawns a fresh Claude Code subagent per round, and
 #: the engine only prepares and records. ``opencode`` is the one reviewer CLI the engine runs
 #: itself (``review run-external``). The name never falls back: see ``arl.harness.UnknownHarness``.
@@ -77,8 +84,9 @@ __all__ = [
 DEFAULTS: Final[dict[str, Any]] = {
     "harness": "subagent",
     "model": "",
-    # The reviewer's model from the second round of a phase on; empty means `model`.
-    "late_model": "",
+    # The reviewer's model from the second round of a phase on: unset is the harness's default
+    # (`LATE_MODEL_DEFAULTS`), an explicit empty string means `model`. See `late_model`.
+    "late_model": None,
     "variant": "",
     "block_severity": "medium",
     "late_block_severity": "high",
@@ -252,14 +260,32 @@ class Config:
         return []
 
 
+#: ``late_model`` when no layer sets it, per harness. Only the subagent has one: Sonnet matched Opus
+#: on the round-2 benchmark at lower cost (``tests/bench/README.md``). OpenCode's model names are
+#: the provider's own and nothing was measured there, so it keeps ``model`` on every round.
+LATE_MODEL_DEFAULTS: Final[Mapping[str, str]] = {"subagent": "sonnet"}
+
+
+def late_model(config: Config) -> str:
+    """The model a later round of a phase runs on, or ``""`` for ``model``.
+
+    ``late_model`` as configured when any layer sets it, an empty string included (the opt-out);
+    otherwise the harness's default from :data:`LATE_MODEL_DEFAULTS`, ``""`` for one with none.
+    """
+    value = config.values.get("late_model")
+    if value is None:
+        return LATE_MODEL_DEFAULTS.get(config.as_str("harness"), "")
+    return config.as_str("late_model")
+
+
 def for_round(config: Config, *, round_number: int, final: bool) -> Config:
-    """``config`` as one review round runs it: ``late_model`` in place of ``model`` from round 2.
+    """``config`` as one review round runs it: :func:`late_model` in place of ``model`` from round 2.
 
     A later round of a phase checks a fix against findings already recorded, a narrower job than
     the first round's; the final review is one round over the whole run and always gets ``model``.
-    An empty ``late_model`` changes nothing.
+    An empty late model (the opt-out, or a harness with no late default) changes nothing.
     """
-    late = config.as_str("late_model")
+    late = late_model(config)
     if final or round_number < 2 or not late:
         return config
     return Config({**config.values, "model": late})

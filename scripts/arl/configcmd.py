@@ -127,8 +127,9 @@ def _show(launch_dir: Path) -> str:
     lines = [f"adversarial-review-loop configuration for {launch_dir}"]
     for key in sorted(config.DEFAULTS):
         value = harness.display_model(resolved) if key == "model" else resolved.values.get(key)
-        if key == "late_model" and not value:
-            value = "(model)"
+        if key == "late_model":
+            # What round 2 runs on: the harness's default when unset, `model` for an empty value.
+            value = config.late_model(resolved) or "(model)"
         lines.append(f"  {key.ljust(width)}  {_display(value)}  ({source[key]})")
     lines.append(f"User config: {config.user_config_path()}; this directory's: {launch_dir / config.REPO_CONFIG_NAME}")
     return "\n".join(lines)

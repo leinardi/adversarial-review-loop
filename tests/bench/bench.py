@@ -726,7 +726,11 @@ def record_session(case: str) -> str:
 
 
 def run_review(case: str, model: str, plugin: Path, tag: str, *, timeout: int = 1500) -> dict[str, Any]:
-    """One headless review of a prepared case; the reviewer's model comes through ``ARL_MODEL``."""
+    """One headless review of a prepared case; the reviewer's model comes through ``ARL_MODEL``.
+
+    ``ARL_LATE_MODEL`` is set empty, so ``model`` reviews every round: a round-2 cell measures the
+    model it names, not the harness's late default.
+    """
     case_dir = _named("cases", case)
     if not case_dir.is_dir():
         raise SystemExit(f"bench: no case {case!r}")
@@ -744,7 +748,7 @@ def run_review(case: str, model: str, plugin: Path, tag: str, *, timeout: int = 
             code = subprocess.run(
                 command,
                 cwd=case_dir,
-                env={**os.environ, "ARL_MODEL": model},
+                env={**os.environ, "ARL_MODEL": model, "ARL_LATE_MODEL": ""},
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=stderr,
