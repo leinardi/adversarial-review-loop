@@ -1,7 +1,8 @@
-"""A root whose checkout left the branch its base was taken on: the reviewer and Claude are told.
+"""A root whose checkout left its base's line of history: the base follows it when it safely can.
 
-The diff is between trees, so the review itself is unchanged; what changes is that a fix only the
-old branch has, shown as removed, is explained instead of read as this phase's regression.
+A base that is a clean checkout of a commit moves to the merge-base of that commit and HEAD, so a
+fix only the old line has is not shown as removed by the phase. A base with uncommitted changes, or
+with no shared history, stays, and the reviewer and Claude are told why the diff may show more.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -29,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from run_common import arl, git_at, run_env, ws
+from run_common import PAST, arl, git_at, make_repo, run_env, ws
 
 from arl import state
 
@@ -55,6 +56,16 @@ def range_text(launch: Path, ticket: dict[str, Any]) -> str:
     return next((launch / ".arl" / "reviews").glob(f"*-{seq:03d}")).joinpath("bundle", "range.txt").read_text()
 
 
+def diff_text(launch: Path, ticket: dict[str, Any]) -> str:
+    seq = int(ticket["review_id"].rsplit("-", 1)[1])
+    bundle = next((launch / ".arl" / "reviews").glob(f"*-{seq:03d}")) / "bundle"
+    return "".join(path.read_text() for path in sorted(bundle.glob("changes.*.diff")))
+
+
+def warnings_of(launch: Path, ticket: dict[str, Any]) -> str:
+    return range_text(launch, ticket).partition("## Snapshot warnings")[2]
+
+
 def record(engine: Engine, launch: Path, ticket: dict[str, Any], tmp_path: Path) -> dict[str, Any]:
     answer = tmp_path / f"answer-{ticket['review_id']}.md"
     answer.write_text(f"Read it.\n\n{APPROVE}")
@@ -62,57 +73,224 @@ def record(engine: Engine, launch: Path, ticket: dict[str, Any], tmp_path: Path)
     return result
 
 
-def test_a_root_that_changed_branch_since_its_base_is_named_to_the_reviewer_and_claude(ws: Path, engine: Engine, tmp_path: Path) -> None:
-    """**Fails on the old code**, which said nothing: the old branch's fixes read as removals."""
-    api = ws / "api"
+def on_a_fix_branch(api: Path) -> None:
+    """``api`` on a branch holding a fix ``main`` does not have, as rust-common was in the runhold run."""
     git_at(api, "checkout", "-q", "-b", "fix/prereqs")
     (api / "src" / "main.py").write_text("print('fixed')\n")
     git_at(api, "commit", "-qam", "a fix only this branch has")
+
+
+def test_a_clean_base_follows_the_checkout_to_another_line_of_history(ws: Path, engine: Engine, tmp_path: Path) -> None:
+    """**Fails on the old code**, which diffed from the old branch: its fix read as removed."""
+    api = ws / "api"
+    on_a_fix_branch(api)
+    main = git_at(api, "rev-parse", "main")
     started(engine, ws)
     run = state.RunState.load(state.run_paths(ws))
     assert run is not None
-    assert {root["alias"]: root.get("approved_branch") for root in run.roots} == {"api": "fix/prereqs", "web": "main", "ws": ""}
+    [root] = [root for root in run.roots if root["alias"] == "api"]
+    assert (root["approved_branch"], root["start_commit"]) == ("fix/prereqs", git_at(api, "rev-parse", "HEAD"))
 
     # The work goes on a new branch from main: the fix is not in it.
     git_at(api, "checkout", "-q", "-b", "feat/work", "main")
     (api / "src" / "new.py").write_text("print('new')\n")
     ticket = engine(ws, "review", "prepare")
     assert ticket["ok"], ticket
-    text = range_text(ws, ticket)
-    assert "api: its base was taken on branch 'fix/prereqs', and it is now on branch 'feat/work'" in text
-    assert "web:" not in text.partition("## Snapshot warnings")[2]
-
+    diff = diff_text(ws, ticket)
+    assert "+print('new')" in diff
+    assert "print('fixed')" not in diff
+    moved = (
+        f"api: the checkout left its starting base, commit {root['start_commit'][:12]} on branch 'fix/prereqs', for branch "
+        f"'feat/work', so the base moved to the commit the two lines share, {main[:12]}."
+    )
+    assert moved in warnings_of(ws, ticket)
+    assert "web:" not in warnings_of(ws, ticket)
     outcome = record(engine, ws, ticket, tmp_path)
-    assert "Note: api: its base was taken on branch 'fix/prereqs'" in outcome["message"]
+    assert "Note: api: the checkout left its starting base" in outcome["message"]
 
-    # Approved on the new branch: the next phase's base is on it, and nothing is said.
+    # Approved on the new line: the next phase says nothing.
     (api / "src" / "new.py").write_text("print('newer')\n")
     second = engine(ws, "review", "prepare")
     assert second["ok"], second
-    assert "its base was taken on branch" not in range_text(ws, second)
+    assert "api:" not in warnings_of(ws, second)
 
 
-def test_a_detached_head_is_named_too(ws: Path, engine: Engine) -> None:
+def test_a_branch_made_from_the_base_changes_nothing(ws: Path, engine: Engine) -> None:
     started(engine, ws)
-    git_at(ws / "web", "checkout", "-q", "--detach")
+    git_at(ws / "web", "checkout", "-q", "-b", "feat/web")
     (ws / "web" / "src" / "main.py").write_text("print(2)\n")
+    git_at(ws / "web", "commit", "-qam", "work")
+    git_at(ws / "web", "checkout", "-q", "--detach")
     ticket = engine(ws, "review", "prepare")
     assert ticket["ok"], ticket
-    assert "web: its base was taken on branch 'main', and it is now on a detached HEAD" in range_text(ws, ticket)
+    assert "web:" not in warnings_of(ws, ticket)
+    assert "+print(2)" in diff_text(ws, ticket)
 
 
-def test_a_run_stored_before_branches_were_recorded_says_nothing(ws: Path, engine: Engine) -> None:
+def test_an_approved_base_never_follows_so_approved_work_the_line_lacks_reads_as_removed(ws: Path, engine: Engine, tmp_path: Path) -> None:
+    """An approved base is the run's own work: when the checkout leaves it for a line without it,
+    the reviewer sees that work go, and is told why."""
+    api = ws / "api"
+    started(engine, ws)
+    (api / "src" / "main.py").write_text("print('phase 1')\n")
+    record(engine, ws, engine(ws, "review", "prepare"), tmp_path)
+    git_at(api, "checkout", "-q", "-b", "phase-1")
+    git_at(api, "commit", "-qam", "phase 1, committed after its approval")
+    # Phase 2 starts on a line from the seed commit, without phase 1.
+    git_at(api, "checkout", "-q", "-b", "phase-2", "main")
+    (api / "src" / "other.py").write_text("print('phase 2')\n")
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    said = (
+        "api: its base, the snapshot approved last, was taken on branch 'main', and it is now on branch 'phase-2'. "
+        "An approved base does not follow the checkout"
+    )
+    assert said in warnings_of(ws, ticket)
+    diff = diff_text(ws, ticket)
+    assert "+print('phase 2')" in diff
+    assert "-print('phase 1')" in diff
+
+
+def test_a_base_with_uncommitted_changes_stays_and_the_diff_is_explained(ws: Path, engine: Engine) -> None:
+    api = ws / "api"
+    on_a_fix_branch(api)
+    (api / "src" / "draft.py").write_text("print('draft')\n")
+    started(engine, ws)
+    (api / "src" / "draft.py").unlink()
+    git_at(api, "checkout", "-q", "-b", "feat/work", "main")
+    (api / "src" / "new.py").write_text("print('new')\n")
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    stays = "api: its base was taken on branch 'fix/prereqs' with uncommitted changes, and it is now on branch 'feat/work'."
+    assert stays in warnings_of(ws, ticket)
+    # Nothing is hidden: the old line's fix and the draft both read as removed.
+    diff = diff_text(ws, ticket)
+    assert "-print('fixed')" in diff
+    assert "-print('draft')" in diff
+
+
+def test_a_line_with_no_shared_history_is_not_followed(ws: Path, engine: Engine) -> None:
+    api = ws / "api"
+    started(engine, ws)
+    git_at(api, "checkout", "-q", "--orphan", "unrelated")
+    git_at(api, "commit", "-qm", "an unrelated root commit")
+    (api / "src" / "main.py").write_text("print('unrelated')\n")
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    assert "is not in the history of HEAD (now on branch 'unrelated'), and the two share no commit" in warnings_of(ws, ticket)
+
+
+def test_a_run_stored_before_commits_were_recorded_does_not_guess_its_base(ws: Path, engine: Engine) -> None:
+    api = ws / "api"
+    on_a_fix_branch(api)
     started(engine, ws)
     run = state.RunState.load(state.run_paths(ws))
     assert run is not None
     with state.locked_state(run.paths) as locked:
         assert locked is not None
         for root in locked.roots:
-            root.pop("approved_branch", None)
-            root.pop("start_branch", None)
+            for key in ("approved_branch", "start_branch", "start_commit"):
+                root.pop(key, None)
         locked.save()
-    git_at(ws / "api", "checkout", "-q", "-b", "elsewhere")
-    (ws / "api" / "src" / "main.py").write_text("print(2)\n")
+    git_at(api, "checkout", "-q", "-b", "feat/work", "main")
+    (api / "src" / "new.py").write_text("print('new')\n")
     ticket = engine(ws, "review", "prepare")
     assert ticket["ok"], ticket
-    assert "its base was taken on branch" not in range_text(ws, ticket)
+    # Nothing recorded says which commit the base was, or when: it stays, and nothing is hidden.
+    assert "-print('fixed')" in diff_text(ws, ticket)
+    assert "api:" not in warnings_of(ws, ticket)
+
+
+def test_an_empty_base_never_moves_so_no_file_of_the_root_leaves_the_review(ws: Path, engine: Engine) -> None:
+    """An empty base makes every file the run's own work. A commit elsewhere with the empty tree
+    (one that removed every file) is not its commit: moving to the merge-base would drop the files."""
+    started(engine, ws)
+    lib = make_repo(ws / "lib", when=None, files={"lib.py": "print('lib')\n"})
+    added = engine(ws, "root-add", str(lib))
+    assert added["ok"], added
+    chosen = engine(ws, "root-baseline", "lib", "--empty")
+    assert chosen["ok"], (added, chosen)
+    git_at(lib, "checkout", "-q", "-b", "wipe")
+    git_at(lib, "rm", "-rq", ".")
+    git_at(lib, "commit", "-qm", "remove every file")
+    git_at(lib, "checkout", "-q", "main")
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    assert "+print('lib')" in diff_text(ws, ticket)
+    assert "lib:" not in warnings_of(ws, ticket)
+
+
+def test_a_base_is_never_matched_to_an_older_commit_with_the_same_tree(ws: Path, engine: Engine) -> None:
+    """Only a commit made since the base was taken is the base's own: the same content earlier in
+    history says nothing about where the base came from."""
+    api = ws / "api"
+    git_at(api, "checkout", "-q", "-b", "old")
+    (api / "src" / "main.py").write_text("print('v2')\n")
+    git_at(api, "commit", "-qam", "an older commit elsewhere", when=PAST)
+    git_at(api, "checkout", "-q", "main")
+    # The base holds uncommitted changes that happen to equal that commit's tree.
+    (api / "src" / "main.py").write_text("print('v2')\n")
+    started(engine, ws)
+    before = next(root["approved_tree"] for root in state.RunState.load(state.run_paths(ws)).roots if root["alias"] == "api")  # type: ignore[union-attr]
+    git_at(api, "checkout", "-q", "-b", "feat/work")
+    (api / "src" / "new.py").write_text("print('new')\n")
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    assert "the checkout left its starting base" not in warnings_of(ws, ticket)
+    after = next(root["approved_tree"] for root in state.RunState.load(state.run_paths(ws)).roots if root["alias"] == "api")  # type: ignore[union-attr]
+    assert after == before
+
+
+def test_a_move_is_said_again_when_the_review_that_first_saw_it_could_not_be_built(ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = ws / "api"
+    on_a_fix_branch(api)
+    started(engine, ws)
+    git_at(api, "checkout", "-q", "-b", "feat/work", "main")
+    (api / "src" / "new.py").write_text("print('new')\n" * 200)
+    monkeypatch.setenv("ARL_HARD_DIFF_CEILING", "100")
+    refused = engine(ws, "review", "prepare")
+    assert (refused["ok"], refused["code"]) == (False, "oversized"), refused
+    monkeypatch.delenv("ARL_HARD_DIFF_CEILING")
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    assert "api: the checkout left its starting base" in warnings_of(ws, ticket)
+    run = state.RunState.load(state.run_paths(ws))
+    assert run is not None
+    assert "api: the checkout left its starting base" in str(run.data["pending_ticket"]["note"])
+
+
+def test_an_approved_base_committed_on_a_new_branch_says_nothing(ws: Path, engine: Engine, tmp_path: Path) -> None:
+    """Claude often makes a branch after an approval and commits the phase there: nothing is lost."""
+    api = ws / "api"
+    started(engine, ws)
+    (api / "src" / "main.py").write_text("print('phase 1')\n")
+    record(engine, ws, engine(ws, "review", "prepare"), tmp_path)
+    git_at(api, "checkout", "-q", "-b", "phase-1")
+    git_at(api, "commit", "-qam", "phase 1, committed after its approval")
+    (api / "src" / "other.py").write_text("print('phase 2')\n")
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    assert "api:" not in warnings_of(ws, ticket)
+    assert "print('phase 1')" not in diff_text(ws, ticket)
+
+
+def test_the_final_review_follows_the_starting_base_too(ws: Path, engine: Engine, tmp_path: Path) -> None:
+    api = ws / "api"
+    on_a_fix_branch(api)
+    assert engine(ws, "init", "--plan", str(ws / "plan.md"))["ok"]
+    assert engine(ws, "set-phases", stdin=json.dumps(["the only phase"]))["ok"]
+    assert engine(ws, "finish")["ok"]
+    # The phase is done on the fix branch, then the work moves to a line from main.
+    (api / "src" / "new.py").write_text("print('new')\n")
+    record(engine, ws, engine(ws, "review", "prepare"), tmp_path)
+    git_at(api, "add", "-A")
+    git_at(api, "commit", "-qm", "the phase")
+    git_at(api, "checkout", "-q", "-b", "feat/work", "main")
+    (api / "src" / "new.py").write_text("print('new')\n")
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    assert ticket["label"] == "final"
+    assert "api: the checkout left its starting base" in warnings_of(ws, ticket)
+    diff = diff_text(ws, ticket)
+    assert "+print('new')" in diff
+    assert "print('fixed')" not in diff
