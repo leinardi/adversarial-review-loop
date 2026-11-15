@@ -358,7 +358,10 @@ def test_a_model_failure_waits_for_the_user_at_once_and_spends_no_budget(ws: Pat
         assert "strong (opus)" in text
         assert "round 1 of phase1" in text
         assert "404 model_not_found" in text
-        assert "/arl-model first default" in text
+        # The default is the refused model itself: the other tier is offered, never default.
+        assert "/arl-model first weak" in text
+        assert "/arl-model default" not in text
+        assert "/arl-model first <model>" in text
     assert run.data["failure_history"][-1]["kind"] == "model"
     # No retry: another review is refused until the user decides.
     edit(ws / "api" / "src" / "main.py", "print(3)\n")
@@ -371,7 +374,39 @@ def test_a_late_rounds_model_failure_points_at_late(ws: Path, engine: Engine, tm
     second = prepared(engine, ws, "print(3)\n")
     outcome = engine(ws, "review", "record", second["review_id"], "--failed", "model", "--error", "refused")
     assert "round 2 of phase1" in outcome["message"]
-    assert "/arl-model late default" in outcome["message"]
+    assert "/arl-model late strong" in outcome["message"]
+    assert "/arl-model default" not in outcome["message"]
+    assert load(ws).data["waiting"]["switch"] == {"which": "late", "word": "strong"}
+
+
+def test_the_default_is_judged_on_every_round_it_would_set(
+    ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch, listed: list[str], tmp_path: Path
+) -> None:
+    """**Fails on the old code**, which judged ``default`` on the late rounds alone: on OpenCode the
+    late default follows ``model``, here this run's weak, so it offered a default that puts the
+    refused strong model back on every round."""
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    started(engine, ws)
+    assert model(engine, ws, "set", "first", "weak")["ok"]
+    assert model(engine, ws, "set", "late", "strong")["ok"]
+    del listed
+    answered(engine, ws, prepared(engine, ws), tmp_path, BLOCK)
+    second = prepared(engine, ws, "print(3)\n")
+    outcome = engine(ws, "review", "record", second["review_id"], "--failed", "model", "--error", "refused")
+    assert "strong (openai/gpt-6.1-sol)" in outcome["message"]
+    assert "/arl-model default" not in outcome["message"]
+    assert "(/arl-model late weak, or /arl-model late <model>)" in outcome["message"]
+    assert load(ws).data["waiting"]["switch"] == {"which": "late", "word": "weak"}
+
+
+def test_a_model_failure_offers_default_when_the_run_chose_another_model(ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    assert engine(ws, "model", "set", "all", "weak")["ok"]
+    outcome = engine(ws, "review", "record", prepared(engine, ws)["review_id"], "--failed", "model", "--error", "refused")
+    assert "weak (sonnet)" in outcome["message"]
+    # The default names another model than the refused one: it alone is offered, with <model>.
+    assert "(/arl-model default, or /arl-model first <model>)" in outcome["message"]
+    assert load(ws).data["waiting"]["switch"] == {"which": "all", "word": "default"}
 
 
 @pytest.mark.parametrize("words", [["set", "all", "default"], ["reset"]])

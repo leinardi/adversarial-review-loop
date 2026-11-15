@@ -106,3 +106,5 @@ export const KEEP_GOING = 'Keep going'
 export const STOP = 'Stop'
 /** A fourth answer when the reviewer's model cannot be used: this run goes back to the built-in models. */
 export const USE_DEFAULT_MODEL = 'Use the default model'
+/** The fourth answer when the default is the refused model itself: another tier, by its word. */
+export const useModel = (word: string): string => `Use the ${word} model`

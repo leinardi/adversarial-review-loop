@@ -434,16 +434,20 @@ class RunState:
         """One more round of the current stage ended with findings to fix."""
         self.data["rounds"] += 1
 
-    def wait_for_user(self, kind: str, detail: str) -> None:
+    def wait_for_user(self, kind: str, detail: str, *, switch: Mapping[str, str] | None = None) -> None:
         """Wait for the user on ``kind``. A stall or a reviewer's call for the user is a decision
         only the user ends, so a later oversized file or failure budget never replaces it: those
-        clear themselves, and would take the decision with them."""
+        clear themselves, and would take the decision with them.
+
+        ``switch`` (a ``model`` wait) is the ``/arl-model`` setting offered as the way out:
+        ``{"which": ..., "word": ...}``, a model other than the refused one.
+        """
         if kind not in WAIT_KINDS:
             raise ValueError(f"unknown wait kind {kind!r}")
         current = self.data["waiting"]
         if isinstance(current, dict) and current.get("kind") in _DECISIONS and kind not in _DECISIONS:
             return
-        self.data["waiting"] = {"kind": kind, "detail": detail}
+        self.data["waiting"] = {"kind": kind, "detail": detail, **({"switch": dict(switch)} if switch else {})}
 
     def pending_decision(self) -> dict[str, Any] | None:
         """The wait only the user ends (a stall, a reviewer's call for the user), or ``None``."""

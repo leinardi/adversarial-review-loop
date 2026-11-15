@@ -99,8 +99,11 @@ The checks, and what each costs:
   seconds in.
 
 When the model cannot be used, the loop says which model, for which round, and why, and asks you
-to choose another (`/arl-model default`, or `/arl-model <model>`; choosing ends the wait), accept
-the stage, keep going on the same model, or stop. Headless, Claude is told to stop and tell you.
+to choose another, accept the stage, keep going on the same model, or stop. Choosing ends the wait.
+The model offered is never the refused one: `/arl-model default` (every round back on the built-in
+models) when those differ from it, else the other tier for the rounds that failed (`/arl-model
+first weak` when the built-in `strong` was refused); `/arl-model <model>` names any other. Headless,
+Claude is told to stop and tell you.
 
 In auto mode the session tells the reviewer to deliver its report with `SubagentHandback`, and
 only auto mode's own classifier may allow that call. The loop leaves it to the classifier, and

@@ -23,7 +23,7 @@ import type { EngineInterface, TurnUsage } from 'claude-code'
 import type { RunView } from '../types'
 import { type Answer, engine, engineStream } from './engine'
 import { Interrupted, normalize, type Ran, runReviewer, type Task, within } from './reviewer'
-import { ACCEPT, KEEP_GOING, STOP, USE_DEFAULT_MODEL } from './text'
+import { ACCEPT, KEEP_GOING, STOP, USE_DEFAULT_MODEL, useModel } from './text'
 import { showActivity, showLast, showRun } from './ui'
 
 /** What the session told the mod at its start. */
@@ -110,28 +110,40 @@ const QUESTIONS: Record<string, string> = {
   model: "The reviewer's model cannot be used. How should the loop go on?",
 }
 
-/** What the user may answer to each wait. */
-function optionsFor(kind: string): string[] {
-  if (kind === 'oversized') return [KEEP_GOING, STOP]
-  if (kind === 'model') return [USE_DEFAULT_MODEL, ACCEPT, KEEP_GOING, STOP]
-  return [ACCEPT, KEEP_GOING, STOP]
+/** The `/arl-model` setting a model wait offers: a model other than the refused one. */
+export type ModelSwitch = { which: string; word: string }
+
+/** The answer that makes `waiting`'s switch, or `undefined` when it offers none. */
+export function switchLabel(waiting: Waiting): string | undefined {
+  const offered = waiting.switch
+  if (waiting.kind !== 'model' || offered === undefined) return undefined
+  return offered.word === 'default' ? USE_DEFAULT_MODEL : useModel(offered.word)
 }
+
+/** What the user may answer to each wait. */
+function optionsFor(waiting: Waiting): string[] {
+  if (waiting.kind === 'oversized') return [KEEP_GOING, STOP]
+  const switched = switchLabel(waiting)
+  return [...(switched === undefined ? [] : [switched]), ACCEPT, KEEP_GOING, STOP]
+}
+
+type Waiting = { kind: string; detail?: string; switch?: ModelSwitch }
 
 /**
  * The run waits for the user (`waiting`): ask them, act on their choice, and answer what Claude is
  * told. Headless, or with no clear answer, Claude is told to stop and hand over.
  */
-export async function decide($: EngineInterface, waiting: { kind: string; detail?: string }): Promise<string> {
+export async function decide($: EngineInterface, waiting: Waiting): Promise<string> {
   const detail = waiting.detail ?? ''
   const choices =
     waiting.kind === 'oversized'
       ? 'whether to keep going once the file is removed or ignored, or to stop the run'
       : waiting.kind === 'model'
-        ? 'which model reviews instead (/arl-model default, or /arl-model <model>), whether to accept this stage as it stands, or to stop the run'
+        ? 'which model reviews instead (/arl-model, as offered above), whether to accept this stage as it stands, or to stop the run'
         : 'whether to accept this stage as it stands, keep going, or stop the run'
   const handOver = `\n\nThe run now waits for the user (${waiting.kind}). Stop working on the plan and tell the user what happened${detail ? `: ${detail}` : '.'} They decide ${choices}.`
   if (!session.isInteractive) return handOver
-  const options = optionsFor(waiting.kind)
+  const options = optionsFor(waiting)
   void $.ui.notify(`adversarial-review-loop needs you: ${QUESTIONS[waiting.kind] ?? waiting.kind}`).catch(() => undefined)
   // Dismissed, or "Chat about this": no decision.
   const choice = await $.ui
@@ -156,11 +168,13 @@ export async function decide($: EngineInterface, waiting: { kind: string; detail
     const repos = typeof accepted.repositories === 'string' ? accepted.repositories : ''
     return `\n\nThe user accepted this stage as it stands. Commit each changed git repository by its own conventions${repos}${next}`
   }
-  if (choice === USE_DEFAULT_MODEL) {
-    // The run's own choice, back to the built-in models: that ends the wait.
-    const chosen = await run($, ['model', 'set', 'all', 'default'])
-    if (!chosen.ok) return `\n\nThe user chose the default model, but setting it failed: ${chosen.error ?? ''}${handOver}`
-    return '\n\nThe user switched this run to the default reviewer model: call review again.'
+  const switched = switchLabel(waiting)
+  if (switched !== undefined && choice === switched && waiting.switch !== undefined) {
+    // The model the engine offered, for the rounds the refused one ran: that ends the wait.
+    const { which, word } = waiting.switch
+    const chosen = await run($, ['model', 'set', which, word])
+    if (!chosen.ok) return `\n\nThe user chose the ${word} reviewer model, but setting it failed: ${chosen.error ?? ''}${handOver}`
+    return `\n\nThe user switched this run's ${which}-round reviewer to the ${word} model: call review again.`
   }
   if (choice === KEEP_GOING) {
     // Resuming clears the decision and would also undo a pause the user set: keep that.

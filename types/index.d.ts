@@ -30,7 +30,7 @@ export type RunView = {
   rounds: number
   final_required: boolean
   pending_review: boolean
-  waiting: { kind: string; detail?: string } | null
+  waiting: { kind: string; detail?: string; switch?: { which: string; word: string } } | null
   roots: { alias: string; path: string; kind: string; baseline: string; proposed: string }[]
 }
 

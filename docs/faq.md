@@ -94,8 +94,10 @@ A stopped or complete run is archived without `--new`.
 The model was refused before the reviewer could answer: unknown, not available to your account, or
 replaced by the session (an `availableModels` allowlist, for example). The message names the model,
 the round and the provider's reason. Nothing was retried, and no failure budget was spent. Choose
-another with `/arl-model` (`/arl-model default` goes back to the built-in models) or fix the
-access, then `/arl-resume`. The check is described in [how it works](how-it-works.md#the-reviewers-model).
+another with `/arl-model` or fix the access, then `/arl-resume`. The message offers only a choice
+that names another model: `/arl-model default` when the built-in models differ from the refused
+one, and the other tier (`/arl-model first weak`, say) when the built-in model is the one refused.
+The check is described in [how it works](how-it-works.md#the-reviewers-model).
 
 ### What does a review cost?
 
