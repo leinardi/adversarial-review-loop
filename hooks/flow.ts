@@ -322,7 +322,8 @@ async function reviewBySubagent($: EngineInterface, reviewer: Reviewer, prepared
 }
 
 async function prepareReview($: EngineInterface, input: Record<string, unknown>): Promise<Answer> {
-  // The engine checks both: a disposition naming no finding of the previous round is refused.
+  // The engine checks both: a disposition naming no finding of the previous round is refused,
+  // and on a stage's first round, with no previous round, dispositions are ignored with a note.
   return run($, ['review', 'prepare', '--session', session.id], JSON.stringify({ verification: input.verification ?? [], dispositions: input.dispositions ?? [] }))
 }
 

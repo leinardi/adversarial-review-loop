@@ -77,7 +77,7 @@ def test_stats_lists_every_round_and_failure_with_its_cost(ws: Path, engine: Eng
     ticket = engine(ws, "review", "prepare")
     engine(ws, "review", "record", ticket["review_id"], "--failed", "transient", "--error", "API error", "--usage", json.dumps({"turns": 2}))
     edit(ws / "api" / "src" / "main.py", "print(3)\n")
-    round_(engine, ws, "VERDICT APPROVED", usage=USAGE)
+    round_(engine, ws, "RESOLVED id=r1.1 | api/src/main.py:1 prints 3 now", "VERDICT APPROVED", usage=USAGE)
 
     answer_ = engine(ws, "stats", "--json")
 
@@ -90,7 +90,8 @@ def test_stats_lists_every_round_and_failure_with_its_cost(ws: Path, engine: Eng
     assert (first["findings"], first["blocking"]) == ({"high": 1, "low": 1}, 1)
     # A failure recorded nothing, so the attempt after it is still round 2.
     assert (failed["round"], failed["verdict"], failed["kind"], failed["requests"]) == (2, "OP_FAILURE", "transient", 2)
-    assert (second["round"], second["verdict"]) == (2, "APPROVED")
+    assert (second["round"], second["verdict"], second["resolved"]) == (2, "APPROVED", 1)
+    assert first["resolved"] == 0
     totals = figures["totals"]
     assert (totals["rounds"], totals["failed"]) == (2, 1)
     assert totals["requests"] == {"total": 14, "missing": 0}
@@ -102,6 +103,7 @@ def test_stats_lists_every_round_and_failure_with_its_cost(ws: Path, engine: Eng
     assert "#1 round 1 · CHANGES_REQUIRED · claude-opus-5-5 · 6 requests · tokens new 2k cached 30k out 400" in text
     assert "findings 1 high, 1 low · blocking 1" in text
     assert "OP_FAILURE (transient)" in text
+    assert "resolved 1 (the reviewer's statement)" in text
     assert "cached 60k (1 not reported)" in text
     assert "not proof that any was fixed" in text
 
@@ -112,7 +114,7 @@ def test_a_round_recorded_before_usage_existed_shows_its_figures_as_missing(ws: 
     round_(engine, ws, BLOCKING, "VERDICT CHANGES_REQUIRED")
     paths = state.run_paths(ws)
     document = json.loads(paths.state_file.read_text())
-    for key in ("usage", "model", "harness", "round", "blocking", "deferred"):
+    for key in ("usage", "model", "harness", "round", "blocking", "deferred", "resolved"):
         del document["round_history"][0][key]
     del document["failure_history"]
     paths.state_file.write_text(json.dumps(document))
@@ -120,13 +122,14 @@ def test_a_round_recorded_before_usage_existed_shows_its_figures_as_missing(ws: 
     figures = engine(ws, "stats")["stats"]
 
     [row] = figures["stages"][0]["rounds"]
-    assert (row["round"], row["requests"], row["blocking"], row["model"]) == (1, None, None, "")
+    assert (row["round"], row["requests"], row["blocking"], row["model"], row["resolved"]) == (1, None, None, "", None)
     assert row["tokens"] == {"new": None, "cached": None, "output": None}
     assert figures["totals"]["requests"] == {"total": None, "missing": 1}
     text = engine(ws, "stats")["text"]
     # Missing is "?", never 0: a round with no figures was not free.
     assert "? · ? requests · tokens new ? cached ? out ?" in text
     assert "blocking ?" in text
+    assert "resolved" not in text
     assert "Total: ? requests" in text
 
 

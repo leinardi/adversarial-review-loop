@@ -112,9 +112,14 @@ seed did not plant.
 `score --round2` reports both figures per class, and counts false re-raises in total and as
 blocking. A regression planted on the line of a fixed defect shares that line, so each record's
 `symbols` must name what is specific to it: in `large1`, `L1`'s inverted `now ==` and `LR`'s
-`exists()`. A finding that names only the shared function is ambiguous. A finding near a fixed
+`baseline`. A finding that names only the shared function is ambiguous. A finding near a fixed
 defect's line, with nothing that names another defect, still counts as a re-raise, even when it
 raises something new there.
+
+`large1`'s regression changed after the figures below were measured. It used to add
+`and here.exists()` to the changed-since-joined check, which Opus rated `low` in every run, so it
+measured severity taste rather than recall. It now adds a condition the guard above has already
+refused, so the check never raises. Every 141 KB round-2 figure in this file used the old one.
 
 The round-2 manifests assume a round 1 by Opus, which reported every defect except the sixth
 (`M6`, `L6`). After a round 1 that found a different set, `untouched-miss` no longer means what
@@ -238,6 +243,24 @@ regression rated low every time) and no false re-raise, against one before. That
 did. Sonnet is unchanged: 8 of 12, and again one run approved the 141 KB phase with `L4` open.
 Every round 2 read the increment and none of the phase diff, as the later-round prompt asks.
 
+### Round 2 with `RESOLVED` accounting
+
+Measured 2026-11-15 on the working tree that added `RESOLVED` lines, the "Still open" list in
+`prior-rounds.txt` and the rule that a later round may not approve past an earlier blocking
+finding still open. Same Opus round 1 and three runs per cell, with `large1`'s current
+regression, so the 141 KB regression column is not comparable with the tables above.
+
+| Phase | Model | Units | Requests | Verdicts | Open | Regression | False re-raises |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 93 KB | Opus | 54 to 69 | 4 to 6 | 3 changes required | `*` `*` `*` | `*` `*` `*` | 0 |
+| 93 KB | Sonnet | 40 to 45 | 4 to 5 | 3 changes required | `*` `*` `*` | `*` `*` `*` | 0 |
+| 141 KB | Opus | 41 to 46 | 3 to 4 | 3 changes required | `*` `*` `*` | `*` `*` `*` | 0 |
+| 141 KB | Sonnet | 36 to 40 | 4 to 5 | 3 changes required | `*` `*` `*` | `*` `*` `*` | 0 |
+
+Blocking recall was 24 of 24, Sonnet's included, and no run approved. Every run stated
+`RESOLVED` for three or four round-1 findings, and none for the defect left open. No round
+failed and no repair call ran, so the accounting repair was never exercised here.
+
 ## Measured on this harness
 
 `make bench-baseline` cells on the 93 KB (`medium`) and 141 KB (`large1`) phases. The baseline is
@@ -271,7 +294,8 @@ note to read on. Sonnet often read one more page and then wrote its review: thre
 baseline runs of the 141 KB seeded cell read 1,699 to 1,859 lines, and a run with the guidance
 that stopped at 1,704 wrote that it had read the whole diff. With 40 KB chunks a single read
 takes in a whole file; the prompts still tell the reviewer to read on when a read stops short,
-which a dense diff can still need.
+which a dense diff can still need. `Read` also stops at 2,000 lines, which a chunk of short lines
+reaches inside 40 KB, so a chunk is also capped at 1,500 lines.
 
 ### Historical, not validated
 

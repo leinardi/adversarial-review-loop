@@ -625,6 +625,145 @@ def test_a_supersedes_line_from_a_final_review_fails_the_contract(tmp_path: Path
     assert contract.parse(out, config=config_with()).verdict == "OP_FAILURE"
 
 
+RESOLVED_OK = ["RESOLVED id=r1.2 | a.txt:3 now checks the token", "RESOLVED id=r12.345|guard in place", "RESOLVED  id=r1.1 \t|  x"]
+RESOLVED_BAD = [
+    "RESOLVED id=r1.2 |",
+    "RESOLVED id=r1.2",
+    "RESOLVED id=1.2 | no r",
+    "RESOLVED id=r1 | no number",
+    "RESOLVED id=r1.2x | trailing junk",
+    "RESOLVED: id=r1.2 | a stray colon",
+    "  RESOLVED id=r1.2 | leading whitespace",
+    "resolved id=r1.2 | lower case",
+]
+
+
+@pytest.mark.parametrize("line", RESOLVED_OK)
+def test_the_resolved_grammar_accepts_a_well_formed_line(line: str) -> None:
+    assert contract.resolved_id(line).startswith("r")
+
+
+@pytest.mark.parametrize("line", [*RESOLVED_BAD, "RESOLVED id=r1.2 | x\nsmuggled", 3])
+def test_the_resolved_grammar_rejects_a_malformed_line(line: object) -> None:
+    assert contract.resolved_id(line) == ""
+
+
+def test_a_resolved_line_is_recorded_and_never_clears_a_blocking_finding(tmp_path: Path) -> None:
+    out = tmp_path / "r.out"
+    out.write_bytes(_block("FINDING severity=high actionable=yes file=a.txt:1 | still broken", "RESOLVED id=r1.1 | gone", "VERDICT APPROVED"))
+    review = contract.parse(out, config=config_with(), allow_supersedes=True, allow_resolved=True)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.resolved == "RESOLVED id=r1.1 | gone\n"
+
+
+@pytest.mark.parametrize("allow_supersedes", [False, True])
+def test_a_resolved_line_where_it_is_not_allowed_fails_the_contract(tmp_path: Path, allow_supersedes: bool) -> None:
+    """Round 1 and the final review do not document it: an unrecognised line, not an ignored one."""
+    out = tmp_path / "r.out"
+    out.write_bytes(_block("RESOLVED id=r1.1 | gone", "VERDICT APPROVED"))
+    review = contract.parse(out, config=config_with(), allow_supersedes=allow_supersedes)
+    assert (review.verdict, review.kind) == ("OP_FAILURE", "contract")
+
+
+@pytest.mark.parametrize("line", RESOLVED_BAD[:6])
+def test_a_near_miss_of_the_resolved_grammar_fails_the_contract(tmp_path: Path, line: str) -> None:
+    out = tmp_path / "r.out"
+    out.write_bytes(_block(line, "VERDICT APPROVED"))
+    assert contract.parse(out, config=config_with(), allow_supersedes=True, allow_resolved=True).verdict == "OP_FAILURE"
+
+
+def test_unknown_resolved_names_an_id_no_earlier_round_has() -> None:
+    review = Review(resolved="RESOLVED id=r1.1 | ok\nRESOLVED id=r1.4 | no such\n")
+    assert contract.unknown_resolved(review, frozenset({"r1.1", "r1.2"})) == "r1.4"
+    assert contract.unknown_resolved(review, frozenset({"r1.1", "r1.4"})) == ""
+
+
+EARLIER = [
+    "FINDING severity=high actionable=yes file=a/x.py:3 | one",
+    "FINDING severity=medium actionable=yes file=./a/y.py | two",
+    "FINDING severity=low actionable=yes file=a/z.py:1 | below the threshold",
+    "FINDING severity=critical actionable=no file=a/z.py:2 | not actionable",
+    "FINDING severity=high actionable=yes file=- | nowhere",
+]
+MEDIUM = arl_config.threshold_rank("medium")
+
+
+def _open(review: Review, rounds: object) -> list[str]:
+    return contract.unaccounted(review, rounds, threshold=MEDIUM)
+
+
+@pytest.mark.parametrize(
+    ("review", "missing"),
+    [
+        (Review(), ["r1.1", "r1.2", "r1.5"]),
+        (Review(resolved="RESOLVED id=r1.1 | a\nRESOLVED id=r1.2 | b\nRESOLVED id=r1.5 | c\n"), []),
+        # Exact file= values close; another line, and `-`, close nothing.
+        (Review(supersedes="SUPERSEDES round=1 file=a/x.py:3 | wrong\nSUPERSEDES round=1 file=a/y.py | wrong\n"), ["r1.5"]),
+        (Review(supersedes="SUPERSEDES round=1 file=a/x.py:9 | moved\nSUPERSEDES round=1 file=- | no\n"), ["r1.1", "r1.2", "r1.5"]),
+        (Review(supersedes="SUPERSEDES round=1 file=a/x.py | no line\n"), ["r1.1", "r1.2", "r1.5"]),
+        (Review(supersedes="SUPERSEDES round=2 file=a/x.py:3 | another round\n"), ["r1.1", "r1.2", "r1.5"]),
+        # An approving round's FINDING never closes one: it is a nit or a silent downgrade.
+        (Review(all_findings="FINDING severity=low actionable=no file=a/x.py:3 | moved\n"), ["r1.1", "r1.2", "r1.5"]),
+    ],
+)
+def test_unaccounted_lists_the_earlier_blocking_findings_left_open(review: Review, missing: list[str]) -> None:
+    assert _open(review, [{"findings": EARLIER}]) == missing
+
+
+A = "FINDING severity=high actionable=yes file=a/x.py:3 | A"
+B = "FINDING severity=high actionable=yes file=a/y.py:3 | B"
+B_SAME_FILE = "FINDING severity=high actionable=yes file=a/x.py:90 | B"
+
+
+def test_withdrawing_one_finding_does_not_close_another_in_the_same_file() -> None:
+    assert _open(Review(supersedes="SUPERSEDES round=1 file=a/x.py:3 | wrong\n"), [{"findings": [A, B_SAME_FILE]}]) == ["r1.2"]
+
+
+def test_a_file_value_two_findings_share_withdraws_neither() -> None:
+    twice = "FINDING severity=info actionable=no file=a/x.py:3 | same place, not blocking"
+    assert _open(Review(supersedes="SUPERSEDES round=1 file=a/x.py:3 | wrong\n"), [{"findings": [A, twice]}]) == ["r1.1"]
+
+
+def test_a_later_finding_in_the_same_file_closes_neither_earlier_one() -> None:
+    rounds = [{"findings": [A, B_SAME_FILE]}, {"findings": ["FINDING severity=high actionable=yes file=a/x.py:5 | one of them"]}]
+    assert _open(Review(resolved="RESOLVED id=r2.1 | gone\n"), rounds) == ["r1.1", "r1.2"]
+
+
+def test_a_finding_raised_in_two_rounds_needs_both_ids_closed() -> None:
+    rounds = [{"findings": [A]}, {"findings": [A]}]
+    assert _open(Review(resolved="RESOLVED id=r2.1 | gone\n"), rounds) == ["r1.1"]
+    assert _open(Review(resolved="RESOLVED id=r1.1 | gone\n"), rounds) == ["r2.1"]
+    assert _open(Review(resolved="RESOLVED id=r1.1 | gone\nRESOLVED id=r2.1 | gone\n"), rounds) == []
+
+
+def test_a_finding_a_middle_round_never_named_stays_open() -> None:
+    rounds = [{"findings": [A, B]}, {"findings": [A], "resolved": ["RESOLVED id=r1.1 | moved on"]}]
+    assert _open(Review(resolved="RESOLVED id=r2.1 | gone\n"), rounds) == ["r1.2"]
+    assert _open(Review(resolved="RESOLVED id=r2.1 | gone\nRESOLVED id=r1.2 | gone\n"), rounds) == []
+
+
+@pytest.mark.parametrize(
+    "middle",
+    [
+        {"findings": [], "resolved": ["RESOLVED id=r1.1 | gone"]},
+        {"findings": [], "supersedes": ["SUPERSEDES round=1 file=a/x.py:3 | wrong"]},
+    ],
+)
+def test_a_middle_rounds_resolved_or_supersedes_closes_it_for_good(middle: dict[str, list[str]]) -> None:
+    ledger = contract.replay([{"findings": [A]}, middle, {"findings": []}], threshold=MEDIUM)
+    assert ledger.open == {}
+    assert ledger.closed["r1.1"].by == 2
+    assert _open(Review(), [{"findings": [A]}, middle, {"findings": []}]) == []
+
+
+def test_unaccounted_counts_a_malformed_stored_finding_as_blocking() -> None:
+    stored = ["FINDING severity=spicy actionable=yes file=a/x.py | ?", "FINDING severity=high actionable=yes file=a/x.py | x\ny", 7]
+    rounds = [{"findings": []}, {"findings": stored, "resolved": "not a list", "supersedes": ["SUPERSEDES round=2 file=- | x\ny"]}]
+    assert _open(Review(supersedes="SUPERSEDES round=2 file=a/x.py | x\n"), rounds) == ["r2.1", "r2.2", "r2.3"]
+    assert contract.unaccounted(Review(), "not a list", threshold=MEDIUM) == []
+    assert _open(Review(), [{"findings": [A]}, "junk"]) == ["r1.1"]
+
+
 def test_a_finding_detail_with_a_unicode_line_separator_stays_one_record(tmp_path: Path) -> None:
     """Records split on ``\\n`` only, never ``str.splitlines``: a valid detail carrying U+2028
     stays one finding instead of two fragments, the second of which breaks the contract."""
@@ -743,6 +882,8 @@ def test_a_huge_cited_line_is_noted_without_its_digits() -> None:
         ("FINDING severity=high actionable=yes file=a/x.py:3 | broken || done when:", ""),
         ("FINDING severity=high actionable=yes file=a/x.py:3 | a || b is wrong", ""),
         ("not a finding || done when: x", ""),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken || Done when: x() checks y", "x() checks y"),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken || DONE WHEN: x() checks y", "x() checks y"),
     ],
 )
 def test_done_when_is_read_from_the_end_of_the_finding_text(line: str, condition: str) -> None:

@@ -100,6 +100,10 @@ def _findings_and_raw(review: Review) -> str:
     if review.supersedes:
         out.append("\n## Reversals of earlier rounds (SUPERSEDES)\n\n")
         out.append(f"```\n{review.supersedes}```\n")
+    if review.resolved:
+        out.append("\n## Earlier findings the reviewer marked resolved (RESOLVED)\n\n")
+        out.append("The reviewer's statement, with its evidence; recorded, never read for the verdict.\n\n")
+        out.append(f"```\n{review.resolved}```\n")
     out.append("\n## Raw reviewer output\n\n")
     out.append("````\n")
     out.append(_raw_text(review.raw))

@@ -52,7 +52,7 @@ and asks the person when the engine says the run waits for them.
 | `workspace.py`, `gitsnap.py` | roots, nested-repository discovery, late baselines; snapshots through a throwaway `GIT_INDEX_FILE` (git roots) or a shadow git dir (plain folders) |
 | `review.py` | `review prepare` / `record` / `run-external` / `abandon`, dispositions, repair, failure budgets, stalls |
 | `bundle.py` | the bundle: diff chunks per root with alias-prefixed paths, `range.txt`, `prior-rounds.txt`, `verification.txt`, the composed prompt (`reviewer-phase` for round 1, `reviewer-phase-late` from round 2, `reviewer-final`) |
-| `contract.py` | the output contract: `FINDING` and `SUPERSEDES` lines, the verdict recomputed from them |
+| `contract.py` | the output contract: `FINDING`, `SUPERSEDES` and `RESOLVED` lines, the verdict recomputed from them, and the accounting a later round's approval owes the phase's earlier rounds |
 | `guidance.py` | each root's review skill and `review_guide` |
 | `runner.py`, `harness/` | the bounded runner and the opencode harness |
 | `oscillation.py` | stall detection across rounds |
@@ -67,7 +67,8 @@ and asks the person when the engine says the run waits for them.
    Otherwise it scans for new nested repositories, snapshots every root, and issues a **ticket**:
    review id, run id, phase, phase-list revision, and every root's snapshot tree. Dispositions
    naming findings of the previous round are checked and stored on the run, not on the ticket, so
-   a review that fails keeps them for the next.
+   a review that fails keeps them for the next. On a stage's first round they have nothing to
+   answer: they are checked for shape, then ignored, and the round's answer to Claude says so.
 2. The bundle is the diff from each root's `approved_tree` (or `start_tree`, for the final review)
    to that snapshot.
 3. The mod reads the prompt file, spawns the reviewer on the round's model (`late_model` from
@@ -78,6 +79,17 @@ and asks the person when the engine says the run waits for them.
    replanned, restarted, or a newer review began) is refused and reported, never applied.
 5. The verdict is recomputed from the findings. An approval moves every root's `approved_tree`; a
    contract failure gets one repair round on the same ticket; failures count toward the budgets.
+   From round 2 of a phase, an approval must leave no earlier blocking finding open.
+   `contract.replay` replays the stage's rounds in order: each closes what it names exactly (a
+   `RESOLVED` id, or a `SUPERSEDES` whose round and exact `file=` value match one finding of that
+   round), then opens its own blocking findings. The same replay writes "Still open" and each
+   finding's closure into `prior-rounds.txt`; "Still open" is never cut, and a list past
+   `max_findings_bytes` makes the run wait for the user. An approval that leaves one open is a
+   contract failure whose repair is told the ids (`repair-reason.txt`). Only that repair may
+   approve, and only keeping every line of the block it re-emits; no accounting repair may add a
+   `SUPERSEDES`. An ordinary repair, of an answer the engine could not read, may copy a
+   `RESOLVED` line only from that answer, never write one of its own. `RESOLVED` lines are
+   stored in the round's `round_history` entry and never change what blocks.
    A block with no `VERDICT` is `CHANGES_REQUIRED` when a finding blocks and a contract failure
    otherwise. A cited line past the end of its file adds a note to what Claude reads, nothing more.
 6. What the round cost goes with it: a recorded round's `round_history` entry, or a failed one's

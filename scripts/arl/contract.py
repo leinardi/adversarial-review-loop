@@ -4,6 +4,11 @@
 omits the markers, emits a line the contract does not allow or an unrecognised verdict maps to
 ``OP_FAILURE`` or ``NEEDS_HUMAN``. The reviewer's own verdict is advisory: an actionable finding
 at or above ``block_severity`` blocks regardless of what it concluded.
+
+From the second round of a phase, an approval must also leave no earlier blocking finding of the
+phase open (:func:`unaccounted`): each one closed by a ``RESOLVED`` naming its id or a
+``SUPERSEDES`` naming exactly it, in that round or an earlier one. An approval that skips one is a
+contract failure, not an approval.
 """
 
 #  This file is part of adversarial-review-loop.
@@ -27,7 +32,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -45,9 +50,11 @@ __all__ = [
     "FINDING_RE",
     "LINE_SUFFIX_RE",
     "ROUND_VERDICTS",
+    "Closure",
     "ContractError",
     "Finding",
     "LateScope",
+    "Ledger",
     "Review",
     "RootRange",
     "Target",
@@ -60,7 +67,11 @@ __all__ = [
     "normalized_file",
     "parse",
     "records",
+    "replay",
+    "resolved_id",
+    "unaccounted",
     "unknown_alias",
+    "unknown_resolved",
 ]
 
 
@@ -98,7 +109,9 @@ FINDING_RE: Final = re.compile(
 
 
 #: A finding's optional suggested check, at the end of its text: `` || done when: <condition>``.
-_DONE_WHEN_RE: Final = re.compile(rf"\|\|[ \t]*done when:[ \t]*(?P<condition>[^{_SPACE}].*?)[{_SPACE}]*$")
+#: The words are matched in any case: ``Done when:`` is the same check, and dropping it would only
+#: lose the advice.
+_DONE_WHEN_RE: Final = re.compile(rf"\|\|[ \t]*(?i:done when):[ \t]*(?P<condition>[^{_SPACE}].*?)[{_SPACE}]*$")
 
 
 def done_when(line: str) -> str:
@@ -141,6 +154,22 @@ _SUPERSEDES_RE: Final = re.compile(
     r"^SUPERSEDES[ \t]+round=(?P<round>[0-9]{1,9})"
     rf"[ \t]+file=(?P<file>[^|{_SPACE}](?:[^|]*[^|{_SPACE}])?)[ \t]*\|[ \t]*[^{_SPACE}]"
 )
+
+
+#: The ``RESOLVED`` grammar, exactly as ``prompts/reviewer-phase-late.md`` specifies it:
+#: ``RESOLVED id=r<round>.<n> | <evidence>``. The reviewer's statement that an earlier finding,
+#: named by its engine-given id (:func:`finding_id`), is gone, with what in the code shows it.
+#: Allowed only from the second round of a phase; recorded, and read for nothing but
+#: :func:`unaccounted`. It never changes what blocks.
+_RESOLVED_RE: Final = re.compile(rf"^RESOLVED[ \t]+id=(?P<id>r[0-9]{{1,9}}\.[0-9]{{1,9}})[ \t]*\|[ \t]*[^{_SPACE}]")
+
+
+def resolved_id(line: object) -> str:
+    """The finding id a stored or parsed ``RESOLVED`` line names, or ``""`` when it is not one."""
+    if not is_single_stored_line(line):
+        return ""
+    match = _RESOLVED_RE.match(str(line))
+    return match.group("id") if match else ""
 
 
 #: How much of an offending line is echoed back, so a denial names what to fix.
@@ -267,6 +296,12 @@ class Review:
     #: Every ``SUPERSEDES`` line, newline-terminated. Recorded only -- it never changes
     #: ``verdict`` (a reversal still blocks exactly as its ``FINDING`` lines say).
     supersedes: str = ""
+    #: Every ``RESOLVED`` line, newline-terminated: the reviewer's statement that an earlier
+    #: finding is gone. Never changes what blocks; read only by :func:`unaccounted`.
+    resolved: str = ""
+    #: The ids of the earlier blocking findings an approval left open, set only
+    #: on the contract failure :func:`unaccounted` causes: what the repair call is asked about.
+    unaccounted: tuple[str, ...] = ()
     #: Rendered by :func:`oscillation.render`, one line per anchor that reappeared or was
     #: named by 2+ ``SUPERSEDES`` lines across this label's ``round_history`` -- engine-computed
     #: text, not reviewer prose. Empty when nothing oscillates. Set after this round's own
@@ -391,6 +426,114 @@ def unknown_alias(review: Review, aliases: frozenset[str], *, retired: frozenset
     return ""
 
 
+def unknown_resolved(review: Review, known: frozenset[str]) -> str:
+    """The first id a ``RESOLVED`` line of ``review`` names that is not in ``known``, or ``""``.
+
+    ``known`` is every finding id of the earlier recorded rounds of this review. A statement about a
+    finding that does not exist cannot be weighed, so it is a contract error, as a ``file=`` naming
+    no root is.
+    """
+    for line in records(review.resolved):
+        ident = resolved_id(line)
+        if ident not in known:
+            return ident or line[:CONTRACT_ECHO_CHARS]
+    return ""
+
+
+@dataclass(frozen=True)
+class Closure:
+    """How an earlier finding was closed: by which round, and the line that closed it."""
+
+    #: The ordinal of the recorded round that closed it, ``0`` for the review being read.
+    by: int
+    #: ``RESOLVED`` or ``SUPERSEDES``.
+    kind: str
+    #: The closing line, verbatim: the reviewer's evidence or reason, never an instruction.
+    line: str
+
+
+@dataclass
+class Ledger:
+    """A stage's findings after :func:`replay`: which blocking ones are open, and how the closed
+    ones were closed. The one account both the engine's check and ``prior-rounds.txt`` read."""
+
+    #: Every open blocking finding, by id in the order raised: the stored line (``""`` when it is
+    #: not a valid ``FINDING``).
+    open: dict[str, str] = field(default_factory=dict)
+    #: How each closed finding was closed, by id (blocking or not).
+    closed: dict[str, Closure] = field(default_factory=dict)
+    #: For each round ordinal, each normalised ``file=`` value of its findings with their ids.
+    files: dict[int, dict[str, list[str]]] = field(default_factory=dict)
+
+    def close(self, resolved: object, supersedes: object, *, by: int) -> None:
+        """Apply one round's ``RESOLVED`` and ``SUPERSEDES`` lines (stored lists, re-validated).
+
+        A ``RESOLVED`` closes the id it names. A ``SUPERSEDES round=<n> file=<v>`` closes a finding
+        of round ``n`` only when exactly one finding of that round, blocking or not, has that exact
+        ``file=`` value (normalised, the line included): ``-`` names nothing, and a value two
+        findings share names neither. Anything else closes nothing.
+        """
+        for line in resolved if isinstance(resolved, list) else []:
+            ident = resolved_id(line)
+            if ident:
+                self._closed(ident, Closure(by=by, kind="RESOLVED", line=str(line)))
+        for line in supersedes if isinstance(supersedes, list) else []:
+            match = _SUPERSEDES_RE.match(line) if is_single_stored_line(line) else None
+            if match is None:
+                continue
+            file = normalized_file(match.group("file"))
+            named = self.files.get(int(match.group("round")), {}).get(file, []) if file != "-" else []
+            if len(named) == 1:
+                self._closed(named[0], Closure(by=by, kind="SUPERSEDES", line=str(line)))
+
+    def _closed(self, ident: str, closure: Closure) -> None:
+        if ident in self.closed:
+            return
+        known = any(ident in ids for files in self.files.values() for ids in files.values()) or ident in self.open
+        if known:
+            self.closed[ident] = closure
+            self.open.pop(ident, None)
+
+
+def replay(rounds: object, *, threshold: int) -> Ledger:
+    """Replay a stage's recorded ``round_history`` entries, in order, into a :class:`Ledger`.
+
+    Each round first closes what its stored ``resolved`` and ``supersedes`` lines name exactly
+    (:meth:`Ledger.close`), then opens its own blocking findings (``actionable=yes`` at or above
+    ``threshold``, a ``threshold_rank``). A round's own findings never close anything: a defect
+    raised in round 1 and again in round 2 has two ids, and both must be closed. A stored line that
+    is not a valid ``FINDING`` cannot be shown not to block, so it opens and can be closed only by
+    its id (Rule 1). An entry recorded before rounds kept ``resolved`` closes nothing by id.
+    """
+    ledger = Ledger()
+    for order, raw in enumerate(rounds if isinstance(rounds, list) else [], start=1):
+        entry = raw if isinstance(raw, dict) else {}
+        ledger.close(entry.get("resolved"), entry.get("supersedes"), by=order)
+        stored = entry.get("findings")
+        files: dict[str, list[str]] = {}
+        for number, line in enumerate(stored if isinstance(stored, list) else [], start=1):
+            ident = finding_id(order, number)
+            match = FINDING_RE.match(str(line)) if is_single_stored_line(line) else None
+            if match is not None:
+                files.setdefault(normalized_file(match.group("file")), []).append(ident)
+            if match is None or (match.group("actionable") == "yes" and severity_rank(match.group("severity")) >= threshold):
+                ledger.open[ident] = str(line) if match is not None else ""
+        ledger.files[order] = files
+    return ledger
+
+
+def unaccounted(review: Review, rounds: object, *, threshold: int) -> list[str]:
+    """The ids of the stage's earlier blocking findings still open once ``review`` is read.
+
+    ``rounds`` are the stage's recorded ``round_history`` entries, replayed by :func:`replay`;
+    ``review``, an approval, then closes an open finding only with a ``RESOLVED`` naming its id or a
+    ``SUPERSEDES`` naming exactly it (:meth:`Ledger.close`). Its ``FINDING`` lines close nothing.
+    """
+    ledger = replay(rounds, threshold=threshold)
+    ledger.close(records(review.resolved), records(review.supersedes), by=0)
+    return list(ledger.open)
+
+
 def records(text: str) -> list[str]:
     """Split on ``\n`` and nothing else, the way every tool in the shell pipeline did.
 
@@ -459,9 +602,9 @@ def _locate_block(lines: list[str]) -> tuple[int, int]:
     return starts[0], ends[0]
 
 
-def _scan_block(block_lines: list[str], *, allow_supersedes: bool) -> tuple[list[Finding], list[str], str]:
-    """Validate every line in the block and return the findings, the ``SUPERSEDES`` lines and the
-    verdict.
+def _scan_block(block_lines: list[str], *, allow_supersedes: bool, allow_resolved: bool) -> tuple[list[Finding], list[str], list[str], str]:
+    """Validate every line in the block and return the findings, the ``SUPERSEDES`` lines, the
+    ``RESOLVED`` lines and the verdict.
 
     **A line that does not fit the contract is a failed review, not a line to skip.** Ignoring
     unrecognised lines meant ``FINDING: severity=critical actionable=yes`` -- one stray colon --
@@ -472,10 +615,12 @@ def _scan_block(block_lines: list[str], *, allow_supersedes: bool) -> tuple[list
     ``allow_supersedes`` is true only for a phase review, the one prompt that documents the line
     and the one invocation shown ``prior-rounds.txt``. For a final review a ``SUPERSEDES`` is an
     unrecognised line and fails the contract. When accepted, the lines are recorded only and never
-    touch the verdict.
+    touch the verdict. ``allow_resolved`` is the same for ``RESOLVED``, true only from the second
+    round of a phase, the one prompt that documents it.
     """
     findings: list[Finding] = []
     supersedes: list[str] = []
+    resolved: list[str] = []
     verdicts: list[str] = []
     for line in block_lines:
         if not line.strip():
@@ -495,6 +640,9 @@ def _scan_block(block_lines: list[str], *, allow_supersedes: bool) -> tuple[list
         if allow_supersedes and _SUPERSEDES_RE.match(line):
             supersedes.append(line)
             continue
+        if allow_resolved and _RESOLVED_RE.match(line):
+            resolved.append(line)
+            continue
         if _VERDICT_LINE.match(line):
             verdicts.append(_TRAILING_SPACE.sub("", _VERDICT_PREFIX.sub("", line)))
             continue
@@ -502,7 +650,7 @@ def _scan_block(block_lines: list[str], *, allow_supersedes: bool) -> tuple[list
     if len(verdicts) > 1:
         raise ContractError("the reviewer emitted more than one VERDICT line")
     # No VERDICT is decided by the caller: a finding that blocks makes it moot, nothing else does.
-    return findings, supersedes, verdicts[0] if verdicts else ""
+    return findings, supersedes, resolved, verdicts[0] if verdicts else ""
 
 
 def _ceiling_exceeded(count: int, block_bytes: int, config: Config) -> str:
@@ -545,7 +693,7 @@ def _byte_contract_violation(raw: bytes) -> str:
     return ""
 
 
-def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False, scope: LateScope | None = None) -> Review:
+def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False, allow_resolved: bool = False, scope: LateScope | None = None) -> Review:
     """Turn the reviewer's output into a :class:`Review`, recomputing the verdict.
 
     The reviewer's own verdict is advisory: any actionable finding at or above ``block_severity``
@@ -558,7 +706,10 @@ def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False, sco
     engine's verdict would be that whatever the reviewer had written, with a note saying so. With
     nothing blocking it stays a contract failure: no verdict is never an approval.
 
-    ``allow_supersedes`` defaults to false and is true only for a phase review.
+    ``allow_supersedes`` defaults to false and is true only for a phase review; ``allow_resolved``
+    likewise, from its second round on. Whether a ``RESOLVED`` id names a finding, and whether an
+    approval leaves an earlier blocking finding open (:func:`unaccounted`), is the caller's to check: both
+    need the run's history.
 
     ``scope`` (:class:`LateScope`, phase reviews from their second round on) narrows what blocks:
     a finding that would block under ``block_severity`` alone still needs to be in scope -- a
@@ -581,7 +732,7 @@ def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False, sco
     try:
         start, end = _locate_block(lines)
         block_lines = lines[start + 1 : end]
-        findings, supersedes, verdict = _scan_block(block_lines, allow_supersedes=allow_supersedes)
+        findings, supersedes, resolved, verdict = _scan_block(block_lines, allow_supersedes=allow_supersedes, allow_resolved=allow_resolved)
     except ContractError as exc:
         # Findings and prose stay empty: half-read evidence from output the engine could not
         # parse would suggest the parse succeeded. The contract error is the finding.
@@ -591,6 +742,7 @@ def parse(out_path: Path, *, config: Config, allow_supersedes: bool = False, sco
     review.all_findings = "".join(f"{finding.line}\n" for finding in findings)
     # Recorded only -- never consulted below when the verdict is computed.
     review.supersedes = "".join(f"{line}\n" for line in supersedes)
+    review.resolved = "".join(f"{line}\n" for line in resolved)
     # `threshold_rank`, not `severity_rank`: an unrecognised *finding* severity must rank
     # highest to guarantee it blocks (Rule 1), but the same rule applied to the *threshold*
     # would do the opposite -- an unknown `block_severity` ranking at 5 would clear almost

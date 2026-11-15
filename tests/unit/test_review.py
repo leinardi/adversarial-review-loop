@@ -34,7 +34,7 @@ from typing import Any
 import pytest
 from run_common import arl, make_repo, run_env, ws
 
-from arl import harness, runner, state
+from arl import config, contract, harness, runner, state
 from arl import review as review_module
 from arl.errors import StateLoadError
 
@@ -239,7 +239,9 @@ def test_a_citation_past_the_end_of_a_deferred_finding_is_noted_on_the_approval(
     review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
     edit(ws / "api" / "src" / "main.py", "print(3)\n")
     # Round 2: a medium finding in a file no round raised and this round did not change is deferred.
-    outcome = review(engine, ws, answers, finding("api/notes.md:400", severity="medium", detail="late"), "VERDICT APPROVED")
+    outcome = review(
+        engine, ws, answers, finding("api/notes.md:400", severity="medium", detail="late"), "RESOLVED id=r1.1 | fixed", "VERDICT APPROVED"
+    )
     assert outcome["verdict"] == "APPROVED", outcome
     assert "Review note: api/notes.md: cited line 400 is past the end of the file (2 lines)" in outcome["message"]
 
@@ -526,10 +528,356 @@ def test_a_new_medium_outside_the_changed_paths_is_deferred_in_round_two(ws: Pat
     review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
     edit(ws / "api" / "src" / "main.py", "print('fixed')\n")
 
-    outcome = review(engine, ws, answers, finding("web/src/main.py:1", severity="medium"), "VERDICT APPROVED")
+    outcome = review(engine, ws, answers, finding("web/src/main.py:1", severity="medium"), "RESOLVED id=r1.1 | fixed", "VERDICT APPROVED")
 
     assert outcome["verdict"] == "APPROVED"
     assert "web/src/main.py:1" in outcome["message"], "a deferred finding is still shown"
+
+
+def round_one(engine: Engine, ws: Path, answers: Path, *lines: str) -> None:
+    """Round 1 of phase 1, asking for changes with ``lines``, then a fix to review in round 2."""
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(1)\n")
+    assert review(engine, ws, answers, *lines, "VERDICT CHANGES_REQUIRED")["verdict"] == "CHANGES_REQUIRED"
+    edit(ws / "api" / "src" / "main.py", "print('fixed')\n")
+
+
+def test_a_later_approval_that_forgets_an_earlier_blocking_finding_goes_to_repair(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(engine, ws, answers, finding("api/src/main.py:1", detail="one"), finding("web/src/main.py:1", detail="two"))
+    ticket = prepare(engine, ws)
+    repair = record(engine, ws, ticket["review_id"], write_answer(answers, "RESOLVED id=r1.1 | prints fixed", *APPROVE))
+    assert repair["status"] == "repair"
+    reason = (Path(repair["bundle_dir"]) / "repair-reason.txt").read_text()
+    assert "- r1.2\n" in reason
+    assert "r1.1" not in reason
+    prompt = Path(repair["prompt_file"]).read_text()
+    assert "repair-reason.txt" in prompt
+    assert "prior-rounds.txt" in prompt
+    assert load(ws).data["approvals"] == []
+    assert load(ws).data["pending_ticket"]["repair_unaccounted"] == ["r1.2"]
+
+
+@pytest.mark.parametrize(
+    "accounting",
+    [
+        "RESOLVED id=r1.1 | api/src/main.py:1 prints fixed now",
+        "SUPERSEDES round=1 file=api/src/main.py:1 | round 1 misread it",
+    ],
+)
+def test_each_way_of_accounting_lets_a_later_approval_through(ws: Path, engine: Engine, answers: Path, accounting: str) -> None:
+    round_one(engine, ws, answers, finding("api/src/main.py:1"))
+    outcome = review(engine, ws, answers, accounting, *APPROVE)
+    assert (outcome["status"], outcome["verdict"]) == ("recorded", "APPROVED"), outcome
+    assert load(ws).data["round_history"][-1]["resolved"] == ([accounting] if accounting.startswith("RESOLVED") else [])
+
+
+def test_resolved_lines_are_stored_and_reported(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(engine, ws, answers, finding("api/src/main.py:1"))
+    line = "RESOLVED id=r1.1 | api/src/main.py:1 prints fixed now"
+    outcome = review(engine, ws, answers, line, *APPROVE)
+    assert load(ws).data["round_history"][-1]["resolved"] == [line]
+    report = Path(outcome["report"]).read_text()
+    assert f"(RESOLVED)\n\nThe reviewer's statement, with its evidence; recorded, never read for the verdict.\n\n```\n{line}\n```" in report
+
+
+def test_a_supersedes_of_another_round_or_file_does_not_account(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(engine, ws, answers, finding("api/src/main.py:1"))
+    outcome = review(
+        engine, ws, answers, "SUPERSEDES round=2 file=api/src/main.py:1 | wrong round", "SUPERSEDES round=1 file=web/src/main.py | other", *APPROVE
+    )
+    assert outcome["status"] == "repair"
+
+
+def test_a_round_asking_for_changes_needs_no_accounting(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(engine, ws, answers, finding("api/src/main.py:1"), finding("web/src/main.py:1"))
+    outcome = review(engine, ws, answers, finding("web/src/main.py:1"), "RESOLVED id=r1.1 | fixed", "VERDICT CHANGES_REQUIRED")
+    assert (outcome["status"], outcome["verdict"]) == ("recorded", "CHANGES_REQUIRED")
+    assert load(ws).data["round_history"][-1]["resolved"] == ["RESOLVED id=r1.1 | fixed"]
+
+
+def test_a_resolved_id_naming_no_earlier_finding_is_a_contract_failure(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(engine, ws, answers, finding("api/src/main.py:1"))
+    ticket = prepare(engine, ws)
+    answer = write_answer(answers, finding("api/src/main.py:1"), "RESOLVED id=r1.9 | no such finding", "VERDICT CHANGES_REQUIRED")
+    assert record(engine, ws, ticket["review_id"], answer)["status"] == "repair"
+    outcome = record(
+        engine, ws, ticket["review_id"], write_answer(answers, "RESOLVED id=r2.1 | not yet", finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
+    )
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert "RESOLVED id=r2.1 names no finding of an earlier round" in Path(outcome["report"]).read_text()
+
+
+def test_resolved_in_round_1_is_a_contract_violation(ws: Path, engine: Engine, answers: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(1)\n")
+    assert review(engine, ws, answers, "RESOLVED id=r1.1 | nothing to resolve", *APPROVE)["status"] == "repair"
+
+
+def test_resolved_in_a_final_review_is_a_contract_violation(ws: Path, engine: Engine, answers: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ARL_FINAL_REVIEW", "true")
+    started(engine, ws, phases=1)
+    edit(ws / "api" / "src" / "main.py", "print(1)\n")
+    review(engine, ws, answers, *APPROVE)
+    assert review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")["verdict"] == "CHANGES_REQUIRED"
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    assert review(engine, ws, answers, "RESOLVED id=r1.1 | fixed", *APPROVE)["status"] == "repair"
+
+
+@pytest.mark.parametrize(
+    "earlier",
+    [
+        "FINDING severity=low actionable=yes file=api/src/main.py:1 | below block_severity",
+        "FINDING severity=critical actionable=no file=api/src/main.py:1 | nothing to change",
+    ],
+)
+def test_an_earlier_finding_that_did_not_block_needs_no_accounting(ws: Path, engine: Engine, answers: Path, earlier: str) -> None:
+    round_one(engine, ws, answers, earlier, finding("web/src/main.py:1"))
+    outcome = review(engine, ws, answers, "RESOLVED id=r1.2 | fixed", *APPROVE)
+    assert outcome["verdict"] == "APPROVED", outcome
+
+
+def test_an_approval_with_only_a_nit_on_the_earlier_blockers_path_is_a_contract_failure(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(engine, ws, answers, finding("api/src/main.py:1"))
+    for nit in (
+        "FINDING severity=low actionable=yes file=api/src/main.py:3 | only a nit",
+        "FINDING severity=high actionable=no file=api/src/main.py:1 | x",
+    ):
+        ticket = prepare(engine, ws)
+        assert record(engine, ws, ticket["review_id"], write_answer(answers, nit, *APPROVE))["status"] == "repair"
+
+
+def three_rounds(engine: Engine, ws: Path, answers: Path, *third: str) -> dict[str, Any]:
+    """Round 1 blocks on r1.1 (api) and r1.2 (web); round 2 asks for changes on api only, never naming web."""
+    round_one(engine, ws, answers, finding("api/src/main.py:1", detail="A"), finding("web/src/main.py:1", detail="B"))
+    assert review(engine, ws, answers, finding("api/src/main.py:1", detail="A still"), "VERDICT CHANGES_REQUIRED")["verdict"] == "CHANGES_REQUIRED"
+    edit(ws / "api" / "src" / "main.py", "print('again')\n")
+    return review(engine, ws, answers, *third)
+
+
+def test_a_finding_no_later_round_named_still_blocks_a_third_round_approval(ws: Path, engine: Engine, answers: Path) -> None:
+    pending = three_rounds(engine, ws, answers, "RESOLVED id=r2.1 | fixed", *APPROVE)
+    assert pending["status"] == "repair"
+    reason = (Path(pending["bundle_dir"]) / "repair-reason.txt").read_text()
+    assert "- r1.1\n- r1.2\n" in reason
+    assert "r2.1" not in reason
+
+
+def test_a_third_round_that_resolves_the_forgotten_finding_approves(ws: Path, engine: Engine, answers: Path) -> None:
+    lines = ("RESOLVED id=r1.1 | fixed", "RESOLVED id=r2.1 | fixed", "RESOLVED id=r1.2 | checked web/src/main.py", *APPROVE)
+    outcome = three_rounds(engine, ws, answers, *lines)
+    assert outcome["verdict"] == "APPROVED", outcome
+
+
+def test_a_finding_raised_again_in_a_middle_round_needs_both_ids_closed(ws: Path, engine: Engine, answers: Path) -> None:
+    """Round 2 raises r1.1's defect again as r2.1: an approval closes both, not one."""
+    outcome = three_rounds(engine, ws, answers, "RESOLVED id=r1.1 | fixed", "RESOLVED id=r1.2 | checked", *APPROVE)
+    assert outcome["status"] == "repair"
+    reason = (Path(outcome["bundle_dir"]) / "repair-reason.txt").read_text()
+    assert "- r2.1\n" in reason
+    assert "- r1.1\n" not in reason
+
+
+def test_a_middle_rounds_resolved_closes_a_finding_for_good(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(engine, ws, answers, finding("web/src/main.py:1"))
+    assert (
+        review(engine, ws, answers, finding("api/src/main.py:1"), "RESOLVED id=r1.1 | fixed", "VERDICT CHANGES_REQUIRED")["verdict"]
+        == "CHANGES_REQUIRED"
+    )
+    edit(ws / "api" / "src" / "main.py", "print('again')\n")
+    assert review(engine, ws, answers, "RESOLVED id=r2.1 | fixed", *APPROVE)["verdict"] == "APPROVED"
+
+
+def forgotten(engine: Engine, ws: Path, answers: Path) -> dict[str, Any]:
+    """Round 2 approves with r1.2 never mentioned; answers the repair to run."""
+    round_one(engine, ws, answers, finding("api/src/main.py:1", detail="one"), finding("web/src/main.py:1", detail="two"))
+    ticket = prepare(engine, ws)
+    nit = "FINDING severity=low actionable=no file=api/src/main.py:2 | naming"
+    repair = record(engine, ws, ticket["review_id"], write_answer(answers, nit, "RESOLVED id=r1.1 | prints fixed", *APPROVE))
+    assert repair["status"] == "repair"
+    return {"review_id": ticket["review_id"], "nit": nit}
+
+
+def test_a_repair_that_accounts_for_every_id_approves(ws: Path, engine: Engine, answers: Path) -> None:
+    pending = forgotten(engine, ws, answers)
+    lines = (pending["nit"], "RESOLVED id=r1.1 | prints fixed", "RESOLVED id=r1.2 | web/src/main.py is unchanged and was checked", *APPROVE)
+    outcome = record(engine, ws, pending["review_id"], write_answer(answers, *lines))
+    assert outcome["verdict"] == "APPROVED", outcome
+    entry = load(ws).data["round_history"][-1]
+    assert entry["repaired"] is True
+    assert len(entry["resolved"]) == 2
+
+
+def test_a_repair_that_reraises_the_forgotten_finding_asks_for_changes(ws: Path, engine: Engine, answers: Path) -> None:
+    pending = forgotten(engine, ws, answers)
+    lines = (pending["nit"], "RESOLVED id=r1.1 | prints fixed", finding("web/src/main.py:1", detail="two"), "VERDICT CHANGES_REQUIRED")
+    outcome = record(engine, ws, pending["review_id"], write_answer(answers, *lines))
+    assert outcome["verdict"] == "CHANGES_REQUIRED"
+    assert "web/src/main.py:1 | two" in outcome["message"]
+
+
+def test_a_repair_that_still_leaves_an_id_unaccounted_for_is_a_failure(ws: Path, engine: Engine, answers: Path) -> None:
+    pending = forgotten(engine, ws, answers)
+    outcome = record(engine, ws, pending["review_id"], write_answer(answers, pending["nit"], "RESOLVED id=r1.1 | prints fixed", *APPROVE))
+    assert outcome["verdict"] == "OP_FAILURE"
+    run = load(ws)
+    assert run.data["approvals"] == []
+    assert run.data["failures"] == 1
+    assert "r1.2" in Path(outcome["report"]).read_text()
+
+
+def test_a_repair_that_drops_a_finding_of_the_review_it_re_emits_is_a_failure(ws: Path, engine: Engine, answers: Path) -> None:
+    pending = forgotten(engine, ws, answers)
+    lines = ("RESOLVED id=r1.1 | prints fixed", "RESOLVED id=r1.2 | checked", *APPROVE)
+    outcome = record(engine, ws, pending["review_id"], write_answer(answers, *lines))
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert load(ws).data["approvals"] == []
+
+
+def withdrawn_round(engine: Engine, ws: Path, answers: Path) -> dict[str, Any]:
+    """Round 2 approves having withdrawn r1.1 and resolved r1.3, with r1.2 still owed: answers the repair."""
+    round_one(
+        engine, ws, answers, finding("api/src/main.py:1", detail="one"), finding("web/src/main.py:1", detail="two"), finding("api/src/main.py:9")
+    )
+    ticket = prepare(engine, ws)
+    lines = ("SUPERSEDES round=1 file=api/src/main.py:1 | misread", "RESOLVED id=r1.3 | gone", *APPROVE)
+    repair = record(engine, ws, ticket["review_id"], write_answer(answers, *lines))
+    assert repair["status"] == "repair"
+    assert "- r1.2\n" in (Path(repair["bundle_dir"]) / "repair-reason.txt").read_text()
+    return {"review_id": ticket["review_id"]}
+
+
+@pytest.mark.parametrize(
+    ("lines", "words"),
+    [
+        (
+            (
+                "SUPERSEDES round=1 file=api/src/main.py:1 | misread",
+                "RESOLVED id=r1.3 | gone",
+                "SUPERSEDES round=1 file=web/src/main.py:1 | invented",
+            ),
+            "added a SUPERSEDES line",
+        ),
+        # Each still closes every id, so only the dropped line can fail it.
+        (("RESOLVED id=r1.1 | instead of withdrawing", "RESOLVED id=r1.3 | gone", "RESOLVED id=r1.2 | checked"), "dropped a line"),
+        (
+            ("SUPERSEDES round=1 file=api/src/main.py:1 | misread", "RESOLVED id=r1.3 | gone, reworded", "RESOLVED id=r1.2 | checked"),
+            "dropped a line",
+        ),
+    ],
+)
+def test_an_accounting_repair_may_not_rewrite_the_block_it_re_emits(
+    ws: Path, engine: Engine, answers: Path, lines: tuple[str, ...], words: str
+) -> None:
+    pending = withdrawn_round(engine, ws, answers)
+    outcome = record(engine, ws, pending["review_id"], write_answer(answers, *lines, *APPROVE))
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert words in Path(outcome["report"]).read_text()
+    assert load(ws).data["approvals"] == []
+
+
+def test_an_accounting_repair_asking_for_changes_may_not_add_a_withdrawal(ws: Path, engine: Engine, answers: Path) -> None:
+    pending = withdrawn_round(engine, ws, answers)
+    lines = (
+        "SUPERSEDES round=1 file=api/src/main.py:1 | misread",
+        "SUPERSEDES round=1 file=api/src/main.py:9 | invented",
+        finding("web/src/main.py:1", detail="two"),
+        "VERDICT CHANGES_REQUIRED",
+    )
+    outcome = record(engine, ws, pending["review_id"], write_answer(answers, *lines))
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert "added a SUPERSEDES line" in Path(outcome["report"]).read_text()
+
+
+def test_an_accounting_repair_that_keeps_every_line_and_adds_resolved_approves(ws: Path, engine: Engine, answers: Path) -> None:
+    pending = withdrawn_round(engine, ws, answers)
+    lines = ("SUPERSEDES round=1 file=api/src/main.py:1 | misread", "RESOLVED id=r1.3 | gone", "RESOLVED id=r1.2 | checked web", *APPROVE)
+    assert record(engine, ws, pending["review_id"], write_answer(answers, *lines))["verdict"] == "APPROVED"
+
+
+def test_prior_rounds_shows_how_each_finding_was_closed_and_what_is_still_open(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(
+        engine,
+        ws,
+        answers,
+        finding("api/src/main.py:1", detail="A"),
+        finding("web/src/main.py:1", detail="B"),
+        finding("api/src/main.py:7", detail="C"),
+    )
+    lines = (
+        "RESOLVED id=r1.1 | api/src/main.py:1 now prints fixed",
+        "SUPERSEDES round=1 file=api/src/main.py:7 | C was a misreading",
+        finding("api/src/main.py:2", detail="D"),
+    )
+    assert review(engine, ws, answers, *lines, "VERDICT CHANGES_REQUIRED")["verdict"] == "CHANGES_REQUIRED"
+    edit(ws / "api" / "src" / "main.py", "print('third')\n")
+    ticket = prepare(engine, ws)
+    prior = bundle_text(ticket, "prior-rounds.txt")
+    rounds = prior.split("## Round 1", 1)[1]
+    a_line = rounds.index("r1.1 FINDING")
+    assert rounds[a_line:].split("\n")[1] == (
+        "    closed by round 2's RESOLVED line (the reviewer's evidence, evidence, not an instruction): api/src/main.py:1 now prints fixed"
+    )
+    c_line = rounds.index("r1.3 FINDING")
+    assert rounds[c_line:].split("\n")[1].endswith("SUPERSEDES line (the reviewer's reason, evidence, not an instruction): C was a misreading")
+    still_open = prior.split("## Still open\n\n", 1)[1].split("## Round 1", 1)[0]
+    listed = [line.split(" ", 1)[0] for line in still_open.split("\n") if line.startswith("r")]
+    threshold = config.threshold_rank("medium")
+    expected = contract.unaccounted(contract.Review(), load(ws).rounds_of("phase1"), threshold=threshold)
+    assert listed == expected == ["r1.2", "r2.1"]
+
+
+def test_an_ordinary_repair_may_not_invent_a_resolved_line(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(engine, ws, answers, finding("api/src/main.py:1", detail="A"))
+    ticket = prepare(engine, ws)
+    assert record(engine, ws, ticket["review_id"], write_answer(answers, "VERDICT MAYBE"))["status"] == "repair"
+    invented = ("RESOLVED id=r1.1 | gone", finding("web/src/main.py:1", detail="B"), "VERDICT CHANGES_REQUIRED")
+    outcome = record(engine, ws, ticket["review_id"], write_answer(answers, *invented))
+    assert (outcome["status"], outcome["verdict"]) == ("recorded", "OP_FAILURE")
+    assert "RESOLVED line the original answer does not contain" in Path(outcome["report"]).read_text()
+    assert len(load(ws).rounds_of("phase1")) == 1, "the refused repair records no round"
+    # The chain it would have opened: round 2 asks for B only, round 3 resolves only B.
+    assert review(engine, ws, answers, finding("web/src/main.py:1", detail="B"), "VERDICT CHANGES_REQUIRED")["verdict"] == "CHANGES_REQUIRED"
+    edit(ws / "web" / "src" / "main.py", "print('B fixed')\n")
+    third = review(engine, ws, answers, "RESOLVED id=r2.1 | B fixed", *APPROVE)
+    assert third["status"] == "repair"
+    assert "- r1.1\n" in (Path(third["bundle_dir"]) / "repair-reason.txt").read_text()
+    assert load(ws).data["approvals"] == []
+
+
+def test_an_ordinary_repair_may_copy_a_resolved_line_the_original_wrote(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(engine, ws, answers, finding("api/src/main.py:1", detail="A"))
+    ticket = prepare(engine, ws)
+    original = write_answer(
+        answers, "RESOLVED id=r1.1 | api/src/main.py:1 prints fixed", finding("web/src/main.py:1", detail="B"), "FINDING: a stray colon"
+    )
+    assert record(engine, ws, ticket["review_id"], original)["status"] == "repair"
+    copied = ("RESOLVED id=r1.1 | api/src/main.py:1 prints fixed", finding("web/src/main.py:1", detail="B"), "VERDICT CHANGES_REQUIRED")
+    outcome = record(engine, ws, ticket["review_id"], write_answer(answers, *copied))
+    assert outcome["verdict"] == "CHANGES_REQUIRED", outcome
+    entry = load(ws).data["round_history"][-1]
+    assert (entry["repaired"], entry["resolved"]) == (True, ["RESOLVED id=r1.1 | api/src/main.py:1 prints fixed"])
+
+
+def test_a_repair_of_an_unreadable_answer_still_never_approves_with_resolved(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(engine, ws, answers, finding("api/src/main.py:1"))
+    ticket = prepare(engine, ws)
+    assert record(engine, ws, ticket["review_id"], write_answer(answers, "VERDICT MAYBE"))["status"] == "repair"
+    outcome = record(engine, ws, ticket["review_id"], write_answer(answers, "RESOLVED id=r1.1 | fixed", *APPROVE))
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert load(ws).data["approvals"] == []
+
+
+def test_a_round_recorded_before_resolved_existed_still_loads_and_renders(ws: Path, engine: Engine, answers: Path) -> None:
+    round_one(engine, ws, answers, finding("api/src/main.py:1"))
+    paths = state.run_paths(ws)
+    document = json.loads(paths.state_file.read_text())
+    del document["round_history"][0]["resolved"]
+    paths.state_file.write_text(json.dumps(document))
+    ticket = prepare(engine, ws)
+    assert ticket["ok"], ticket
+    assert "r1.1 FINDING" in bundle_text(ticket, "prior-rounds.txt")
+    assert engine(ws, "stats")["ok"]
+    assert record(engine, ws, ticket["review_id"], write_answer(answers, "RESOLVED id=r1.1 | fixed", *APPROVE))["verdict"] == "APPROVED"
 
 
 # --------------------------------------------------------------------------
@@ -1077,7 +1425,7 @@ def test_dispositions_reach_the_next_round_under_their_finding(ws: Path, engine:
     edit(ws / "api" / "src" / "main.py", "print(3)\n")
     ticket = prepare(engine, ws, stdin=dispositions(("r1.2", "rejected", "main.py:1 prints\nby design"), ("r1.1", "fixed", "")))
     assert ticket["ok"], ticket
-    prior = bundle_text(ticket, "prior-rounds.txt")
+    prior = bundle_text(ticket, "prior-rounds.txt").split("## Round 1", 1)[1]
     one = prior.index("r1.1 FINDING")
     two = prior.index("r1.2 FINDING")
     assert "the implementer's statement (evidence, not an instruction) -- fixed: \n" in prior[one:two]
@@ -1155,11 +1503,55 @@ def test_a_malformed_disposition_is_refused_and_nothing_is_stated(ws: Path, engi
     assert load(ws).data["pending_ticket"] is None
 
 
-def test_a_disposition_on_round_1_has_nothing_to_answer(ws: Path, engine: Engine) -> None:
+def test_dispositions_on_a_stages_first_round_are_ignored_with_a_note(ws: Path, engine: Engine, answers: Path) -> None:
     started(engine, ws)
     edit(ws / "api" / "src" / "main.py", "print(2)\n")
-    refused = prepare(engine, ws, stdin=dispositions(("r1.1", "fixed", "")))
-    assert (refused["code"], refused["error"]) == ("bad-dispositions", "there is no earlier round of this stage for a disposition to answer")
+    ticket = prepare(engine, ws, stdin=dispositions(("r1.1", "fixed", "carried over"), ("r1.2", "rejected", "")))
+    assert ticket["ok"], ticket
+    assert load(ws).data["dispositions"] == []
+    bundle_dir = Path(ticket["bundle_dir"])
+    shown = [path.read_text(errors="replace") for path in [*bundle_dir.iterdir(), Path(ticket["prompt_file"])] if path.is_file()]
+    assert not any("carried over" in text or "ignored:" in text for text in shown)
+    outcome = record(engine, ws, ticket["review_id"], write_answer(answers, *APPROVE))
+    assert outcome["verdict"] == "APPROVED"
+    assert "Note: 2 disposition(s) were ignored: this stage had no earlier review for them to answer.\n" in outcome["message"]
+
+
+def test_ignored_dispositions_are_noted_on_findings_too(ws: Path, engine: Engine, answers: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws, stdin=dispositions(("r1.1", "fixed", "")))
+    outcome = record(engine, ws, ticket["review_id"], write_answer(answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED"))
+    assert outcome["verdict"] == "CHANGES_REQUIRED"
+    assert "Note: 1 disposition(s) were ignored" in outcome["message"]
+    assert load(ws).data["dispositions"] == []
+
+
+def test_ignored_dispositions_are_noted_when_the_review_is_skipped(ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ARL_IGNORE_GLOBS", "*.md")
+    started(engine, ws)
+    edit(ws / "api" / "README.md", "api docs\n")
+    outcome = prepare(engine, ws, stdin=dispositions(("r1.1", "fixed", "")))
+    assert (outcome["status"], outcome["verdict"]) == ("skipped", "APPROVED")
+    assert "Note: 1 disposition(s) were ignored" in outcome["message"]
+    assert load(ws).data["dispositions"] == []
+
+
+@pytest.mark.parametrize(
+    ("stdin", "words"),
+    [
+        (dispositions(("r1.1", "done", "")), "status must be one of fixed, rejected"),
+        (dispositions(("r1.1", "fixed", ""), ("r1.1", "fixed", "")), "finding r1.1 has more than one disposition"),
+        (json.dumps({"dispositions": [{"id": "r1.1", "status": "fixed", "note": "x" * 5000}]}), "at most 4096 bytes"),
+        (json.dumps({"dispositions": ["r1.1"]}), "must be a list of objects"),
+    ],
+)
+def test_a_malformed_disposition_on_a_first_round_is_still_refused(ws: Path, engine: Engine, stdin: str, words: str) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    refused = prepare(engine, ws, stdin=stdin)
+    assert (refused["ok"], refused["code"]) == (False, "bad-dispositions")
+    assert words in refused["error"]
 
 
 def test_round_2_gets_the_late_round_prompt_and_still_has_the_whole_diff(ws: Path, engine: Engine, answers: Path) -> None:
@@ -1231,7 +1623,7 @@ def test_round_2_runs_on_late_model_and_says_so(ws: Path, engine: Engine, answer
     edit(ws / "api" / "src" / "main.py", "print(3)\n")
     second = prepare(engine, ws)
     assert (second["round"], second["reviewer_model"], second["model"]) == (2, "sonnet", "sonnet")
-    outcome = record(engine, ws, second["review_id"], write_answer(answers, *APPROVE))
+    outcome = record(engine, ws, second["review_id"], write_answer(answers, "RESOLVED id=r1.1 | prints 3", *APPROVE))
     assert "- model: `sonnet`" in Path(outcome["report"]).read_text()
     assert [entry["model"] for entry in load(ws).data["round_history"]] == ["opus", "sonnet"]
     # The next phase starts at round 1 again.
@@ -1245,7 +1637,7 @@ def test_the_final_review_runs_on_model(ws: Path, engine: Engine, answers: Path)
     edit(ws / "api" / "src" / "main.py", "print(2)\n")
     review(engine, ws, answers, finding("api/src/main.py:1"), "VERDICT CHANGES_REQUIRED")
     edit(ws / "api" / "src" / "main.py", "print(3)\n")
-    assert review(engine, ws, answers, *APPROVE)["verdict"] == "APPROVED"
+    assert review(engine, ws, answers, "RESOLVED id=r1.1 | prints 3", *APPROVE)["verdict"] == "APPROVED"
     final = prepare(engine, ws)
     assert (final["label"], final["reviewer_model"]) == ("final", "opus")
 

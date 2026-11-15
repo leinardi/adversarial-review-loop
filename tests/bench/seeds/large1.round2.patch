@@ -20,7 +20,7 @@ index bcab47d..b7ce7f9 100644
      except SnapshotError as exc:
          raise RunError("kept", f"root {root['alias']!r} cannot be compared ({exc}); it stays") from exc
 -    if now == root["start_tree"]:
-+    if now != root["start_tree"] and here.exists():
++    if now != root["start_tree"] and root["baseline"] != "set":
          raise RunError("kept", f"root {root['alias']!r} changed since it joined; it stays")
  
  

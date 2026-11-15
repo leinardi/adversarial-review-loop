@@ -5,7 +5,8 @@ as the review pipeline recorded them, and nothing here decides anything.
 
 It does not say when a single finding was resolved. The stall anchors are file plus severity,
 so they cannot tell bug A leaving a file from bug B arriving in it in the same round. A round's
-blocking findings are shown as a count, never as "fixed".
+blocking findings are shown as a count, never as "fixed". How many earlier findings a round
+marked ``RESOLVED`` is shown as what it is: the reviewer's statement, not proof.
 
 A run started before rounds recorded their usage still loads: a missing figure is shown as
 missing (``?``), never as ``0``, which would read as "this round was free".
@@ -108,6 +109,10 @@ def _row(entry: Mapping[str, Any], *, failed: bool, number: int) -> dict[str, An
         # Recorded since rounds count their own; an older round's is left unknown.
         row["blocking"] = _int(entry.get("blocking"))
         row["deferred"] = _int(entry.get("deferred"))
+        # How many earlier findings the reviewer said are gone (RESOLVED); a round recorded before
+        # rounds kept them is left unknown.
+        resolved = entry.get("resolved")
+        row["resolved"] = sum(1 for line in resolved if contract.resolved_id(line)) if isinstance(resolved, list) else None
     return row
 
 
@@ -205,6 +210,8 @@ def _line(row: Mapping[str, Any]) -> str:
         parts.append(f"blocking {_figure(row['blocking'])}")
         if row["deferred"]:
             parts.append(f"deferred {row['deferred']}")
+        if row.get("resolved"):
+            parts.append(f"resolved {row['resolved']} (the reviewer's statement)")
         if row.get("stated"):
             parts.append("stated " + ", ".join(f"{status} {count}" for status, count in row["stated"].items()))
     return "  " + " · ".join(parts)

@@ -333,7 +333,7 @@ def test_round2_shipped_a_fixed_defect_reraised_on_the_regressions_line_is_no_re
 
 def test_round2_shipped_the_regression_on_a_fixed_line_is_the_regression() -> None:
     caught = finding(
-        "high", "scripts/arl/commands.py:259", "_require_untouched skips the check once here.exists() is false: a deleted root is dropped"
+        "high", "scripts/arl/commands.py:259", "_require_untouched: the baseline condition is always false here, so a changed root is dropped"
     )
     result = bench.score_round2(STATE, entry(caught), _shipped("large1"))
     assert classes(result)["regression"] == (1, 1)

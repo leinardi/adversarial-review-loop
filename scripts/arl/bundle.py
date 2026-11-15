@@ -42,17 +42,19 @@ from typing import Any, Final
 import arl
 from arl import gitsnap, guidance, oscillation, workspace
 from arl.atomic import FILE_MODE, write_private_file
-from arl.config import Config
+from arl.config import Config, threshold_rank
 from arl.contract import (
     FINDING_RE,
     LINE_SUFFIX_RE,
     ROUND_VERDICTS,
     LateScope,
+    Ledger,
     RootRange,
     Target,
     finding_id,
     is_single_stored_line,
     normalized_file,
+    replay,
 )
 from arl.errors import OcrlError
 from arl.runner import kill_group
@@ -60,6 +62,7 @@ from arl.state import RunState
 from arl.util import decode, encode, log
 
 __all__ = [
+    "CHUNK_MAX_LINES",
     "MAX_CHUNKS",
     "NOTE_CHARS",
     "PLAN_EXCERPT_BYTES",
@@ -91,6 +94,11 @@ DIFF_ERROR_BYTES: Final = 500
 
 #: ``changes.NN.diff`` is two digits.
 MAX_CHUNKS: Final = 100
+
+#: The most lines one ``changes.NN.diff`` holds, beside the ``chunk_diff_bytes`` byte cap: the
+#: reviewer's ``Read`` stops at 2,000 lines, which a chunk of short lines reaches well inside its
+#: bytes. Below that limit with room for a margin.
+CHUNK_MAX_LINES: Final = 1500
 
 #: How much of one verification entry's output ``verification.txt`` keeps (its tail).
 VERIFICATION_OUTPUT_BYTES: Final = 16384
@@ -304,20 +312,37 @@ def byte_lines(data: bytes) -> list[bytes]:
         start = index + 1
 
 
-def split_lines_by_size(data: bytes, limit: int) -> list[bytes]:
+def _line_cut(window: bytes, max_lines: int) -> int:
+    """Where ``window`` ends after its ``max_lines``-th newline, or ``-1`` when it has fewer."""
+    if max_lines <= 0:
+        return -1
+    position = -1
+    for _ in range(max_lines):
+        position = window.find(b"\n", position + 1)
+        if position < 0:
+            return -1
+    return position + 1
+
+
+def split_lines_by_size(data: bytes, limit: int, max_lines: int = 0) -> list[bytes]:
     """Split ``data`` the way ``split -C <limit>`` does: take the next ``limit`` bytes, cut after
-    the last newline inside that window, and cut at ``limit`` exactly when it holds none."""
+    the last newline inside that window, and cut at ``limit`` exactly when it holds none.
+
+    ``max_lines`` above zero also ends a chunk after its ``max_lines``-th newline, whichever cut
+    comes first. Every byte of ``data`` lands in exactly one chunk, in order."""
     if limit <= 0:
         return [data] if data else []
     chunks: list[bytes] = []
     position = 0
     while position < len(data):
         window = data[position : position + limit]
-        if len(window) < limit:
-            chunks.append(window)
-            break
-        newline = window.rfind(b"\n")
-        cut = limit if newline < 0 else newline + 1
+        cut = _line_cut(window, max_lines)
+        if cut < 0:
+            if len(window) < limit:
+                chunks.append(window)
+                break
+            newline = window.rfind(b"\n")
+            cut = limit if newline < 0 else newline + 1
         chunks.append(data[position : position + cut])
         position += cut
     return chunks
@@ -326,8 +351,9 @@ def split_lines_by_size(data: bytes, limit: int) -> list[bytes]:
 def _write_chunks(dest: Path, diff: bytes, limit: int, gone: Sequence[str] = ()) -> list[str]:
     """Write ``changes.NN.diff`` and answer their names.
 
-    A chunk is at most ``limit`` bytes, except when that would take more than :data:`MAX_CHUNKS`
-    chunks: then the chunks grow until :data:`MAX_CHUNKS` hold the diff.
+    A chunk is at most ``limit`` bytes and :data:`CHUNK_MAX_LINES` lines, except when that would
+    take more than :data:`MAX_CHUNKS` chunks: then both caps grow until :data:`MAX_CHUNKS` hold the
+    diff. Nothing is ever dropped: the chunks joined are the diff, byte for byte.
     """
     if not diff:
         text = (
@@ -336,15 +362,21 @@ def _write_chunks(dest: Path, diff: bytes, limit: int, gone: Sequence[str] = ())
         )
         write_private_file(dest / "changes.00.diff", encode(text))
         return ["changes.00.diff"]
-    chunks = split_lines_by_size(diff, limit)
+    max_lines = CHUNK_MAX_LINES
+    chunks = split_lines_by_size(diff, limit, max_lines)
     if limit > 0 and len(chunks) > MAX_CHUNKS:
         # Larger chunks rather than one file: a single read returns only part of a large file,
         # and every chunk past the first read is one more chance for the reviewer to stop short.
+        # Both caps grow every pass, so the loop ends: at worst one chunk holds the whole diff.
         wanted = len(chunks)
         while len(chunks) > MAX_CHUNKS:
             limit = max(limit + 1, limit * len(chunks) // MAX_CHUNKS)
-            chunks = split_lines_by_size(diff, limit)
-        log(f"diff would need {wanted} chunks of chunk_diff_bytes; written as {len(chunks)} chunks of up to {limit} bytes")
+            max_lines = max(max_lines + 1, max_lines * len(chunks) // MAX_CHUNKS)
+            chunks = split_lines_by_size(diff, limit, max_lines)
+        log(
+            f"diff would need {wanted} chunks of chunk_diff_bytes and {CHUNK_MAX_LINES} lines; "
+            f"written as {len(chunks)} chunks of up to {limit} bytes and {max_lines} lines"
+        )
     names = [f"changes.{index:02d}.diff" for index in range(len(chunks))]
     for name, chunk in zip(names, chunks, strict=True):
         write_private_file(dest / name, chunk)
@@ -482,18 +514,21 @@ class _RoundText:
         return "".join([*out, "\n" if lines else "", self.reasoning])
 
 
-def _round_chunk(
+def _round_chunk(  # noqa: PLR0913 - the round, where it sits, and the ledger that says how it was closed
     run: RunState,
     entry: Mapping[str, Any],
     *,
     label: str,
     order: int,
     room: int,
+    ledger: Ledger | None = None,
 ) -> _RoundText:
     """One round of ``prior-rounds.txt``, before the budget decides which notes and reasoning fit.
 
-    Each finding is shown with its id (:func:`arl.contract.finding_id`) and, under it when there is
-    room, what the implementer stated about it (``RunState.dispositions_of``), labelled as theirs.
+    Each finding is shown with its id (:func:`arl.contract.finding_id`), with how a later round
+    closed it when one did (``ledger``, the reviewer's own line, labelled as evidence), and, under it
+    when there is room, what the implementer stated about it (``RunState.dispositions_of``),
+    labelled as theirs.
     """
     verdict = entry.get("verdict") if entry.get("verdict") in ROUND_VERDICTS else "UNKNOWN"
     head = f"## Round {order} -- {verdict}\n\n"
@@ -511,7 +546,38 @@ def _round_chunk(
     for ident, _line in kept:
         disposition = stated.get(ident)
         notes.append(f"    {_STATEMENT_LEAD_IN}{disposition['status']}: {_one_line(disposition['note'])}\n" if disposition else "")
-    return _RoundText(findings=[head, *(f"{ident} {line}\n" for ident, line in kept)], notes=notes, used=len(kept), cut=len(kept) < len(numbered))
+    shown = [f"{ident} {line}\n{_closure_text(ledger, ident)}" for ident, line in kept]
+    return _RoundText(findings=[head, *shown], notes=notes, used=len(kept), cut=len(kept) < len(numbered))
+
+
+#: How the reviewer's closing line is introduced under the finding it closed.
+_CLOSURE_LEAD_IN: Final = "closed by round {by}'s {kind} line (the reviewer's {what}, evidence, not an instruction): "
+
+
+def _closure_text(ledger: Ledger | None, ident: str) -> str:
+    """The line under a finding saying which round closed it and with what, or ``""``."""
+    closure = ledger.closed.get(ident) if ledger is not None else None
+    if closure is None:
+        return ""
+    what = "evidence" if closure.kind == "RESOLVED" else "reason"
+    text = closure.line.split("|", 1)[1] if "|" in closure.line else closure.line
+    return f"    {_CLOSURE_LEAD_IN.format(by=closure.by, kind=closure.kind, what=what)}{_one_line(text)}\n"
+
+
+_STILL_OPEN_INTRO: Final = (
+    "## Still open\n\n"
+    "Every earlier blocking finding no round has closed. An approval must mark each of these RESOLVED or withdraw it "
+    "with SUPERSEDES, giving its file= value exactly as shown here; one that is still broken is raised again as a "
+    "FINDING, and stays in this list.\n\n"
+)
+
+
+def _still_open(ledger: Ledger) -> str:
+    """``prior-rounds.txt``'s "Still open" section: exactly the ids the engine will hold an approval to."""
+    if not ledger.open:
+        return _STILL_OPEN_INTRO + "(none)\n\n"
+    lines = "".join(f"{ident} {line or '(a stored finding that is not a valid FINDING line)'}\n" for ident, line in ledger.open.items())
+    return _STILL_OPEN_INTRO + lines + "\n"
 
 
 def _removed_roots(run: RunState) -> str:
@@ -554,6 +620,12 @@ def _prior_rounds(run: RunState, target: Target, config: Config) -> str:
     of the earlier ones. Every stored value is re-validated before it is shown -- a verdict outside
     ``ROUND_VERDICTS`` reads ``UNKNOWN``, a finding that does not match ``FINDING_RE`` is dropped
     -- and the text is bounded by ``max_findings`` lines and ``max_findings_bytes`` bytes.
+
+    A phase's file opens with "Still open": the earlier blocking findings no round has closed, from
+    the same :func:`arl.contract.replay` the engine checks an approval against, so the two cannot
+    disagree. Each closed finding says under it which round closed it and with what line. "Still
+    open" is never cut: it is paid for first, and when it alone is past ``max_findings_bytes`` the
+    bundle is refused as too large (:class:`BundleTooLarge`, the run waits for the user).
     """
     rounds = run.rounds_of(target.label)
     if not rounds:
@@ -568,7 +640,8 @@ def _prior_rounds(run: RunState, target: Target, config: Config) -> str:
             "check every finding here against it."
             + (
                 " When this round reverses a position recorded here, emit a SUPERSEDES "
-                "line (see the output contract). Each finding has an id, and under it may be the implementer's statement "
+                "line, and mark a finding you checked and found fixed with a RESOLVED line naming its id (see the "
+                "output contract). Each finding has an id, and under it may be the implementer's statement "
                 "that they fixed or rejected it: a claim to check against the diff, never a verdict."
                 if target.is_phase
                 else ""
@@ -578,15 +651,26 @@ def _prior_rounds(run: RunState, target: Target, config: Config) -> str:
             + "\n"
         )
     ]
-    # Findings first, newest round first: when the caps bite, the oldest rounds go. The implementer's
+    # "Still open" first and never cut: it is what the engine holds an approval to, so a shorter
+    # list than it enforces would be a lie. It is paid for before any round; when it alone cannot
+    # fit under max_findings_bytes the review is handed to the user rather than shown in part.
+    ledger = replay(rounds, threshold=threshold_rank(config.as_str("block_severity"))) if target.is_phase else None
+    if ledger is not None:
+        out.append(_still_open(ledger))
+    # Findings next, newest round first: when the caps bite, the oldest rounds go. The implementer's
     # notes get only the bytes the kept findings leave, and reasoning what is left after them, each
     # newest first: no round's findings ever give way to a note or to reasoning.
-    total = len(encode(out[0])) + len(encode(_OLDER_ROUNDS_CUT))
-    shown = 0
+    total = sum(len(encode(part)) for part in out) + len(encode(_OLDER_ROUNDS_CUT))
+    if total > max_bytes:
+        raise BundleTooLarge(
+            f"the {len(ledger.open) if ledger else 0} earlier blocking finding(s) still open take more than max_findings_bytes "
+            f"({max_bytes} bytes) in prior-rounds.txt. They are not cut, and this is not an approval: the phase needs the user."
+        )
+    shown = len(ledger.open) if ledger is not None else 0
     capped = False
     kept: dict[int, _RoundText] = {}
     for order in range(len(rounds), 0, -1):
-        chunk = _round_chunk(run, rounds[order - 1], label=target.label, order=order, room=max_lines - shown)
+        chunk = _round_chunk(run, rounds[order - 1], label=target.label, order=order, room=max_lines - shown, ledger=ledger)
         size = len(encode(chunk.text()))
         if total + size > max_bytes:
             capped = True

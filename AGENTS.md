@@ -66,9 +66,9 @@ The architecture ([docs/architecture.md](docs/architecture.md) has the long form
 | `scripts/arl/configcmd.py` | `config`: every key with its layer, or set or unset one key |
 | `scripts/arl/state.py` | the run state in `<launch dir>/.arl/state.json`: stages, approvals, tickets, the rounds and failed rounds with their usage, the dispositions stated, `next_action` |
 | `scripts/arl/workspace.py` | workspace roots: git and shadow snapshots, nested-repository discovery, late baselines |
-| `scripts/arl/contract.py` | the reviewer output contract: `FINDING`/`SUPERSEDES` grammar, `parse`, the recomputed verdict, the late-round scope type, finding ids, `done when` |
+| `scripts/arl/contract.py` | the reviewer output contract: `FINDING`/`SUPERSEDES`/`RESOLVED` grammar, `parse`, the recomputed verdict, the replay of a phase's earlier blocking findings (what is still open, what closed each), the late-round scope type, finding ids, `done when` |
 | `scripts/arl/review.py` | the review pipeline: `review prepare`/`record`/`run-external`, dispositions, repair, failure budgets, stalls |
-| `scripts/arl/bundle.py` | the review bundle: alias-prefixed diff chunks per root, `range.txt`, `verification.txt`, prior rounds, prompt composition |
+| `scripts/arl/bundle.py` | the review bundle: alias-prefixed diff chunks per root, `range.txt`, `verification.txt`, prior rounds with their "Still open" list, prompt composition |
 | `scripts/arl/runner.py` | running the reviewer: the bounded runner, transcript reduction, failure classification |
 | `scripts/arl/harness/`, `reviewer_probe.py` | the reviewer-CLI seam; `opencode.py` is the one external harness, and the probe lists its models |
 | `scripts/arl/gitsnap.py` | temp-index snapshot, oversized guard, submodule detection |

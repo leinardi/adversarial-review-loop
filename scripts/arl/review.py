@@ -9,7 +9,8 @@ has the tree it was reviewed at. A ticket is retired by ``stop``, ``accept``, a 
 was not prepared for.
 
 **No failure is an approval** (AGENTS.md rule 1). An answer that breaks the output contract gets
-one repair call and is otherwise ``OP_FAILURE``; a repair may never approve; failures count
+one repair call and is otherwise ``OP_FAILURE``; a repair may never approve, except one that only
+accounts for the earlier findings a readable approval skipped (``RESOLVED``); failures count
 against ``max_failures`` (``max_transient_failures`` for timeouts and rate limits) and, past the
 budget, the run waits for the user.
 """
@@ -116,31 +117,34 @@ def _validated_verification(raw: object) -> list[dict[str, Any]]:
 _NOTE_BYTES: Final = 4096
 
 
-def _validated_dispositions(raw: object, run: RunState) -> list[dict[str, str]]:
-    """What the implementer states about the previous round's findings, or a refusal.
+def _validated_dispositions(raw: object, run: RunState) -> tuple[list[dict[str, str]], int]:
+    """What the implementer states about the previous round's findings, or a refusal, and how many
+    entries were ignored.
 
     Each entry names a finding of the latest recorded round of the current stage by its id
     (``r<round>.<n>``), says ``fixed`` or ``rejected``, and may carry a note. An id that names no
     such finding, or a second entry for one id, is refused as malformed verification is: a
     statement about a finding the reviewer cannot find would be shown as evidence of nothing.
+
+    A stage with no recorded round yet has nothing for an id to name (typically the previous
+    phase's ids carried into the next phase's first review, or a replan): every entry is checked
+    for its shape and then ignored, and the count says so, rather than refusing the review.
     """
     if raw is None:
-        return []
+        return [], 0
     shape = "dispositions must be a list of objects (id, status, note)"
     if not isinstance(raw, list) or not all(isinstance(entry, dict) for entry in raw):
         raise RunError("bad-dispositions", shape)
     if not raw:
-        return []
+        return [], 0
     rounds = run.rounds_of(run.label())
-    if not rounds:
-        raise RunError("bad-dispositions", "there is no earlier round of this stage for a disposition to answer")
     order = len(rounds)
-    stored = rounds[-1].get("findings")
+    stored = rounds[-1].get("findings") if rounds else None
     known = {contract.finding_id(order, number) for number in range(1, (len(stored) if isinstance(stored, list) else 0) + 1)}
     out: list[dict[str, str]] = []
     for entry in raw:
         ident, status, note = entry.get("id"), entry.get("status"), entry.get("note", "")
-        if not isinstance(ident, str) or ident not in known:
+        if not isinstance(ident, str) or (rounds and ident not in known):
             names = ", ".join(sorted(known)) or "none"
             raise RunError("bad-dispositions", f"disposition id {str(ident)[:40]!r} names no finding of round {order} (its ids: {names})")
         if any(seen["id"] == ident for seen in out):
@@ -150,7 +154,16 @@ def _validated_dispositions(raw: object, run: RunState) -> list[dict[str, str]]:
         if not isinstance(note, str) or len(encode(note)) > _NOTE_BYTES:
             raise RunError("bad-dispositions", f"a disposition note must be text of at most {_NOTE_BYTES} bytes")
         out.append({"id": ident, "status": str(status), "note": note})
-    return out
+    if not rounds:
+        return [], len(out)
+    return out, 0
+
+
+def _ignored_note(ignored: int) -> str:
+    """What Claude is told about dispositions a stage with no earlier round had nothing to answer."""
+    if not ignored:
+        return ""
+    return f"Note: {ignored} disposition(s) were ignored: this stage had no earlier review for them to answer.\n"
 
 
 def _snapshot_or_wait(run: RunState) -> dict[str, str]:
@@ -216,11 +229,12 @@ def next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
     return ""
 
 
-def _skip(run: RunState, trees: Mapping[str, str], cfg: config.Config) -> dict[str, Any]:
+def _skip(run: RunState, trees: Mapping[str, str], cfg: config.Config, *, note: str = "") -> dict[str, Any]:
     what = "the final review" if run.stage() == "final" else f"phase {run.current_phase()}"
     run.approve(trees, by="ignored")
     run.save()
     message = f"Every change of {what} matches ignore_globs ({', '.join(cfg.as_list('ignore_globs'))}), so it was approved without a review.\n"
+    message += note
     message += next_turn(run, cfg, "APPROVED")
     return {"ok": True, "status": "skipped", "verdict": "APPROVED", "message": message, "run": run.summary()}
 
@@ -245,7 +259,7 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         stage = run.stage()
         if stage not in ("phase", "final"):
             raise RunError("nothing-to-review", "set the phases first" if stage == "plan" else "the run is complete")
-        stated = _validated_dispositions(args.get("dispositions"), run)
+        stated, ignored = _validated_dispositions(args.get("dispositions"), run)
         if not run.roots:
             # An empty bundle would show the reviewer nothing, and its approval would cover changes
             # no one saw.
@@ -261,7 +275,7 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         # Every root snapshotted, so nothing is oversized any more.
         run.clear_wait("oversized")
         if _only_ignored(run, trees, cfg):
-            return _skip(run, trees, cfg)
+            return _skip(run, trees, cfg, note=_ignored_note(ignored))
         seq = run.next_review_seq()
         if stated:
             # On the run, not the ticket: a review that fails or is abandoned keeps them for the next.
@@ -300,6 +314,8 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             # Who reviews it, as configured now: what /arl-stats shows the round ran on.
             "harness": cfg.as_str("harness"),
             "model": harness.display_model(cfg),
+            # For Claude only, with whatever the round answers; never part of the bundle.
+            "note": _ignored_note(ignored),
         }
         run.issue_ticket(ticket)
         run.save()
@@ -359,16 +375,42 @@ def _count_failure(run: RunState, kind: str, error: str, cfg: config.Config) -> 
     return ""
 
 
-def _repair(run: RunState, ticket: dict[str, Any], answer: Path, review_dir: Path) -> dict[str, Any]:
-    """Arrange the one repair call a malformed answer gets, and answer what the caller runs."""
+def _repair_reason(unaccounted: tuple[str, ...]) -> str:
+    """``repair-reason.txt``: why an answer whose block the engine read still failed, and what the
+    repair call is to do about each id."""
+    return (
+        "# Why your block failed\n\n"
+        "The engine read your findings block. It failed because your review approved while these earlier blocking "
+        'findings are still open; each is listed under "Still open" in `prior-rounds.txt`:\n\n'
+        + "".join(f"- {ident}\n" for ident in unaccounted)
+        + "\nRe-emit your block. For each id above, either add `RESOLVED id=<id> | <what in the code shows it is gone>`, only "
+        "if your review above actually checked that the defect is gone, or emit it again as a `FINDING` that is still "
+        "open. If nothing in the transcript shows it was checked, it is still open. Do not add a `SUPERSEDES` line your "
+        "review did not already have.\n"
+    )
+
+
+def _repair(run: RunState, ticket: dict[str, Any], answer: Path, review_dir: Path, *, unaccounted: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Arrange the one repair call a malformed answer gets, and answer what the caller runs.
+
+    ``unaccounted`` names the earlier blocking findings an approval left open (the block itself was
+    readable): ``repair-reason.txt`` tells the repair call so, and the ticket remembers it, since
+    such a repair may approve once each one is accounted for.
+    """
     try:
         raw = answer.read_bytes()
     except OSError:
         raw = b""
-    write_private_file(review_dir / "bundle" / "repair.txt", raw[-REPAIR_TAIL_BYTES:] or b"(the reviewer wrote nothing)\n")
+    bundle_dir = review_dir / "bundle"
+    write_private_file(bundle_dir / "repair.txt", raw[-REPAIR_TAIL_BYTES:] or b"(the reviewer wrote nothing)\n")
+    files = ["range.txt", "repair.txt"]
+    if unaccounted:
+        write_private_file(bundle_dir / "repair-reason.txt", encode(_repair_reason(unaccounted)))
+        files += ["repair-reason.txt", "prior-rounds.txt"]
     prompt = review_dir / "repair-prompt.md"
-    bundle.compose_fixed("reviewer-repair", review_dir / "bundle", ["range.txt", "repair.txt"], prompt)
+    bundle.compose_fixed("reviewer-repair", bundle_dir, files, prompt)
     ticket["repair"] = str(answer)
+    ticket["repair_unaccounted"] = list(unaccounted)
     run.data["pending_ticket"] = ticket
     run.save()
     return {
@@ -407,39 +449,170 @@ def _line_count(target: Target, file: str, limit: int) -> int | None:
     return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
 
 
-def _parsed(run: RunState, ticket: Mapping[str, Any], target: Target, answer: Path, cfg: config.Config) -> Review:
-    repairing = bool(ticket.get("repair"))
-    scope = bundle.late_scope(run, target)
-    review = contract.parse(answer, config=cfg, allow_supersedes=target.is_phase and not repairing, scope=scope)
-    review.raw = str(answer)
-    retired = frozenset(alias for alias in run.data.get("retired_aliases", []) if isinstance(alias, str))
-    stray = contract.unknown_alias(review, target.aliases, retired=retired) if review.verdict in ("APPROVED", "CHANGES_REQUIRED") else ""
-    if stray:
-        review = Review(verdict="OP_FAILURE", kind="contract", raw=str(answer), error=f"file={stray} names no root; every location is <alias>/<path>")
-    elif review.verdict in ("APPROVED", "CHANGES_REQUIRED"):
-        review.notes += contract.citation_notes(review.all_findings, lambda file: _line_count(target, file, cfg.as_int("max_file_bytes")))
-    if repairing:
-        if review.verdict == "APPROVED":
-            # A tail cannot show that nothing was found, so a repair never approves.
+def _known_ids(rounds: list[dict[str, Any]]) -> frozenset[str]:
+    """Every finding id of ``rounds``, by position, as :func:`arl.contract.finding_id` numbers them."""
+    known: set[str] = set()
+    for order, entry in enumerate(rounds, start=1):
+        stored = entry.get("findings")
+        known.update(contract.finding_id(order, number) for number in range(1, (len(stored) if isinstance(stored, list) else 0) + 1))
+    return frozenset(known)
+
+
+def _unaccounted_error(missing: list[str]) -> str:
+    return (
+        f"the review approved while earlier blocking finding(s) {', '.join(missing)} are still open: an approval must mark each "
+        "RESOLVED or withdraw it with SUPERSEDES, or else raise it again as a FINDING and ask for changes"
+    )
+
+
+def _missing_line(kept: str, original: str) -> str:
+    """The first line of ``original`` that ``kept`` lacks, counting repeats, or ``""``."""
+    left = contract.records(kept)
+    for line in contract.records(original):
+        if line not in left:
+            return line
+        left.remove(line)
+    return ""
+
+
+def _repair_violation(review: Review, original: Review | None, *, approving: bool) -> str:
+    """Why an accounting repair's block breaks faith with the block it re-emits, or ``""``.
+
+    An ordinary repair, of an answer the engine could not read, is held by :func:`_invented_resolved`
+    instead: it may copy a ``RESOLVED`` line only from that answer.
+
+    Its ``SUPERSEDES`` lines must be exactly the original's: a withdrawal the review never made,
+    recorded, would close findings for every later round, so none may be added whatever the verdict.
+    An approving repair must also keep every ``FINDING``, ``SUPERSEDES`` and ``RESOLVED`` line of
+    the original; it may add only ``RESOLVED`` and ``FINDING`` lines. ``original`` is ``None`` when
+    that answer no longer parses, which nothing can be shown to keep.
+    """
+    if original is None:
+        return "the answer the repair call re-emits can no longer be read"
+    added = _missing_line(original.supersedes, review.supersedes)
+    if added:
+        return f"the repair call added a SUPERSEDES line the review never made, which it may not: {added[: contract.CONTRACT_ECHO_CHARS]}"
+    if approving:
+        for block, kind in (
+            (review.all_findings, original.all_findings),
+            (review.supersedes, original.supersedes),
+            (review.resolved, original.resolved),
+        ):
+            dropped = _missing_line(block, kind)
+            if dropped:
+                return f"the repair call dropped a line of the review it re-emitted, which it may not: {dropped[: contract.CONTRACT_ECHO_CHARS]}"
+    return ""
+
+
+def _invented_resolved(review: Review, original: Path) -> str:
+    """The first ``RESOLVED`` line of an ordinary repair that the original answer lacks, or ``""``.
+
+    The original is read as raw lines, split as the parser splits them (:func:`arl.contract.records`),
+    since it need not hold a readable block; repeats are counted. An original that cannot be read
+    holds no line, so every ``RESOLVED`` of the repair is one it lacks.
+    """
+    try:
+        lines = "\n".join(contract.records(decode(original.read_bytes())))
+    except OSError:
+        lines = ""
+    return _missing_line(lines, review.resolved)
+
+
+def _accounting_original(ticket: Mapping[str, Any], cfg: config.Config) -> Review | None:
+    """The answer an accounting repair re-emits, parsed; ``None`` when it no longer parses."""
+    original = contract.parse(Path(str(ticket["repair"])), config=cfg, allow_supersedes=True, allow_resolved=True)
+    return original if original.verdict in ("APPROVED", "CHANGES_REQUIRED") else None
+
+
+def _repaired(review: Review, ticket: Mapping[str, Any], answer: Path, cfg: config.Config, *, accounting_repair: bool) -> Review:
+    """What a repair call's parsed answer comes to: the checks on what a repair may emit."""
+    if accounting_repair and review.verdict in ("APPROVED", "CHANGES_REQUIRED"):
+        # The repair only accounts for the findings an approval left open; it may not rewrite
+        # the review it re-emits, and an approval is the original review's own.
+        violation = _repair_violation(review, _accounting_original(ticket, cfg), approving=review.verdict == "APPROVED")
+        if violation:
+            return Review(verdict="OP_FAILURE", kind="contract", raw=str(answer), error=violation)
+    if not accounting_repair and review.verdict == "CHANGES_REQUIRED":
+        # A recorded RESOLVED closes a finding for every later round, so an ordinary repair may
+        # only copy one the unreadable answer already wrote, never state one of its own.
+        invented = _invented_resolved(review, Path(str(ticket["repair"])))
+        if invented:
             return Review(
                 verdict="OP_FAILURE",
                 kind="contract",
                 raw=str(answer),
-                error="the repair call approved, which it may not; the original answer stays unreadable",
+                error=f"the repair call wrote a RESOLVED line the original answer does not contain, which it may not: {invented[: contract.CONTRACT_ECHO_CHARS]}",
             )
-        if review.verdict == "CHANGES_REQUIRED":
-            recovered = [line for line in contract.records(review.findings) if line and not line.endswith(_INCOMPLETE)]
-            if not recovered:
-                # Nothing blocking was recovered (or only the "transcript incomplete" sentinel the
-                # repair prompt prescribes): no review stands behind this round, so it is the
-                # original failure, counted against the budget -- not a round Claude must "fix".
-                return Review(
-                    verdict="OP_FAILURE",
-                    kind="contract",
-                    raw=str(answer),
-                    error="the repair call recovered no finding from the unreadable answer",
-                )
-            review.repaired = str(ticket["repair"])
+    if review.verdict == "APPROVED":
+        # Only an accounting repair gets here.
+        review.repaired = str(ticket["repair"])
+        return review
+    if review.verdict == "CHANGES_REQUIRED":
+        recovered = [line for line in contract.records(review.findings) if line and not line.endswith(_INCOMPLETE)]
+        if not recovered:
+            # Nothing blocking was recovered (or only the "transcript incomplete" sentinel the
+            # repair prompt prescribes): no review stands behind this round, so it is the
+            # original failure, counted against the budget -- not a round Claude must "fix".
+            return Review(
+                verdict="OP_FAILURE",
+                kind="contract",
+                raw=str(answer),
+                error="the repair call recovered no finding from the unreadable answer",
+            )
+        review.repaired = str(ticket["repair"])
+    return review
+
+
+def _parsed(run: RunState, ticket: Mapping[str, Any], target: Target, answer: Path, cfg: config.Config) -> Review:
+    """Parse ``answer`` into the round's :class:`Review`, with every engine check a parse alone
+    cannot make: roots, ``RESOLVED`` ids, the accounting an approval owes, and what a repair may
+    emit. An accounting repair may approve but not rewrite the block it re-emits
+    (:func:`_repair_violation`); an ordinary repair never approves, recovers at least one blocking
+    finding, and writes no ``RESOLVED`` the original answer lacks (:func:`_invented_resolved`)."""
+    repairing = bool(ticket.get("repair"))
+    # The repair of an approval that skipped an earlier finding: its block was read, so it may
+    # re-emit SUPERSEDES lines, and it may approve once every finding is accounted for.
+    owed = ticket.get("repair_unaccounted")
+    accounting_repair = repairing and isinstance(owed, list) and bool(owed)
+    rounds = run.rounds_of(target.label) if target.is_phase else []
+    scope = bundle.late_scope(run, target)
+    review = contract.parse(
+        answer,
+        config=cfg,
+        allow_supersedes=target.is_phase and (not repairing or accounting_repair),
+        allow_resolved=bool(rounds),
+        scope=scope,
+    )
+    review.raw = str(answer)
+    retired = frozenset(alias for alias in run.data.get("retired_aliases", []) if isinstance(alias, str))
+    answered = review.verdict in ("APPROVED", "CHANGES_REQUIRED")
+    stray = contract.unknown_alias(review, target.aliases, retired=retired) if answered else ""
+    unknown = contract.unknown_resolved(review, _known_ids(rounds)) if answered and not stray else ""
+    if stray:
+        review = Review(verdict="OP_FAILURE", kind="contract", raw=str(answer), error=f"file={stray} names no root; every location is <alias>/<path>")
+    elif unknown:
+        review = Review(
+            verdict="OP_FAILURE", kind="contract", raw=str(answer), error=f"RESOLVED id={unknown} names no finding of an earlier round of this review"
+        )
+    elif answered:
+        review.notes += contract.citation_notes(review.all_findings, lambda file: _line_count(target, file, cfg.as_int("max_file_bytes")))
+    if repairing and review.verdict == "APPROVED" and not accounting_repair:
+        # A tail cannot show that nothing was found, so a repair never approves.
+        return Review(
+            verdict="OP_FAILURE",
+            kind="contract",
+            raw=str(answer),
+            error="the repair call approved, which it may not; the original answer stays unreadable",
+        )
+    if review.verdict == "APPROVED" and rounds:
+        # A later round may not approve past an earlier blocking finding still open: a fresh
+        # reviewer that forgot one has not checked it, and nor has a round that never named it.
+        threshold = config.threshold_rank(cfg.as_str("block_severity"))
+        missing = contract.unaccounted(review, rounds, threshold=threshold)
+        if missing:
+            return Review(verdict="OP_FAILURE", kind="contract", raw=str(answer), error=_unaccounted_error(missing), unaccounted=tuple(missing))
+    if repairing:
+        return _repaired(review, ticket, answer, cfg, accounting_repair=accounting_repair)
     return review
 
 
@@ -520,6 +693,8 @@ def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about wh
                 "verdict": review.verdict,
                 "findings": contract.records(review.all_findings),
                 "supersedes": contract.records(review.supersedes),
+                # The reviewer's statements that an earlier finding is gone; never read for a verdict.
+                "resolved": contract.records(review.resolved),
                 "repaired": bool(review.repaired),
                 # Why the round concluded what it did, for the next fresh reviewer: bounded here so
                 # the run document stays small whatever the reviewer wrote.
@@ -570,6 +745,8 @@ def _apply(  # noqa: PLR0913 - the round, and the one display-only fact about wh
         message = f"{_headline(target, review.verdict)}\n\n{notes}{report.deferred_text(review, what='approval')}Full report: {review.report}\n"
     else:
         message = report.reason(review, _headline(target, review.verdict), config=cfg, waiting=run.data["waiting"] is not None) + note
+    stored_note = ticket.get("note")
+    message += stored_note if isinstance(stored_note, str) else ""
     message += next_turn(run, cfg, review.verdict)
     run.save()
     return {
@@ -652,7 +829,7 @@ def _record_answer(  # noqa: PLR0913 - the pieces `record` already validated
             return _apply(run, ticket, target, review, cfg, answered_by=answered_by)
         review = _parsed(run, ticket, target, answer, cfg)
         if review.verdict == "OP_FAILURE" and review.kind == "contract" and not ticket.get("repair"):
-            return _repair(run, ticket, answer, review_dir)
+            return _repair(run, ticket, answer, review_dir, unaccounted=review.unaccounted)
         if usage is not None:
             review.usage = usage
     return _apply(run, ticket, target, review, cfg, answered_by=answered_by)

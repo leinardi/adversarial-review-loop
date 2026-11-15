@@ -13,11 +13,11 @@
     "class": "regression",
     "file": "scripts/arl/commands.py",
     "line": 259,
-    "symbols": ["exists()", "deleted", "no longer exists"],
+    "symbols": ["baseline", "always false", "never raise", "unreachable"],
     "severity": "high",
-    "what": "Planted by the fix of L1: the changed-since-joined check also requires the root to still exist, so a root whose folder was deleted after it joined is dropped and the deletion leaves review.",
+    "what": "Planted by the fix of L1: the changed-since-joined check also requires the root's baseline not to be 'set', which the guard above has already refused, so the check never raises and a root that changed since it joined is dropped with its changes unreviewed.",
     "original": "    if now != root[\"start_tree\"]:",
-    "seeded": "    if now != root[\"start_tree\"] and here.exists():"
+    "seeded": "    if now != root[\"start_tree\"] and root[\"baseline\"] != \"set\":"
   },
   {
     "id": "L1",

@@ -42,12 +42,21 @@ that and asks again; only an approval moves the run to the next phase.
    line. An answer that breaks the contract (a missing `VERDICT` with nothing blocking included)
    gets one repair attempt, then counts as a failure. A failure is never an approval. A finding
    that cites a line past the end of its file still stands, with a note telling Claude to find
-   it by its description.
+   it by its description. From round 2 of a phase, an approval must also leave no earlier
+   blocking finding of the phase open. A finding is closed only by a line that names exactly it:
+   `RESOLVED id=r1.3 | <what in the code shows it>`, or a `SUPERSEDES` giving its round and its
+   exact `file=` value. Raising a defect again gives it a new id, and both must be closed. The
+   reviewer sees the open ids under "Still open" in `prior-rounds.txt`, computed the way the
+   engine checks them, and how each earlier finding was closed. An approval that leaves one open
+   breaks the contract, and its repair call is told which ids to
+   account for. That repair may approve, since the review behind it was read; any other repair
+   never does, and may copy a `RESOLVED` line only from the answer it repairs.
 8. **Claude reads the outcome.** Findings, each with an id (`r1.3`): fix them and call `review`
    again, saying for each one whether it was fixed or is rejected, with a note. The next reviewer
    is told what this one found and what Claude said, and accounts for every finding: fixed, still
-   open, or withdrawn. A rejection that cites no file and line stays open. Approval: commit each
-   changed repository by its own conventions.
+   open, or withdrawn. A rejection that cites no file and line stays open. Dispositions sent to the
+   first review of a stage have nothing to answer: they are ignored, and the answer says so.
+   Approval: commit each changed repository by its own conventions.
 9. **The loop continues.** When Claude's turn ends, the plugin asks the engine whether work
    remains and, if so, prompts Claude with the next phase. After the last approval (and the final
    review, if one is required) the run is complete.

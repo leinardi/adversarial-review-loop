@@ -172,6 +172,56 @@ def test_past_max_chunks_the_chunks_grow_rather_than_the_diff_being_cut_short(tm
     assert b"".join((tmp_path / name).read_bytes() for name in names) == data
 
 
+def test_a_chunk_of_short_lines_stops_at_the_line_cap(tmp_path: Path) -> None:
+    """``Read`` stops at 2,000 lines, so a chunk under its byte cap may still be too long."""
+    data = b"".join(f"+{i}\n".encode() for i in range(4000))
+    assert len(data) < 40000
+    names = bundle._write_chunks(tmp_path, data, 40000)
+    chunks = [(tmp_path / name).read_bytes() for name in names]
+    assert len(chunks) == 3
+    assert [chunk.count(b"\n") for chunk in chunks] == [bundle.CHUNK_MAX_LINES, bundle.CHUNK_MAX_LINES, 1000]
+    assert b"".join(chunks) == data
+
+
+def test_the_byte_cap_still_cuts_a_chunk_of_long_lines(tmp_path: Path) -> None:
+    data = b"".join(b"+" + b"x" * 98 + b"\n" for _ in range(1000))
+    names = bundle._write_chunks(tmp_path, data, 40000)
+    chunks = [(tmp_path / name).read_bytes() for name in names]
+    assert [len(chunk) for chunk in chunks] == [40000, 40000, 20000]
+    assert b"".join(chunks) == data
+
+
+@pytest.mark.parametrize(("limit", "max_lines"), [(16, 1), (64, 3), (4096, 7), (25, 2)])
+def test_the_two_caps_together_keep_every_byte(limit: int, max_lines: int) -> None:
+    data = b"".join(f"line {i} {'y' * (i % 37)}\n".encode() for i in range(200)) + b"x" * 500 + b"\ntail"
+    chunks = bundle.split_lines_by_size(data, limit, max_lines)
+    assert b"".join(chunks) == data
+    assert all(len(chunk) <= limit and chunk.count(b"\n") <= max_lines for chunk in chunks)
+
+
+def test_past_max_chunks_both_caps_grow_and_nothing_is_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Short lines under a generous byte cap: the line cap alone would need too many chunks."""
+    monkeypatch.setattr(bundle, "MAX_CHUNKS", 3)
+    monkeypatch.setattr(bundle, "CHUNK_MAX_LINES", 10)
+    data = b"".join(f"{i}\n".encode() for i in range(1000))
+    names = bundle._write_chunks(tmp_path, data, 1_000_000)
+    assert 1 < len(names) <= 3
+    assert b"".join((tmp_path / name).read_bytes() for name in names) == data
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_the_grown_chunks_always_fit_max_chunks_and_rejoin_to_the_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int) -> None:
+    rng = random.Random(seed)
+    monkeypatch.setattr(bundle, "MAX_CHUNKS", rng.choice([2, 3, 5]))
+    monkeypatch.setattr(bundle, "CHUNK_MAX_LINES", rng.choice([1, 4, 30]))
+    data = bytes(rng.choice(b"\n\nabcdef") for _ in range(rng.randrange(200, 3000)))
+    for stale in tmp_path.glob("changes.*.diff"):
+        stale.unlink()
+    names = bundle._write_chunks(tmp_path, data, rng.choice([1, 8, 64]))
+    assert len(names) <= bundle.MAX_CHUNKS
+    assert b"".join((tmp_path / name).read_bytes() for name in names) == data
+
+
 def test_the_default_chunk_fits_one_read_of_the_reviewer() -> None:
     """Read returns at most 25,000 tokens of a file; a diff runs at about 2.4 bytes per token."""
     assert config.DEFAULTS["chunk_diff_bytes"] <= 50_000
@@ -333,12 +383,30 @@ def test_prior_rounds_is_bounded_by_max_findings_bytes(ws: Path, engine: Engine,
     for n in range(3):
         edit(ws / "api" / "src" / "main.py", f"print({n})\n")
         changes_required(engine, ws, tmp_path, file=f"api/src/f{n}.py:1")
-    monkeypatch.setenv("ARL_MAX_FINDINGS_BYTES", "1000")
+    # Room for the header, the three findings still open and one round, not three.
+    monkeypatch.setenv("ARL_MAX_FINDINGS_BYTES", "1500")
     edit(ws / "api" / "src" / "main.py", "print('again')\n")
     prior = (Path(engine(ws, "review", "prepare")["bundle_dir"]) / "prior-rounds.txt").read_text()
-    assert len(prior.encode()) <= 1000
+    assert len(prior.encode()) <= 1500
     assert "past the max_findings / max_findings_bytes cap" in prior
-    assert "file=api/src/f2.py:1" in prior, "the newest round is the one kept"
+    assert "## Round 3" in prior and "## Round 1 " not in prior, "the newest round is the one kept"
+    # The cap cuts old rounds, never the list an approval is held to.
+    still_open = prior.split("## Still open", 1)[1].split("(the oldest rounds", 1)[0]
+    assert all(f"r{n + 1}.1 FINDING severity=high actionable=yes file=api/src/f{n}.py:1 | broken\n" in still_open for n in range(3))
+
+
+def test_a_still_open_list_past_max_findings_bytes_hands_the_phase_to_the_user(
+    ws: Path, engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started(engine, ws)
+    for n in range(3):
+        edit(ws / "api" / "src" / "main.py", f"print({n})\n")
+        changes_required(engine, ws, tmp_path, file=f"api/src/f{n}.py:1")
+    monkeypatch.setenv("ARL_MAX_FINDINGS_BYTES", "700")
+    edit(ws / "api" / "src" / "main.py", "print('again')\n")
+    refused = engine(ws, "review", "prepare")
+    assert (refused["ok"], refused["code"]) == (False, "oversized")
+    assert "still open" in refused["error"]
 
 
 @pytest.mark.parametrize(
