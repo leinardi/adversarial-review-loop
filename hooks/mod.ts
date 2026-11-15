@@ -21,7 +21,7 @@
 // Every decision about the run is the engine's (`scripts/arl/`); see flow.ts.
 
 import type { EngineInterface, Register } from 'claude-code'
-import { COMMANDS, openPane, registerCommands, runCommand } from './commands'
+import { COMMANDS, openPane, registerCommands, runCommand, showNow } from './commands'
 import { engine } from './engine'
 import { addRoot, continueRun, ensureRoot, parentOf, type Registration, review, session, resetWrites, setPhases, sweepRoots, track, unregistered, writeIn } from './flow'
 import { countStep, deliver, registerReviewer, resetCheckedModels, REVIEWER, reviewerDecision, runHandback } from './reviewer'
@@ -100,6 +100,7 @@ export const register: Register = on => {
     // A pane the person closed stays closed for their session, not for the next one (`/clear`).
     pane.dismissed = false
     // A session that ended mid-turn left the flag set; this one has run no turn yet.
+    session.turnRunning = false
     await showBusy($, false).catch(() => undefined)
     await registerTools($)
     const effort = await attach($).catch(() => '')
@@ -154,7 +155,10 @@ export const register: Register = on => {
   }).catch(($, e, next) => (e.agentId === undefined ? next(e) : { decision: 'deny', reason: 'the reviewer permission check failed' }))
 
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) await showBusy($, true).catch(() => undefined)
+    if (e.agentId === undefined) {
+      session.turnRunning = true
+      await showBusy($, true).catch(() => undefined)
+    }
     return next(e)
   })
 
@@ -167,6 +171,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) deliver(e.agentId, { answer: e.answer, reason: e.reason, usage: e.usage, durationMs: e.durationMs })
     // Whatever ended it (an answer, an interrupt, an error), the main turn is over.
+    if (e.agentId === undefined) session.turnRunning = false
     if (e.agentId === undefined) await showBusy($, false).catch(() => undefined)
     if (e.agentId === undefined) await sweepRoots($)
     const done = await next(e)
@@ -186,6 +191,7 @@ export const register: Register = on => {
   for (const spec of COMMANDS) {
     on('command.run', { command: spec.name }, async ($, e) => {
       const text = await runCommand($, e.command, e.args)
+      if (text !== undefined) await showNow($, e.command, text)
       return { text: text ?? `No command ${e.command} here.` }
     }).catch(($, e) => ({ text: `/${e.command} failed.` }))
   }

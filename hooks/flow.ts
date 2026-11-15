@@ -33,6 +33,11 @@ export const session = {
   /** Whether a person can be asked (`$.ui.ask` rejects under `-p`). */
   isInteractive: false,
   id: '',
+  /**
+   * Whether Claude's turn is running. A command's text is printed only once the turn ends, so
+   * while one runs it is also put where the person sees it at once (`hooks/mod.ts`).
+   */
+  turnRunning: false,
 }
 
 type RunSummary = RunView
