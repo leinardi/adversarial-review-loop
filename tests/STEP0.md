@@ -9,7 +9,7 @@ Budget about an hour, plus a handful of real model calls in session A.
 **v4 note.** Sessions A to I measured v3, the enforcement gate. The tooling they run
 (`tests/step0-fixture.sh`, `make dry-run`, `arl arm`, the `claude-code` harness) was removed in
 v4, so read them as a record of what was measured, not as a procedure to rerun. Session J
-measures the v4 mod surface and is current.
+measures the v4 mod surface and is current, as are K (v4 end to end) and L (reviewer models).
 
 ## Before you start
 
@@ -1133,6 +1133,74 @@ folder. Three plans, 13 phases, run by the user and read back here.
   exited, and left no process behind.
 - **Auto mode: pass.** Four phases were reviewed and approved in auto mode with no contract error or
   host preamble.
+
+## Session L — reviewer models and the host, measured 2026-11-15
+
+What the host does with a reviewer's model, before the plugin names strong and weak models and
+refuses one it cannot use. Claude Code 2.1.325, OpenCode 2.3.0. The Claude probes were a
+throwaway mod (built as in J's "How the probes were built") run with `claude -p --plugin-dir
+<scratch> --model haiku`, logging every result to a file. The OpenCode probes ran the harness's
+own argv (`opencode run <prompt> --standalone -m <model> --agent build --title probe --archived`)
+in a scratch folder.
+
+### L1. `$.model.complete` as a model check: pass
+
+`{ model, prompt: "Reply OK.", maxTokens: 1, timeoutMs: 30000 }`:
+
+| Model | Result | Latency |
+| --- | --- | --- |
+| `opus`, `sonnet`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-sonnet-4-5` | `isAnswered: true`, text `OK.` | 0.7 to 5.6 s |
+| `claude-bogus-9-9` | `isAnswered: false`, `reason: api-error`, `status: 404`, `error: model_not_found` | 0.2 s |
+| any model under `--settings '{"availableModels":["haiku"]}'` but haiku | **rejects**: `model "opus" is not in this organization's allowlist` | 0 ms |
+
+`maxTokens: 1` is accepted. The usage of a check is about 14 input and 1 to 5 output tokens. Aliases
+and full ids are both taken.
+
+### L2. `$.agent.spawn`'s `model` takes only aliases: measured
+
+`model` on a spawn must be one of `sonnet`, `opus`, `haiku`, `fable`: `claude-opus-5-5` and
+`claude-bogus-9-9` are refused at once with `{ deny: "InputValidationError … expected one of
+\"sonnet\"|\"opus\"|\"haiku\"|\"fable\"" }`. An alias is answered with the resolved id:
+`opus` gave `spawned.model: "claude-opus-5-5"`, `sonnet` `claude-sonnet-5-5`, `fable`
+`claude-fable-5-2`.
+
+A full id goes through the agent definition instead: an agent type registered with
+`model: "claude-sonnet-4-5"` and spawned with no `model` ran that model (`spawned.model:
+"claude-sonnet-4-5"`; its `turn.complete` usage said `claude-sonnet-4-5-20250929`). Registered again
+inside a tool call with another `model`, the very next spawn ran the new one. A type registered
+with `claude-bogus-9-9` registers and spawns (`spawned.model: "claude-bogus-9-9"`) and then ends in
+0.45 s with `turn.complete` `reason: error` and no answer, which the reviewer classifies today as a
+transient API error and retries.
+
+### L3. Model identity: pass, the gate holds
+
+- `CLAUDE_CODE_SUBAGENT_MODEL=haiku` does **not** override a spawn's own model: `opus` requested,
+  `spawned.model` and the completion's usage both `claude-opus-5-5`.
+- An allowlist (`availableModels: ["haiku"]`) swaps the model silently: `opus` requested on the
+  spawn, and a type registered with `claude-sonnet-5-5`, both ran `claude-haiku-5-5`, and
+  `spawned.model` said so. Nothing denied the spawn.
+
+So `spawned.model` reports the model that runs, as a full id, and comparing it with the requested
+id detects a replaced model. An alias is compared through what it resolves to.
+
+### L4. OpenCode refusals: pass with `--format json`, text only without
+
+| Case | Exit | Plain output (stderr) | `--format json` error event |
+| --- | --- | --- | --- |
+| `-m openai/gpt-bogus` | 1, 3 s | `Error: Model unavailable: openai/gpt-bogus` | `{"type":"provider.no-route","message":"Model unavailable: …"}` |
+| a listed model, `XDG_DATA_HOME` with no `auth.json` | 1, 3 s | `Error: Model unavailable: openai/gpt-6.1-terra` | `{"type":"provider.no-route","message":"Model unavailable: …"}` |
+| a listed model, an invalid key in `auth.json` | 1, 3 s | `Error: Incorrect API key provided: …` (the provider's text) | `{"type":"provider.auth","status":401,…}` |
+| network down (`HTTPS_PROXY` to a closed port) | 1, 97 s | eleven `retrying (attempt n): ECONNREFUSED`, then `Error: ECONNREFUSED …` | `{"type":"provider.transport",…}` |
+
+Every failure exits 1. Without `--format json` only the provider's own text tells them apart.
+With it, the run writes one JSON event per line (`step_start`, `text` with `part.text`,
+`step_finish` with `part.tokens`, `error` with `error.type`), and `error.type` separates a model
+or credential refusal (`provider.no-route`, `provider.auth`) from a transport failure
+(`provider.transport`). No-access-to-a-model (403) was not reproduced.
+
+`opencode models` lists the same 119 models with no credentials or a bad key, so the listing shows
+whether a model exists, not whether it can be used. `opencode models` has no `--verbose`, and
+nothing lists a model's variants.
 
 ## If A1 fails
 
