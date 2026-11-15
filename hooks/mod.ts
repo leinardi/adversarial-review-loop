@@ -24,7 +24,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import { COMMANDS, openPane, registerCommands, runCommand } from './commands'
 import { engine } from './engine'
 import { addRoot, continueRun, ensureRoot, parentOf, type Registration, review, session, resetWrites, setPhases, sweepRoots, track, unregistered, writeIn } from './flow'
-import { countStep, deliver, registerReviewer, resetCheckedModels, REVIEWER, reviewerDecision } from './reviewer'
+import { countStep, deliver, registerReviewer, resetCheckedModels, REVIEWER, reviewerDecision, runHandback } from './reviewer'
 import { TOOLS, type ToolName } from './text'
 import { pane, registerUi, showBusy } from './ui'
 
@@ -118,6 +118,8 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const call = e as unknown as { tool: string } & Record<string, unknown>
+    // A reviewer's report, handed back: its answer once the call ran.
+    if (call.tool === 'SubagentHandback' && e.agentId !== undefined) return runHandback(e.agentId, call.message, () => next(e))
     const own = tools.get(call.tool)
     if (own !== undefined) {
       const answer = await serve($, own, argumentsOf(call), next.signal)

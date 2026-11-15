@@ -19,7 +19,7 @@
 // end is classified, and what it may do.
 
 import { expect, test } from 'claude-code/testing'
-import { answerOf, classify, countStep, deliver, isModelOf, normalize, permit, resetCheckedModels, REVIEWER_TOOLS, reviewerDecision, runReviewer, within } from '../../hooks/reviewer'
+import { answerOf, classify, countStep, deliver, isModelOf, normalize, permit, resetCheckedModels, REVIEWER_TOOLS, reviewerDecision, runHandback, runReviewer, within } from '../../hooks/reviewer'
 import { apiError, fakeEngine, PLUGIN, start, tool, world } from './world'
 
 const DONE = { answer: 'VERDICT APPROVED', reason: 'answer', durationMs: 10 }
@@ -248,8 +248,66 @@ test("an interrupt that ends the reviewer's own run first is still an interrupt,
   await expect(runReviewer($, { ...TASK, signal: aborted.signal })).rejects.toThrow('interrupted')
 })
 
-test('handing the report back is allowed: some sessions deliver a subagent answer that way', () => {
-  expect(permit(DIRS, { tool: 'SubagentHandback', input: {} })).toEqual(expect.objectContaining({ decision: 'allow' }))
+test("handing the report back is left to the session: auto mode refuses a hook's allow of it", () => {
+  expect(permit(DIRS, { tool: 'SubagentHandback', input: {} })).toBe('theirs')
+})
+
+/** Let pending promise callbacks run (the model check before a spawn). */
+const settleSoon = async (): Promise<void> => {
+  for (let turn = 0; turn < 20; turn++) await Promise.resolve()
+}
+
+const REPORT = '<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>'
+const NOTE = { ...DONE, answer: 'The report was handed back.' }
+
+test("the report a reviewer handed back is its answer, not the note it ends on", async () => {
+  const { $ } = fakeEngine({
+    engine: {},
+    agents: [NOTE],
+    whileRunning: async agentId => {
+      await runHandback(agentId, REPORT, async () => ({ result: 'delivered', isError: false }))
+    },
+  })
+  expect(await runReviewer($, TASK)).toEqual(expect.objectContaining({ ok: true, answer: REPORT }))
+})
+
+for (const [why, outcome] of [
+  ['the session refused it', { deny: 'Only the auto-mode classifier can allow SubagentHandback' }],
+  ['it failed', { result: 'no', isError: true }],
+] as const) {
+  test(`a handback is not the answer when ${why}: it delivered nothing`, async () => {
+    const { $ } = fakeEngine({
+      engine: {},
+      agents: [NOTE],
+      whileRunning: async agentId => {
+        await runHandback(agentId, REPORT, async () => outcome)
+      },
+    })
+    expect(await runReviewer($, TASK)).toEqual(expect.objectContaining({ ok: true, answer: NOTE.answer }))
+  })
+}
+
+test('a report handed back before the spawn resolved is still the answer, as an early completion is', async () => {
+  const { $ } = fakeEngine({ engine: {}, agents: [] })
+  let spawned: (value: { agentId: string; model: string }) => void = () => undefined
+  ;($.agent as { spawn: unknown }).spawn = () =>
+    new Promise(resolve => {
+      spawned = resolve
+    })
+  const ran = runReviewer($, TASK)
+  await settleSoon()
+  // The reviewer hands back and ends while its spawn is still pending.
+  await runHandback('agent-fast', REPORT, async () => ({ result: 'delivered', isError: false }))
+  deliver('agent-fast', NOTE)
+  spawned({ agentId: 'agent-fast', model: 'claude-haiku-5-5' })
+  expect(await ran).toEqual(expect.objectContaining({ ok: true, answer: REPORT }))
+})
+
+test("a handback by an agent that is not a running reviewer is not kept", async () => {
+  const { $ } = fakeEngine({ engine: {} })
+  await runHandback('agent-stranger', REPORT, async () => ({ result: 'delivered', isError: false }))
+  deliver('agent-stranger', NOTE)
+  expect(await answerOf($, 'agent-stranger', 900)).toEqual(NOTE)
 })
 
 // --------------------------------------------------------------------------

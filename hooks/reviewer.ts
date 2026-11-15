@@ -91,6 +91,11 @@ const everSpawned = new Set<string>()
 const checkedModels = new Set<string>()
 /** Model requests per reviewer, counted from its `turn.step`s until its answer is delivered. */
 const steps = new Map<string, number>()
+/**
+ * Reports reviewers handed back through `SubagentHandback`, by agent id, until their answer is
+ * delivered. Only a call that ran is kept: one the session refused delivered nothing.
+ */
+const handbacks = new Map<string, string>()
 /** Spawns not resolved yet: a reviewer's first tool call can come before its id is known. */
 let spawning = 0
 let spawningDirs: readonly string[] = []
@@ -124,11 +129,46 @@ export function countStep(agentId: string): void {
   }
 }
 
+/**
+ * Keep the report a reviewer handed back (from a `tool.call` hook, once the call ran).
+ *
+ * In auto mode the host tells a subagent that only a `SubagentHandback` call reaches its caller,
+ * and the subagent's last text is then often a note about the handback, not its report. The
+ * report it handed back is its answer.
+ */
+export function handBack(agentId: string, message: string): void {
+  // A reviewer can hand back before its spawn resolves with its id, as its answer can (`early`):
+  // kept while a spawn is pending too. Only the review waiting on this id ever reads it, after
+  // the spawn's checks; any other agent's is dropped with its own completion (`deliver`).
+  if (!running.has(agentId) && spawning === 0) return
+  handbacks.set(agentId, message)
+  if (handbacks.size > EARLY_LIMIT) {
+    const oldest = handbacks.keys().next().value
+    if (oldest !== undefined && oldest !== agentId) handbacks.delete(oldest)
+  }
+}
+
+/** How a tool call came out, as far as a handback needs it. */
+export type CallOutcome = { deny?: string; isError?: boolean }
+
+/**
+ * Run a subagent's `SubagentHandback` call (`run` is the hook's `next`) and keep its report once
+ * it ran: a handback the session refused, or one that failed, delivered nothing.
+ */
+export async function runHandback<T extends CallOutcome>(agentId: string, message: unknown, run: () => Promise<T>): Promise<T> {
+  const outcome = await run()
+  if (outcome.deny === undefined && outcome.isError !== true && typeof message === 'string') handBack(agentId, message)
+  return outcome
+}
+
 /** Hand a subagent's answer to the review waiting on it (from a `turn.complete` hook). */
 export function deliver(agentId: string, delivered: Completion): void {
   const counted = steps.get(agentId)
   steps.delete(agentId)
-  const completion = counted === undefined ? delivered : { ...delivered, requests: counted }
+  const handed = handbacks.get(agentId)
+  handbacks.delete(agentId)
+  const answered = handed === undefined ? delivered : { ...delivered, answer: handed }
+  const completion = counted === undefined ? answered : { ...answered, requests: counted }
   const resolve = waiting.get(agentId)
   if (resolve !== undefined) {
     waiting.delete(agentId)
@@ -350,7 +390,8 @@ export function permit(dirs: readonly string[], call: Check): Decision {
     // A read outside the bundle and the roots is left to the session's own rules.
     return path !== undefined && dirs.some(dir => within(path, dir)) ? { decision: 'allow', reason: 'a file of the review' } : 'theirs'
   }
-  // Handing the report back is how some sessions deliver a subagent's answer, not a write.
-  if (call.tool === 'SubagentHandback') return { decision: 'allow', reason: "the reviewer's report" }
+  // Handing the report back is how auto mode delivers a subagent's answer, not a write. Only auto
+  // mode's own classifier may allow it: a hook's allow is refused, and the report never arrives.
+  if (call.tool === 'SubagentHandback') return 'theirs'
   return { decision: 'deny', reason: 'The reviewer only reads.' }
 }

@@ -102,6 +102,12 @@ When the model cannot be used, the loop says which model, for which round, and w
 to choose another (`/arl-model default`, or `/arl-model <model>`; choosing ends the wait), accept
 the stage, keep going on the same model, or stop. Headless, Claude is told to stop and tell you.
 
+In auto mode the session tells the reviewer to deliver its report with `SubagentHandback`, and
+only auto mode's own classifier may allow that call. The loop leaves it to the classifier, and
+reads the report the call delivered as the reviewer's answer, since the reviewer's last message is
+then often only a note about the handback. A handback the session refuses delivers nothing, and
+the reviewer's last message is read as before.
+
 ## What it does not do
 
 It does not enforce anything. Claude can commit without a review, ignore a finding, or write
