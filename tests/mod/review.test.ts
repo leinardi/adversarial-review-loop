@@ -15,12 +15,12 @@
 // You should have received a copy of the GNU General Public License
 // along with adversarial-review-loop.  If not, see <http://www.gnu.org/licenses/>.
 
-// The review and clarify flows: one round on the subagent, its repair, its failures, the external
+// The review flow: one round on the subagent, its repair, its failures, the external
 // harness, and what Claude is told when the loop needs the user.
 
 import type { EngineInterface } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { clarifyWith, reviewWith, session } from '../../hooks/flow'
+import { reviewWith, session } from '../../hooks/flow'
 import { Interrupted } from '../../hooks/reviewer'
 import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, start, summary, world } from './world'
 
@@ -51,7 +51,7 @@ test('a review runs one fresh reviewer on the prepared prompt and records its an
   expect(w.written.get(PREPARED.answer_file)).toBe(APPROVED.answer)
   expect(w.commands()).toEqual(['review prepare', 'review record'])
   const [prepare, record] = w.calls
-  expect(JSON.parse(prepare?.stdin ?? '')).toEqual({ verification: [{ command: 'make test', status: 0 }] })
+  expect(JSON.parse(prepare?.stdin ?? '')).toEqual({ verification: [{ command: 'make test', status: 0 }], dispositions: [] })
   expect(prepare?.args).toEqual(['review', 'prepare', '--session', 'session-1'])
   expect(record?.args.slice(0, 5)).toEqual(['review', 'record', 'r1-1', '--answer', PREPARED.answer_file])
   expect(JSON.parse(record?.args.at(-1) ?? '{}')).toEqual({
@@ -60,14 +60,61 @@ test('a review runs one fresh reviewer on the prepared prompt and records its an
     cache_read_tokens: 3,
     cache_creation_tokens: 4,
     duration_ms: 1000,
+    // The model that answered: what /arl-stats names the round by.
+    model: 'haiku',
   })
+})
+
+test('the model requests a round made reach the engine, summed over its repair', async () => {
+  at()
+  const repair = {
+    ok: true,
+    status: 'repair',
+    review_id: 'r1-1',
+    prompt_file: '/work/.arl/reviews/r1-001/repair-prompt.md',
+    bundle_dir: PREPARED.bundle_dir,
+    answer_file: '/work/.arl/reviews/r1-001/repair-answer.md',
+  }
+  let records = 0
+  const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': () => (++records === 1 ? repair : RECORDED) }, files: PROMPTS })
+  await review($, {}, reviewer([{ ...APPROVED, answer: 'no block', requests: 7 }, { ...APPROVED, requests: 2 }]).run)
+  const [first, second] = w.calls.filter(call => call.args[1] === 'record').map(call => JSON.parse(call.args.at(-1) ?? '{}'))
+  expect(first.turns).toBe(7)
+  expect(second.turns).toBe(9)
+})
+
+test('an answer that cannot be saved is a failure that still reports what the round cost', async () => {
+  at()
+  const failed = { ...RECORDED, verdict: 'OP_FAILURE', message: 'The reviewer failed.' }
+  const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': failed }, files: PROMPTS })
+  const broken = { ...$, fs: { ...$.fs, write: () => Promise.reject(new Error('disk full')) } } as typeof $
+  await review(broken, {}, reviewer([{ ...APPROVED, requests: 4 }]).run)
+  const last = w.calls.at(-1)?.args ?? []
+  expect(last.slice(0, 5)).toEqual(['review', 'record', 'r1-1', '--failed', 'operational'])
+  expect(JSON.parse(last.at(-1) ?? '{}')).toEqual(expect.objectContaining({ turns: 4, output_tokens: 2, model: 'haiku' }))
+})
+
+test('a failed round reports what it cost too', async () => {
+  at()
+  const failed = { ...RECORDED, verdict: 'OP_FAILURE', message: 'The reviewer failed.' }
+  const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': failed }, files: PROMPTS })
+  await review($, {}, reviewer([{ ok: false, kind: 'transient', error: 'API error', requests: 3, durationMs: 50 }]).run)
+  expect(JSON.parse(w.calls.at(-1)?.args.at(-1) ?? '{}')).toEqual({ turns: 3, duration_ms: 50 })
 })
 
 test('a review with no verification sends an empty list, never nothing', async () => {
   at()
   const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': RECORDED }, files: PROMPTS })
   await review($, {}, reviewer([APPROVED]).run)
-  expect(JSON.parse(w.calls[0]?.stdin ?? '')).toEqual({ verification: [] })
+  expect(JSON.parse(w.calls[0]?.stdin ?? '')).toEqual({ verification: [], dispositions: [] })
+})
+
+test('dispositions are passed to the engine beside the verification', async () => {
+  at()
+  const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': RECORDED }, files: PROMPTS })
+  const stated = [{ id: 'r1.2', status: 'rejected', note: 'api/x.py:9 already checks it' }]
+  await review($, { dispositions: stated }, reviewer([APPROVED]).run)
+  expect(JSON.parse(w.calls[0]?.stdin ?? '')).toEqual({ verification: [], dispositions: stated })
 })
 
 test('the configured model and timeout reach the reviewer', async () => {
@@ -76,6 +123,23 @@ test('the configured model and timeout reach the reviewer', async () => {
   const r = reviewer([APPROVED])
   await review($, {}, r.run)
   expect([r.tasks[0]?.model, r.tasks[0]?.timeoutSec]).toEqual(['sonnet', 60])
+})
+
+test('round 2 spawns the reviewer on the late model the engine names', async () => {
+  at()
+  let prepares = 0
+  const late = { ...PREPARED, review_id: 'r1-2', round: 2, model: 'sonnet', reviewer_model: 'sonnet' }
+  const { $ } = fakeEngine({
+    engine: { 'review prepare': () => (++prepares === 1 ? { ...PREPARED, reviewer_model: 'opus' } : late), 'review record': RECORDED },
+    files: PROMPTS,
+  })
+  const r = reviewer([APPROVED, APPROVED])
+  await review($, {}, r.run)
+  await review($, {}, r.run)
+  expect(r.tasks.map(task => [task.description, task.model])).toEqual([
+    ['Review phase1, round 1', 'opus'],
+    ['Review phase1, round 2', 'sonnet'],
+  ])
 })
 
 test('a malformed answer gets one repair run, recorded under the same review with the usage of both', async () => {
@@ -306,13 +370,6 @@ test('an approval recorded just before an interrupt stands: it is reported, not 
   expect(w.commands()).not.toContain('review abandon')
 })
 
-test('an empty question runs nothing', async () => {
-  at()
-  const { $, w } = fakeEngine({ engine: {} })
-  expect(await clarifyWith($, { question: '  ' }, reviewer([]).run)).toBe('clarify needs a question.')
-  expect(w.calls).toEqual([])
-})
-
 test('a record the engine refused, which spent the failure budget, is put to the user', async () => {
   at(false)
   const { $ } = fakeEngine({
@@ -400,64 +457,6 @@ test('headless, an unknown baseline stops the review and says why', async () => 
 })
 
 // --------------------------------------------------------------------------
-// clarify
-// --------------------------------------------------------------------------
-
-const ASKED = {
-  ok: true,
-  run_id: 'r1',
-  round_seq: 3,
-  question: 1,
-  reviewer_model: '',
-  timeout_sec: 900,
-  prompt_file: '/work/.arl/reviews/r1-003/clarify-1-prompt.md',
-  bundle_dir: '/work/.arl/reviews/r1-003/bundle',
-  roots: [LAUNCH],
-  answer_file: '/work/.arl/reviews/r1-003/clarify-1-answer.md',
-}
-
-test('a question goes to a fresh reviewer, and its reply to Claude', async () => {
-  at()
-  const { $, w } = fakeEngine({
-    engine: {
-      'clarify run-external': { ok: false, code: 'not-external', error: 'the subagent' },
-      'clarify prepare': ASKED,
-      'clarify record': { ok: true, reply: 'Line 3 still races.', retracted: [{ ordinal: 1 }], problem: '' },
-    },
-    files: { [ASKED.prompt_file]: 'Answer the question.' },
-  })
-  const r = reviewer([{ ok: true, answer: 'Line 3 still races.', durationMs: 5 }])
-
-  const text = await clarifyWith($, { question: 'Is the lock not enough?' }, r.run)
-
-  expect(text).toContain('Line 3 still races.')
-  expect(text).toContain('retracted 1 finding')
-  expect(w.calls.map(call => call.stdin).slice(0, 2)).toEqual(['Is the lock not enough?', 'Is the lock not enough?'])
-  expect(w.calls.at(-1)?.args).toEqual(['clarify', 'record', '3', '1', '--answer', ASKED.answer_file, '--run-id', 'r1'])
-  expect(r.tasks[0]?.prompt).toBe('Answer the question.')
-})
-
-test('the external reviewer answers a question through the engine alone', async () => {
-  at()
-  const { $, w } = fakeEngine({ engine: { 'clarify run-external': { ok: true, reply: 'Yes.', retracted: [], problem: '' } } })
-  const r = reviewer([])
-  expect(await clarifyWith($, { question: 'Sure?' }, r.run)).toContain('Yes.')
-  expect(w.commands()).toEqual(['clarify run-external'])
-  expect(r.tasks).toEqual([])
-})
-
-test('a reviewer that could not answer a question records nothing', async () => {
-  at()
-  const { $, w } = fakeEngine({
-    engine: { 'clarify run-external': { ok: false, code: 'not-external', error: '' }, 'clarify prepare': ASKED },
-    files: { [ASKED.prompt_file]: 'Answer.' },
-  })
-  const text = await clarifyWith($, { question: 'Why?' }, reviewer([{ ok: false, kind: 'transient', error: 'timed out' }]).run)
-  expect(text).toBe('The reviewer could not answer: timed out')
-  expect(w.commands()).not.toContain('clarify record')
-})
-
-// --------------------------------------------------------------------------
 // The tool, as Claude calls it
 // --------------------------------------------------------------------------
 
@@ -469,12 +468,4 @@ test('the review tool answers through the mod, and a reviewer the kit cannot sta
   expect(await callTool($, 'review')).toBe('The reviewer failed.')
   expect(w.spawns).toEqual([{ prompt: 'Review phase 1.', type: 'adversarial-review-loop:reviewer', model: undefined }])
   expect(w.calls.at(-1)?.args.slice(3, 5)).toEqual(['--failed', 'operational'])
-})
-
-test('an interrupted external question is said to be interrupted, not an engine refusal', async () => {
-  at()
-  const { $ } = fakeEngine({ engine: { 'clarify run-external': { ok: false, code: 'engine', error: 'the engine was stopped' } } })
-  const interrupted = new AbortController()
-  interrupted.abort()
-  expect(await clarifyWith($, { question: 'Why?' }, reviewer([]).run, interrupted.signal)).toBe('The question was interrupted; its reply was not recorded.')
 })

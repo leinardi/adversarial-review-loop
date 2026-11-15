@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from arl import harness
+from arl import contract, harness
 from arl.atomic import write_private_atomic
 from arl.config import Config
 from arl.util import truncate
@@ -100,6 +100,10 @@ def _findings_and_raw(review: Review) -> str:
     if review.supersedes:
         out.append("\n## Reversals of earlier rounds (SUPERSEDES)\n\n")
         out.append(f"```\n{review.supersedes}```\n")
+    if review.resolved:
+        out.append("\n## Earlier findings the reviewer marked resolved (RESOLVED)\n\n")
+        out.append("The reviewer's statement, with its evidence; recorded, never read for the verdict.\n\n")
+        out.append(f"```\n{review.resolved}```\n")
     out.append("\n## Raw reviewer output\n\n")
     out.append("````\n")
     out.append(_raw_text(review.raw))
@@ -191,6 +195,7 @@ def render_report(review: Review, target: Target, *, seq: str, config: Config) -
     out.append(_usage_line(review))
     if review.error:
         out.append(f"- engine note: {review.error}\n")
+    out.extend(f"- engine note: {note}\n" for note in contract.records(review.notes))
 
     out.append(_findings_and_raw(review))
     return "".join(out)
@@ -235,6 +240,13 @@ def _footer(review: Review, *, waiting: bool) -> str:
     return _PROSE_FOOTER
 
 
+def _with_ids(review: Review, lines: str) -> list[str]:
+    """``lines``, each prefixed with its finding id once the round is recorded (``Review.ordinal``)."""
+    if not review.ordinal:
+        return contract.records(lines)
+    return [f"{ident} {line}" for ident, line in contract.finding_ids(review.ordinal, review.all_findings, lines)]
+
+
 def reason(review: Review, headline: str, *, config: Config, waiting: bool = False) -> str:
     """The message ``review record`` hands back to Claude when a review did not approve.
 
@@ -244,6 +256,7 @@ def reason(review: Review, headline: str, *, config: Config, waiting: bool = Fal
     out: list[str] = [f"{headline}\n"]
     if review.error:
         out.append(f"\nReview note: {review.error}\n")
+    out.extend(f"\nReview note: {note}\n" for note in contract.records(review.notes))
     if review.repaired:
         out.append(
             "\nReview note: the reviewer's findings block was malformed, so the findings below were re-emitted by a "
@@ -251,14 +264,24 @@ def reason(review: Review, headline: str, *, config: Config, waiting: bool = Fal
         )
     if review.findings:
         out.append(f"\nBlocking findings (actionable, severity >= {config.as_str('block_severity')}) -- every one must be resolved:\n\n")
-        out.append(review.findings)
+        for shown, line in zip(_with_ids(review, review.findings), contract.records(review.findings), strict=True):
+            out.append(f"{shown}\n")
+            # The reviewer's evidence that the defect is gone; the next round judges the defect.
+            check = contract.done_when(line)
+            if check:
+                out.append(f"  suggested check: {check}\n")
     if review.deferred:
         # A `CHANGES_REQUIRED` that carries deferred lines: the reviewer's own verdict blocked
         # (stricter wins), or other findings did. Either way these are shown as what they are.
         out.append(f"\n{deferred_text(review, what='round')}")
     if review.all_findings and review.all_findings != review.findings:
         out.append("\nAll findings reported (non-blocking ones included, for context):\n\n")
-        out.append(review.all_findings)
+        out.extend(f"{line}\n" for line in _with_ids(review, review.all_findings))
+    if review.ordinal and review.all_findings:
+        out.append(
+            "\nEach finding's id (r<round>.<n>) is how the next review call names it: pass `dispositions` saying which "
+            "you fixed and which you reject, with a note citing the file and line that shows why.\n"
+        )
     if review.supersedes:
         out.append("\nReversals of earlier rounds (SUPERSEDES lines) -- recorded, not verdict-changing:\n\n")
         out.append(review.supersedes)

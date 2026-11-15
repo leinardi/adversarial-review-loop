@@ -39,7 +39,7 @@ from typing import Final
 
 from arl import reviewer_probe
 from arl.config import Config
-from arl.harness import ClarifySpec, Command, PayloadError, ReviewSpec, Usage, model
+from arl.harness import Command, PayloadError, ReviewSpec, Usage, model
 
 __all__ = [
     "AGENT",
@@ -156,19 +156,6 @@ class OpenCodeHarness:
 
     def review_command(self, spec: ReviewSpec) -> Command:
         """``opencode run <prompt> …`` plus the permission document as an env override."""
-        return Command(
-            argv=[
-                self.binary,
-                "run",
-                _with_system_prompt(spec.prompt_text, spec.system_prompt),
-                *review_argv(spec.title, config=spec.config),
-            ],
-            env=isolation_env(spec.config, {"OPENCODE_CONFIG_CONTENT": config_content(spec.bundle_dir, spec.roots)}),
-            cwd=spec.repo,
-        )
-
-    def clarify_command(self, spec: ClarifySpec) -> Command:
-        """A clarify run: the same shape as a review, reading the same bundle."""
         return Command(
             argv=[
                 self.binary,

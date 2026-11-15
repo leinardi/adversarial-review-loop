@@ -73,6 +73,7 @@ tells Claude to stop and tell you.
 | `/arl-phases` | list every phase of the run |
 | `/arl-pane` | close the review pane, or open it again. Closed by you (this, ctrl+x x), it stays closed for the session until you open it |
 | `/arl-report [N]` | the newest stored review report, or the N-th, in a pane of its own that takes the keys to scroll; Esc or its Close closes it |
+| `/arl-stats` | what each review round cost and found: model, requests, tokens, findings by severity and the blocking count, failed rounds included, in the report pane |
 | `/arl-pause` | stop the run after the current phase, until `/arl-resume`: the loop prompts nothing, and a review Claude asks for still runs and tells it to stop there |
 | `/arl-accept` | approve the current phase (or the final review) as it stands, without a review |
 | `/arl-finish` | require a final review of the whole run before it completes |
@@ -83,9 +84,10 @@ tells Claude to stop and tell you.
 The `arl-` prefix is not decoration: Claude Code ships `/status`, `/resume` and `/config`, and
 refuses a plugin command of the same name.
 
-Claude itself uses four tools the plugin registers: `set_phases`, `add_root` (before it changes a
-folder outside every root through Bash), `review` and `clarify` (one question to the reviewer about
-its findings).
+Claude itself uses three tools the plugin registers: `set_phases`, `add_root` (before it changes a
+folder outside every root through Bash) and `review`. After a review that asked for changes,
+`review` also takes Claude's dispositions: each finding, by its id (`r1.3`), fixed or rejected with
+a note, which the next reviewer checks against the code.
 
 ## 🔧 Configuration
 

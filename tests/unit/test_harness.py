@@ -32,7 +32,7 @@ import pytest
 from conftest import config_with
 
 from arl import harness, runner
-from arl.config import DEFAULTS
+from arl.config import DEFAULTS, for_round
 from arl.harness import opencode
 
 #: Payloads the stdin tests round-trip. Named because ruff counts a bytes literal in a
@@ -304,15 +304,9 @@ def test_the_permission_reads_the_bundle_and_every_root_and_nothing_else(tmp_pat
     assert {key for key, value in document.items() if value == "allow"} == {"read", "grep", "glob", "list"}
 
 
-@pytest.mark.parametrize("which", ["review", "clarify"])
-def test_both_opencode_commands_carry_the_roots_in_their_permission(which: str, tmp_path: Path) -> None:
+def test_the_opencode_command_carries_the_roots_in_its_permission(tmp_path: Path) -> None:
     spec = spec_for(opencode.HARNESS, tmp_path)
-    if which == "review":
-        built = opencode.HARNESS.review_command(spec)
-    else:
-        built = opencode.HARNESS.clarify_command(
-            harness.ClarifySpec(repo=spec.repo, prompt_text="why?", title="t", bundle_dir=spec.bundle_dir, roots=spec.roots, config=spec.config)
-        )
+    built = opencode.HARNESS.review_command(spec)
     allowed = json.loads(built.env["OPENCODE_CONFIG_CONTENT"])["permission"]["external_directory"]
     assert "/elsewhere/web/**" in allowed
     assert "-s" not in built.argv, "every round is a fresh reviewer; nothing continues a session"
@@ -368,3 +362,19 @@ def test_a_variant_in_both_model_and_variant_is_refused(tmp_path: Path) -> None:
     )
     with pytest.raises(harness.PayloadError):
         opencode.HARNESS.review_command(spec)
+
+
+@pytest.mark.parametrize(
+    ("round_number", "final", "expected"),
+    [(1, False, "vendor/first"), (2, False, "vendor/late"), (5, False, "vendor/late"), (1, True, "vendor/first")],
+)
+def test_opencode_runs_late_model_from_round_2_of_a_phase(round_number: int, final: bool, expected: str) -> None:
+    cfg = for_round(config_with(harness="opencode", model="vendor/first", late_model="vendor/late"), round_number=round_number, final=final)
+    argv = opencode.review_argv("t", config=cfg)
+    assert argv[argv.index("-m") + 1] == expected
+    assert harness.display_model(cfg) == expected
+
+
+def test_an_empty_late_model_keeps_the_harnesss_default_on_every_round() -> None:
+    cfg = for_round(config_with(harness="opencode"), round_number=3, final=False)
+    assert harness.model(cfg) == opencode.HARNESS.default_model

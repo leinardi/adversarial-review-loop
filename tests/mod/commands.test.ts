@@ -48,6 +48,7 @@ test('every command is registered with the arl- prefix: Claude Code ships /statu
     'arl-resume',
     'arl-status',
     'arl-report',
+    'arl-stats',
     'arl-phases',
     'arl-pane',
     'arl-pause',
@@ -221,6 +222,26 @@ test('/arl-report shows the report in a pane of its own, which scrolls, never in
   // A dialog: it takes the keys, so it scrolls, and Escape closes it.
   expect(w.openArgs.get('arl-report')).toEqual(expect.objectContaining({ focus: true, closeOnEscape: true }))
   expect(w.logged).toEqual([])
+})
+
+test('/arl-stats shows the statistics in the report pane, never in Claude\'s context', async () => {
+  at(true)
+  const { $, w } = fakeEngine({ engine: { stats: { ok: true, text: 'Run r1: 2 recorded round(s).', stats: {} } } })
+  expect(await runCommand($, 'arl-stats', '')).toBe('The run statistics are in the report pane.')
+  expect(w.calls[0]?.args).toEqual(['stats'])
+  expect(w.state.get('adversarial-review-loop/report')).toBe('Run r1: 2 recorded round(s).')
+  expect(w.opened).toEqual(['arl-report'])
+  expect(w.openArgs.get('arl-report')).toEqual(expect.objectContaining({ title: 'Review statistics', focus: true, closeOnEscape: true }))
+  expect(w.logged).toEqual([])
+})
+
+test('/arl-stats headless answers the engine text, or why there is none', async () => {
+  at()
+  const { $, w } = fakeEngine({ engine: { stats: { ok: true, text: 'Run r1: 2 recorded round(s).', stats: {} } } })
+  expect(await runCommand($, 'arl-stats', '')).toBe('Run r1: 2 recorded round(s).')
+  expect(w.opened).toEqual([])
+  const none = fakeEngine({ engine: { stats: { ok: false, code: 'no-run', error: 'there is no run here' } } })
+  expect(await runCommand(none.$, 'arl-stats', '')).toContain('there is no run here')
 })
 
 test('/arl-pane closes the open review pane, and the loop leaves it closed until it is asked for', async () => {

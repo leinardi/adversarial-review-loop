@@ -1,0 +1,14 @@
+{
+  "small": {
+    "commit": "f6992b61e0741075a7cc7040f15cc6254626cb16",
+    "diff": "24 KB"
+  },
+  "medium": {
+    "commit": "219159e69f3af2f5a2a0d21a09de13d934db55e7",
+    "diff": "93 KB"
+  },
+  "large1": {
+    "commit": "0b1bfc3ddd28c491048bd42b9c91517205ff5b83",
+    "diff": "141 KB"
+  }
+}

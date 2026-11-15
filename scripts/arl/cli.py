@@ -51,17 +51,15 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
   report [N]                                 the newest stored report, or the N-th
   config                                     show, set or unset a key; arguments as text on stdin
   status [--json]                            the run summary
+  stats [--json]                             what each review round cost and found
   pause | stop | finish | accept             user decisions
   next-action                                whether the loop continues after a turn
   review prepare [--session ID]              prepare the current stage's review; optional JSON
-                                             {"verification": [...]} on stdin
+                                             {"verification": [...], "dispositions": [...]} on stdin
   review record ID (--answer FILE | --failed transient|operational [--error TEXT])
                    [--usage JSON]            what the subagent round cost, for the report
   review run-external ID                     run the opencode reviewer and record its answer
   review abandon ID                          retire an interrupted review; no failure is counted
-  clarify prepare                            one question (stdin) about the latest round
-  clarify record SEQ N --answer FILE [--run-id ID]
-  clarify run-external                       ask the opencode reviewer (question on stdin)
 
 Every subcommand prints one JSON object on stdout.
 """
@@ -100,6 +98,8 @@ def _parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", add_help=False)
     # Accepted and ignored: every answer is JSON already, and the plan's spelling is `status --json`.
     status.add_argument("--json", action="store_true", dest="_json")
+    # The same: the answer carries the text and the figures both.
+    sub.add_parser("stats", add_help=False).add_argument("--json", action="store_true", dest="_json")
     resume = sub.add_parser("resume", add_help=False)
     resume.add_argument("--session", default="")
     for name in ("pause", "stop", "finish", "accept", "next-action"):
@@ -116,32 +116,22 @@ def _parser() -> argparse.ArgumentParser:
     record.add_argument("--usage", default="")
     review.add_parser("run-external", add_help=False).add_argument("review_id")
     review.add_parser("abandon", add_help=False).add_argument("review_id")
-    clarify = sub.add_parser("clarify", add_help=False).add_subparsers(dest="action", parser_class=_Parser)
-    clarify.add_parser("prepare", add_help=False)
-    clarify.add_parser("run-external", add_help=False)
-    answer = clarify.add_parser("record", add_help=False)
-    answer.add_argument("round_seq", type=int)
-    answer.add_argument("question", type=int)
-    answer.add_argument("--answer", required=True)
-    answer.add_argument("--run-id", dest="run_id", default="")
     return parser
 
 
 #: The first word of every subcommand: ``review prepare`` is the ``review-prepare`` command.
-_TOP_LEVEL: frozenset[str] = frozenset(name.split("-", 1)[0] if name.startswith(("review-", "clarify-")) else name for name in COMMANDS)
+_TOP_LEVEL: frozenset[str] = frozenset(name.split("-", 1)[0] if name.startswith("review-") else name for name in COMMANDS)
 
 #: Subcommands whose stdin is read, and the key it lands under.
 _STDIN: dict[str, str] = {
     "config": "args",
     "set-phases": "phases",
-    "review-prepare": "verification",
-    "clarify-prepare": "question",
-    "clarify-run-external": "question",
+    "review-prepare": "stdin",
 }
 
 
 def _read_stdin(name: str) -> Any:
-    """What a command reads on stdin: JSON, except a clarify question, which is text.
+    """What a command reads on stdin: JSON, except ``config``'s arguments, which are text.
 
     Unreadable input becomes ``None``, which the command refuses with its own code.
     """
@@ -149,7 +139,7 @@ def _read_stdin(name: str) -> Any:
         raw = sys.stdin.read()
     except ValueError:  # UnicodeDecodeError included
         return None
-    if name.startswith("clarify-") or name == "config":
+    if name == "config":
         return raw
     if name == "review-prepare" and not raw.strip():
         return None
@@ -159,8 +149,8 @@ def _read_stdin(name: str) -> Any:
         # Verification that cannot be read is refused, not dropped: the reviewer would be told
         # nothing was reported.
         return "malformed" if name == "review-prepare" else None
-    if name == "review-prepare":
-        return value.get("verification") if isinstance(value, dict) else "malformed"
+    if name == "review-prepare" and not isinstance(value, dict):
+        return "malformed"
     return value
 
 
@@ -195,7 +185,7 @@ def main(argv: list[str]) -> int:
     name = parsed.pop("command", None)
     parsed.pop("_json", None)
     action = parsed.pop("action", None)
-    if name in ("review", "clarify"):
+    if name == "review":
         if action is None:
             sys.stderr.write(USAGE)
             return 2
@@ -207,6 +197,11 @@ def main(argv: list[str]) -> int:
         parsed["choice"] = "commit"
     if name in _STDIN:
         parsed[_STDIN[name]] = _read_stdin(name)
+    if name == "review-prepare":
+        # Both halves refuse alike when the document could not be read.
+        payload = parsed.pop("stdin")
+        parsed["verification"] = payload.get("verification") if isinstance(payload, dict) else payload
+        parsed["dispositions"] = payload.get("dispositions") if isinstance(payload, dict) else payload
     return _run(name, parsed)
 
 

@@ -229,17 +229,23 @@ export async function addRoot($: EngineInterface, input: Record<string, unknown>
   return `Registered root ${String(answer.alias)}, but it already holds changes, so its baseline is unknown and nothing in it can be reviewed until the user picks one. Tell the user.`
 }
 
-/** Reviewer usage as the engine's `--usage` reads it. */
-function usageArgs(usage: TurnUsage | undefined, durationMs: number | undefined): string[] {
-  if (usage === undefined && durationMs === undefined) return []
+/** What a review round's runs cost so far, summed over the review and its repair. */
+type Spent = { usage?: TurnUsage; durationMs?: number; requests?: number }
+
+/** Reviewer usage as the engine's `--usage` reads it; `model` is the one that answered. */
+export function usageArgs(spent: Spent): string[] {
+  const { usage, durationMs, requests } = spent
+  if (usage === undefined && durationMs === undefined && requests === undefined) return []
   return [
     '--usage',
     JSON.stringify({
+      turns: requests,
       input_tokens: usage?.input_tokens,
       output_tokens: usage?.output_tokens,
       cache_read_tokens: usage?.cache_read_input_tokens,
       cache_creation_tokens: usage?.cache_creation_input_tokens,
       duration_ms: durationMs,
+      model: usage?.model,
     }),
   ]
 }
@@ -256,7 +262,7 @@ function sum(a: TurnUsage | undefined, b: TurnUsage | undefined): TurnUsage | un
   }
 }
 
-/** A prepared review or clarify call, as the engine answered `prepare`. */
+/** A prepared review, as the engine answered `prepare`. */
 type Prepared = Answer & {
   prompt_file: string
   bundle_dir: string
@@ -286,9 +292,6 @@ async function ask($: EngineInterface, reviewer: Reviewer, prepared: Prepared, s
   })
 }
 
-/** What Claude is told when the person interrupted a question: its reply was not recorded. */
-const QUESTION_INTERRUPTED = 'The question was interrupted; its reply was not recorded.'
-
 /** What Claude is told when the person interrupted a review: nothing was recorded. */
 const INTERRUPTED = 'The review was interrupted, and nothing was recorded. Call review again when the user wants it.'
 
@@ -296,30 +299,32 @@ const INTERRUPTED = 'The review was interrupted, and nothing was recorded. Call 
 async function reviewBySubagent($: EngineInterface, reviewer: Reviewer, prepared: Prepared): Promise<Answer> {
   const id = String(prepared.review_id)
   let step: { prompt_file: string; answer_file: string } = prepared
-  let usage: TurnUsage | undefined
-  let durationMs: number | undefined
+  const spent: Spent = {}
   let recorded: Answer = { ok: false, code: 'engine', error: 'no review ran' }
   for (const attempt of [1, 2]) {
     const ran = await ask($, reviewer, prepared, step, `Review ${String(prepared.label)}, round ${String(prepared.round)}${attempt > 1 ? ' (repair)' : ''}`)
-    usage = sum(usage, ran.usage)
-    if (ran.durationMs !== undefined) durationMs = (durationMs ?? 0) + ran.durationMs
+    spent.usage = sum(spent.usage, ran.usage)
+    if (ran.durationMs !== undefined) spent.durationMs = (spent.durationMs ?? 0) + ran.durationMs
+    if (ran.requests !== undefined) spent.requests = (spent.requests ?? 0) + ran.requests
     if (!ran.ok) {
-      return run($, ['review', 'record', id, '--failed', ran.kind, '--error', ran.error, ...usageArgs(usage, durationMs)])
+      return run($, ['review', 'record', id, '--failed', ran.kind, '--error', ran.error, ...usageArgs(spent)])
     }
     try {
       await $.fs.write(step.answer_file, ran.answer)
     } catch (error) {
-      return run($, ['review', 'record', id, '--failed', 'operational', '--error', `the answer could not be saved: ${String(error)}`])
+      return run($, ['review', 'record', id, '--failed', 'operational', '--error', `the answer could not be saved: ${String(error)}`, ...usageArgs(spent)])
     }
-    recorded = await run($, ['review', 'record', id, '--answer', step.answer_file, ...usageArgs(usage, durationMs)])
+    recorded = await run($, ['review', 'record', id, '--answer', step.answer_file, ...usageArgs(spent)])
     if (recorded.status !== 'repair') return recorded
     step = recorded as Answer & { prompt_file: string; answer_file: string }
   }
   return recorded
 }
 
-async function prepareReview($: EngineInterface, verification: unknown): Promise<Answer> {
-  return run($, ['review', 'prepare', '--session', session.id], JSON.stringify({ verification: verification ?? [] }))
+async function prepareReview($: EngineInterface, input: Record<string, unknown>): Promise<Answer> {
+  // The engine checks both: a disposition naming no finding of the previous round is refused,
+  // and on a stage's first round, with no previous round, dispositions are ignored with a note.
+  return run($, ['review', 'prepare', '--session', session.id], JSON.stringify({ verification: input.verification ?? [], dispositions: input.dispositions ?? [] }))
 }
 
 export async function review($: EngineInterface, input: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
@@ -328,10 +333,10 @@ export async function review($: EngineInterface, input: Record<string, unknown>,
 
 /** `signal` is the tool call's own: aborted when the person interrupts the review. */
 export async function reviewWith($: EngineInterface, input: Record<string, unknown>, reviewer: Reviewer, signal?: AbortSignal): Promise<string> {
-  let prepared = await prepareReview($, input.verification)
+  let prepared = await prepareReview($, input)
   if (!prepared.ok && prepared.code === 'baseline-unknown') {
     if (!(await chooseBaselines($))) return `${refused(prepared)}\n\nStop and tell the user: a root's baseline must be chosen before the review can run.`
-    prepared = await prepareReview($, input.verification)
+    prepared = await prepareReview($, input)
   }
   if (!prepared.ok) {
     // Whatever refused it (a stall, an oversized file, the failure budget a broken bundle spent),
@@ -384,58 +389,6 @@ export async function announce($: EngineInterface, recorded: Answer, message: st
   }
 }
 
-
-function clarifyText(answer: Answer): string {
-  const retracted = Array.isArray(answer.retracted) ? answer.retracted.length : 0
-  const notes = [
-    retracted ? `The reviewer retracted ${retracted} finding(s); the next round is told.` : '',
-    typeof answer.problem === 'string' && answer.problem ? `Note: ${answer.problem}` : '',
-  ].filter(note => note !== '')
-  return `The reviewer's reply:\n\n${String(answer.reply ?? '')}${notes.length ? `\n\n${notes.join('\n')}` : ''}`
-}
-
-export async function clarify($: EngineInterface, input: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
-  return clarifyWith($, input, task => runReviewer($, { ...task, signal }), signal)
-}
-
-/** `signal` is the tool call's own: aborted when the person interrupts the question. */
-export async function clarifyWith($: EngineInterface, input: Record<string, unknown>, reviewer: Reviewer, signal?: AbortSignal): Promise<string> {
-  const question = typeof input.question === 'string' ? input.question : ''
-  if (question.trim() === '') return 'clarify needs a question.'
-  // An external reviewer is run by the engine, which prepares the question itself; the subagent
-  // is refused there (`not-external`) before anything is prepared.
-  const external = await runStream($, ['clarify', 'run-external'], question)
-  if (external.ok) return clarifyText(external)
-  // An interrupt kills the external reviewer's engine, which then answers nothing readable.
-  if (signal?.aborted) return QUESTION_INTERRUPTED
-  if (external.code !== 'not-external') return refused(external)
-  const prepared = (await run($, ['clarify', 'prepare'], question)) as Prepared
-  if (!prepared.ok) return refused(prepared)
-  let ran: Ran
-  try {
-    ran = await ask($, reviewer, prepared, prepared, `Clarify review round ${String(prepared.round_seq)}`)
-  } catch (error) {
-    if (error instanceof Interrupted) return QUESTION_INTERRUPTED
-    throw error
-  }
-  if (!ran.ok) return `The reviewer could not answer: ${ran.error}`
-  try {
-    await $.fs.write(prepared.answer_file, ran.answer)
-  } catch (error) {
-    return `The reviewer's reply could not be saved: ${String(error)}`
-  }
-  const recorded = await run($, [
-    'clarify',
-    'record',
-    String(prepared.round_seq),
-    String(prepared.question),
-    '--answer',
-    prepared.answer_file,
-    '--run-id',
-    String(prepared.run_id),
-  ])
-  return recorded.ok ? clarifyText(recorded) : refused(recorded)
-}
 
 // --------------------------------------------------------------------------
 // Roots, and the turn's end

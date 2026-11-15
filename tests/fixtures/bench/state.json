@@ -1,0 +1,18 @@
+{
+ "roots": [
+  {
+   "alias": "case",
+   "path": "/case"
+  }
+ ],
+ "round_history": [
+  {
+   "label": "phase1",
+   "verdict": "CHANGES_REQUIRED",
+   "findings": [
+    "FINDING severity=high actionable=yes file=case/scripts/arl/review.py:153 | paused run tells Claude to commit rejected work",
+    "FINDING severity=low actionable=yes file=case/hooks/ui.tsx:12 | cosmetic"
+   ]
+  }
+ ]
+}

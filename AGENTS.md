@@ -26,7 +26,7 @@ as an approval.
 The architecture ([docs/architecture.md](docs/architecture.md) has the long form):
 
 - **The mod** (`hooks/mod.ts`): the orchestrator and UI. It registers the tools
-  Claude calls (`set_phases`, `add_root`, `review`, `clarify`), the reviewer subagent, the slash
+  Claude calls (`set_phases`, `add_root`, `review`), the reviewer subagent, the slash
   commands, and the band and review pane.
 - **The engine** (`scripts/arl/`, Python): workspace roots and snapshots, the review bundle,
   prompt composition, contract parsing and the verdict, stall detection, reports, and the run
@@ -62,24 +62,26 @@ The architecture ([docs/architecture.md](docs/architecture.md) has the long form
 | `scripts/arl.sh` | launcher: finds a Python 3.12 or newer and runs the bootstrap |
 | `scripts/arl-bootstrap.py` | trusted absolute entrypoint; establishes `sys.path` and `sys.pycache_prefix` before `arl` is imported |
 | `scripts/arl/cli.py` | subcommand dispatch: argv in, one JSON answer on stdout |
-| `scripts/arl/commands.py` | the command table: `init`, `resume`, `set-phases`, `root-add`, `root-remove`, `root-baseline`, `attach`, `status`, `report`, `config`, `pause`, `stop`, `finish`, `accept`, `next-action`, and the `review`/`clarify` subcommands |
+| `scripts/arl/commands.py` | the command table: `init`, `resume`, `set-phases`, `root-add`, `root-remove`, `root-baseline`, `attach`, `status`, `report`, `config`, `stats`, `pause`, `stop`, `finish`, `accept`, `next-action`, and the `review` subcommands |
 | `scripts/arl/configcmd.py` | `config`: every key with its layer, or set or unset one key |
-| `scripts/arl/state.py` | the run state in `<launch dir>/.arl/state.json`: stages, approvals, tickets, `next_action` |
+| `scripts/arl/state.py` | the run state in `<launch dir>/.arl/state.json`: stages, approvals, tickets, the rounds and failed rounds with their usage, the dispositions stated, `next_action` |
 | `scripts/arl/workspace.py` | workspace roots: git and shadow snapshots, nested-repository discovery, late baselines |
-| `scripts/arl/contract.py` | the reviewer output contract: `FINDING`/`SUPERSEDES` grammar, `parse`, the recomputed verdict, the late-round scope type, `parse_clarify` |
-| `scripts/arl/review.py` | the review pipeline: `review prepare`/`record`/`run-external`, repair, failure budgets, stalls, `clarify` |
-| `scripts/arl/bundle.py` | the review bundle: alias-prefixed diff chunks per root, `range.txt`, `verification.txt`, prior rounds, prompt composition |
+| `scripts/arl/contract.py` | the reviewer output contract: `FINDING`/`SUPERSEDES`/`RESOLVED` grammar, `parse`, the recomputed verdict, the replay of a phase's earlier blocking findings (what is still open, what closed each), the late-round scope type, finding ids, `done when` |
+| `scripts/arl/review.py` | the review pipeline: `review prepare`/`record`/`run-external`, dispositions, repair, failure budgets, stalls |
+| `scripts/arl/bundle.py` | the review bundle: alias-prefixed diff chunks per root, `range.txt`, `verification.txt`, prior rounds with their "Still open" list, prompt composition |
 | `scripts/arl/runner.py` | running the reviewer: the bounded runner, transcript reduction, failure classification |
 | `scripts/arl/harness/`, `reviewer_probe.py` | the reviewer-CLI seam; `opencode.py` is the one external harness, and the probe lists its models |
 | `scripts/arl/gitsnap.py` | temp-index snapshot, oversized guard, submodule detection |
 | `scripts/arl/oscillation.py` | stall detection across rounds |
 | `scripts/arl/guidance.py` | project review guidance: each root's review skill and the `review_guide` file |
 | `scripts/arl/report.py` | report storage and the text Claude sees |
+| `scripts/arl/stats.py` | `stats` (`/arl-stats`): each round's model, usage and findings from `round_history` and `failure_history`; display only |
 | `scripts/arl/atomic.py`, `config.py`, `globmatch.py`, `util.py`, `errors.py` | shared plumbing |
 | `prompts/*.md` | the reviewer prompts |
 | `tests/unit/` | pytest unit tests; shared fixtures in `conftest.py`, run fixtures in `run_common.py`, reviewer stand-ins in `reviewer_common.py` |
 | `tests/mod/` | the mod's tests under `claude plugin test`; the scripted engine and user in `world.ts` |
 | `tests/selftest.sh` | smoke test for `scripts/arl.sh` |
+| `tests/bench/` | the reviewer benchmark: `bench.py`, the seeded phases in `seeds/`, the baseline in its `README.md`; calls models, never part of `make test` |
 | `tests/STEP0.md` | live-session measurements of the Claude Code host; Session J covers the v4 mod surface |
 
 ## Generated: never hand-edit
@@ -99,6 +101,7 @@ make test-accept  # tests/selftest.sh only
 make test-mod     # the mod under `claude plugin test`; needs the claude binary
 make check        # pre-commit: shellcheck, markdownlint, yamllint, actionlint, ruff, mypy, eslint, tsc, licence headers
 make sync-pins    # propagate requirements-dev.txt into .pre-commit-config.yaml
+make bench-baseline  # the reviewer benchmark's round-1 matrix (tests/bench/README.md); calls models and costs money
 ```
 
 `make test` must pass before any commit, and a behaviour change needs a test that fails on the old

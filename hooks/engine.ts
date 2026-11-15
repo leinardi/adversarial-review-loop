@@ -61,8 +61,8 @@ export const ENGINE_TIMEOUT_MS = 600_000
 /**
  * Run one engine command and answer what it printed.
  *
- * `stdin` is always written and closed: `set-phases`, `review prepare` and `clarify prepare`
- * read their input to end of file, and an inherited stdin would hang them.
+ * `stdin` is always written and closed: `set-phases` and `review prepare` read their input to
+ * end of file, and an inherited stdin would hang them.
  */
 export async function engine($: EngineInterface, dir: string, args: readonly string[], stdin = ''): Promise<Answer> {
   try {

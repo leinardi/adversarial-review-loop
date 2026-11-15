@@ -29,7 +29,7 @@ ignore = [
 
 [lint.isort]
 # The package lives under scripts/, which isort cannot infer from the layout.
-known-first-party = ["arl"]
+known-first-party = ["arl", "bench"]
 
 [lint.pylint]
 allow-magic-value-types = ["str", "int"]

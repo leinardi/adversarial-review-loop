@@ -41,12 +41,14 @@ export type Completion = {
   reason: string
   usage?: TurnUsage
   durationMs: number
+  /** The model requests the run made, as its `turn.step`s counted them. */
+  requests?: number
 }
 
 /** A reviewer run: its answer, or why it gave none and how the failure budget counts it. */
 export type Ran =
-  | { ok: true; answer: string; usage?: TurnUsage; durationMs: number }
-  | { ok: false; kind: 'transient' | 'operational'; error: string; usage?: TurnUsage; durationMs?: number }
+  | { ok: true; answer: string; usage?: TurnUsage; durationMs: number; requests?: number }
+  | { ok: false; kind: 'transient' | 'operational'; error: string; usage?: TurnUsage; durationMs?: number; requests?: number }
 
 /** One review round's run. */
 export type Task = {
@@ -71,6 +73,8 @@ const running = new Map<string, readonly string[]>()
  * once its review is over it may do nothing at all, rather than fall back on the session's rules.
  */
 const everSpawned = new Set<string>()
+/** Model requests per reviewer, counted from its `turn.step`s until its answer is delivered. */
+const steps = new Map<string, number>()
 /** Spawns not resolved yet: a reviewer's first tool call can come before its id is known. */
 let spawning = 0
 let spawningDirs: readonly string[] = []
@@ -91,8 +95,24 @@ export async function registerReviewer($: EngineInterface, effort = ''): Promise
   })
 }
 
+/**
+ * Count one model request of a subagent (from a `turn.step` hook). Every subagent's is counted:
+ * a reviewer's first request can come before its spawn resolves with its id. A count leaves on
+ * the agent's `turn.complete`, and the map is bounded for one that never sends it.
+ */
+export function countStep(agentId: string): void {
+  steps.set(agentId, (steps.get(agentId) ?? 0) + 1)
+  if (steps.size > EARLY_LIMIT) {
+    const oldest = steps.keys().next().value
+    if (oldest !== undefined && oldest !== agentId) steps.delete(oldest)
+  }
+}
+
 /** Hand a subagent's answer to the review waiting on it (from a `turn.complete` hook). */
-export function deliver(agentId: string, completion: Completion): void {
+export function deliver(agentId: string, delivered: Completion): void {
+  const counted = steps.get(agentId)
+  steps.delete(agentId)
+  const completion = counted === undefined ? delivered : { ...delivered, requests: counted }
   const resolve = waiting.get(agentId)
   if (resolve !== undefined) {
     waiting.delete(agentId)
@@ -137,7 +157,7 @@ export async function answerOf($: EngineInterface, agentId: string, timeoutSec: 
 }
 
 function failed(kind: 'transient' | 'operational', error: string, completion?: Completion): Ran {
-  return { ok: false, kind, error, usage: completion?.usage, durationMs: completion?.durationMs }
+  return { ok: false, kind, error, usage: completion?.usage, durationMs: completion?.durationMs, requests: completion?.requests }
 }
 
 /** The person interrupted the review: no failure is counted, and its ticket is left to be abandoned. */
@@ -192,7 +212,7 @@ export function classify(completion: Completion | undefined, timeoutSec: number)
   if (completion === undefined) return failed('transient', `the reviewer did not answer within ${timeoutSec} s`)
   switch (completion.reason) {
     case 'answer':
-      return { ok: true, answer: completion.answer, usage: completion.usage, durationMs: completion.durationMs }
+      return { ok: true, answer: completion.answer, usage: completion.usage, durationMs: completion.durationMs, requests: completion.requests }
     case 'error':
       return failed('transient', 'the reviewer stopped on an API error', completion)
     case 'refusal':

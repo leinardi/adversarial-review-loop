@@ -1,0 +1,78 @@
+diff --git a/hooks/flow.ts b/hooks/flow.ts
+index c426c41..040217e 100644
+--- a/hooks/flow.ts
++++ b/hooks/flow.ts
+@@ -498,7 +498,7 @@ export async function continueRun($: EngineInterface): Promise<void> {
+   if (next.ok && next.action === 'continue' && typeof next.prompt === 'string') {
+     // After `next(e)`, compact then submit, awaited here: the order STEP0 J6 measured. Headless,
+     // compaction is refused, and the prompt is submitted uncompacted.
+-    if (next.compact === true && session.isInteractive) {
++    if (next.compact === true || session.isInteractive) {
+       await compactThenSubmit($, next.prompt)
+       return
+     }
+diff --git a/hooks/mod.ts b/hooks/mod.ts
+index e98901d..2ad90f4 100644
+--- a/hooks/mod.ts
++++ b/hooks/mod.ts
+@@ -119,7 +119,7 @@ export const register: Register = on => {
+     // A write the session's rules deny makes no root. One that may run (allowed, or put to the
+     // person) registers its folder first, so the baseline is the content before the change.
+     const check = await $.tool.check({ tool: call.tool, input: argumentsOf(call) } as never).catch(() => undefined)
+-    if (check?.decision === 'deny') return next(e)
++    if (check?.decision !== 'allow') return next(e)
+     // A registration that fails is said, never dropped: the write would land unreviewed.
+     const registered: Registration = await ensureRoot($, parentOf(file)).catch((error: unknown) => ({ note: unregistered(parentOf(file), String(error)) }))
+     const result = await next(e)
+diff --git a/scripts/arl/commands.py b/scripts/arl/commands.py
+index d77239a..bcab47d 100644
+--- a/scripts/arl/commands.py
++++ b/scripts/arl/commands.py
+@@ -256,7 +256,7 @@ def _require_untouched(run: RunState, root: dict[str, Any]) -> None:
+         now = workspace.snapshot(root, run.roots, run.paths) if here.exists() else workspace.empty_tree(root, run.paths)
+     except SnapshotError as exc:
+         raise RunError("kept", f"root {root['alias']!r} cannot be compared ({exc}); it stays") from exc
+-    if now != root["start_tree"]:
++    if now == root["start_tree"]:
+         raise RunError("kept", f"root {root['alias']!r} changed since it joined; it stays")
+ 
+ 
+diff --git a/scripts/arl/contract.py b/scripts/arl/contract.py
+index ac9f465..a4288a1 100644
+--- a/scripts/arl/contract.py
++++ b/scripts/arl/contract.py
+@@ -372,7 +372,7 @@ def unknown_alias(review: Review, aliases: frozenset[str], *, retired: frozenset
+     A ``SUPERSEDES`` line may also name a ``retired`` root (one the person removed): it retracts
+     an earlier round's finding there, which the contract asks for.
+     """
+-    for block, known in ((review.all_findings, aliases), (review.supersedes, aliases | retired)):
++    for block, known in ((review.all_findings, aliases | retired), (review.supersedes, aliases)):
+         for line in records(block):
+             match = FINDING_RE.match(line) or _SUPERSEDES_RE.match(line)
+             file = normalized_file(match.group("file")) if match else "-"
+diff --git a/scripts/arl/review.py b/scripts/arl/review.py
+index 765fedb..c1e8272 100644
+--- a/scripts/arl/review.py
++++ b/scripts/arl/review.py
+@@ -163,7 +163,7 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
+         stage = run.stage()
+         if stage not in ("phase", "final"):
+             raise RunError("nothing-to-review", "set the phases first" if stage == "plan" else "the run is complete")
+-        if not run.roots:
++        if run.roots is None:
+             # An empty bundle would show the reviewer nothing, and its approval would cover changes
+             # no one saw.
+             raise RunError("no-roots", "the run has no workspace root left: call add_root for the folder the phase changed")
+diff --git a/scripts/arl/workspace.py b/scripts/arl/workspace.py
+index 855471d..2a542e7 100644
+--- a/scripts/arl/workspace.py
++++ b/scripts/arl/workspace.py
+@@ -576,7 +576,7 @@ def discover(run: RunState, *, late: bool) -> list[str]:
+                 continue
+             if late:
+                 entry: dict[str, Any] = {
+-                    "alias": alias_for(nested, taken_aliases(run)),
++                    "alias": alias_for(nested, [other["alias"] for other in run.data["roots"]]),
+                     "path": str(nested),
+                     "kind": "git",
+                     "baseline": "unknown",

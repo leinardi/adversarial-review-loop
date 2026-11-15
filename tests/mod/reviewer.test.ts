@@ -19,10 +19,24 @@
 // end is classified, and what it may do.
 
 import { expect, test } from 'claude-code/testing'
-import { answerOf, classify, deliver, normalize, permit, REVIEWER_TOOLS, reviewerDecision, runReviewer, within } from '../../hooks/reviewer'
+import { answerOf, classify, countStep, deliver, normalize, permit, REVIEWER_TOOLS, reviewerDecision, runReviewer, within } from '../../hooks/reviewer'
 import { fakeEngine, PLUGIN, start, tool, world } from './world'
 
 const DONE = { answer: 'VERDICT APPROVED', reason: 'answer', durationMs: 10 }
+
+test("a subagent's model requests are counted until its answer, which carries them", async () => {
+  const { $ } = fakeEngine({ engine: {} })
+  countStep('agent-steps')
+  countStep('agent-steps')
+  countStep('agent-other')
+  deliver('agent-steps', DONE)
+  expect(await answerOf($, 'agent-steps', 900)).toEqual({ ...DONE, requests: 2 })
+  // Delivered, the count is gone: a later run of the same id starts from nothing.
+  deliver('agent-steps', DONE)
+  expect(await answerOf($, 'agent-steps', 900)).toEqual(DONE)
+  deliver('agent-other', DONE)
+  expect(await answerOf($, 'agent-other', 900)).toEqual({ ...DONE, requests: 1 })
+})
 
 // --------------------------------------------------------------------------
 // Waiting for the answer
@@ -108,6 +122,24 @@ test('paths are compared segment by segment, after resolving dots', () => {
 // Registration, as the session sees it
 // --------------------------------------------------------------------------
 
+test('the reviewer is told to work in few messages, within a budget: its cost is its context times its messages', async ($, on) => {
+  const w = world(on, { engine: {} })
+  await start($)
+  const prompt = String((w.registered.agents[0] as { prompt?: string } | undefined)?.prompt ?? '')
+  expect(prompt).toContain('Work in few messages.')
+  expect(prompt).toContain('read `range.txt` and every other bundle file your task message says to read in full, together')
+  expect(prompt).toContain('If you are past 12, stop investigating outside the bundle')
+  // A read cut short is finished: the budget never excuses leaving part of the diff unread.
+  expect(prompt).toContain('read on from the line it stopped at')
+  expect(prompt).toContain('no budget below excuses leaving part of it unread')
+  expect(prompt).not.toContain('never re-read a file')
+  // What to read in full is the task message's to say: a later round reads the increment.
+  expect(prompt).not.toContain('whole diff')
+  expect(prompt).toContain('once you have read what your task message says to read in full')
+  // Still a reviewer that only reads.
+  expect(prompt).toContain('You only read.')
+})
+
 test('the reviewer is registered read-only with no CLAUDE.md, and hidden from Claude', async ($, on) => {
   const w = world(on, { engine: {} })
   await start($)
@@ -123,7 +155,7 @@ test("the plugin's own tools are allowed on the main loop, whatever the session'
   world(on, { engine: {} })
   on('tool.check', () => ({ decision: 'ask', reason: 'the host asks' }))
   await start($)
-  for (const name of ['set_phases', 'add_root', 'review', 'clarify']) {
+  for (const name of ['set_phases', 'add_root', 'review']) {
     expect((await $.tool.check({ tool: tool(name), input: {} })).decision).toBe('allow')
   }
   expect((await $.tool.check({ tool: 'WebFetch', input: {} })).decision).toBe('ask')

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "M1",
+    "file": "scripts/arl/review.py",
+    "line": 153,
+    "symbols": ["_next_turn", "stop here", "paused"],
+    "severity": "high",
+    "what": "Condition inverted: on a paused run an APPROVED verdict tells Claude 'Stop here' without committing, while a rejected one tells it to commit the unapproved changes.",
+    "original": "... if verdict == \"APPROVED\" else \"Stop here: \"",
+    "seeded": "... if verdict != \"APPROVED\" else \"Stop here: \""
+  },
+  {
+    "id": "M2",
+    "file": "hooks/flow.ts",
+    "line": 474,
+    "symbols": ["dropRoot"],
+    "severity": "high",
+    "what": "dropRoot reports 'dropped' when the engine refused the removal, so a failure is treated as success: the root stays registered and the caller drops its note/retry.",
+    "original": "  if (!answer.ok) return 'kept'",
+    "seeded": "  if (!answer.ok) return 'dropped'"
+  },
+  {
+    "id": "M3",
+    "file": "hooks/commands.ts",
+    "line": 152,
+    "symbols": ["/arl-report", "showReport", "report()", "isInteractive"],
+    "severity": "medium",
+    "what": "Inverted interactive check: in interactive sessions the full raw report is returned into Claude's context and the pane is never shown; headless runs get the pane message instead of the text.",
+    "original": "  if (!session.isInteractive) return text",
+    "seeded": "  if (session.isInteractive) return text"
+  },
+  {
+    "id": "M4",
+    "file": "hooks/mod.ts",
+    "line": 106,
+    "symbols": ["sweepRoots", "retry.delete"],
+    "severity": "medium",
+    "what": "Inverted sweep condition: unresolved ('unknown') roots are removed from the retry set without being dropped, while resolved ones stay and are re-offered every turn.",
+    "original": "if ((await dropRoot($, alias)) !== 'unknown') retry.delete(alias)",
+    "seeded": "if ((await dropRoot($, alias)) === 'unknown') retry.delete(alias)"
+  },
+  {
+    "id": "M5",
+    "file": "scripts/arl/state.py",
+    "line": 583,
+    "symbols": ["resume_context", "approved_phases", "index < done"],
+    "severity": "medium",
+    "what": "Off-by-one: the last approved phase is not marked '(approved)' in the resume context, so a resumed session misreads progress.",
+    "original": "if index <= done",
+    "seeded": "if index < done"
+  },
+  {
+    "id": "M6",
+    "file": "scripts/arl/report.py",
+    "line": 229,
+    "symbols": ["_footer", "_PROSE_FOOTER"],
+    "severity": "medium",
+    "what": "_footer checks review.deferred (late-round, non-blocking findings) instead of all_findings, so a CHANGES_REQUIRED with findings but nothing deferred gets the prose-only footer and Claude is told no findings are listed.",
+    "original": "if review.findings or review.all_findings:",
+    "seeded": "if review.findings or review.deferred:"
+  }
+]

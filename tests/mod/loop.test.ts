@@ -43,7 +43,7 @@ function fileTools(on: On): void {
 test('every session gets the four tools, each with a schema', async ($, on) => {
   const w = world(on, { engine: {} })
   await start($)
-  expect(w.registered.tools.map(spec => spec.name)).toEqual(['set_phases', 'add_root', 'review', 'clarify'])
+  expect(w.registered.tools.map(spec => spec.name)).toEqual(['set_phases', 'add_root', 'review'])
   for (const spec of w.registered.tools) {
     expect(typeof spec.description).toBe('string')
     expect(spec.inputSchema).toEqual(expect.objectContaining({ type: 'object' }))

@@ -208,6 +208,34 @@ def test_a_saved_run_loads_back_identically(tmp_path: Path) -> None:
     assert loaded.data == run.data
 
 
+def test_a_state_written_with_clarify_history_and_without_dispositions_loads(tmp_path: Path) -> None:
+    """Clarify is gone: an older state keeps loading, and its retractions are simply not read."""
+    run = make_run(tmp_path)
+    with locked_state(run.paths):
+        run.save()
+    document = json.loads(run.paths.state_file.read_text())
+    del document["dispositions"]
+    document["clarify_history"] = [{"label": "phase1", "round_seq": 1, "supersedes": ["SUPERSEDES round=1 file=a | x"]}]
+    run.paths.state_file.write_text(json.dumps(document))
+    loaded = RunState.load(run.paths)
+    assert loaded is not None
+    assert (loaded.data["dispositions"], loaded.dispositions_of("phase1")) == ([], {})
+
+
+def test_a_later_statement_replaces_the_earlier_one_and_a_replan_clears_them(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    run.state_dispositions("phase1", [{"id": "r1.1", "status": "rejected", "note": "a"}], seq=2)
+    run.state_dispositions("phase1", [{"id": "r1.1", "status": "fixed", "note": "b"}, {"id": "r1.2", "status": "fixed", "note": ""}], seq=3)
+    stated = run.dispositions_of("phase1")
+    assert {ident: (entry["status"], entry["note"], entry["seq"]) for ident, entry in stated.items()} == {
+        "r1.1": ("fixed", "b", 3),
+        "r1.2": ("fixed", "", 3),
+    }
+    assert run.dispositions_of("phase2") == {}
+    run.set_phases(["only one"], replan=False)
+    assert run.dispositions_of("phase1") == {}
+
+
 @pytest.mark.parametrize(
     "document",
     [

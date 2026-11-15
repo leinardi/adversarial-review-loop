@@ -5,8 +5,12 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-merge-conflict
+      # A patch's blank context line is a single space: stripping it breaks the patch
+      # (tests/bench/seeds/).
       - id: end-of-file-fixer
+        exclude: \.patch$
       - id: trailing-whitespace
+        exclude: \.patch$
       - id: check-yaml
       - id: check-json
       - id: check-toml

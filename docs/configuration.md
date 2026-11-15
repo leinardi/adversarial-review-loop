@@ -27,7 +27,8 @@ again when `/arl-config` sets it.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `harness` | `subagent` | who reviews: `subagent`, a hidden Claude Code subagent the plugin registers, or `opencode`, which the engine runs itself. An unknown name is refused, never replaced by the default |
-| `model` | empty: the session's subagent default, or `openai/gpt-5.6-sol` for `opencode` | the reviewer's model |
+| `model` | empty: the session's subagent default, or `openai/gpt-5.6-sol` for `opencode` | the reviewer's model for the first round of each phase and for the final review. `opus` is the recommended value for the subagent |
+| `late_model` | `sonnet` on `subagent`; `model` on `opencode` | the reviewer's model from the second round of a phase on, which checks the fixes against findings already recorded. The final review always uses `model`. With the round-2 accounting, Sonnet and Opus each blocked on 12 of 12 seeded defects (24 of 24 combined), at 36 to 45 cost units against Opus's 41 to 69, and no run approved ([measured](../tests/bench/README.md#round-2-with-resolved-accounting)). OpenCode keeps `model`: its model names are the provider's own, and nothing was measured there. Set it to `""` to use `model` on every round; unset it to get the harness default back |
 | `effort` | empty: the agent's default | the subagent reviewer's effort: `low`, `medium`, `high`, `xhigh` or `max`. A value that is no level is ignored, and said at session start |
 | `variant` | empty | OpenCode only: the model variant, passed as `-m <model>#<variant>`. A `model` containing `#` and a `variant` together are refused |
 | `disable_project_config` | `false` | OpenCode only: ignore the repository's own OpenCode config (`OPENCODE_DISABLE_PROJECT_CONFIG`) |
@@ -38,14 +39,13 @@ again when `/arl-config` sets it.
 | `max_failures` | `2` | reviewer failures (crash, broken contract) tolerated in a row: the next one makes the loop stop prompting Claude and ask you. Any answered review resets the count, and a `review` Claude calls anyway still runs |
 | `max_transient_failures` | `5` | timeouts and rate limits tolerated in a row, likewise |
 | `stall_rounds` | `5` | rounds a blocking finding may persist before the loop asks you; `0` disables |
-| `max_clarifications` | `2` | questions Claude may ask the reviewer about one review |
 | `ignore_globs` | `[]` | paths (inside their root) whose sole change approves a stage without a review. A change to `.adversarial-review-loop.json` itself is never ignored |
 | `final_review` | `false` | end every run with a review of all its changes, every root from where it joined the run |
 | `review_skill` | `auto` | each root's own review skill, attached as guidance for that root: `auto`, a skill name, or `off`. See below |
 | `review_guide` | empty | one Markdown file (relative to the launch folder) spliced into every review prompt |
 | `roots` | `[]` | folders every run in this launch folder starts with, besides the launch folder, `--root` and the paths the plan names |
 | `auto_compact` | `false` | compact the conversation before the phase that follows an approval. An approval tells Claude to commit and end its turn; the loop then compacts and prompts the next phase. A turn that goes on into the next phase cancels it: by calling review there, or by writing a file in a root with Edit, Write or NotebookEdit before it ends (a change made only through Bash does not count, and a turn with one still compacts). Never headless |
-| `chunk_diff_bytes` | `400000` | the size of one diff file in the bundle |
+| `chunk_diff_bytes` | `40000` | the largest diff file in the bundle, so one reviewer read takes in a whole file. A file also holds at most 1,500 lines, since a read stops at 2,000. A diff that would need more than 100 files gets larger ones |
 | `hard_diff_ceiling` | `8388608` | a diff larger than this makes the loop ask you rather than review a cut |
 | `max_file_bytes` | `16777216` | one changed file larger than this makes the loop ask you |
 | `max_reason_bytes` | `32768` | the reviewer's prose kept in the text Claude reads; findings are exempt |

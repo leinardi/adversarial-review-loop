@@ -355,3 +355,24 @@ def test_an_unreadable_prompt_is_a_launch_error_not_a_crash(tmp_path: Path, monk
     run = invocation(tmp_path)
     with pytest.raises(runner.LaunchError, match="could not be read"):
         runner.invoke(TARGET, run, config=config_with(harness="opencode"))
+
+
+def test_the_opencode_guidance_names_the_tools_its_read_only_agent_has() -> None:
+    """**Fails on the old text**, written for Claude Code's tools: it told OpenCode to grep with
+    ``-n``/``-C`` flags its ``grep`` tool does not take, and gave no message budget."""
+    text = runner.efficiency_text()
+    for tool in ("`read`", "`grep`", "`glob`", "`list`"):
+        assert tool in text
+    assert "-C" not in text
+    assert "Budget:" in text
+    assert "about 8" in text
+    # A read cut short is finished; only the same range is never read twice.
+    assert "Finish every file you are to read in full." in text
+    assert "whole diff" not in " ".join(text.split())
+    assert "no budget below excuses leaving part of it unread" in " ".join(text.split())
+    assert "Never read a file again" not in text
+
+
+def test_missing_opencode_guidance_degrades_to_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("arl.prompt_path", lambda name: tmp_path / f"{name}.md")
+    assert runner.efficiency_text() == ""

@@ -26,6 +26,15 @@ Your task message is the review: what to look at, where the review bundle is, an
 
 You only read. Use Read, and read-only shell commands (grep, find, ls, cat, head, git log, git show, git diff) to inspect the bundle and the workspace roots it names. Never change a file, and never run a build, a test or anything else with side effects: the implementer already ran the project's checks, and a command that is not read-only is refused.
 
+Work in few messages. Every message you send re-reads your whole context (the bundle and every file you opened), so the cost of a review is its context times its number of messages, not its number of tool calls.
+
+- First message: read \`range.txt\` and every other bundle file your task message says to read in full, together, as parallel tool calls in that one message.
+- A read can stop short of a file's end (a \`changes.NN.diff\` often does). When it does, read on from the line it stopped at, in the next message, until you have read every such file to its end. What your task message says to read in full is the evidence: no budget below excuses leaving part of it unread.
+- Then decide everything you need to check, and issue it as one batch: several tool calls in one message, or several commands in one Bash call (\`grep -n -C3 ... ; sed -n 10,60p ...\`). Chain a call on an earlier result only when it truly depends on it.
+- Locate with grep (\`-n\`, \`-C\`), then read only the region it points at. Never read a large file whole to find one symbol, and never read again a range already in your context.
+- Budget: a small diff needs about 3 messages, a large one about 8. If you are past 12, stop investigating outside the bundle and write the review from what you have, once you have read what your task message says to read in full.
+- Thoroughness is judged by the findings, not by the number of calls.
+
 Your answer is your final message (or the report you hand back, where your session asks for that), in the format your task message gives, and nothing else.`
 
 export const TOOLS = {
@@ -52,7 +61,7 @@ export const TOOLS = {
   },
   review: {
     description:
-      "Ask for the adversarial review of the current phase (or of the final review stage) once the phase is implemented. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
+      "Ask for the adversarial review of the current phase (or of the final review stage) once the phase is implemented. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. After a review that asked for changes, pass dispositions too: for each finding of that review (by its id, r<round>.<n>), whether you fixed it or reject it, with a note citing the file and line that shows it. A finding you reject with no such citation stays open. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -71,16 +80,20 @@ export const TOOLS = {
             required: ['command', 'status'],
           },
         },
+        dispositions: {
+          type: 'array',
+          description: "What you did about the previous review's findings, one entry per finding. The next reviewer reads them as your claim, to check against the diff.",
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'The finding id the previous review gave it, such as r1.3.' },
+              status: { type: 'string', enum: ['fixed', 'rejected'] },
+              note: { type: 'string', description: 'Why: for a rejection, the file and line that show the finding is wrong.' },
+            },
+            required: ['id', 'status'],
+          },
+        },
       },
-    },
-  },
-  clarify: {
-    description:
-      "Ask the reviewer of the latest review one question about its findings, when a finding is unclear or you believe it is wrong. A few questions per review at most. The reply may retract a finding for the next round; it never changes this review's verdict, so fix or explain, then call review again.",
-    inputSchema: {
-      type: 'object',
-      properties: { question: { type: 'string' } },
-      required: ['question'],
     },
   },
 } as const

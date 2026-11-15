@@ -48,7 +48,7 @@ Write your review as prose first, ranked most severe first, then say briefly wha
 
 ```
 <<<ARL-FINDINGS>>>
-FINDING severity=high actionable=yes file=api/internal/store/db.go:88 | Phase 3 renamed the key; phase 1's reader still uses the old one
+FINDING severity=high actionable=yes file=api/internal/store/db.go:88 | Phase 3 renamed the key; phase 1's reader still uses the old one || done when: no reader of the old key name is left
 FINDING severity=low actionable=no file=- | The two modules could share a helper
 VERDICT CHANGES_REQUIRED
 <<<ARL-END>>>
@@ -56,7 +56,8 @@ VERDICT CHANGES_REQUIRED
 
 Rules for the block:
 
-- One `FINDING` line per finding, on a single line. `severity` is one of `info`, `low`, `medium`, `high`, `critical`. `file` is `<alias>/path:line`, or `<alias>/path` alone, or `-` when there is no single location. The path must start with one of the aliases in `range.txt`'s **Roots** section, exactly as the diff shows it; a finding whose path names no root fails the review.
+- One `FINDING` line per finding, on a single line. `severity` is one of `info`, `low`, `medium`, `high`, `critical`. `file` is `<alias>/path:line`, or `<alias>/path` alone, or `-` when there is no single location. The path must start with one of the aliases in `range.txt`'s **Roots** section, exactly as the diff shows it; a finding whose path names no root fails the review. The line is that file's own line as it is now under its root, the numbering the `+` side of the diff's `@@` headers counts in, never a line of `changes.NN.diff`.
+- End every finding that blocks with `|| done when: <condition>`: what, checked by reading the code, would show the defect is gone, such as a guard in place, a call removed or a test asserting the behaviour. It is your suggested evidence for the implementer, never a ceiling: whoever reviews the fix judges the defect itself. A finding that does not block may carry one too.
 - Severity rubric — pick the label the finding actually earns, not the one that feels safe:
     - `critical` / `high` — a wrong result, a crash, or a security issue on a reachable path.
     - `medium` — a contract break, lost test coverage, or a bug on plausible input.
@@ -65,4 +66,4 @@ Rules for the block:
 - `actionable=yes` means a specific, concrete change would fix it. If no concrete change would fix it, it is `actionable=no`.
 - `VERDICT` is `APPROVED` or `CHANGES_REQUIRED`, and must be `CHANGES_REQUIRED` whenever any finding is `actionable=yes` **and at or above the `block_severity` named in `range.txt`**; otherwise `APPROVED`, with the sub-threshold findings still listed. The engine recomputes the verdict from the `FINDING` lines and the threshold, and the stricter of the two wins.
 - Emit the block even when you found nothing: no `FINDING` lines, then `VERDICT APPROVED`.
-- Missing markers, a missing `VERDICT`, or an empty response is treated as a failed review, which never approves.
+- Missing markers or an empty response is treated as a failed review, which never approves, and so is a missing `VERDICT` when no finding blocks.

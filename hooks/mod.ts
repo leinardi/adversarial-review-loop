@@ -23,8 +23,8 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { COMMANDS, openPane, registerCommands, runCommand } from './commands'
 import { engine } from './engine'
-import { addRoot, clarify, continueRun, ensureRoot, parentOf, type Registration, review, session, resetWrites, setPhases, sweepRoots, track, unregistered, writeIn } from './flow'
-import { deliver, registerReviewer, REVIEWER, reviewerDecision } from './reviewer'
+import { addRoot, continueRun, ensureRoot, parentOf, type Registration, review, session, resetWrites, setPhases, sweepRoots, track, unregistered, writeIn } from './flow'
+import { countStep, deliver, registerReviewer, REVIEWER, reviewerDecision } from './reviewer'
 import { TOOLS, type ToolName } from './text'
 import { pane, registerUi, showBusy } from './ui'
 
@@ -37,8 +37,6 @@ async function serve($: EngineInterface, name: string, input: Record<string, unk
       return addRoot($, input)
     case 'review':
       return review($, input, signal)
-    case 'clarify':
-      return clarify($, input, signal)
     default:
       return undefined
   }
@@ -154,6 +152,12 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) await showBusy($, true).catch(() => undefined)
     return next(e)
+  })
+
+  // A reviewer's model requests are what its round cost grows with; nothing else counts them.
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId !== undefined) countStep(e.agentId)
+    return yield* next(e)
   })
 
   on('turn.complete', async ($, e, next) => {

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "L1",
+    "file": "scripts/arl/commands.py",
+    "line": 259,
+    "symbols": ["_require_untouched", "start_tree"],
+    "severity": "high",
+    "what": "Undo of a root registration compares the snapshot with == instead of !=, so a root that changed since it joined is silently dropped (its changes leave review) while an untouched root is refused.",
+    "original": "if now != root[\"start_tree\"]:",
+    "seeded": "if now == root[\"start_tree\"]:"
+  },
+  {
+    "id": "L2",
+    "file": "scripts/arl/review.py",
+    "line": 166,
+    "symbols": ["run.roots is None", "zero roots", "no roots"],
+    "severity": "high",
+    "what": "The no-roots guard tests `run.roots is None` instead of emptiness, so a run with zero roots is no longer refused and gets an empty bundle that can be approved with nothing reviewed.",
+    "original": "if not run.roots:",
+    "seeded": "if run.roots is None:"
+  },
+  {
+    "id": "L3",
+    "file": "scripts/arl/contract.py",
+    "line": 375,
+    "symbols": ["unknown_alias", "retired"],
+    "severity": "medium",
+    "what": "The known-alias sets are swapped: FINDINGs naming a removed root are accepted, while SUPERSEDES retractions of findings in a removed root are rejected as unknown-alias (contract failure).",
+    "original": "((review.all_findings, aliases), (review.supersedes, aliases | retired))",
+    "seeded": "((review.all_findings, aliases | retired), (review.supersedes, aliases))"
+  },
+  {
+    "id": "L4",
+    "file": "hooks/mod.ts",
+    "line": 122,
+    "symbols": ["decision", "'allow'"],
+    "severity": "medium",
+    "what": "Registration is skipped unless the tool check is exactly 'allow', so a write that is put to the person ('ask') lands in a folder never registered as a root and its baseline is missed.",
+    "original": "if (check?.decision === 'deny') return next(e)",
+    "seeded": "if (check?.decision !== 'allow') return next(e)"
+  },
+  {
+    "id": "L5",
+    "file": "hooks/flow.ts",
+    "line": 501,
+    "symbols": ["continueRun", "next.compact"],
+    "severity": "medium",
+    "what": "`&&` became `||`: the conversation is compacted on every continuation in an interactive session, and a headless session with compact set tries a refused compaction.",
+    "original": "if (next.compact === true && session.isInteractive) {",
+    "seeded": "if (next.compact === true || session.isInteractive) {"
+  },
+  {
+    "id": "L6",
+    "file": "scripts/arl/workspace.py",
+    "line": 579,
+    "symbols": ["taken_aliases"],
+    "severity": "medium",
+    "what": "Late-discovered nested repos pick their alias from current roots only, not taken_aliases(), so a retired alias can be reissued, colliding with round history and stall anchors (the sibling call site in _add still uses taken_aliases).",
+    "original": "\"alias\": alias_for(nested, taken_aliases(run)),",
+    "seeded": "\"alias\": alias_for(nested, [other[\"alias\"] for other in run.data[\"roots\"]]),"
+  }
+]

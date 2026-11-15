@@ -1,5 +1,5 @@
 """The reviewer output contract: the findings block, the recomputed verdict, the late-round
-scope, ``SUPERSEDES`` and a clarify reply's retraction block.
+scope and ``SUPERSEDES``.
 
 No reviewer output the contract does not allow produces ``APPROVED``.
 """
@@ -625,107 +625,143 @@ def test_a_supersedes_line_from_a_final_review_fails_the_contract(tmp_path: Path
     assert contract.parse(out, config=config_with()).verdict == "OP_FAILURE"
 
 
-# --------------------------------------------------------------------------
-# parse_clarify: a clarify reply and its retraction block
-# --------------------------------------------------------------------------
+RESOLVED_OK = ["RESOLVED id=r1.2 | a.txt:3 now checks the token", "RESOLVED id=r12.345|guard in place", "RESOLVED  id=r1.1 \t|  x"]
+RESOLVED_BAD = [
+    "RESOLVED id=r1.2 |",
+    "RESOLVED id=r1.2",
+    "RESOLVED id=1.2 | no r",
+    "RESOLVED id=r1 | no number",
+    "RESOLVED id=r1.2x | trailing junk",
+    "RESOLVED: id=r1.2 | a stray colon",
+    "  RESOLVED id=r1.2 | leading whitespace",
+    "resolved id=r1.2 | lower case",
+]
 
-_RETRACTION = "SUPERSEDES round=1 file=a.txt:1 | the premise was wrong"
+
+@pytest.mark.parametrize("line", RESOLVED_OK)
+def test_the_resolved_grammar_accepts_a_well_formed_line(line: str) -> None:
+    assert contract.resolved_id(line).startswith("r")
 
 
-def test_a_clarify_reply_with_no_markers_is_all_prose() -> None:
-    text = "Just an answer.\nOn two lines.\n"
-    assert contract.parse_clarify(text) == contract.ClarifyReply(prose=text)
+@pytest.mark.parametrize("line", [*RESOLVED_BAD, "RESOLVED id=r1.2 | x\nsmuggled", 3])
+def test_the_resolved_grammar_rejects_a_malformed_line(line: object) -> None:
+    assert contract.resolved_id(line) == ""
 
 
-def test_a_clarify_retraction_block_is_split_from_the_prose_above_it() -> None:
-    reply = contract.parse_clarify(f"You are right.\n\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n\n<<<ARL-END>>>\n")
-    assert reply.prose == "You are right."
-    assert reply.supersedes == (_RETRACTION,)
-    assert reply.problem == ""
+def test_a_resolved_line_is_recorded_and_never_clears_a_blocking_finding(tmp_path: Path) -> None:
+    out = tmp_path / "r.out"
+    out.write_bytes(_block("FINDING severity=high actionable=yes file=a.txt:1 | still broken", "RESOLVED id=r1.1 | gone", "VERDICT APPROVED"))
+    review = contract.parse(out, config=config_with(), allow_supersedes=True, allow_resolved=True)
+    assert review.verdict == "CHANGES_REQUIRED"
+    assert review.resolved == "RESOLVED id=r1.1 | gone\n"
+
+
+@pytest.mark.parametrize("allow_supersedes", [False, True])
+def test_a_resolved_line_where_it_is_not_allowed_fails_the_contract(tmp_path: Path, allow_supersedes: bool) -> None:
+    """Round 1 and the final review do not document it: an unrecognised line, not an ignored one."""
+    out = tmp_path / "r.out"
+    out.write_bytes(_block("RESOLVED id=r1.1 | gone", "VERDICT APPROVED"))
+    review = contract.parse(out, config=config_with(), allow_supersedes=allow_supersedes)
+    assert (review.verdict, review.kind) == ("OP_FAILURE", "contract")
+
+
+@pytest.mark.parametrize("line", RESOLVED_BAD[:6])
+def test_a_near_miss_of_the_resolved_grammar_fails_the_contract(tmp_path: Path, line: str) -> None:
+    out = tmp_path / "r.out"
+    out.write_bytes(_block(line, "VERDICT APPROVED"))
+    assert contract.parse(out, config=config_with(), allow_supersedes=True, allow_resolved=True).verdict == "OP_FAILURE"
+
+
+def test_unknown_resolved_names_an_id_no_earlier_round_has() -> None:
+    review = Review(resolved="RESOLVED id=r1.1 | ok\nRESOLVED id=r1.4 | no such\n")
+    assert contract.unknown_resolved(review, frozenset({"r1.1", "r1.2"})) == "r1.4"
+    assert contract.unknown_resolved(review, frozenset({"r1.1", "r1.4"})) == ""
+
+
+EARLIER = [
+    "FINDING severity=high actionable=yes file=a/x.py:3 | one",
+    "FINDING severity=medium actionable=yes file=./a/y.py | two",
+    "FINDING severity=low actionable=yes file=a/z.py:1 | below the threshold",
+    "FINDING severity=critical actionable=no file=a/z.py:2 | not actionable",
+    "FINDING severity=high actionable=yes file=- | nowhere",
+]
+MEDIUM = arl_config.threshold_rank("medium")
+
+
+def _open(review: Review, rounds: object) -> list[str]:
+    return contract.unaccounted(review, rounds, threshold=MEDIUM)
 
 
 @pytest.mark.parametrize(
-    "block_line",
+    ("review", "missing"),
     [
-        "FINDING severity=high actionable=yes file=b.txt:2 | a brand-new finding",
-        "VERDICT APPROVED",
-        "VERDICT CHANGES_REQUIRED",
-        "SUPERSEDES round=1 file=a.txt:1",
-        "prose inside the block",
+        (Review(), ["r1.1", "r1.2", "r1.5"]),
+        (Review(resolved="RESOLVED id=r1.1 | a\nRESOLVED id=r1.2 | b\nRESOLVED id=r1.5 | c\n"), []),
+        # Exact file= values close; another line, and `-`, close nothing.
+        (Review(supersedes="SUPERSEDES round=1 file=a/x.py:3 | wrong\nSUPERSEDES round=1 file=a/y.py | wrong\n"), ["r1.5"]),
+        (Review(supersedes="SUPERSEDES round=1 file=a/x.py:9 | moved\nSUPERSEDES round=1 file=- | no\n"), ["r1.1", "r1.2", "r1.5"]),
+        (Review(supersedes="SUPERSEDES round=1 file=a/x.py | no line\n"), ["r1.1", "r1.2", "r1.5"]),
+        (Review(supersedes="SUPERSEDES round=2 file=a/x.py:3 | another round\n"), ["r1.1", "r1.2", "r1.5"]),
+        # An approving round's FINDING never closes one: it is a nit or a silent downgrade.
+        (Review(all_findings="FINDING severity=low actionable=no file=a/x.py:3 | moved\n"), ["r1.1", "r1.2", "r1.5"]),
     ],
 )
-def test_a_clarify_block_holding_anything_but_supersedes_yields_no_retraction(block_line: str) -> None:
-    """A ``FINDING`` or a ``VERDICT`` in a clarify block is a re-review, which a clarify is not.
-    The valid line beside it is not salvaged: a block that breaks the contract yields nothing."""
-    reply = contract.parse_clarify(f"Prose above.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n{block_line}\n<<<ARL-END>>>\n")
-    assert reply.supersedes == ()
-    assert reply.problem
-    assert reply.prose == "Prose above.", "the prose above a located block is still returned"
+def test_unaccounted_lists_the_earlier_blocking_findings_left_open(review: Review, missing: list[str]) -> None:
+    assert _open(review, [{"findings": EARLIER}]) == missing
+
+
+A = "FINDING severity=high actionable=yes file=a/x.py:3 | A"
+B = "FINDING severity=high actionable=yes file=a/y.py:3 | B"
+B_SAME_FILE = "FINDING severity=high actionable=yes file=a/x.py:90 | B"
+
+
+def test_withdrawing_one_finding_does_not_close_another_in_the_same_file() -> None:
+    assert _open(Review(supersedes="SUPERSEDES round=1 file=a/x.py:3 | wrong\n"), [{"findings": [A, B_SAME_FILE]}]) == ["r1.2"]
+
+
+def test_a_file_value_two_findings_share_withdraws_neither() -> None:
+    twice = "FINDING severity=info actionable=no file=a/x.py:3 | same place, not blocking"
+    assert _open(Review(supersedes="SUPERSEDES round=1 file=a/x.py:3 | wrong\n"), [{"findings": [A, twice]}]) == ["r1.1"]
+
+
+def test_a_later_finding_in_the_same_file_closes_neither_earlier_one() -> None:
+    rounds = [{"findings": [A, B_SAME_FILE]}, {"findings": ["FINDING severity=high actionable=yes file=a/x.py:5 | one of them"]}]
+    assert _open(Review(resolved="RESOLVED id=r2.1 | gone\n"), rounds) == ["r1.1", "r1.2"]
+
+
+def test_a_finding_raised_in_two_rounds_needs_both_ids_closed() -> None:
+    rounds = [{"findings": [A]}, {"findings": [A]}]
+    assert _open(Review(resolved="RESOLVED id=r2.1 | gone\n"), rounds) == ["r1.1"]
+    assert _open(Review(resolved="RESOLVED id=r1.1 | gone\n"), rounds) == ["r2.1"]
+    assert _open(Review(resolved="RESOLVED id=r1.1 | gone\nRESOLVED id=r2.1 | gone\n"), rounds) == []
+
+
+def test_a_finding_a_middle_round_never_named_stays_open() -> None:
+    rounds = [{"findings": [A, B]}, {"findings": [A], "resolved": ["RESOLVED id=r1.1 | moved on"]}]
+    assert _open(Review(resolved="RESOLVED id=r2.1 | gone\n"), rounds) == ["r1.2"]
+    assert _open(Review(resolved="RESOLVED id=r2.1 | gone\nRESOLVED id=r1.2 | gone\n"), rounds) == []
 
 
 @pytest.mark.parametrize(
-    "text",
+    "middle",
     [
-        f"<<<ARL-FINDINGS>>>\n{_RETRACTION}\n<<<ARL-END>>>\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n<<<ARL-END>>>\n",
-        f"Prose.\n<<<ARL-END>>>\n{_RETRACTION}\n<<<ARL-FINDINGS>>>\n",
-        f"Prose.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n",
-        f"Prose.\n{_RETRACTION}\n<<<ARL-END>>>\n",
+        {"findings": [], "resolved": ["RESOLVED id=r1.1 | gone"]},
+        {"findings": [], "supersedes": ["SUPERSEDES round=1 file=a/x.py:3 | wrong"]},
     ],
-    ids=["two-blocks", "inverted", "no-end-marker", "no-start-marker"],
 )
-def test_a_clarify_block_that_cannot_be_located_yields_no_retraction(text: str) -> None:
-    reply = contract.parse_clarify(text)
-    assert reply.supersedes == ()
-    assert reply.problem
-    assert reply.prose == text, "with no block located, the whole reply is the prose"
+def test_a_middle_rounds_resolved_or_supersedes_closes_it_for_good(middle: dict[str, list[str]]) -> None:
+    ledger = contract.replay([{"findings": [A]}, middle, {"findings": []}], threshold=MEDIUM)
+    assert ledger.open == {}
+    assert ledger.closed["r1.1"].by == 2
+    assert _open(Review(), [{"findings": [A]}, middle, {"findings": []}]) == []
 
 
-@pytest.mark.parametrize(
-    "trailing",
-    [
-        "On reflection, the finding stands.",
-        "FINDING severity=high actionable=yes file=a.txt:1 | still wrong after all",
-        "VERDICT CHANGES_REQUIRED",
-        "SUPERSEDES round=1 file=b.txt:2 | one more, outside the block",
-    ],
-    ids=["prose", "finding", "verdict", "supersedes"],
-)
-def test_a_clarify_block_followed_by_text_yields_no_retraction(trailing: str) -> None:
-    """The block must end the reply. Text after it can take the retraction back, so recording the
-    block while dropping that text would report a retraction the reviewer no longer makes."""
-    text = f"You are right.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n<<<ARL-END>>>\n\n{trailing}\n"
-    reply = contract.parse_clarify(text)
-    assert reply.supersedes == ()
-    assert "must end the reply" in reply.problem
-    assert reply.prose == text, "the trailing text is shown, not hidden"
-
-
-def test_blank_lines_after_a_clarify_block_are_allowed() -> None:
-    reply = contract.parse_clarify(f"You are right.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\n<<<ARL-END>>>\n\n  \n\t\n")
-    assert reply.supersedes == (_RETRACTION,)
-    assert reply.problem == ""
-
-
-def test_an_empty_clarify_block_yields_no_retraction() -> None:
-    reply = contract.parse_clarify("Prose.\n<<<ARL-FINDINGS>>>\n\n<<<ARL-END>>>\n")
-    assert reply.supersedes == ()
-    assert "no SUPERSEDES" in reply.problem
-    assert reply.prose == "Prose."
-
-
-def test_a_clarify_block_carrying_a_nul_byte_yields_no_retraction() -> None:
-    reply = contract.parse_clarify(f"Prose.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}\0\n<<<ARL-END>>>\n")
-    assert reply.supersedes == ()
-    assert "NUL" in reply.problem
-
-
-def test_a_clarify_block_that_is_not_valid_utf8_yields_no_retraction() -> None:
-    """``_decode`` keeps invalid bytes as lone surrogates, and one reaching ``clarify_history``
-    could not be encoded when ``state.json`` is saved."""
-    raw = f"Prose.\n<<<ARL-FINDINGS>>>\n{_RETRACTION}".encode() + b"\xff\n<<<ARL-END>>>\n"
-    reply = contract.parse_clarify(raw.decode("utf-8", "surrogateescape"))
-    assert reply.supersedes == ()
-    assert "UTF-8" in reply.problem
+def test_unaccounted_counts_a_malformed_stored_finding_as_blocking() -> None:
+    stored = ["FINDING severity=spicy actionable=yes file=a/x.py | ?", "FINDING severity=high actionable=yes file=a/x.py | x\ny", 7]
+    rounds = [{"findings": []}, {"findings": stored, "resolved": "not a list", "supersedes": ["SUPERSEDES round=2 file=- | x\ny"]}]
+    assert _open(Review(supersedes="SUPERSEDES round=2 file=a/x.py | x\n"), rounds) == ["r2.1", "r2.2", "r2.3"]
+    assert contract.unaccounted(Review(), "not a list", threshold=MEDIUM) == []
+    assert _open(Review(), [{"findings": [A]}, "junk"]) == ["r1.1"]
 
 
 def test_a_finding_detail_with_a_unicode_line_separator_stays_one_record(tmp_path: Path) -> None:
@@ -756,3 +792,111 @@ def test_unknown_alias_lets_supersedes_name_a_removed_root() -> None:
 def test_unknown_alias_never_lets_a_finding_name_a_removed_root() -> None:
     review = Review(verdict="CHANGES_REQUIRED", all_findings="FINDING severity=high actionable=yes file=web/x.ts | bug\n")
     assert contract.unknown_alias(review, frozenset({"api"}), retired=frozenset({"web"})) == "web/x.ts"
+
+
+# --------------------------------------------------------------------------
+# A missing VERDICT
+# --------------------------------------------------------------------------
+
+
+def test_no_verdict_with_a_blocking_finding_is_changes_required_with_a_note(tmp_path: Path) -> None:
+    parsed = parse_text(tmp_path, contract_text("FINDING severity=high actionable=yes file=a/x.py:3 | broken"))
+    assert (parsed.verdict, parsed.kind, parsed.error) == ("CHANGES_REQUIRED", "", "")
+    assert parsed.findings == "FINDING severity=high actionable=yes file=a/x.py:3 | broken\n"
+    assert parsed.notes == "the reviewer gave no VERDICT line; its 1 blocking finding(s) make this CHANGES_REQUIRED\n"
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        (),
+        ("FINDING severity=low actionable=yes file=a/x.py:3 | nit",),
+        ("FINDING severity=critical actionable=no file=a/x.py:3 | nothing to change",),
+    ],
+)
+def test_no_verdict_with_nothing_blocking_is_a_contract_failure_never_an_approval(tmp_path: Path, lines: tuple[str, ...]) -> None:
+    parsed = parse_text(tmp_path, contract_text(*lines))
+    assert (parsed.verdict, parsed.kind) == ("OP_FAILURE", "contract")
+    assert parsed.error == "the reviewer emitted no VERDICT line, and no finding blocks"
+    # Half-read evidence would suggest the parse succeeded.
+    assert (parsed.findings, parsed.all_findings, parsed.notes) == ("", "", "")
+
+
+def test_no_verdict_with_only_deferred_findings_is_a_contract_failure(tmp_path: Path) -> None:
+    scope = contract.LateScope(changed_paths=frozenset(), prior_files=frozenset())
+    out = tmp_path / "o"
+    out.write_text(contract_text("FINDING severity=medium actionable=yes file=a/x.py:3 | late"))
+    parsed = contract.parse(out, config=config_with(), allow_supersedes=True, scope=scope)
+    assert parsed.verdict == "OP_FAILURE"
+
+
+# --------------------------------------------------------------------------
+# Citations
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("file", "cited"),
+    [("a/x.py:12", ("a/x.py", 12)), ("./a/x.py:1", ("a/x.py", 1)), ("a/x.py", None), ("-", None), ("a/x:y.py", None)],
+)
+def test_cited_line(file: str, cited: tuple[str, int] | None) -> None:
+    assert contract.cited_line(file) == cited
+
+
+def test_a_citation_past_the_end_of_its_file_gets_a_note() -> None:
+    findings = (
+        "FINDING severity=high actionable=yes file=a/x.py:900 | past the end\n"
+        "FINDING severity=low actionable=no file=a/x.py:10 | inside\n"
+        "FINDING severity=low actionable=no file=a/gone.py:5 | unknown file\n"
+        "FINDING severity=low actionable=no file=- | nowhere\n"
+    )
+    lengths = {"a/x.py": 10}
+    assert contract.citation_notes(findings, lengths.get) == (
+        "a/x.py: cited line 900 is past the end of the file (10 lines); locate it by the description\n"
+    )
+
+
+@pytest.mark.parametrize(("digits", "number"), [("9" * 5000, contract.CITED_LINE_CAP), ("0" * 4000 + "7", 7), ("9" * 18, 10**18 - 1)])
+def test_a_cited_line_of_any_length_is_read_without_raising(digits: str, number: int) -> None:
+    assert contract.cited_line(f"a/x.py:{digits}") == ("a/x.py", number)
+
+
+def test_a_huge_cited_line_is_noted_without_its_digits() -> None:
+    findings = f"FINDING severity=high actionable=yes file=a/x.py:{'9' * 5000} | huge\n"
+    assert contract.citation_notes(findings, {"a/x.py": 10}.get) == (
+        "a/x.py: cited a line number is past the end of the file (10 lines); locate it by the description\n"
+    )
+
+
+# --------------------------------------------------------------------------
+# done when
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "condition"),
+    [
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken || done when: x() checks y", "x() checks y"),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken ||done when:x() checks y  ", "x() checks y"),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken", ""),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken || done when:", ""),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | a || b is wrong", ""),
+        ("not a finding || done when: x", ""),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken || Done when: x() checks y", "x() checks y"),
+        ("FINDING severity=high actionable=yes file=a/x.py:3 | broken || DONE WHEN: x() checks y", "x() checks y"),
+    ],
+)
+def test_done_when_is_read_from_the_end_of_the_finding_text(line: str, condition: str) -> None:
+    assert contract.done_when(line) == condition
+
+
+def test_a_finding_with_a_condition_parses_blocks_and_is_stored_verbatim(tmp_path: Path) -> None:
+    line = "FINDING severity=high actionable=yes file=a/x.py:3 | broken || done when: x() checks y"
+    parsed = parse_text(tmp_path, contract_text(line, "VERDICT CHANGES_REQUIRED"))
+    assert parsed.verdict == "CHANGES_REQUIRED"
+    assert parsed.findings == f"{line}\n"
+
+
+def test_an_empty_condition_is_not_a_contract_violation(tmp_path: Path) -> None:
+    parsed = parse_text(tmp_path, contract_text("FINDING severity=low actionable=no file=a/x.py:3 | nit || done when:", "VERDICT APPROVED"))
+    assert parsed.verdict == "APPROVED"

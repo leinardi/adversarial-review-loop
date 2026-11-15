@@ -54,7 +54,6 @@ __all__ = [
     "invoke",
     "kill_group",
     "run_bounded",
-    "run_clarify",
 ]
 
 
@@ -160,7 +159,11 @@ def _harness(config: Config) -> harness.Harness:
 
 
 def efficiency_text() -> str:
-    """``prompts/reviewer-efficiency.md``: how to work, as opposed to what to review.
+    """``prompts/reviewer-efficiency-opencode.md``: how to work, as opposed to what to review.
+
+    Written for OpenCode's read-only agent and its four tools (``read``, ``grep``, ``glob``,
+    ``list``). The subagent reviewer has its own, in ``REVIEWER_SYSTEM_PROMPT``
+    (``hooks/text.ts``), because its tools differ: Read, and grep through Bash.
 
     Read on every invocation rather than cached at import: a hook is a fresh process each
     time, so there is nothing to cache across, and reading it at the call site keeps this the
@@ -173,7 +176,7 @@ def efficiency_text() -> str:
     module, and deliberately so: nothing here bears on a verdict.
     """
     try:
-        return decode(arl.prompt_path("reviewer-efficiency").read_bytes()).rstrip("\n")
+        return decode(arl.prompt_path("reviewer-efficiency-opencode").read_bytes()).rstrip("\n")
     except OSError as exc:
         log(f"the reviewer efficiency guidance could not be read ({exc}); continuing without it")
         return ""
@@ -418,65 +421,6 @@ def invoke(target: Target, run: Invocation, *, config: Config, environ: dict[str
         # `classify_op_failure` on its "operational" path, which is what this is: the
         # reviewer reported something about its own run that no verdict may be read past.
         raise ReviewerFailed(str(exc)) from exc
-
-
-def run_clarify(  # noqa: PLR0913 - one knob per argument, as `run_bounded` notes
-    launch_dir: str,
-    bundle_dir: Path,
-    *,
-    prompt_file: Path,
-    title: str,
-    out_path: Path,
-    config: Config,
-    roots: tuple[str, ...] = (),
-) -> str:
-    """Answer one question about a review already given, from its stored bundle, and return the
-    reply. No ``VERDICT`` is parsed. Raises :class:`ReviewerFailed` on a timeout or a non-zero exit,
-    so a failed clarify is reported, never silently empty.
-
-    ``ARL_REVIEWER_CMD`` is honoured for the tests.
-    """
-    env = dict(os.environ)
-    timeout_sec = _timeout_sec(config)
-    reviewer_cmd = env.get("ARL_REVIEWER_CMD", "")
-
-    stdin: bytes | None = None
-    cwd: str | None = None
-    if reviewer_cmd:
-        env["ARL_BUNDLE_DIR"] = str(bundle_dir)
-        command = [reviewer_cmd, str(bundle_dir), str(prompt_file)]
-    else:
-        try:
-            prompt_text = decode(prompt_file.read_bytes()).rstrip("\n")
-        except OSError as exc:
-            raise ReviewerFailed(f"the clarify prompt at {prompt_file} could not be read: {exc.strerror or exc}") from exc
-        spec = harness.ClarifySpec(
-            repo=launch_dir,
-            prompt_text=prompt_text,
-            system_prompt=efficiency_text(),
-            title=title,
-            bundle_dir=bundle_dir,
-            roots=roots,
-            config=config,
-        )
-        try:
-            built = _harness(config).clarify_command(spec)
-        except harness.PayloadError as exc:
-            raise ReviewerFailed(str(exc)) from exc
-        command, stdin, cwd = built.argv, built.stdin, built.cwd
-        env.update(built.env)
-
-    status = _capture_to_file(command, env, out_path, timeout_sec, stdin, cwd)
-    if status in _TIMEOUT_STATUSES:
-        raise ReviewerFailed(f"the reviewer timed out after {timeout_sec}s", status=status)
-    if status != 0:
-        raise ReviewerFailed(f"the reviewer exited with status {status}", status=status)
-    if not reviewer_cmd:
-        try:
-            _reduce_transcript(_harness(config), out_path)
-        except harness.TranscriptError as exc:
-            raise ReviewerFailed(str(exc)) from exc
-    return decode(out_path.read_bytes())
 
 
 def classify_op_failure(exc: ReviewerFailed, out_path: Path) -> str:

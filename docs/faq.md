@@ -44,8 +44,9 @@ it finds one (where the repository stood when the run started). No review runs u
 ### The loop keeps raising the same findings
 
 After `stall_rounds` rounds of the same blocking findings, the loop asks you. Accept the phase as it
-stands, keep going (the stalled rounds no longer count), or stop. Claude can also ask the reviewer
-about a finding it believes is wrong with `clarify`; the reply may retract it for the next round.
+stands, keep going (the stalled rounds no longer count), or stop. Claude can also reject a finding
+it believes is wrong when it calls `review` again, citing the file and line that show it; the next
+reviewer checks the rejection against the code and withdraws the finding, or keeps it open.
 
 ### A file is too large to review
 
@@ -91,5 +92,8 @@ A stopped or complete run is archived without `--new`.
 ### What does a review cost?
 
 One reviewer run per round, plus at most one repair when an answer breaks the contract. Each report's
-`- cost:` line gives the tokens and the time; `/arl-report` shows them. To spend less: a cheaper
-`model` or a lower `effort`, `ignore_globs` for paths that need no review, and smaller phases.
+`- cost:` line gives the tokens and the time; `/arl-report` shows them, and `/arl-stats` lists
+every round of the run with its model, requests, tokens, findings and what Claude stated about
+them. To spend less: a cheaper `model` or a lower `effort`, a cheaper `late_model` for the rounds
+after the first, `ignore_globs` for paths that need no review, and smaller phases. The measured
+trade-offs are in `tests/bench/README.md`.
