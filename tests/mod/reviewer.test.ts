@@ -20,6 +20,7 @@
 
 import { expect, test } from 'claude-code/testing'
 import { answerOf, classify, countStep, deliver, isModelOf, normalize, permit, resetCheckedModels, REVIEWER_TOOLS, reviewerDecision, runHandback, runReviewer, within } from '../../hooks/reviewer'
+import { REVIEWER_SYSTEM_PROMPT } from '../../hooks/text'
 import { apiError, fakeEngine, PLUGIN, start, tool, world } from './world'
 
 const DONE = { answer: 'VERDICT APPROVED', reason: 'answer', durationMs: 10 }
@@ -93,6 +94,17 @@ const DIRS = ['/work/.arl/reviews/r1-001/bundle', '/work', '/elsewhere/web']
 test('a read-only command is allowed, any other refused', () => {
   expect(permit(DIRS, { tool: 'Bash', input: { command: 'git show HEAD' }, isReadOnly: true })).toEqual(expect.objectContaining({ decision: 'allow' }))
   expect(permit(DIRS, { tool: 'Bash', input: { command: 'rm -rf src' } })).toEqual(expect.objectContaining({ decision: 'deny' }))
+})
+
+// In live runs every git command a reviewer sent at another root (`git -C`, `cd ... && git`,
+// `--git-dir`) and every chained command was refused as not read-only, while the prompt offered
+// both. The prompt and the refusal now say what is refused.
+test('the reviewer is told which commands are refused, and never told to chain them', () => {
+  expect(REVIEWER_SYSTEM_PROMPT).toContain('`git -C`, `cd ... && git` and `--git-dir` are always refused')
+  expect(REVIEWER_SYSTEM_PROMPT).toContain('one plain command per call')
+  expect(REVIEWER_SYSTEM_PROMPT).not.toContain('several commands in one Bash call (')
+  const refusal = permit(DIRS, { tool: 'Bash', input: { command: 'git -C /elsewhere/web log' } })
+  expect(refusal).toEqual(expect.objectContaining({ decision: 'deny', reason: expect.stringContaining('git -C') }))
 })
 
 test('a read inside the bundle or a root is allowed; outside, the session decides', () => {

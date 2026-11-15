@@ -383,7 +383,7 @@ export function permit(dirs: readonly string[], call: Check): Decision {
   if (call.tool === 'Bash') {
     return call.isReadOnly
       ? { decision: 'allow', reason: 'a read-only command of the review' }
-      : { decision: 'deny', reason: 'The reviewer only reads: this command is not read-only. Use Read, or a read-only command such as grep, find, ls or git show.' }
+      : { decision: 'deny', reason: 'The reviewer only reads: this command is not read-only. Use Read, Grep or Glob, or one plain read-only command per call, with no cd, git -C, variables, echo or redirection.' }
   }
   if (call.tool === 'Read' || call.tool === 'Grep' || call.tool === 'Glob') {
     const path = pathOf(call.input)
