@@ -30,8 +30,11 @@ and asks the person when the engine says the run waits for them.
 
 - **The reviewer** is registered at session start (`$.agent.register`, `omitClaudeMd`, tools Read,
   Grep, Glob and Bash), hidden from Claude by an `agent.offer` hook, and spawned once per round. A
-  `tool.check` hook allows it reads under the bundle and the roots and read-only Bash, and denies
-  everything else, and everything at all once its review is over.
+  `tool.check` hook allows it reads under the bundle and the roots, Bash the session judges
+  read-only, and one plain reading git call in a root (`git -C <root> log|show|diff|...`, which
+  the session itself refuses: `gitRead` in `hooks/reviewer.ts`). It denies everything else, and
+  everything at all once its review is over. The plugin trusts its agents: git runs the
+  repository's own config, as it does for Claude.
 - **Waiting for it.** A hook's own time budget runs while it awaits a plain promise, so the review
   tool waits for the subagent's `turn.complete` while a `$.process.spawn(['sleep', timeout])` is in
   flight: the spawn stops the clock, and its exit is the review's timeout.

@@ -378,6 +378,83 @@ export async function reviewerDecision($: EngineInterface, call: Check): Promise
   return dirs === undefined ? undefined : permit(dirs, call)
 }
 
+/**
+ * git subcommands a reviewer may run in a root: each only reads the repository. Anything that can
+ * write (a ref, the index, a file, a tag or branch) is left out, and so is `status`, which
+ * refreshes the index.
+ */
+const GIT_READS = new Set(['log', 'show', 'diff', 'rev-parse', 'ls-tree', 'ls-files', 'cat-file', 'merge-base', 'blame', 'grep', 'describe', 'show-ref', 'for-each-ref', 'name-rev', 'tag'])
+/**
+ * Options that make a reading subcommand write a file, start another program, or read files
+ * outside the repository (`--no-index`).
+ */
+const GIT_UNSAFE_OPTIONS = /^(--output(=|$)|-O|--open-files-in-pager|--no-index)/
+/** `git tag` options that create, delete or sign a tag: with `-l` it only lists. */
+const TAG_WRITING_OPTIONS = /^(-[dfasumFe]$|--(delete|force|annotate|sign|local-user|message|file|edit))/
+/** Characters that would make the command more than one plain git call. */
+const SHELL_SYNTAX = /[;&|<>`$()\\\n\r]/
+
+/** Split a command line on spaces, honouring single and double quotes; `undefined` if one is unclosed. */
+function words(command: string): string[] | undefined {
+  const found: string[] = []
+  let current = ''
+  let quote = ''
+  let started = false
+  for (const char of command) {
+    if (quote !== '') {
+      if (char === quote) quote = ''
+      else current += char
+    } else if (char === "'" || char === '"') {
+      quote = char
+      started = true
+    } else if (char === ' ' || char === '\t') {
+      if (started) found.push(current)
+      current = ''
+      started = false
+    } else {
+      current += char
+      started = true
+    }
+  }
+  if (quote !== '') return undefined
+  if (started) found.push(current)
+  return found
+}
+
+/**
+ * Whether `command` is one plain read-only git call in a root the reviewer may read: `git -C <root>
+ * <subcommand> ...`, or with no `-C` in the session's own directory. The session refuses every
+ * `git -C`, so a reviewer could not check a commit or a tag of another root; the plugin trusts
+ * its agents, and this lets the reviewer read history without a refused call.
+ */
+export function gitRead(command: string, dirs: readonly string[]): boolean {
+  if (SHELL_SYNTAX.test(command)) return false
+  const argv = words(command.trim())
+  if (argv === undefined || argv[0] !== 'git') return false
+  let at = 1
+  let directory: string | undefined
+  while (at < argv.length && argv[at]?.startsWith('-')) {
+    const option = argv[at]
+    if (option === '--no-pager') {
+      at += 1
+    } else if (option === '-C' && directory === undefined && at + 1 < argv.length) {
+      directory = argv[at + 1]
+      at += 2
+    } else {
+      // `-c` sets config, `--git-dir` and `--work-tree` point elsewhere, `--exec-path` runs others.
+      return false
+    }
+  }
+  if (directory !== undefined && !(directory.startsWith('/') && dirs.some(dir => within(directory, dir)))) return false
+  const subcommand = argv[at]
+  if (subcommand === undefined || !GIT_READS.has(subcommand)) return false
+  const rest = argv.slice(at + 1)
+  if (rest.some(arg => GIT_UNSAFE_OPTIONS.test(arg))) return false
+  // `git tag` creates a tag unless it lists: only the listing form is a read.
+  if (subcommand === 'tag') return rest.some(arg => arg === '-l' || arg === '--list') && !rest.some(arg => TAG_WRITING_OPTIONS.test(arg))
+  return true
+}
+
 /** How many times a reviewer's handback can be sent back for its findings block. */
 export const HANDBACK_REFUSALS = 2
 /** Handbacks sent back so far, by agent id; bounded like the other per-agent maps. */
@@ -413,9 +490,10 @@ function refuseHandback(agentId: string | undefined): Decision {
 /** What a reviewer that may read `dirs` may do: read, and run read-only commands. */
 export function permit(dirs: readonly string[], call: Check): Decision {
   if (call.tool === 'Bash') {
-    return call.isReadOnly
+    const command = (call.input as { command?: unknown } | null)?.command
+    return call.isReadOnly || (typeof command === 'string' && gitRead(command, dirs))
       ? { decision: 'allow', reason: 'a read-only command of the review' }
-      : { decision: 'deny', reason: 'The reviewer only reads: this command is not read-only. Use Read, Grep or Glob, or one plain read-only command per call, with no cd, git -C, variables, echo or redirection.' }
+      : { decision: 'deny', reason: 'The reviewer only reads: this command is not read-only. Use Read, Grep or Glob, one plain read-only command per call with no cd, variables, echo or redirection, or git -C <root> with a reading subcommand such as log, show, diff or rev-parse.' }
   }
   if (call.tool === 'Read' || call.tool === 'Grep' || call.tool === 'Glob') {
     const path = pathOf(call.input)
