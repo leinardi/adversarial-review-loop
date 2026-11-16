@@ -382,8 +382,25 @@ def test_pause_resume_and_stop(ws: Path, engine: Engine) -> None:
     assert engine(ws, "pause")["code"] == "run-paused"
     assert engine(ws, "resume")["run"]["status"] == "active"
     assert engine(ws, "stop")["run"]["status"] == "stopped"
-    assert engine(ws, "resume")["code"] == "run-stopped"
     assert engine(ws, "root-add", str(ws))["code"] == "run-stopped"
+
+
+def test_a_stopped_run_is_resumed_where_it_stopped(ws: Path, engine: Engine) -> None:
+    """**Fails on the old code**, which refused with ``run-stopped``: a mistaken stop ended a run."""
+    started(engine, ws)
+    engine(ws, "set-phases", stdin='["one", "two"]')
+    with state.locked_state(state.run_paths(ws)) as run:
+        assert run is not None
+        run.issue_ticket({"review_id": "r7"})
+        run.save()
+    assert engine(ws, "stop")["run"]["status"] == "stopped"
+    resumed = engine(ws, "resume")
+    assert resumed["run"]["status"] == "active"
+    # The stop already retired the ticket: nothing is pending, nothing to abandon.
+    assert resumed["abandoned_review"] is False
+    assert resumed["pending_review"] is False
+    assert resumed["run"]["phases"] == ["one", "two"]
+    assert engine(ws, "next-action")["action"] == "continue"
 
 
 def test_resume_abandons_a_pending_review_and_prompts_again(ws: Path, engine: Engine) -> None:

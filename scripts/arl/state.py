@@ -78,7 +78,7 @@ __all__ = [
 RUN_DIR_NAME: Final = ".arl"
 STATE_VERSION: Final = 4
 
-#: ``active`` runs; ``paused`` waits for ``resume``; ``stopped`` and ``complete`` are final.
+#: ``active`` runs; ``paused`` and ``stopped`` wait for ``resume``; ``complete`` is final.
 STATUSES: Final = ("active", "paused", "stopped", "complete")
 
 #: The decisions a run can be waiting on the user for, besides a root's baseline (which is read
@@ -514,8 +514,11 @@ class RunState:
         is in flight) and always abandons it. A decision the run was waiting on (a stall, the failure budget) is
         cleared: ``resume`` is the user's "keep going". The continuation token is reset, so this
         session is prompted even if the state is otherwise unchanged.
+
+        A stopped run comes back too: ``stop`` only retired the pending ticket and set the status,
+        so nothing it did needs undoing, and a mistaken ``/arl-stop`` is not the end of a run.
         """
-        self.require_status("active", "paused")
+        self.require_status("active", "paused", "stopped")
         if self.pending_decision() is not None and self.data["waiting"]["kind"] == "stall":
             # "Keep going" past a stall: the rounds that stalled no longer count towards the
             # next one, or the very next round would stall again on the same window.

@@ -96,15 +96,56 @@ test('a read-only command is allowed, any other refused', () => {
   expect(permit(DIRS, { tool: 'Bash', input: { command: 'rm -rf src' } })).toEqual(expect.objectContaining({ decision: 'deny' }))
 })
 
-// In live runs every git command a reviewer sent at another root (`git -C`, `cd ... && git`,
-// `--git-dir`) and every chained command was refused as not read-only, while the prompt offered
-// both. The prompt and the refusal now say what is refused.
+// In live runs every chained command was refused as not read-only, while the prompt offered it.
 test('the reviewer is told which commands are refused, and never told to chain them', () => {
-  expect(REVIEWER_SYSTEM_PROMPT).toContain('`git -C`, `cd ... && git` and `--git-dir` are always refused')
   expect(REVIEWER_SYSTEM_PROMPT).toContain('one plain command per call')
+  expect(REVIEWER_SYSTEM_PROMPT).toContain("`git -C <the root's absolute path> <subcommand> ...`")
   expect(REVIEWER_SYSTEM_PROMPT).not.toContain('several commands in one Bash call (')
-  const refusal = permit(DIRS, { tool: 'Bash', input: { command: 'git -C /elsewhere/web log' } })
-  expect(refusal).toEqual(expect.objectContaining({ decision: 'deny', reason: expect.stringContaining('git -C') }))
+  const refusal = permit(DIRS, { tool: 'Bash', input: { command: 'cd /elsewhere/web && git log' } })
+  expect(refusal).toEqual(expect.objectContaining({ decision: 'deny', reason: expect.stringContaining('git -C <root>') }))
+})
+
+// The session refused every `git -C`, so a reviewer could not check a tag or a commit of another
+// root. One plain reading git call in a root is the plugin's to allow.
+test('a plain reading git call in a root is allowed', () => {
+  for (const command of [
+    'git -C /elsewhere/web log --oneline -3 v1.4.0',
+    "git -C /elsewhere/web rev-parse 'v1.4.0^{commit}'",
+    'git -C /elsewhere/web show v1.4.0:crates/docker-client/Cargo.toml',
+    'git -C "/elsewhere/web" ls-tree -r v1.4.0 --name-only',
+    "git -C /elsewhere/web tag -l 'v1.4*'",
+    'git --no-pager -C /work diff HEAD~1 -- src',
+    'git log --format=%h%x20%s -5',
+    'git -C /elsewhere/web/sub/../ cat-file -t 6ad52461',
+  ]) {
+    expect({ command, decision: permit(DIRS, { tool: 'Bash', input: { command } }) }).toEqual({ command, decision: expect.objectContaining({ decision: 'allow' }) })
+  }
+})
+
+test('a git call that writes, leaves the roots or is more than one plain call is refused', () => {
+  for (const command of [
+    'git -C /outside log',
+    'git -C relative/path log',
+    'git -C /elsewhere/web/../../etc log',
+    'git -C /elsewhere/web commit -m x',
+    'git -C /elsewhere/web tag v9.9.9',
+    'git -C /elsewhere/web tag -l -d v1.4.0',
+    'git -C /elsewhere/web status',
+    'git -C /elsewhere/web checkout main',
+    'git -C /elsewhere/web diff --output=/tmp/x',
+    'git -C /elsewhere/web diff --no-index /etc/passwd /work/a',
+    'git -C /elsewhere/web grep -O x',
+    'git -c core.pager=sh -C /elsewhere/web log',
+    'git --git-dir=/elsewhere/web/.git log',
+    'git -C /elsewhere/web log | head',
+    'git -C /elsewhere/web log; rm -rf /work',
+    'git -C /elsewhere/web log $(touch /work/x)',
+    'git -C /elsewhere/web log > /work/out',
+    "git -C /elsewhere/web log 'unclosed",
+    'gitk -C /elsewhere/web',
+  ]) {
+    expect({ command, decision: permit(DIRS, { tool: 'Bash', input: { command } }) }).toEqual({ command, decision: expect.objectContaining({ decision: 'deny' }) })
+  }
 })
 
 test('a read inside the bundle or a root is allowed; outside, the session decides', () => {

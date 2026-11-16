@@ -38,7 +38,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   { name: 'arl-pause', description: 'Pause the run: Claude is not prompted again until /arl-resume', immediate: true },
   { name: 'arl-accept', description: 'Approve the current phase (or the final review) as it stands' },
   { name: 'arl-finish', description: 'Require a final review of the whole run before it completes' },
-  { name: 'arl-stop', description: 'Stop the run; it cannot be resumed', immediate: true },
+  { name: 'arl-stop', description: 'Stop the run now, dropping a pending review; /arl-resume brings it back', immediate: true },
   { name: 'arl-config', description: 'Show the adversarial-review-loop configuration, or set or unset a key', argumentHint: '[<key> <value> [--repo] | <key> --unset [--repo]]' },
   {
     name: 'arl-model',
@@ -253,7 +253,7 @@ async function stats($: EngineInterface): Promise<string> {
 async function transition($: EngineInterface, command: 'pause' | 'stop'): Promise<string> {
   const answer = await run($, [command])
   if (!answer.ok) return refused(answer)
-  return command === 'pause' ? 'Paused: Claude is not prompted again until /arl-resume.' : 'Stopped: the run is over, and Claude is not prompted again.'
+  return command === 'pause' ? 'Paused: Claude is not prompted again until /arl-resume.' : 'Stopped: Claude is not prompted again. /arl-resume brings the run back where it stopped.'
 }
 
 async function accept($: EngineInterface): Promise<string> {
