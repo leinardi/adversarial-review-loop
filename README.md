@@ -77,7 +77,7 @@ tells Claude to stop and tell you.
 | `/arl-pause` | stop the run after the current phase, until `/arl-resume`: the loop prompts nothing, and a review Claude asks for still runs and tells it to stop there |
 | `/arl-accept` | approve the current phase (or the final review) as it stands, without a review |
 | `/arl-finish` | require a final review of the whole run before it completes |
-| `/arl-stop` | end the run |
+| `/arl-stop` | stop the run now: the loop prompts nothing, and a pending review is dropped. `/arl-resume` brings it back where it stopped, and `/arl-implement` starts a new run without `--new` |
 | `/arl-config [<key> <value> [--repo] \| <key> --unset [--repo]]` | show the configuration, or set or unset one key |
 | `/arl-model [all\|first\|late] <M> \| reset [all\|first\|late]` | this run's reviewer model, shown with no arguments. `first` is round 1 of each phase and the final review, `late` every later round; `reset` hands the choice back to the config files. Never written to a file |
 | `/arl-remove-root <alias or path>` | drop a workspace root registered by mistake |
