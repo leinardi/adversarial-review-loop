@@ -226,10 +226,18 @@ def next_turn(run: RunState, cfg: config.Config, verdict: str) -> str:
     """What Claude is told about the rest of its turn after a recorded round, or nothing.
 
     A run waiting for the user says nothing here: the mod puts the decision to them, and their
-    choice is what Claude is told.
+    choice is what Claude is told. A run this round completed says so: measured live, Claude read a
+    bare "approved" on the last phase as a step of a loop still going, and waited for the loop to
+    ask for the plan's after-the-run step, which no loop ever asks for.
     """
-    if run.data["waiting"] is not None or run.stage() == "done":
+    if run.data["waiting"] is not None:
         return ""
+    if run.stage() == "done":
+        return (
+            "\nEvery stage is approved: the run is complete, and the loop asks for nothing more. Commit each changed git "
+            f"repository by its own conventions{repositories(run)} if that is not done yet. Anything the plan says comes after "
+            "the run is yours to do now, without a review; then tell the user the run is complete.\n"
+        )
     if run.status == "paused":
         # Measured live: a paused run's approval read as "go on", and Claude implemented every
         # remaining phase in the same turn. Pausing is the user's stop.
