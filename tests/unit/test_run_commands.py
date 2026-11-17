@@ -33,7 +33,7 @@ import pytest
 from conftest import BOOTSTRAP, run_bootstrap
 from run_common import PAST, arl, backdate, git_at, make_repo, run_env, shadow_files, ws
 
-from arl import state, workspace
+from arl import gitsnap, state, workspace
 
 __all__ = ["run_env", "ws"]  # fixtures, re-exported so pytest finds them
 
@@ -361,6 +361,50 @@ def test_an_unborn_nested_repository_does_not_break_its_container(ws: Path, engi
     roots = roots_by_alias(started(engine, ws))
     assert roots["scratch"]["kind"] == "git"
     assert "scratch/x.txt" not in shadow_files(ws, "ws", load(ws).root("ws")["start_tree"])  # type: ignore[index]
+
+
+def test_a_folder_with_a_dangling_gitfile_is_content_not_a_root(ws: Path, engine: Engine) -> None:
+    """A removed submodule's ``.git`` file points at a store that is gone; git stages the folder's files."""
+    stale = ws / "keystore"
+    stale.mkdir()
+    (stale / ".git").write_text("gitdir: ../.git/modules/keystore\n")
+    (stale / "key.properties").write_text("k\n")
+    backdate(ws)
+
+    roots = roots_by_alias(started(engine, ws))
+    assert "keystore" not in roots
+    assert "keystore/key.properties" in shadow_files(ws, "ws", load(ws).root("ws")["start_tree"])  # type: ignore[index]
+
+
+def test_a_gitdir_ending_in_a_space_is_read_as_git_reads_it(run_env: Path, ws: Path, engine: Engine) -> None:
+    """Git keeps a gitfile path's trailing space; stripping it would call a live repository dangling."""
+    linked = make_repo(ws / "linked", files={"a.txt": "a\n"})
+    store = run_env / "store "
+    shutil.move(linked / ".git", store)
+    (linked / ".git").write_text(f"gitdir: {store}\n")
+    assert git_at(linked, "rev-parse", "--git-dir") == str(store)
+    backdate(ws)
+
+    roots = roots_by_alias(started(engine, ws))
+    assert roots["linked"]["kind"] == "git"
+    assert "linked/a.txt" not in shadow_files(ws, "ws", load(ws).root("ws")["start_tree"])  # type: ignore[index]
+
+
+def test_a_repository_git_refuses_to_open_stays_a_root(ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a dangling gitfile is content: a repository git will not open fails closed, never a gitlink."""
+    refused = make_repo(ws / "theirs")
+    backdate(ws)
+    real_git_run = gitsnap.git_run
+
+    def refusing(cwd: str, args: Any, **kwargs: Any) -> Any:
+        if Path(cwd).resolve() == refused.resolve():
+            return subprocess.CompletedProcess(args, 128, b"", b"fatal: detected dubious ownership\n")
+        return real_git_run(cwd, args, **kwargs)
+
+    monkeypatch.setattr(workspace, "git_run", refusing)
+    refused_init = engine(ws, "init", "--plan", str(ws / "plan.md"))
+    assert not refused_init["ok"]
+    assert "theirs is no longer the top of a git repository" in refused_init["error"]
 
 
 def test_two_roots_with_the_same_name_get_distinct_aliases(run_env: Path, ws: Path, engine: Engine) -> None:
