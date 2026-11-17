@@ -411,6 +411,10 @@ def scan_nested(top: Path, *, max_depth: int = SCAN_DEPTH) -> list[Path]:
     return sorted(set(found))
 
 
+_GITFILE_PREFIX: Final = b"gitdir: "
+_NUL: Final = b"\0"
+
+
 def _dangling_gitfile(directory: Path) -> bool:
     """Whether ``directory/.git`` is a gitfile whose ``gitdir:`` names a path that does not exist.
 
@@ -423,15 +427,22 @@ def _dangling_gitfile(directory: Path) -> bool:
     try:
         if gitfile.is_symlink() or not gitfile.is_file():
             return False
-        first = gitfile.read_text("utf-8").splitlines()[0]
-    except (OSError, UnicodeDecodeError, IndexError):
+        content = gitfile.read_bytes()
+    except OSError:
         return False
-    if not first.startswith("gitdir: ") or not first[len("gitdir: ") :].strip():
+    # Parsed as git's `read_gitfile_gently` does: the whole file, only trailing CR and LF
+    # dropped, then `gitdir: ` and the path as it stands -- spaces in it are part of the path.
+    content = content.rstrip(b"\r\n")
+    if not content.startswith(_GITFILE_PREFIX):
         return False
-    target = directory / first[len("gitdir: ") :].strip()
+    raw = content[len(_GITFILE_PREFIX) :]
+    # A NUL no path can hold: git reads such a file differently, so it is not ours to call dangling.
+    if not raw or _NUL in raw:
+        return False
+    target = os.path.join(os.fsencode(directory), raw)
     if os.path.lexists(target):
         return False
-    log(f"{gitfile} points at {target}, which does not exist; its folder is taken as plain content")
+    log(f"{gitfile} points at {os.fsdecode(target)}, which does not exist; its folder is taken as plain content")
     return True
 
 

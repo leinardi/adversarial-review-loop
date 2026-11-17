@@ -376,6 +376,20 @@ def test_a_folder_with_a_dangling_gitfile_is_content_not_a_root(ws: Path, engine
     assert "keystore/key.properties" in shadow_files(ws, "ws", load(ws).root("ws")["start_tree"])  # type: ignore[index]
 
 
+def test_a_gitdir_ending_in_a_space_is_read_as_git_reads_it(run_env: Path, ws: Path, engine: Engine) -> None:
+    """Git keeps a gitfile path's trailing space; stripping it would call a live repository dangling."""
+    linked = make_repo(ws / "linked", files={"a.txt": "a\n"})
+    store = run_env / "store "
+    shutil.move(linked / ".git", store)
+    (linked / ".git").write_text(f"gitdir: {store}\n")
+    assert git_at(linked, "rev-parse", "--git-dir") == str(store)
+    backdate(ws)
+
+    roots = roots_by_alias(started(engine, ws))
+    assert roots["linked"]["kind"] == "git"
+    assert "linked/a.txt" not in shadow_files(ws, "ws", load(ws).root("ws")["start_tree"])  # type: ignore[index]
+
+
 def test_a_repository_git_refuses_to_open_stays_a_root(ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only a dangling gitfile is content: a repository git will not open fails closed, never a gitlink."""
     refused = make_repo(ws / "theirs")
