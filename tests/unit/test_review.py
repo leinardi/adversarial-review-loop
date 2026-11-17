@@ -1815,6 +1815,26 @@ def test_accepting_under_auto_compact_tells_claude_to_end_its_turn(ws: Path, eng
     assert "end your turn without starting the next stage" in engine(ws, "accept")["next"]
 
 
+def test_the_approval_that_completes_the_run_says_so(ws: Path, engine: Engine, answers: Path) -> None:
+    """**Fails on the old code**, which said only "approved the change". Measured live: Claude then
+    waited for the loop to ask for the plan's after-the-run commit, which the loop never does."""
+    started(engine, ws, phases=1)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+
+    outcome = review(engine, ws, answers, "VERDICT APPROVED")
+
+    assert outcome["run"]["stage"] == "done"
+    assert "the run is complete, and the loop asks for nothing more" in outcome["message"]
+    assert "Anything the plan says comes after the run is yours to do now" in outcome["message"]
+    assert f"api at {ws / 'api'}" in outcome["message"]
+
+
+def test_accepting_the_last_stage_says_the_run_is_complete(ws: Path, engine: Engine) -> None:
+    started(engine, ws, phases=1)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    assert "the run is complete, and the loop asks for nothing more" in engine(ws, "accept")["next"]
+
+
 def test_accepting_without_auto_compact_answers_no_next_turn(ws: Path, engine: Engine) -> None:
     started(engine, ws)
     edit(ws / "api" / "src" / "main.py", "print(2)\n")

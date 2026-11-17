@@ -398,7 +398,7 @@ test('/arl-accept approves and continues with the next stage', async () => {
   expect(w.submitted[0]).toContain('The user accepted the stage as it stands.')
 })
 
-test('/arl-accept of the last stage completes the run and prompts nothing', async () => {
+test('/arl-accept of the last stage completes the run and prompts nothing when the engine says nothing', async () => {
   at()
   const { $, w } = fakeEngine({ engine: { accept: { ok: true, run: summary({ stage: 'done', status: 'complete' }) } } })
   expect(await runCommand($, 'arl-accept', '')).toBe('Accepted. The run is complete.')
@@ -406,6 +406,17 @@ test('/arl-accept of the last stage completes the run and prompts nothing', asyn
   await settle()
   expect(w.commands()).toEqual(['accept'])
   expect(w.submitted).toEqual([])
+})
+
+// Measured live: told nothing, Claude waited for the loop to ask for the plan's after-the-run step.
+test('/arl-accept of the last stage tells Claude the run is complete', async () => {
+  at()
+  const next = 'Every stage is approved: the run is complete, and the loop asks for nothing more.'
+  const { $, w } = fakeEngine({ engine: { accept: { ok: true, next, run: summary({ stage: 'done', status: 'complete' }) } } })
+  expect(await runCommand($, 'arl-accept', '')).toBe('Accepted. The run is complete.')
+  await settle()
+  expect(w.commands()).toEqual(['accept'])
+  expect(w.submitted).toEqual([`The user accepted the last stage as it stands. ${next}`])
 })
 
 test('a stage whose changes are all ignored is shown, and the run it completes is notified', async () => {

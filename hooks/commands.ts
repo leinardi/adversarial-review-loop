@@ -264,6 +264,14 @@ async function accept($: EngineInterface): Promise<string> {
   const stage = summaryOf(answer)?.stage
   if (stage === 'done') {
     await announce($, { ...answer, label: 'run', verdict: 'APPROVED' }, 'The user accepted the last stage: the run is complete.')
+    // Claude is told the run is over, or it waits for a loop that asks for nothing more: what the
+    // plan says comes after the run is its to do now.
+    const next = typeof answer.next === 'string' ? answer.next.trim() : ''
+    if (next !== '') {
+      $.clock.after(0, () => {
+        void $.prompt.submit({ text: `The user accepted the last stage as it stands. ${next}` }).catch(() => undefined)
+      })
+    }
     return 'Accepted. The run is complete.'
   }
   const repos = typeof answer.repositories === 'string' ? answer.repositories : ''
