@@ -386,7 +386,9 @@ def scan_nested(top: Path, *, max_depth: int = SCAN_DEPTH) -> list[Path]:
     """The outermost git repositories below ``top`` (a ``.git`` directory or file), ``top`` excluded.
 
     The scan does not descend into a repository it finds: what is nested in *that* one is its
-    own scan's business, under its own ignore rules, once it is a root.
+    own scan's business, under its own ignore rules, once it is a root. A dangling gitfile (one
+    left behind by a removed submodule, its ``gitdir:`` gone) is no repository: git stages that
+    folder's files as plain content of whatever contains it, so the scan treats it as a folder.
     """
     found: list[Path] = []
     seen = 0
@@ -401,12 +403,36 @@ def scan_nested(top: Path, *, max_depth: int = SCAN_DEPTH) -> list[Path]:
         if seen > WALK_LIMIT:
             log(f"nested-repository scan of {top} stopped after {WALK_LIMIT} entries; a repository below it may be missed")
             break
-        if directory != top and any(entry.name == ".git" for entry in entries):
+        if directory != top and any(entry.name == ".git" for entry in entries) and not _dangling_gitfile(directory):
             found.append(directory.resolve())
             continue
         if depth < max_depth:
             stack.extend((Path(entry.path), depth + 1) for entry in entries if entry.name not in _SKIP_DIRS and entry.is_dir(follow_symlinks=False))
     return sorted(set(found))
+
+
+def _dangling_gitfile(directory: Path) -> bool:
+    """Whether ``directory/.git`` is a gitfile whose ``gitdir:`` names a path that does not exist.
+
+    Decided from the file alone, never from a git probe: a probe also fails on a real repository
+    git refuses (``safe.directory``, permissions), whose container would then record only a
+    gitlink and hide its changes. Anything not positively dangling stays a repository, and its
+    snapshot fails closed.
+    """
+    gitfile = directory / ".git"
+    try:
+        if gitfile.is_symlink() or not gitfile.is_file():
+            return False
+        first = gitfile.read_text("utf-8").splitlines()[0]
+    except (OSError, UnicodeDecodeError, IndexError):
+        return False
+    if not first.startswith("gitdir: ") or not first[len("gitdir: ") :].strip():
+        return False
+    target = directory / first[len("gitdir: ") :].strip()
+    if os.path.lexists(target):
+        return False
+    log(f"{gitfile} points at {target}, which does not exist; its folder is taken as plain content")
+    return True
 
 
 def _nested_roots(container: dict[str, Any]) -> list[Path]:
