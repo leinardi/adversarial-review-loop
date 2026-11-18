@@ -82,6 +82,18 @@ function where(run: RunView): string {
   return `phase ${run.phase}/${run.phase_count}: ${run.phases[run.phase - 1] ?? ''}`
 }
 
+/**
+ * A review's label as the phase window shows it: `phase3` is `3. <title>`, `final` the final
+ * review. A plan whose own titles carry numbers ("Phase 2: …") is then never read against the
+ * label's number.
+ */
+function reviewName(run: RunView, label: string): string {
+  if (label === 'final') return 'final review'
+  const number = /^phase(\d+)$/.exec(label)?.[1]
+  const title = number === undefined ? undefined : run.phases[Number(number) - 1]
+  return title === undefined ? label : `${number}. ${title}`
+}
+
 /** What the run waits on, when it waits on the person or a pending review. */
 function hold(run: RunView): string | undefined {
   if (run.status === 'paused') return 'paused: /arl-resume continues it'
@@ -204,7 +216,7 @@ export function paneLines(run: RunView | null, last: LastReview | null, activity
   lines.push(line(...roots))
   if (last !== null) {
     const findings = findingsOf(last.message, last.verdict)
-    const latest: Segment[] = [{ text: 'Latest: ', color: QUIET }, { text: `${last.label} ` }, { text: last.verdict, bold: true, color: VERDICT_COLOR[last.verdict] ?? WAITS }]
+    const latest: Segment[] = [{ text: 'Latest: ', color: QUIET }, { text: `${reviewName(run, last.label)} ` }, { text: last.verdict, bold: true, color: VERDICT_COLOR[last.verdict] ?? WAITS }]
     if (findings.length > 0) latest.push({ text: ` · ${findings.length} blocking`, color: BAD })
     lines.push(line(...latest))
     for (const finding of findings.slice(0, PANE_FINDINGS)) {

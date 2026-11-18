@@ -242,6 +242,9 @@ def test_a_diff_past_hard_diff_ceiling_makes_the_run_wait_rather_than_trimming(w
     assert refused["code"] == "oversized"
     assert "Approving on a partial view is not an option" in refused["error"]
     assert load(ws).data["waiting"]["kind"] == "oversized"
+    # Nothing of the refused bundle is left behind: the part written before the ceiling was hit
+    # can be the oversized diff itself.
+    assert not list((ws / ".arl" / "reviews").glob("*"))
 
 
 def test_the_incremental_diff_is_omitted_not_truncated_past_the_ceiling(
