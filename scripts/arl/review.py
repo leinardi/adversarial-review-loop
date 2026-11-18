@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -327,6 +328,8 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
             built = bundle.build(run, target, review_dir / "bundle", config=cfg, verification=verification, sources=sources, warnings=warnings)
             bundle.compose_prompt(target, built, review_dir / "prompt.md")
         except BundleTooLarge as exc:
+            # Nothing is reviewed from it, and what was written can be the oversized diff itself.
+            shutil.rmtree(review_dir, ignore_errors=True)
             run.wait_for_user("oversized", str(exc))
             run.save()
             raise RunError("oversized", str(exc)) from exc
