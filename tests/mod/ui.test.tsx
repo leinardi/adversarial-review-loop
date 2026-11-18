@@ -86,7 +86,7 @@ test('the pane lists at most three blocking findings of the latest review, one l
   ].join('\n')
   const lines = paneLines(run(), { label: 'phase1', verdict: 'CHANGES_REQUIRED', message, report: '/r.md' }, '')
   const texts = lines.map(line => line.text)
-  expect(texts).toContain('Latest: phase1 CHANGES_REQUIRED · 4 blocking')
+  expect(texts).toContain('Latest: 1. one CHANGES_REQUIRED · 4 blocking')
   expect(texts).toContain('  high api/a.py:1  bug 1')
   expect(texts).not.toContain('  high api/a.py:4  bug 4')
   expect(texts).toContain('  … 1 more')
@@ -105,7 +105,7 @@ test('deferred findings and an approval\'s listed findings are never counted as 
   const changes = `The review of phase 1 asks for changes.\n\nBlocking findings (actionable, severity >= medium) -- every one must be resolved:\n\nFINDING severity=high actionable=yes file=api/a.py | bug\n\n${deferred}`
   expect(blockingFindings(changes, 'CHANGES_REQUIRED')).toEqual(['high api/a.py  bug'])
   const texts = paneLines(run(), { label: 'phase1', verdict: 'APPROVED', message: approved, report: '/r.md' }, '').map(line => line.text)
-  expect(texts).toContain('Latest: phase1 APPROVED')
+  expect(texts).toContain('Latest: 1. one APPROVED')
 })
 
 test('phase marks are coloured: approved green, current blue and bold, later grey', () => {
@@ -203,4 +203,16 @@ test('a run stored by an earlier version is declined: the pane says there is non
   } as never)
   expect((await ui.find({ type: 'Text' }))?.text).toContain('No adversarial-review-loop run here')
   await ui.unmount()
+})
+
+test('the latest review is named as the phase window names its phase, not by its label', () => {
+  // A plan numbering its own phases from 0: label phase3 is the third title, "Phase 2: db".
+  const view = run({ phases: ['Phase 0: fix', 'Phase 1: skeleton', 'Phase 2: db', 'Phase 3: auth'], phase_count: 4, phase: 4, approved_phases: 3 })
+  const texts = paneLines(view, { label: 'phase3', verdict: 'APPROVED', message: '', report: '/r.md' }, '').map(line => line.text)
+  expect(texts).toContain('Latest: 3. Phase 2: db APPROVED')
+  const final = paneLines(run({ stage: 'final', phase: 0 }), { label: 'final', verdict: 'APPROVED', message: '', report: '/r.md' }, '').map(line => line.text)
+  expect(final).toContain('Latest: final review APPROVED')
+  // A label no phase answers to is shown as it is.
+  const stale = paneLines(run(), { label: 'phase9', verdict: 'APPROVED', message: '', report: '/r.md' }, '').map(line => line.text)
+  expect(stale).toContain('Latest: phase9 APPROVED')
 })
