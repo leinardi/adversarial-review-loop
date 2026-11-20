@@ -494,7 +494,19 @@ const GIT_READS = new Set(['log', 'show', 'diff', 'rev-parse', 'ls-tree', 'ls-fi
  * Options that make a reading subcommand write a file, start another program, or read files
  * outside the repository (`--no-index`).
  */
-const GIT_UNSAFE_OPTIONS = /^(--output(=|$)|-O|--open-files-in-pager|--no-index)/
+const GIT_UNSAFE_OPTIONS = /^(--output(=|$)|-O|--open-files-in-pager|--no-index|--ext-diff$|--textconv$|--filters$|--show-signature$)/
+/**
+ * Options a subcommand must carry because without them it may start another program: an external
+ * diff driver (`diff.external`, a `diff=<driver>` attribute) or a text-conversion filter
+ * (`textconv`). The session judges none of these read-only; the plugin allows them only when the
+ * call turns both off.
+ */
+const GIT_REQUIRED_OPTIONS: Record<string, readonly string[]> = {
+  diff: ['--no-ext-diff', '--no-textconv'],
+  show: ['--no-ext-diff', '--no-textconv'],
+  log: ['--no-ext-diff', '--no-textconv'],
+  blame: ['--no-textconv'],
+}
 /** `git tag` options that create, delete or sign a tag: with `-l` it only lists. */
 const TAG_WRITING_OPTIONS = /^(-[dfasumFe]$|--(delete|force|annotate|sign|local-user|message|file|edit))/
 /** Characters that would make the command more than one plain git call. */
@@ -533,17 +545,18 @@ function words(command: string): string[] | undefined {
  * `git -C`, so a reviewer could not check a commit or a tag of another root; the plugin trusts
  * its agents, and this lets the reviewer read history without a refused call.
  */
-export function gitRead(command: string, dirs: readonly string[]): boolean {
+export function gitRead(command: string, dirs: readonly string[], cwd?: string): boolean {
   if (SHELL_SYNTAX.test(command)) return false
   const argv = words(command.trim())
   if (argv === undefined || argv[0] !== 'git') return false
   let at = 1
-  let directory: string | undefined
+  // A script's `.cwd()` already names the directory: the call may not name another.
+  let directory: string | undefined = cwd
   while (at < argv.length && argv[at]?.startsWith('-')) {
     const option = argv[at]
     if (option === '--no-pager') {
       at += 1
-    } else if (option === '-C' && directory === undefined && at + 1 < argv.length) {
+    } else if (option === '-C' && cwd === undefined && directory === undefined && at + 1 < argv.length) {
       directory = argv[at + 1]
       at += 2
     } else {
@@ -556,6 +569,11 @@ export function gitRead(command: string, dirs: readonly string[]): boolean {
   if (subcommand === undefined || !GIT_READS.has(subcommand)) return false
   const rest = argv.slice(at + 1)
   if (rest.some(arg => GIT_UNSAFE_OPTIONS.test(arg))) return false
+  // The required options come first, right after the subcommand: nothing before them can take one
+  // as its value (`--grep --no-textconv` is a pattern, not the option), and none is a path.
+  const required = GIT_REQUIRED_OPTIONS[subcommand] ?? []
+  const leading = rest.slice(0, required.length)
+  if (!required.every(option => leading.includes(option))) return false
   // `git tag` creates a tag unless it lists: only the listing form is a read.
   if (subcommand === 'tag') return rest.some(arg => arg === '-l' || arg === '--list') && !rest.some(arg => TAG_WRITING_OPTIONS.test(arg))
   return true
@@ -593,13 +611,33 @@ function refuseHandback(agentId: string | undefined): Decision {
   }
 }
 
+/**
+ * What a script's `$\`git ...\`.cwd(<dir>)` sends (tests/STEP0.md): `cd '<dir>' && <command>`, the
+ * directory single-quoted. Only that exact shape is taken apart.
+ */
+const SCRIPT_CWD = /^cd '([^']+)' && (git .*)$/s
+
+/**
+ * Whether `command` is a script's git read run in a root: `cd '<root>' && git <read>`, the `cd`
+ * standing for `-C`. The git call may not name a directory of its own.
+ */
+export function scriptGitRead(command: string, dirs: readonly string[]): boolean {
+  const match = SCRIPT_CWD.exec(command)
+  if (match === null) return false
+  const [, directory = '', rest = ''] = match
+  if (!directory.startsWith('/')) return false
+  // `gitRead` checks the directory is a root's, and refuses a `-C` among git's own options;
+  // one after the subcommand (`git grep -C 2`) is that subcommand's.
+  return gitRead(rest, dirs, directory)
+}
+
 /** What a reviewer that may read `dirs` may do: read, and run read-only commands. */
 export function permit(dirs: readonly string[], call: Check): Decision {
   if (call.tool === 'Bash') {
     const command = (call.input as { command?: unknown } | null)?.command
-    return call.isReadOnly || (typeof command === 'string' && gitRead(command, dirs))
+    return call.isReadOnly || (typeof command === 'string' && (gitRead(command, dirs) || scriptGitRead(command, dirs)))
       ? { decision: 'allow', reason: 'a read-only command of the review' }
-      : { decision: 'deny', reason: 'The reviewer only reads: this command is not read-only. Use Read, Grep or Glob, one plain read-only command per call with no cd, variables, echo or redirection, or git -C <root> with a reading subcommand such as log, show, diff or rev-parse.' }
+      : { decision: 'deny', reason: 'The reviewer only reads: this command is not read-only. Use Read, Grep or Glob, one plain read-only command per call with no cd, variables, echo or redirection, or git -C <root> with a reading subcommand such as log, show, diff or rev-parse (in a script, a git read with .cwd(<root>) works too). git diff, show and log need --no-ext-diff --no-textconv, and blame --no-textconv, right after the subcommand.' }
   }
   if (call.tool === 'Read' || call.tool === 'Grep' || call.tool === 'Glob') {
     const path = pathOf(call.input)

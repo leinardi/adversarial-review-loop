@@ -105,17 +105,51 @@ test('the reviewer is told which commands are refused, and never told to chain t
   expect(refusal).toEqual(expect.objectContaining({ decision: 'deny', reason: expect.stringContaining('git -C <root>') }))
 })
 
+// Under Code Mode a script's `$\`git log\`.cwd(root)` arrives as `cd '<root>' && git log` (tests/STEP0.md),
+// which the session does not judge read-only.
+test("a script's git read with .cwd(<root>) is allowed, and nothing else after a cd", () => {
+  for (const command of [
+    "cd '/elsewhere/web' && git log --no-ext-diff --no-textconv -1 --oneline",
+    "cd '/work/src' && git show --no-ext-diff --no-textconv HEAD:a.ts",
+    "cd '/work/.arl/reviews/r1-001/bundle' && git diff --no-ext-diff --no-textconv --stat",
+    // A -C after the subcommand is grep's context, not a directory.
+    "cd '/work' && git grep -n -C 2 needle",
+  ]) {
+    expect(permit(DIRS, { tool: 'Bash', input: { command } })).toEqual(expect.objectContaining({ decision: 'allow' }))
+  }
+  for (const command of [
+    "cd '/etc' && git log",
+    "cd '/elsewhere/web' && git commit -m x",
+    "cd '/elsewhere/web' && git -C /etc log --no-ext-diff --no-textconv",
+    "cd '/elsewhere/web' && git -C /elsewhere/web log --no-ext-diff --no-textconv",
+    "cd '/elsewhere/web' && git diff HEAD~1",
+    "cd '/elsewhere/web' && git log | head",
+    "cd '/elsewhere/web' && cd '/work' && git log",
+    "cd '/elsewhere/web' && ls",
+    "cd 'web' && git log",
+    'cd /elsewhere/web && git log',
+    "cd '/elsewhere/web' && git -c core.pager=x log",
+    "cd '/elsewhere/web'&&git log",
+  ]) {
+    expect([command, permit(DIRS, { tool: 'Bash', input: { command } })]).toEqual([command, expect.objectContaining({ decision: 'deny' })])
+  }
+  expect(REVIEWER_SYSTEM_PROMPT).toContain('If your session runs tool calls through scripts (a REPL tool), the same rules hold for every call in a script')
+  expect(REVIEWER_SYSTEM_PROMPT).toContain(".cwd(<the root's absolute path>)")
+})
+
 // The session refused every `git -C`, so a reviewer could not check a tag or a commit of another
 // root. One plain reading git call in a root is the plugin's to allow.
 test('a plain reading git call in a root is allowed', () => {
   for (const command of [
-    'git -C /elsewhere/web log --oneline -3 v1.4.0',
+    'git -C /elsewhere/web log --no-ext-diff --no-textconv --oneline -3 v1.4.0',
     "git -C /elsewhere/web rev-parse 'v1.4.0^{commit}'",
-    'git -C /elsewhere/web show v1.4.0:crates/docker-client/Cargo.toml',
+    'git -C /elsewhere/web show --no-ext-diff --no-textconv v1.4.0:crates/docker-client/Cargo.toml',
     'git -C "/elsewhere/web" ls-tree -r v1.4.0 --name-only',
     "git -C /elsewhere/web tag -l 'v1.4*'",
-    'git --no-pager -C /work diff HEAD~1 -- src',
-    'git log --format=%h%x20%s -5',
+    'git --no-pager -C /work diff --no-ext-diff --no-textconv HEAD~1 -- src',
+    'git log --no-ext-diff --no-textconv --format=%h%x20%s -5',
+    'git -C /work blame --no-textconv -L 1,20 src/a.ts',
+    'git -C /work grep -n -C 2 needle',
     'git -C /elsewhere/web/sub/../ cat-file -t 6ad52461',
   ]) {
     expect({ command, decision: permit(DIRS, { tool: 'Bash', input: { command } }) }).toEqual({ command, decision: expect.objectContaining({ decision: 'allow' }) })
@@ -143,6 +177,25 @@ test('a git call that writes, leaves the roots or is more than one plain call is
     'git -C /elsewhere/web log > /work/out',
     "git -C /elsewhere/web log 'unclosed",
     'gitk -C /elsewhere/web',
+    // Each can start another program: a diff driver, a conversion filter, gpg.
+    'git -C /elsewhere/web diff HEAD~1',
+    'git -C /elsewhere/web show HEAD',
+    'git -C /elsewhere/web log -p',
+    'git -C /elsewhere/web diff --no-ext-diff HEAD~1',
+    'git -C /elsewhere/web diff --no-textconv HEAD~1',
+    'git -C /elsewhere/web diff -- --no-ext-diff --no-textconv',
+    'git -C /elsewhere/web diff --no-ext-diff --no-textconv --ext-diff',
+    'git -C /elsewhere/web show --no-ext-diff --no-textconv --textconv HEAD',
+    'git -C /elsewhere/web log --no-ext-diff --no-textconv --show-signature',
+    // A required option taken as another option's value is not that option.
+    'git -C /elsewhere/web log --grep --no-textconv --no-ext-diff -p',
+    'git -C /elsewhere/web log -p --grep --no-textconv --no-ext-diff',
+    'git -C /elsewhere/web diff HEAD~1 --no-ext-diff --no-textconv',
+    "cd '/elsewhere/web' && git log --author --no-ext-diff --no-textconv -p",
+    'git -C /elsewhere/web blame src/a.ts',
+    'git -C /elsewhere/web grep --textconv x',
+    'git -C /elsewhere/web cat-file --textconv HEAD:a.ts',
+    'git -C /elsewhere/web cat-file --filters HEAD:a.ts',
   ]) {
     expect({ command, decision: permit(DIRS, { tool: 'Bash', input: { command } }) }).toEqual({ command, decision: expect.objectContaining({ decision: 'deny' }) })
   }
