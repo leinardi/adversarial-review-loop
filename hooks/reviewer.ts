@@ -72,6 +72,8 @@ export type Task = {
   timeoutSec: number
   /** What the reviewer may read: the bundle and every root. */
   dirs: readonly string[]
+  /** The review bundle: a reviewer that read none of it gives no verdict. */
+  bundle: string
   /** The calling hook's `next.signal`: aborted when the person interrupts the review. */
   signal?: AbortSignal
 }
@@ -96,9 +98,18 @@ const steps = new Map<string, number>()
  * delivered. Only a call that ran is kept: one the session refused delivered nothing.
  */
 const handbacks = new Map<string, string>()
+/** The bundle each running reviewer reviews, by agent id. */
+const bundles = new Map<string, string>()
+/**
+ * Reviewers that read part of their bundle, by agent id. The prompt lists the bundle's files and
+ * holds none of them: an answer from a reviewer that never read one is a verdict on nothing, and
+ * a well-formed APPROVED from it would approve a phase nobody saw.
+ */
+const readTheBundle = new Set<string>()
 /** Spawns not resolved yet: a reviewer's first tool call can come before its id is known. */
 let spawning = 0
 let spawningDirs: readonly string[] = []
+let spawningBundle = ''
 
 export function reviewerType($: EngineInterface): string {
   return `${$.plugin.name}:${REVIEWER}`
@@ -148,8 +159,8 @@ export function handBack(agentId: string, message: string): void {
   }
 }
 
-/** How a tool call came out, as far as a handback needs it. */
-export type CallOutcome = { deny?: string; isError?: boolean }
+/** How a tool call came out, as far as a handback or a reviewer's read needs it. */
+export type CallOutcome = { deny?: string; isError?: boolean; result?: unknown }
 
 /**
  * Run a subagent's `SubagentHandback` call (`run` is the hook's `next`) and keep its report once
@@ -271,6 +282,7 @@ export async function runReviewer($: EngineInterface, task: Task): Promise<Ran> 
   if (refused !== undefined) return refused
   spawning += 1
   spawningDirs = task.dirs
+  spawningBundle = task.bundle
   let agentId: string | undefined
   let ranOn: string
   try {
@@ -291,11 +303,15 @@ export async function runReviewer($: EngineInterface, task: Task): Promise<Ran> 
     return failed('model', `the session started the reviewer on ${ranOn || 'an unnamed model'}, not ${task.model}`)
   }
   running.set(agentId, task.dirs)
+  bundles.set(agentId, task.bundle)
   try {
     const completion = await answerOf($, agentId, task.timeoutSec, task.signal)
     // An interrupt may also end the reviewer's own run before its clock: still an interrupt.
     if (task.signal?.aborted) throw new Interrupted()
-    return classify(completion, task.timeoutSec)
+    const ran = classify(completion, task.timeoutSec)
+    // Never a verdict from a reviewer that read none of the evidence (AGENTS.md rule 1).
+    if (ran.ok && !readTheBundle.has(agentId)) return failed('operational', 'the reviewer read none of the bundle', completion)
+    return ran
   } catch (error) {
     if (error instanceof Interrupted || task.signal?.aborted) throw new Interrupted()
     // The clock could not run, or the wait was interrupted: no answer either way. An interrupted
@@ -303,6 +319,8 @@ export async function runReviewer($: EngineInterface, task: Task): Promise<Ran> 
     return failed('operational', `the reviewer's answer could not be waited for: ${String(error)}`)
   } finally {
     running.delete(agentId)
+    bundles.delete(agentId)
+    readTheBundle.delete(agentId)
   }
 }
 
@@ -375,7 +393,95 @@ export async function reviewerDecision($: EngineInterface, call: Check): Promise
     return { decision: 'deny', reason: 'This review is over: its answer is no longer waited for.' }
   }
   const dirs = await dirsOf($, call.agentId)
-  return dirs === undefined ? undefined : permit(dirs, call)
+  if (dirs === undefined) return undefined
+  return permit(dirs, call)
+}
+
+/**
+ * The bundle files that hold the change itself: the diff chunks, a later round's increment, and
+ * a repair's transcript. `range.txt` and the rest are orientation, not evidence.
+ */
+const EVIDENCE = /^(changes\.\d+\.diff|incremental\.diff|repair\.txt)$/
+/** Commands that print a file's content, as a reviewer reads a diff chunk through Bash. */
+const PRINTERS = new Set(['cat', 'head', 'tail', 'sed'])
+
+/**
+ * What a diff's content looks like: a file header or a hunk, possibly after a line number and a
+ * tab (as Read numbers its lines), or the engine's own line for an increment with no change.
+ */
+const DIFF_CONTENT = /(^|\t)(diff --git |@@ -\d)|\(no change since the previous round\)/m
+
+/** Every string in a tool result, one per line: Read's content, Bash's output, wherever the session puts them. */
+function textOf(value: unknown, depth = 0): string {
+  if (typeof value === 'string') return value
+  if (depth > 6 || typeof value !== 'object' || value === null) return ''
+  return Object.values(value)
+    .map(inner => textOf(inner, depth + 1))
+    .filter(text => text !== '')
+    .join('\n')
+}
+
+/** Whether what a read of `name` printed is its evidence: a diff's content, or a repair transcript that is not empty. */
+function showsEvidence(name: string, result: unknown): boolean {
+  const text = textOf(result)
+  return name.endsWith('.diff') ? DIFF_CONTENT.test(text) : text.trim() !== ''
+}
+
+function isEvidence(path: string, bundle: string): boolean {
+  const normal = normalize(path)
+  return normal !== undefined && within(normal, bundle) && parentOf(normal) === normalize(bundle) && EVIDENCE.test(normal.slice(normal.lastIndexOf('/') + 1))
+}
+
+function parentOf(path: string): string {
+  const cut = path.lastIndexOf('/')
+  return cut <= 0 ? '/' : path.slice(0, cut)
+}
+
+/**
+ * The evidence file in `bundle` a call reads: a Read of one, or a printing command naming one;
+ * `undefined` for any other call.
+ */
+function evidenceRead(tool: string, input: unknown, bundle: string): string | undefined {
+  if (tool === 'Read') {
+    const path = pathOf(input)
+    return path !== undefined && isEvidence(path, bundle) ? path : undefined
+  }
+  if (tool !== 'Bash') return undefined
+  const command = (input as { command?: unknown } | null)?.command
+  if (typeof command !== 'string' || SHELL_SYNTAX.test(command)) return undefined
+  const argv = words(command.trim())
+  if (argv === undefined || !PRINTERS.has(argv[0] ?? '')) return undefined
+  return argv.slice(1).find(word => isEvidence(word, bundle))
+}
+
+/**
+ * A subagent's tool call ran (from a `tool.call` hook, once `next(e)` answered): a reviewer
+ * whose call read change evidence, succeeded and printed it has read the phase. A call that was
+ * refused, failed (a file not there) or printed none of it read nothing, and neither did a
+ * listing or a search.
+ */
+export function noteToolResult(agentId: string, tool: string, input: unknown, outcome: CallOutcome): void {
+  if (outcome.deny !== undefined || outcome.isError === true) return
+  const bundle = bundles.get(agentId) ?? (spawning > 0 ? spawningBundle : '')
+  if (bundle === '') return
+  const read = evidenceRead(tool, input, bundle)
+  // A read that ran and printed nothing (`head -n 0`, an offset past the end) read nothing.
+  if (read !== undefined && showsEvidence(read, outcome.result)) noteRead(agentId)
+}
+
+/** Run a subagent's tool call (`run` is the hook's `next`) and note what it read, once it ran. */
+export async function runSubagentCall<T extends CallOutcome>(agentId: string, tool: string, input: unknown, run: () => Promise<T>): Promise<T> {
+  const outcome = await run()
+  noteToolResult(agentId, tool, input, outcome)
+  return outcome
+}
+
+function noteRead(agentId: string): void {
+  readTheBundle.add(agentId)
+  if (readTheBundle.size > EARLY_LIMIT) {
+    const oldest = readTheBundle.values().next().value
+    if (oldest !== undefined && oldest !== agentId && !running.has(oldest)) readTheBundle.delete(oldest)
+  }
 }
 
 /**

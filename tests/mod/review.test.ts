@@ -21,7 +21,7 @@
 import type { EngineInterface } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 import { reviewWith, session } from '../../hooks/flow'
-import { Interrupted, type Ran } from '../../hooks/reviewer'
+import { Interrupted, type Ran, runReviewer, runSubagentCall } from '../../hooks/reviewer'
 import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, start, summary, world } from './world'
 
 function at(isInteractive = false): void {
@@ -37,6 +37,64 @@ function review($: EngineInterface, input: Record<string, unknown>, run: ReturnT
 
 const APPROVED = { ok: true as const, answer: 'All good.\nVERDICT APPROVED', usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4, model: 'haiku' }, durationMs: 1000 }
 
+/** An approval the engine's contract parser accepts: only the evidence gate can stop it. */
+const VALID_APPROVAL = 'Nothing to fix.\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>'
+
+for (const [label, outcome, recorded] of [
+  ['a read of the diff that failed', { result: 'File does not exist.', isError: true }, '--failed'],
+  ['a read of the diff that ran and printed nothing', { result: { stdout: '', stderr: '' } }, '--failed'],
+  ['a read of the diff that ran', { result: { file: { content: 'diff --git a/x b/x\n@@ -1 +1 @@\n' } } }, '--answer'],
+] as const) {
+  test(`a reviewer's valid approval after ${label} is recorded with ${recorded}`, async () => {
+    at()
+    const { $, w } = fakeEngine({
+      engine: { 'review prepare': PREPARED, 'review record': RECORDED },
+      files: PROMPTS,
+      agents: [{ answer: VALID_APPROVAL, reason: 'answer', durationMs: 5 }],
+      reads: 'none',
+      // The read goes through the call the mod's tool.call hook makes around the session's own.
+      whileRunning: async agentId => {
+        await runSubagentCall(agentId, 'Read', { file_path: `${PREPARED.bundle_dir}/changes.00.diff` }, async () => outcome)
+      },
+    })
+    await review($, {}, task => runReviewer($, task))
+    const record = w.calls.find(call => call.args[1] === 'record')
+    expect(record?.args[3]).toBe(recorded)
+  })
+}
+
+test('a subagent\'s scripted read goes through the registered hook to the session and back unchanged', async ($, on) => {
+  const w = world(on, { engine: {} })
+  const shown = { result: { type: 'text', file: { content: 'diff --git a/x b/x\n' } } }
+  const ran: unknown[] = []
+  on('tool.call', { tool: 'Read' }, (_, e) => {
+    ran.push(e)
+    return shown as never
+  })
+  await start($)
+  // As a script's inner call arrives (tests/STEP0.md): the agent's id, and a repl_ tool-use id.
+  const result = await $.tool.call({ tool: 'Read', file_path: `${PREPARED.bundle_dir}/changes.00.diff`, agentId: 'agent-r', tool_use_id: 'repl_0877ffc1' } as never)
+  expect(result).toEqual(expect.objectContaining(shown))
+  expect(ran).toHaveLength(1)
+  // Not taken for a write: no root is registered for it.
+  expect(w.commands()).not.toContain('root-add')
+})
+
+test('a reviewer that read none of the bundle is recorded as a failure, never its APPROVED', async () => {
+  at()
+  const failed = { ok: true, status: 'failed', message: 'The review failed: the reviewer read none of the bundle.', run: summary() }
+  const { $, w } = fakeEngine({
+    engine: { 'review prepare': PREPARED, 'review record': failed },
+    files: PROMPTS,
+    agents: [{ answer: VALID_APPROVAL, reason: 'answer', durationMs: 5 }],
+    reads: 'none',
+  })
+  await review($, {}, task => runReviewer($, task))
+  const record = w.calls.find(call => call.args[1] === 'record')
+  expect(record?.args.slice(0, 7)).toEqual(['review', 'record', 'r1-1', '--failed', 'operational', '--error', 'the reviewer read none of the bundle'])
+  expect(w.written.has(PREPARED.answer_file)).toBe(false)
+})
+
 test('a review runs one fresh reviewer on the prepared prompt and records its answer', async () => {
   at()
   const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': RECORDED }, files: PROMPTS })
@@ -46,7 +104,7 @@ test('a review runs one fresh reviewer on the prepared prompt and records its an
 
   expect(text).toBe(RECORDED.message)
   expect(r.tasks).toEqual([
-    { prompt: 'Review phase 1.', description: 'Review phase1, round 1', model: 'opus', timeoutSec: 900, dirs: [PREPARED.bundle_dir, ...PREPARED.roots] },
+    { prompt: 'Review phase 1.', description: 'Review phase1, round 1', model: 'opus', timeoutSec: 900, dirs: [PREPARED.bundle_dir, ...PREPARED.roots], bundle: PREPARED.bundle_dir },
   ])
   expect(w.written.get(PREPARED.answer_file)).toBe(APPROVED.answer)
   expect(w.commands()).toEqual(['review prepare', 'review record'])

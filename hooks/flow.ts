@@ -400,6 +400,7 @@ async function ask($: EngineInterface, reviewer: Reviewer, prepared: Prepared, s
     model: prepared.reviewer_model ?? '',
     timeoutSec: prepared.timeout_sec ?? 900,
     dirs: [prepared.bundle_dir, ...prepared.roots],
+    bundle: prepared.bundle_dir,
   })
 }
 

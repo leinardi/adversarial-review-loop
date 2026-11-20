@@ -25,7 +25,7 @@
 
 import type { EngineInterface, On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { type Completion, deliver, type Ran, type Task } from '../../hooks/reviewer'
+import { type Completion, deliver, noteToolResult, type Ran, type Task } from '../../hooks/reviewer'
 
 /** A `$.model.complete` result, as a check of the reviewer's model sees it. */
 export type ModelCheck =
@@ -185,6 +185,8 @@ export type WorldOptions = {
   ranOn?: string[]
   /** Called with each spawned agent's id before it answers, as its tool calls would come. */
   whileRunning?: (agentId: string) => Promise<void>
+  /** What each spawned reviewer reads before it answers: a diff chunk of the bundle by default, `none` for nothing. */
+  reads?: 'none'
   /** The session's permission verdict for a write (`$.tool.check`); left out, no stand-in answers. */
   check?: 'allow' | 'ask' | 'deny'
   /** What the write itself comes to: `'deny'` as when the person refuses it in the dialog. */
@@ -474,6 +476,8 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
         const agentId = `agent-${state.spawns.length}`
         if (end !== undefined) {
           setTimeout(() => {
+            // A stand-in reviewer reads its bundle's diff first, and the read succeeds.
+            if (options.reads !== 'none') noteToolResult(agentId, 'Read', { file_path: `${PREPARED.bundle_dir}/changes.00.diff` }, { result: { type: 'text', file: { content: 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n' } } })
             void (options.whileRunning?.(agentId) ?? Promise.resolve()).then(() => deliver(agentId, end))
           }, 0)
         }

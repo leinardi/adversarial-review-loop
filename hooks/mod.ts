@@ -24,7 +24,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import { COMMANDS, openPane, registerCommands, runCommand, showNow } from './commands'
 import { engine } from './engine'
 import { addRoot, continueRun, ensureRoot, nameTools, parentOf, type Registration, review, session, resetWrites, setPhases, sweepRoots, track, unregistered, writeIn } from './flow'
-import { countStep, deliver, registerReviewer, resetCheckedModels, REVIEWER, reviewerDecision, runHandback } from './reviewer'
+import { countStep, deliver, registerReviewer, resetCheckedModels, REVIEWER, reviewerDecision, runHandback, runSubagentCall } from './reviewer'
 import { TOOLS, type ToolName } from './text'
 import { pane, registerUi, showBusy } from './ui'
 
@@ -127,6 +127,8 @@ export const register: Register = on => {
       const answer = await serve($, own, argumentsOf(call), next.signal)
       return answer === undefined ? next(e) : { result: answer }
     }
+    // A subagent's read, once it ran: what tells a reviewer that read the phase from one that did not.
+    if (e.agentId !== undefined && (call.tool === 'Read' || call.tool === 'Bash')) return runSubagentCall(e.agentId, call.tool, argumentsOf(call), () => next(e))
     const file = writtenFile(call)
     if (file === undefined) return next(e)
     // A write the session's rules deny makes no root. One that may run (allowed, or put to the

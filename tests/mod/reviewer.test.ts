@@ -19,7 +19,7 @@
 // end is classified, and what it may do.
 
 import { expect, test } from 'claude-code/testing'
-import { answerOf, classify, countStep, deliver, HANDBACK_REFUSALS, isModelOf, normalize, permit, resetCheckedModels, REVIEWER_TOOLS, reviewerDecision, runHandback, runReviewer, within } from '../../hooks/reviewer'
+import { answerOf, classify, countStep, deliver, HANDBACK_REFUSALS, isModelOf, normalize, noteToolResult, permit, resetCheckedModels, REVIEWER_TOOLS, reviewerDecision, runHandback, runReviewer, within } from '../../hooks/reviewer'
 import { REVIEWER_SYSTEM_PROMPT } from '../../hooks/text'
 import { apiError, fakeEngine, PLUGIN, start, tool, world } from './world'
 
@@ -232,7 +232,7 @@ test('a clock that cannot run is a failure to wait, never a hang or an approval'
 // One run, end to end on a hand-made session
 // --------------------------------------------------------------------------
 
-const TASK = { prompt: 'Review it.', description: 'Review phase1, round 1', model: 'haiku', timeoutSec: 900, dirs: DIRS }
+const TASK = { prompt: 'Review it.', description: 'Review phase1, round 1', model: 'haiku', timeoutSec: 900, dirs: DIRS, bundle: DIRS[0] ?? '' }
 
 test('a reviewer is spawned as the plugin type with the task, and its answer comes back', async () => {
   const { $, w } = fakeEngine({ engine: {}, agents: [DONE] })
@@ -363,11 +363,68 @@ test('a report handed back before the spawn resolved is still the answer, as an 
     })
   const ran = runReviewer($, TASK)
   await settleSoon()
-  // The reviewer hands back and ends while its spawn is still pending.
+  // The reviewer reads, hands back and ends while its spawn is still pending: its read counts.
+  noteToolResult('agent-fast', 'Read', { file_path: `${TASK.bundle}/changes.00.diff` }, { result: { file: { content: 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n' } } })
   await runHandback('agent-fast', REPORT, async () => ({ result: 'delivered', isError: false }))
   deliver('agent-fast', NOTE)
   spawned({ agentId: 'agent-fast', model: 'claude-haiku-5-5' })
   expect(await ran).toEqual(expect.objectContaining({ ok: true, answer: REPORT }))
+})
+
+test('a reviewer that answers APPROVED having read none of the bundle gives no verdict', async () => {
+  const { $ } = fakeEngine({ engine: {}, agents: [{ answer: REPORT, reason: 'answer', durationMs: 5 }], reads: 'none' })
+  expect(await runReviewer($, TASK)).toEqual(expect.objectContaining({ ok: false, kind: 'operational', error: 'the reviewer read none of the bundle' }))
+})
+
+const SHOWN = { file: { content: 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n' } }
+
+test('only a read of change evidence that ran counts: a failed or refused read, a listing, a search, orientation or a root does not', async () => {
+  const B = TASK.bundle
+  const misses: [string, unknown, { deny?: string; isError?: boolean; result?: unknown }][] = [
+    ['Read', { file_path: `${B}/changes.00.diff` }, { isError: true, result: SHOWN }],
+    ['Read', { file_path: `${B}/changes.00.diff` }, { deny: 'no', result: SHOWN }],
+    // Ran, and printed nothing of the diff: an empty read, or one past the file's end.
+    ['Read', { file_path: `${B}/changes.00.diff`, offset: 9000 }, { result: { file: { content: '' } } }],
+    ['Bash', { command: `head -n 0 ${B}/changes.00.diff` }, { result: { stdout: '', stderr: '' } }],
+    ['Read', { file_path: `${B}/repair.txt` }, { result: { file: { content: '  \n' } } }],
+    ['Read', { file_path: `${B}/range.txt` }, { result: SHOWN }],
+    ['Read', { file_path: `${B}/nested/changes.00.diff` }, { result: SHOWN }],
+    ['Read', { file_path: '/work/src/a.ts' }, { result: SHOWN }],
+    ['Bash', { command: `ls ${B}` }, { result: { stdout: 'changes.00.diff\nrange.txt\n' } }],
+    ['Bash', { command: `grep -n x ${B}/changes.00.diff` }, { result: SHOWN }],
+    ['Bash', { command: `cat ${B}/changes.00.diff > /tmp/x` }, { result: SHOWN }],
+    ['Grep', { pattern: 'x', path: B }, { result: SHOWN }],
+  ]
+  const { $ } = fakeEngine({
+    engine: {},
+    agents: [{ answer: REPORT, reason: 'answer', durationMs: 5 }],
+    reads: 'none',
+    whileRunning: async agentId => {
+      for (const [name, input, outcome] of misses) noteToolResult(agentId, name, input, outcome)
+    },
+  })
+  expect(await runReviewer($, TASK)).toEqual(expect.objectContaining({ ok: false, error: 'the reviewer read none of the bundle' }))
+})
+
+test('a read of a diff chunk, the increment or a repair transcript that ran counts as reading the phase', async () => {
+  const B = TASK.bundle
+  for (const [name, input, outcome] of [
+    ['Read', { file_path: `${B}/changes.03.diff` }, { result: { file: { content: '     1\tdiff --git a/x b/x\n     2\t@@ -1 +1 @@\n' } } }],
+    ['Read', { file_path: `${B}/incremental.diff`, offset: 200 }, { result: { file: { content: '@@ -40,3 +40,4 @@\n+x\n' } } }],
+    ['Read', { file_path: `${B}/incremental.diff` }, { result: { file: { content: '(no change since the previous round)\n' } } }],
+    ['Read', { file_path: `${B}/repair.txt` }, { result: { file: { content: 'FINDING severity=high ...' } } }],
+    ['Bash', { command: `sed -n 1,400p ${B}/changes.00.diff` }, { result: { stdout: 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n' } }],
+  ] as const) {
+    const { $ } = fakeEngine({
+      engine: {},
+      agents: [{ answer: REPORT, reason: 'answer', durationMs: 5 }],
+      reads: 'none',
+      whileRunning: async agentId => {
+        noteToolResult(agentId, name, input, outcome)
+      },
+    })
+    expect(await runReviewer($, TASK)).toEqual(expect.objectContaining({ ok: true, answer: REPORT }))
+  }
 })
 
 test("a handback by an agent that is not a running reviewer is not kept", async () => {
