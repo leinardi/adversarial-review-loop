@@ -80,7 +80,7 @@ test('add_root registers a directory and reports its baseline', async ($, on) =>
   const w = world(on, { engine: { 'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'set', proposed: '' } } })
   await start($)
   expect(await callTool($, 'add_root', { path: '../lib' })).toContain('Registered root lib')
-  expect(w.calls[0]?.args).toEqual(['root-add', '../lib'])
+  expect(w.calls[0]?.args).toEqual(['root-add', '../lib', '--not-scratch'])
 })
 
 test('add_root on a directory that already changed asks the user for its baseline', async ($, on) => {
@@ -135,7 +135,7 @@ test('a file written outside every root registers its directory before the write
 
   const result = await $.tool.call({ tool: 'Write', file_path: '/elsewhere/web/new/a.ts', content: 'x' })
 
-  expect(w.calls.find(call => call.args[0] === 'root-add')?.args).toEqual(['root-add', '/elsewhere/web/new'])
+  expect(w.calls.find(call => call.args[0] === 'root-add')?.args).toEqual(['root-add', '/elsewhere/web/new', '--not-scratch'])
   expect(order.indexOf('root-add')).toBeLessThan(order.indexOf('write'))
   expect(result.deny === undefined && result.context?.join('\n')).toContain('registered /elsewhere/web/new as root web')
 })
@@ -224,7 +224,7 @@ test('a file in a folder being created registers the folder being created, not i
   fileTools(on)
   await start($)
   await $.tool.call({ tool: 'Write', file_path: '/x/svc/src/deep/a.py', content: 'x' })
-  expect(w.calls.find(call => call.args[0] === 'root-add')?.args).toEqual(['root-add', '/x/svc'])
+  expect(w.calls.find(call => call.args[0] === 'root-add')?.args).toEqual(['root-add', '/x/svc', '--not-scratch'])
 })
 
 test('a folder that could not become a root is said, never silently left unreviewed', async ($, on) => {
@@ -263,21 +263,38 @@ test('set_phases names the phase to implement, which after a replan need not be 
   expect(await callTool($, 'set_phases', { phases: ['a', 'b', 'c'], replan: true })).toContain('Implement phase 3')
 })
 
-test('scratch writes (temp folders, plans, memory) never become roots', async ($, on) => {
-  const w = world(on, { engine: { status: STATUS } })
+test('a write through a symlink in a root to a folder outside every root registers where it lands', async ($, on) => {
+  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'set', proposed: '' } }, links: { [`${LAUNCH}/link`]: '/elsewhere/lib' } })
   fileTools(on)
   await start($)
-  for (const file of ['/tmp/msg.txt', '/var/tmp/x/y.txt', '/run/user/tmp/scratch/a.md', `${HOME}/.claude/plans/plan.md`, `${HOME}/.claude/projects/p/memory/m.md`]) {
-    await $.tool.call({ tool: 'Write', file_path: file, content: 'x' })
-  }
-  expect(w.commands()).toEqual(['status'])
+  await $.tool.call({ tool: 'Write', file_path: `${LAUNCH}/link/src/a.ts`, content: 'x' })
+  expect(w.calls.filter(call => call.args[0] === 'root-add').map(call => call.args)).toEqual([['root-add', `${LAUNCH}/link/src`, '--not-scratch']])
+  // A folder that really is in a root still skips the engine.
+  const before = w.calls.length
+  await $.tool.call({ tool: 'Write', file_path: `${LAUNCH}/src/b.ts`, content: 'x' })
+  expect(w.calls.length).toBe(before)
 })
 
-test('add_root still registers a scratch folder when asked to', async ($, on) => {
-  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'proto', baseline: 'set', proposed: '' } } })
+test('a write the engine finds in a scratch place makes no root and tells Claude nothing', async ($, on) => {
+  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: false, code: 'scratch', error: '/tmp/x is a scratch directory' } } })
+  fileTools(on)
   await start($)
-  await callTool($, 'add_root', { path: '/tmp/proto' })
-  expect(w.calls[0]?.args).toEqual(['root-add', '/tmp/proto'])
+  const result = await $.tool.call({ tool: 'Write', file_path: `${HOME}/.claude/plans/plan.md`, content: 'x' })
+  expect(w.calls.filter(call => call.args[0] === 'root-add').map(call => call.args)).toEqual([['root-add', `${HOME}/.claude/plans`, '--not-scratch']])
+  // No refresh after a refusal, and nothing said: the write goes on, outside the run.
+  expect(w.commands()).toEqual(['status', 'root-add'])
+  expect(result.deny).toBeUndefined()
+  expect((result.context ?? []).join('\n')).not.toContain('adversarial-review-loop')
+})
+
+test('add_root refuses a scratch folder and points to /add-dir', async ($, on) => {
+  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: false, code: 'scratch', error: '/tmp/proto is a scratch directory' } } })
+  await start($)
+  const text = await callTool($, 'add_root', { path: '/tmp/proto' })
+  expect(w.calls[0]?.args).toEqual(['root-add', '/tmp/proto', '--not-scratch'])
+  expect(text).toContain('not registered')
+  expect(text).toContain('/add-dir')
+  expect(text).not.toContain('Registered')
 })
 
 test('a path that climbs out of a root with .. is not taken to be inside it', async ($, on) => {
@@ -327,17 +344,6 @@ test('the tools are served under the names the host registered them by', async (
   const result = await $.tool.call({ tool: 'mcp__renamed__set_phases', phases: ['a'] } as never)
   expect(result.deny).toBeUndefined()
   expect(w.commands()).toEqual(['set-phases'])
-})
-
-test('a run that lives under a temp folder still registers its own sibling folders, and only those', async ($, on) => {
-  const inTmp = { ok: true, run: summary({ roots: [{ alias: 'app', path: '/tmp/ws/app', kind: 'git', baseline: 'set', proposed: '' }] }) }
-  const w = world(on, { engine: { status: inTmp, 'root-add': { ok: true, status: 'added', alias: 'notes', baseline: 'set', proposed: '' } } })
-  fileTools(on)
-  await start($)
-  await $.tool.call({ tool: 'Write', file_path: '/tmp/msg.txt', content: 'x' })
-  await $.tool.call({ tool: 'Write', file_path: '/tmp/other-session/x', content: 'x' })
-  await $.tool.call({ tool: 'Write', file_path: '/tmp/ws/notes/x.md', content: 'x' })
-  expect(w.calls.filter(call => call.args[0] === 'root-add').map(call => call.args[1])).toEqual(['/tmp/ws/notes'])
 })
 
 test('a directory the person adds under a temp folder still joins the run', async ($, on) => {

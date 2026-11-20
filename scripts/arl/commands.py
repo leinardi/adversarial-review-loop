@@ -217,7 +217,8 @@ def cmd_root_add(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         run = _require(loaded)
         run.require_status("active", "paused")
         target = Path(str(args["path"])).expanduser()
-        outcome = workspace.register(run, target if target.is_absolute() else paths.launch_dir / target, late=True)
+        where = target if target.is_absolute() else paths.launch_dir / target
+        outcome = workspace.register(run, where, late=True, not_scratch=bool(args.get("not_scratch")))
         run.save()
         return {"ok": True, **outcome}
 

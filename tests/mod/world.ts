@@ -163,6 +163,8 @@ export type WorldOptions = {
   missing?: string[]
   /** The state file's modification time, as `$.fs.stat` reads it. */
   stateMtime?: number
+  /** Symlinks, by the path of the link: what `$.fs.stat` with `resolve` answers as `realPath` below it. */
+  links?: Record<string, string>
   /** The server name the host gives the plugin's tools (`mcp__<it>__<name>`); the plugin's own name by default. */
   toolServer?: string
   /** Make `$.env.get` reject, as a failing host would. */
@@ -234,6 +236,13 @@ function scripted(options: WorldOptions): { state: World; answer: (argv: readonl
   return { state, answer, choose }
 }
 
+function realPath(options: WorldOptions, path: string): string {
+  for (const [link, target] of Object.entries(options.links ?? {})) {
+    if (path === link || path.startsWith(`${link}/`)) return `${target}${path.slice(link.length)}`
+  }
+  return path
+}
+
 function exists(options: WorldOptions, path: string): boolean {
   if (path === `${LAUNCH}/.arl/state.json`) return options.hasState ?? true
   return !(options.missing ?? []).includes(path)
@@ -263,7 +272,10 @@ export function world(on: On, options: WorldOptions): World {
     if (options.existsFails) throw new Error('fs unavailable')
     return { value: exists(options, e.path) }
   })
-  on('fs.stat', () => ({ value: { mtimeMs: options.stateMtime ?? 1, size: 1, isFile: true, isDirectory: false, isSymbolicLink: false } as never }))
+  on('fs.stat', (_, e) => {
+    if (!exists(options, e.path)) throw new Error(`ENOENT: ${e.path}`)
+    return { value: { mtimeMs: options.stateMtime ?? 1, size: 1, isFile: true, isDirectory: false, isSymbolicLink: false, realPath: realPath(options, e.path) } as never }
+  })
   on('env.get', (_, e) => {
     if (options.envFails) throw new Error('env unavailable')
     return { value: ENV[e.name] }

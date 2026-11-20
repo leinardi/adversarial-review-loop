@@ -123,8 +123,9 @@ variables) and the project's own review skill are in [docs/configuration.md](doc
   Writing a new subfolder of a folder outside every root registers the subfolder; a later write
   beside it registers the folder, and you are asked once for its baseline although nothing went
   unreviewed.
-- Writes into scratch places (`/tmp`, `/var/tmp`, `$TMPDIR`, `~/.claude`) register nothing, unless
-  they share a top-level folder with a root, or go through `add_root` or `/add-dir`.
+- Scratch places (`/tmp`, `/var/tmp`, `$TMPDIR`, `~/.claude`, judged where a path really lands,
+  symlinks resolved) never become roots through a write or `add_root`, unless they share a
+  top-level folder with a root. Only `/add-dir` registers one.
 - A repository nested in another root cannot be removed, only given a baseline.
 - `/arl-config --repo` writes `.adversarial-review-loop.json` into the launch folder, so it shows
   up in that phase's diff.

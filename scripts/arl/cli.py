@@ -45,7 +45,8 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
                                              --model: this run's reviewer model on every round)
   resume [--session ID]                      continue the run in this session
   set-phases [--replan]                      read a JSON array of phase descriptions on stdin
-  root-add PATH                              register a root before changing it
+  root-add PATH [--not-scratch]              register a root before changing it (--not-scratch:
+                                             refuse a temp or Claude Code folder)
   root-baseline ALIAS (--commit REV | --empty | --current)
   root-remove ALIAS|PATH [--undo]            drop a root registered by mistake (--undo: only
                                              while unchanged, for a write that did not run)
@@ -88,6 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     phases.add_argument("--replan", action="store_true")
     root_add = sub.add_parser("root-add", add_help=False)
     root_add.add_argument("path")
+    root_add.add_argument("--not-scratch", action="store_true")
     baseline = sub.add_parser("root-baseline", add_help=False)
     baseline.add_argument("alias")
     choice = baseline.add_mutually_exclusive_group(required=True)

@@ -22,7 +22,7 @@
 import type { EngineInterface, TurnUsage } from 'claude-code'
 import type { RunView } from '../types'
 import { type Answer, engine, engineStream } from './engine'
-import { Interrupted, normalize, type Ran, runReviewer, type Task, within } from './reviewer'
+import { Interrupted, type Ran, runReviewer, type Task, within } from './reviewer'
 import { ACCEPT, KEEP_GOING, STOP, USE_DEFAULT_MODEL, useModel } from './text'
 import { showActivity, showLast, showRun } from './ui'
 
@@ -246,7 +246,10 @@ export async function setPhases($: EngineInterface, input: Record<string, unknow
 
 export async function addRoot($: EngineInterface, input: Record<string, unknown>): Promise<string> {
   if (typeof input.path !== 'string' || input.path === '') return 'add_root needs a path.'
-  const answer = await run($, ['root-add', input.path])
+  const answer = await run($, ['root-add', input.path, '--not-scratch'])
+  if (!answer.ok && answer.code === 'scratch') {
+    return `${input.path} is a scratch directory (temporary or Claude Code's own), so it is not registered: everything in a root is reviewed. Do throwaway checks there unregistered. If it really holds the plan's work, ask the user to add it with /add-dir.`
+  }
   if (!answer.ok) return refused(answer)
   // `root-add` answers no run summary: refresh the cached roots.
   await run($, ['status'])
@@ -450,14 +453,22 @@ export async function ensureRoot($: EngineInterface, directory: string, { explic
   const here = await runHere($)
   if (here === 'no') return {}
   if (here !== 'yes') return { note: unregistered(directory, here.unknown) }
-  if ((roots ?? []).some(root => within(directory, root))) return {}
-  // A folder the person added to the session is meant to be worked in, wherever it is.
-  if (!explicit && (await isScratch($, directory))) return {}
+  // Covered only where the folder really lands: a symlink inside a root that leads to another
+  // project would otherwise send the write there unreviewed (a snapshot tracks the link, not
+  // what it points to). A folder that cannot be placed goes to the engine, which resolves it.
+  if ((roots ?? []).some(root => within(directory, root))) {
+    const real = await landing($, directory)
+    if (real !== undefined && (roots ?? []).some(root => within(real, root))) return {}
+  }
   // A folder being created registers as the folder, not as its deepest new subfolder: a later
   // file beside that subfolder would otherwise join late, with an unknown baseline.
   let target = directory
   while (parentOf(target) !== target && !(await $.fs.exists(parentOf(target)))) target = parentOf(target)
-  const answer = await run($, ['root-add', target])
+  // A write in a scratch place (a temp folder, Claude Code's own) is not part of the plan; the
+  // engine judges it on the resolved path. A folder the person added to the session is meant to
+  // be worked in, wherever it is.
+  const answer = await run($, ['root-add', target, ...(explicit ? [] : ['--not-scratch'])])
+  if (!answer.ok && answer.code === 'scratch') return {}
   if (!answer.ok) return { note: unregistered(target, answer.error ?? answer.code ?? 'no reason given') }
   // `root-add` answers no run summary: refresh the cached roots.
   await run($, ['status'])
@@ -576,29 +587,20 @@ export async function sweepRoots($: EngineInterface): Promise<void> {
 }
 
 /**
- * Whether `directory` is a place for scratch files: temp folders and Claude Code's own (plans,
- * memory, the session scratchpad). A write there is not part of the plan, and registering it
- * would make a root of a folder other sessions fill. `add_root` still registers one on purpose.
- *
- * A run may itself live in such a place (a workspace under `/tmp`): a folder that shares a
- * top-level folder of the place with one of the run's roots is the run's, not scratch.
+ * Where `path` really lands: its nearest existing ancestor with every symlink resolved, then the
+ * rest as spelled (folders not created yet). `undefined` when no ancestor can be resolved.
  */
-async function isScratch($: EngineInterface, directory: string): Promise<boolean> {
-  const [home, tmp] = await Promise.all([$.env.get('HOME'), $.env.get('TMPDIR')])
-  const places = ['/tmp', '/var/tmp', ...(tmp ? [tmp] : []), ...(home ? [`${home}/.claude`] : [])]
-  const place = places.filter(candidate => within(directory, candidate)).sort((a, b) => b.length - a.length)[0]
-  if (place === undefined) return false
-  const top = topBelow(directory, place)
-  return top === undefined || !(roots ?? []).some(root => within(root, top))
-}
-
-/** The folder directly below `place` that `path` lies in; `undefined` for `place` itself. */
-function topBelow(path: string, place: string): string | undefined {
-  const inner = normalize(path)
-  const outer = normalize(place)
-  if (inner === undefined || outer === undefined || inner === outer) return undefined
-  const rest = inner.slice(outer === '/' ? 1 : outer.length + 1)
-  return `${outer === '/' ? '' : outer}/${rest.split('/')[0]}`
+async function landing($: EngineInterface, path: string): Promise<string | undefined> {
+  let probe = path
+  let rest = ''
+  for (;;) {
+    const stat = await $.fs.stat(probe, { resolve: true }).catch(() => undefined)
+    if (stat !== undefined) return stat.realPath === undefined ? undefined : `${stat.realPath.replace(/\/$/, '')}${rest}`
+    const up = parentOf(probe)
+    if (up === probe) return undefined
+    rest = `${probe.slice(up === '/' ? 0 : up.length)}${rest}`
+    probe = up
+  }
 }
 
 /** What Claude is told when a folder about to be written could not become a root. */
