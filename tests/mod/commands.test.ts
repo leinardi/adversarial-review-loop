@@ -21,7 +21,7 @@
 import { expect, test } from 'claude-code/testing'
 import { implementArgs, modelArgs, openPane, runCommand, showNow } from '../../hooks/commands'
 import { pane } from '../../hooks/ui'
-import { announce, continueRun, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
+import { announce, continueRun, nameTools, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
 import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, settle, start, summary, world } from './world'
 
 function at(isInteractive = false): void {
@@ -32,7 +32,15 @@ function at(isInteractive = false): void {
   resetWrites()
   pane.dismissed = false
   session.turnRunning = false
+  nameTools([])
 }
+
+const NAMES: [string, string][] = [
+  ['set_phases', 'mcp__arl__set_phases'],
+  ['add_root', 'mcp__arl__add_root'],
+  ['review', 'mcp__arl__review'],
+]
+const NAMES_LINE = "The loop's tools, by their full names: set_phases is mcp__arl__set_phases, add_root is mcp__arl__add_root, review is mcp__arl__review."
 
 const CONTINUE = { ok: true, action: 'continue', stage: 'phase', phase: 2, prompt: 'Implement phase 2 of 2: two', token: 't', compact: false }
 
@@ -188,6 +196,38 @@ test('/arl-implement starts the run, opens the pane, and starts Claude on the pl
   expect(w.submitted).toEqual([])
   await settle()
   expect(w.submitted).toEqual(['Implement the plan.'])
+})
+
+test('the start, resume and compacted prompts name the loop\'s tools in full, once each', async () => {
+  at(true)
+  nameTools(NAMES)
+  const started = fakeEngine({ engine: { init: { ok: true, run: summary(), prompt: 'Implement the plan.' } } })
+  await runCommand(started.$, 'arl-implement', 'plan.md')
+  await settle()
+  expect(started.w.submitted).toEqual([`Implement the plan.\n\n${NAMES_LINE}`])
+
+  const resumed = fakeEngine({ engine: { resume: { ok: true, run: summary(), abandoned_review: false, context: 'The run.' }, 'next-action': { ...CONTINUE, compact: true } } })
+  await runCommand(resumed.$, 'arl-resume', '')
+  await settle()
+  expect(resumed.w.compacted).toHaveLength(1)
+  expect(resumed.w.submitted).toHaveLength(1)
+  expect(resumed.w.submitted[0]?.split(NAMES_LINE)).toHaveLength(2)
+
+  const compacted = fakeEngine({ engine: { status: { ok: true, run: summary() }, 'next-action': { ...CONTINUE, compact: true } } })
+  await continueRun(compacted.$)
+  expect(compacted.w.submitted).toEqual([`${CONTINUE.prompt}\n\n${NAMES_LINE}`])
+
+  // A continuation on the same conversation keeps what it was told: no line added.
+  const plain = fakeEngine({ engine: { status: { ok: true, run: summary() }, 'next-action': CONTINUE } })
+  await continueRun(plain.$)
+  expect(plain.w.submitted).toEqual([CONTINUE.prompt])
+})
+
+test('the tools\' full names come from the host\'s registration', async ($, on) => {
+  const w = world(on, { engine: { status: { ok: true, run: summary() }, 'next-action': { ...CONTINUE, compact: true } }, toolServer: 'renamed' })
+  await start($, true)
+  await $.turn.complete({ answer: 'done', reason: 'answer', durationMs: 5, isAborted: false, turnId: 't1' } as never)
+  expect(w.submitted).toEqual([`${CONTINUE.prompt}\n\nThe loop's tools, by their full names: set_phases is mcp__renamed__set_phases, add_root is mcp__renamed__add_root, review is mcp__renamed__review.`])
 })
 
 test('/arl-implement --model passes the run its model', async () => {

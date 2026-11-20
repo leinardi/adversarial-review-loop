@@ -603,6 +603,27 @@ async function landing($: EngineInterface, path: string): Promise<string | undef
   }
 }
 
+/** Each of the plugin's tools by its own name, to the full name the host registered it by. */
+const fullNames = new Map<string, string>()
+
+/** Record the full names the host gave the plugin's tools (`mcp__<server>__<name>`). */
+export function nameTools(names: Iterable<[own: string, full: string]>): void {
+  fullNames.clear()
+  for (const [own, full] of names) fullNames.set(own, full)
+}
+
+/**
+ * `text`, then the line naming the loop's tools in full. A start, resume or compacted prompt
+ * says only the short names, and under Code Mode Claude calls a tool from a script by its full
+ * name: a short name alone sends it searching, and a search shows only part of a description.
+ */
+export function withToolNames(text: string): string {
+  if (fullNames.size === 0) return text
+  const line = `The loop's tools, by their full names: ${[...fullNames].map(([own, full]) => `${own} is ${full}`).join(', ')}.`
+  // Said once: a resumed prompt that is then compacted already holds it.
+  return text.includes(line) ? text : `${text}\n\n${line}`
+}
+
 /** What Claude is told when a folder about to be written could not become a root. */
 export function unregistered(directory: string, why: string): string {
   return `adversarial-review-loop could not register ${directory} as a root of the run (${why}). Nothing written there is reviewed: call add_root for it, or tell the user.`
@@ -644,7 +665,8 @@ async function compactThenSubmit($: EngineInterface, prompt: string): Promise<vo
   } catch (error) {
     $.ui.log(`Could not compact before the next phase (${String(error)}); continuing without.`)
   }
-  await $.prompt.submit({ text: prompt }).catch((error: unknown) => {
+  // A compacted conversation may have lost the tools' full names.
+  await $.prompt.submit({ text: withToolNames(prompt) }).catch((error: unknown) => {
     $.ui.log(`Could not continue the run (${String(error)}): /arl-resume continues it.`)
   })
 }

@@ -23,7 +23,7 @@
 import type { CommandSpec, EngineInterface } from 'claude-code'
 import type { RunView } from '../types'
 import { type Answer } from './engine'
-import { announce, proceed, refused, resetWrites, run, session, stageEnded } from './flow'
+import { announce, proceed, refused, resetWrites, run, session, stageEnded, withToolNames } from './flow'
 import { registerReviewer } from './reviewer'
 import { briefly, pane, PANE, PANE_TITLE, phasesText, REPORT_PANE, REPORT_TITLE, showLast, showReport, STATS_TITLE, statusText } from './ui'
 
@@ -179,7 +179,7 @@ async function implement($: EngineInterface, args: string): Promise<string> {
   await showLast($, null).catch(() => undefined)
   await showReport($, '').catch(() => undefined)
   await $.ui.close({ id: REPORT_PANE }).catch(() => undefined)
-  const prompt = String(answer.prompt ?? '')
+  const prompt = withToolNames(String(answer.prompt ?? ''))
   $.clock.after(0, () => {
     void $.prompt.submit({ text: prompt }).catch((error: unknown) => {
       $.ui.log(`Could not start Claude on the plan (${String(error)}).`)
@@ -199,7 +199,7 @@ async function resume($: EngineInterface): Promise<string> {
   const abandoned = answer.abandoned_review === true
   const resumes = abandoned ? 'The run resumes. The review that was in flight was abandoned: when the phase is ready, call review again.' : 'The run resumes.'
   // This session may not be the one that started the run: it is told what the run is.
-  const lead = typeof answer.context === 'string' && answer.context ? `${resumes}\n\n${answer.context}` : resumes
+  const lead = withToolNames(typeof answer.context === 'string' && answer.context ? `${resumes}\n\n${answer.context}` : resumes)
   const view = summaryOf(answer)
   // A conversation brought back from the background starts no session: nothing else shows the run.
   await openPane($)
