@@ -207,18 +207,75 @@ async function waitingDecision($: EngineInterface): Promise<string> {
   return waiting ? decide($, waiting) : ''
 }
 
-/** Ask the user for the baseline of each root that has none; false when any is left unchosen. */
-export async function chooseBaselines($: EngineInterface): Promise<boolean> {
-  const status = await run($, ['status'])
-  const summary = status.run as RunSummary | null | undefined
-  const unknown = summary?.roots.filter(root => root.baseline === 'unknown') ?? []
-  if (!session.isInteractive) return unknown.length === 0
-  for (const root of unknown) {
+/** What became of one root the baseline question was about. */
+export type Outcome = 'chosen' | 'removed' | 'unchosen'
+
+/**
+ * What asking for the missing baselines came to: each root asked about (or removed with one)
+ * by alias, the roots removed, and whether every remaining root is known to have a baseline. A
+ * status the engine could not answer leaves it unsettled: nothing is known to be chosen.
+ */
+export type Baselines = { settled: boolean; removed: string[]; outcomes: Map<string, Outcome> }
+
+/** What Claude is told about roots the user removed from the baseline question. */
+export function removedNote(removed: readonly string[]): string {
+  if (removed.length === 0) return ''
+  return `The user removed root${removed.length === 1 ? '' : 's'} ${removed.join(', ')} from the run: nothing in ${removed.length === 1 ? 'it' : 'them'} is reviewed. Don't change ${removed.length === 1 ? 'it' : 'them'} for the plan.\n\n`
+}
+
+/**
+ * Ask the user for the baseline of each root that has none, or to remove it: a scratch folder
+ * registered by mistake, or the clone found in it, is not the plan's work. Removal takes the
+ * outermost root holding it with every root inside, in one engine call that checks the set is
+ * still the one shown. The roots are read again after each answer, so a root just removed is
+ * never asked about.
+ */
+export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
+  const removed: string[] = []
+  const outcomes = new Map<string, Outcome>()
+  const done = (settled: boolean): Baselines => ({ settled, removed, outcomes })
+  // Roots whose removal met a changed set, and were asked again once.
+  const retried = new Set<string>()
+  for (;;) {
+    const status = await run($, ['status'])
+    const summary = status.run as RunSummary | null | undefined
+    if (!status.ok || summary == null) return done(false)
+    // A root whose baseline the engine took is not asked again, whatever a stale status says.
+    const unknown = summary.roots.filter(root => root.baseline === 'unknown' && outcomes.get(root.alias) !== 'chosen')
+    const root = unknown[0]
+    if (root === undefined) return done(true)
+    if (!session.isInteractive) return done(false)
+    const roots = summary.roots
+    // The outermost root holding it (itself when none does): removing a root leaves nothing of it
+    // inside another, so the container goes with it, and every root it holds.
+    const top = roots.filter(other => within(root.path, other.path)).sort((a, b) => a.path.length - b.path.length)[0] ?? root
+    const going = roots.filter(other => within(other.path, top.path)).map(other => other.alias)
+    const remove = going.length < roots.length ? `Remove ${going.join(', ')} (not the plan's work)` : ''
     const since = root.proposed ? `Changes since ${root.proposed}` : ''
-    const options = [...(since ? [since] : []), 'Everything here is new', 'The current content is the baseline']
+    const options = [...(since ? [since] : []), 'Everything here is new', 'The current content is the baseline', ...(remove ? [remove] : [])]
     const choice = await $.ui
       .ask(`Root ${root.alias} (${root.path}) joined the run after it changed. What should its review compare against?`, options)
-      .catch(() => '')
+      .catch((error: unknown) => {
+        $.ui.log(`Could not ask for the baseline of root ${root.alias} (${String(error)}).`)
+        return ''
+      })
+    if (choice === remove && remove) {
+      const answer = await run($, ['root-remove', top.alias, '--with-nested', '--expect', going.join(','), '--run', summary.run_id])
+      if (answer.ok) {
+        const gone = Array.isArray(answer.removed) ? answer.removed.map(String) : going
+        removed.push(...gone)
+        for (const alias of gone) outcomes.set(alias, 'removed')
+        continue
+      }
+      // A root joined or left while the question was open: ask again, once, with the new set.
+      if (answer.code === 'removal-changed' && !retried.has(root.alias)) {
+        retried.add(root.alias)
+        continue
+      }
+      $.ui.log(`Could not remove ${going.join(', ')}: ${answer.error ?? answer.code ?? 'no reason given'}`)
+      outcomes.set(root.alias, 'unchosen')
+      return done(false)
+    }
     const args =
       choice === since && since
         ? ['root-baseline', root.alias, '--commit', root.proposed]
@@ -227,9 +284,14 @@ export async function chooseBaselines($: EngineInterface): Promise<boolean> {
           : choice === 'The current content is the baseline'
             ? ['root-baseline', root.alias, '--current']
             : undefined
-    if (args === undefined || !(await run($, args)).ok) return false
+    // Chosen for the run the question showed: another session may have replaced it meanwhile.
+    if (args !== undefined) args.push('--run', summary.run_id)
+    if (args === undefined || !(await run($, args)).ok) {
+      outcomes.set(root.alias, 'unchosen')
+      return done(false)
+    }
+    outcomes.set(root.alias, 'chosen')
   }
-  return true
 }
 
 // --------------------------------------------------------------------------
@@ -262,12 +324,20 @@ export async function addRoot($: EngineInterface, input: Record<string, unknown>
   if (answer.status !== 'added') {
     if (answer.baseline !== 'unknown') return `${input.path} is already covered by root ${String(answer.alias)}.`
     // A root with no baseline yet reviews nothing: settle it now rather than at the next review.
-    if (await chooseBaselines($)) return `${input.path} is covered by root ${String(answer.alias)}, whose baseline the user just chose.`
-    return `${input.path} is covered by root ${String(answer.alias)}, whose baseline is unknown: nothing in it can be reviewed until the user picks one. Tell the user.`
+    const chosen = await chooseBaselines($)
+    const outcome = chosen.outcomes.get(String(answer.alias))
+    if (outcome === 'removed') return removedNote(chosen.removed).trim()
+    if (outcome === 'chosen') return `${removedNote(chosen.removed)}${input.path} is covered by root ${String(answer.alias)}, whose baseline the user just chose.`
+    return removedNote(chosen.removed) + `${input.path} is covered by root ${String(answer.alias)}, whose baseline is unknown: nothing in it can be reviewed until the user picks one. Tell the user.`
   }
   if (answer.baseline !== 'unknown') return `Registered root ${String(answer.alias)}; its current content is the baseline.`
-  if (await chooseBaselines($)) return `Registered root ${String(answer.alias)} with the baseline the user chose.`
-  return `Registered root ${String(answer.alias)}, but it already holds changes, so its baseline is unknown and nothing in it can be reviewed until the user picks one. Tell the user.`
+  const chosen = await chooseBaselines($)
+  // This root's own outcome, never the run's: another root's question may have failed.
+  const outcome = chosen.outcomes.get(String(answer.alias))
+  // Removed, never "registered": nothing in it is reviewed now.
+  if (outcome === 'removed') return removedNote(chosen.removed).trim()
+  if (outcome === 'chosen') return `${removedNote(chosen.removed)}Registered root ${String(answer.alias)} with the baseline the user chose.`
+  return removedNote(chosen.removed) + `Registered root ${String(answer.alias)}, but it already holds changes, so its baseline is unknown and nothing in it can be reviewed until the user picks one. Tell the user.`
 }
 
 /** What a review round's runs cost so far, summed over the review and its repair. */
@@ -375,10 +445,18 @@ export async function review($: EngineInterface, input: Record<string, unknown>,
 /** `signal` is the tool call's own: aborted when the person interrupts the review. */
 export async function reviewWith($: EngineInterface, input: Record<string, unknown>, reviewer: Reviewer, signal?: AbortSignal): Promise<string> {
   let prepared = await prepareReview($, input)
+  let note = ''
   if (!prepared.ok && prepared.code === 'baseline-unknown') {
-    if (!(await chooseBaselines($))) return `${refused(prepared)}\n\nStop and tell the user: a root's baseline must be chosen before the review can run.`
+    const chosen = await chooseBaselines($)
+    note = removedNote(chosen.removed)
+    if (!chosen.settled) return `${note}${refused(prepared)}\n\nStop and tell the user: a root's baseline must be chosen before the review can run.`
     prepared = await prepareReview($, input)
   }
+  return note + (await reviewPrepared($, prepared, reviewer, signal))
+}
+
+/** The review round of a ticket `review prepare` answered, or its refusal. */
+async function reviewPrepared($: EngineInterface, prepared: Answer, reviewer: Reviewer, signal?: AbortSignal): Promise<string> {
   if (!prepared.ok) {
     // Whatever refused it (a stall, an oversized file, the failure budget a broken bundle spent),
     // a run that now waits for the user is put to them.
@@ -675,10 +753,14 @@ async function compactThenSubmit($: EngineInterface, prompt: string): Promise<vo
  * After the person moved the run on (`/arl-accept`, `/arl-finish`, `/arl-resume`): continue it
  * once the command has ended, when the engine says so. Answers what the person is told.
  */
-export async function proceed($: EngineInterface, lead = ''): Promise<string> {
+export async function proceed($: EngineInterface, lead = '', relead?: () => Promise<string>): Promise<string> {
   let next = await engine($, session.dir, ['next-action'])
-  if (next.ok && next.action === 'yield' && next.reason === 'baseline-unknown' && (await chooseBaselines($))) {
-    next = await engine($, session.dir, ['next-action'])
+  if (next.ok && next.action === 'yield' && next.reason === 'baseline-unknown') {
+    const chosen = await chooseBaselines($)
+    // A lead that names the roots is written again once some are gone.
+    if (chosen.removed.length > 0 && relead !== undefined) lead = await relead()
+    lead = (removedNote(chosen.removed) + lead).trim()
+    if (chosen.settled) next = await engine($, session.dir, ['next-action'])
   }
   if (!next.ok) return refused(next)
   if (next.action !== 'continue' || typeof next.prompt !== 'string') {

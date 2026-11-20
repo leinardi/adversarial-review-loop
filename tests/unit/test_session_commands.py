@@ -192,6 +192,118 @@ def test_root_remove_refuses_the_last_root(engine: Engine, run_env: Path) -> Non
     assert engine(solo, "root-remove", "solo")["code"] == "last-root"
 
 
+def _scratch_with_clone(ws: Path, run_env: Path, engine: Engine) -> Path:
+    """A folder registered by mistake that holds a clone, as Claude's scratchpad did."""
+    scratch = run_env / "scratch"
+    make_repo(scratch / "clone")
+    added = engine(ws, "root-add", str(scratch))
+    assert added["status"] == "added"
+    assert {"scratch", "clone"} <= {root["alias"] for root in engine(ws, "status")["run"]["roots"]}
+    return scratch
+
+
+def test_root_remove_with_nested_drops_a_folder_and_the_repositories_in_it(engine: Engine, ws: Path, run_env: Path) -> None:
+    started(engine, ws)
+    _scratch_with_clone(ws, run_env, engine)
+    with_ticket(ws, "s1")
+    answer = engine(ws, "root-remove", "scratch", "--with-nested", "--expect", "clone,scratch")
+    assert sorted(answer["removed"]) == ["clone", "scratch"]
+    left = [root["alias"] for root in answer["run"]["roots"]]
+    assert "scratch" not in left and "clone" not in left and "api" in left
+    assert pending(ws) is None
+    assert {"scratch", "clone"} <= set(json.loads((ws / ".arl" / "state.json").read_text())["retired_aliases"])
+
+
+def test_root_remove_with_nested_changes_nothing_when_the_set_is_not_what_was_shown(engine: Engine, ws: Path, run_env: Path) -> None:
+    started(engine, ws)
+    scratch = _scratch_with_clone(ws, run_env, engine)
+    # A repository joined after the person was shown "scratch, clone".
+    make_repo(scratch / "late")
+    engine(ws, "root-add", str(scratch / "late"))
+    before = (ws / ".arl" / "state.json").read_bytes()
+    answer = engine(ws, "root-remove", "scratch", "--with-nested", "--expect", "scratch,clone")
+    assert answer["code"] == "removal-changed"
+    assert "late" in answer["error"]
+    assert (ws / ".arl" / "state.json").read_bytes() == before
+    # One already gone is a change too.
+    assert engine(ws, "root-remove", "scratch", "--with-nested", "--expect", "scratch,clone,late,gone")["code"] == "removal-changed"
+    assert engine(ws, "root-remove", "scratch", "--with-nested", "--expect", "scratch,clone,late")["ok"]
+
+
+def test_root_remove_with_nested_removes_a_chain_from_its_top(engine: Engine, ws: Path, run_env: Path) -> None:
+    started(engine, ws)
+    scratch = run_env / "scratch"
+    make_repo(scratch / "mid")
+    make_repo(scratch / "mid" / "deep")
+    engine(ws, "root-add", str(scratch))
+    aliases = sorted(root["alias"] for root in engine(ws, "status")["run"]["roots"] if root["path"].startswith(str(scratch)))
+    assert aliases == ["deep", "mid", "scratch"]
+    assert engine(ws, "root-remove", "mid", "--with-nested", "--expect", "mid,deep")["code"] == "nested-root"
+    assert sorted(engine(ws, "root-remove", "scratch", "--with-nested", "--expect", ",".join(aliases))["removed"]) == aliases
+
+
+def test_root_remove_with_nested_refuses_to_empty_the_run(engine: Engine, ws: Path) -> None:
+    started(engine, ws)
+    roots = sorted(root["alias"] for root in engine(ws, "status")["run"]["roots"])
+    before = (ws / ".arl" / "state.json").read_bytes()
+    assert engine(ws, "root-remove", "ws", "--with-nested", "--expect", ",".join(roots))["code"] == "last-root"
+    assert (ws / ".arl" / "state.json").read_bytes() == before
+
+
+def test_root_remove_dry_run_resolves_the_root_as_the_removal_does_and_changes_nothing(engine: Engine, ws: Path, run_env: Path) -> None:
+    started(engine, ws)
+    _scratch_with_clone(ws, run_env, engine)
+    before = (ws / ".arl" / "state.json").read_bytes()
+    # A path relative to the launch directory names the same root as its alias.
+    planned = engine(ws, "root-remove", "../scratch", "--with-nested", "--dry-run")
+    assert (planned["alias"], sorted(planned["removing"]), planned["run_id"]) == ("scratch", ["clone", "scratch"], load_run_id(ws))
+    assert (ws / ".arl" / "state.json").read_bytes() == before
+
+
+def test_root_remove_refuses_consent_given_for_another_run(engine: Engine, ws: Path, run_env: Path) -> None:
+    started(engine, ws)
+    _scratch_with_clone(ws, run_env, engine)
+    before = (ws / ".arl" / "state.json").read_bytes()
+    answer = engine(ws, "root-remove", "scratch", "--with-nested", "--expect", "scratch,clone", "--run", "an-older-run")
+    assert answer["code"] == "run-changed"
+    assert (ws / ".arl" / "state.json").read_bytes() == before
+    assert engine(ws, "root-remove", "scratch", "--with-nested", "--expect", "scratch,clone", "--run", load_run_id(ws))["ok"]
+
+
+def test_root_baseline_refuses_consent_given_for_another_run(engine: Engine, ws: Path, run_env: Path) -> None:
+    started(engine, ws)
+    late = run_env / "late"
+    late.mkdir()
+    (late / "f.txt").write_text("written during the run\n")
+    alias = engine(ws, "root-add", str(late))["alias"]
+    before = (ws / ".arl" / "state.json").read_bytes()
+    assert engine(ws, "root-baseline", alias, "--current", "--run", "an-older-run")["code"] == "run-changed"
+    assert (ws / ".arl" / "state.json").read_bytes() == before
+    assert engine(ws, "root-baseline", alias, "--current", "--run", load_run_id(ws))["ok"]
+
+
+def test_status_context_is_the_resume_context_of_the_run_as_it_is_now(engine: Engine, ws: Path, run_env: Path) -> None:
+    started(engine, ws)
+    _scratch_with_clone(ws, run_env, engine)
+    engine(ws, "root-remove", "scratch", "--with-nested", "--expect", "scratch,clone")
+    context = engine(ws, "status", "--context")["context"]
+    assert f"api = {ws / 'api'}" in context
+    assert "scratch =" not in context and "clone =" not in context
+    assert "context" not in engine(ws, "status")
+
+
+def load_run_id(ws: Path) -> str:
+    return str(json.loads((ws / ".arl" / "state.json").read_text())["run_id"])
+
+
+def test_root_remove_flags_that_do_not_combine_are_refused(engine: Engine, ws: Path, run_env: Path) -> None:
+    started(engine, ws)
+    _scratch_with_clone(ws, run_env, engine)
+    assert engine(ws, "root-remove", "scratch", "--with-nested", "--undo", "--expect", "scratch,clone")["code"] == "usage"
+    assert engine(ws, "root-remove", "scratch", "--expect", "scratch,clone")["code"] == "usage"
+    assert engine(ws, "root-remove", "scratch", "--dry-run")["code"] == "usage"
+
+
 def test_review_prepare_refuses_a_run_with_no_roots(engine: Engine, ws: Path) -> None:
     started(engine, ws)
     engine(ws, "set-phases", stdin='["one"]')

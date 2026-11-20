@@ -126,7 +126,8 @@ variables) and the project's own review skill are in [docs/configuration.md](doc
 - Scratch places (`/tmp`, `/var/tmp`, `$TMPDIR`, `~/.claude`, judged where a path really lands,
   symlinks resolved) never become roots through a write or `add_root`, unless they share a
   top-level folder with a root. Only `/add-dir` registers one.
-- A repository nested in another root cannot be removed, only given a baseline.
+- A repository nested in another root cannot be removed on its own: it goes with its container
+  (`/arl-remove-root <container>`, or the removal the baseline question offers).
 - `/arl-config --repo` writes `.adversarial-review-loop.json` into the launch folder, so it shows
   up in that phase's diff.
 - The failure budget makes the loop stop prompting Claude, but a `review` Claude calls anyway still

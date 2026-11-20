@@ -235,10 +235,19 @@ def cmd_root_remove(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     ``undo`` is the mod taking back a registration whose write did not happen: it drops the root
     only while nothing in it changed since it joined (and no review is pending), and moves
     nothing else, so a refused write does not prompt the loop again.
+
+    ``with_nested`` also drops every root inside it, in one save: a scratch folder registered by
+    mistake, and the clone found in it. ``expect`` is the aliases the person was shown, all of
+    them: when the set to remove is no longer exactly those (a root joined or left since), nothing
+    changes and the answer is ``removal-changed``. ``run`` is the run id the person was shown: aliases repeat
+    across runs, so consent given for one run never removes roots of a run that replaced it
+    (``run-changed``). ``dry_run`` answers what ``with_nested`` would remove, resolved as the removal
+    resolves it, and the run id, and changes nothing.
     """
     with locked_state(paths) as loaded:
         run = _require(loaded)
         run.require_status("active", "paused")
+        _require_run(run, args, "nothing was removed")
         wanted = str(args["root"])
         target = Path(wanted).expanduser()
         target = (target if target.is_absolute() else paths.launch_dir / target).resolve()
@@ -249,20 +258,38 @@ def cmd_root_remove(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         container = next((other for other in run.roots if other is not root and here.is_relative_to(Path(other["path"]))), None)
         if container is not None:
             raise RunError("nested-root", f"root {root['alias']!r} lies inside root {container['alias']!r}: it is part of that root's review")
-        if len(run.roots) == 1:
-            raise RunError("last-root", f"root {root['alias']!r} is the run's only root; a run with none reviews nothing")
+        with_nested = bool(args.get("with_nested"))
+        if with_nested and args.get("undo"):
+            raise RunError("usage", "--with-nested does not combine with --undo")
+        if (args.get("expect") is not None or args.get("dry_run")) and not with_nested:
+            raise RunError("usage", "--expect and --dry-run go with --with-nested")
+        inside = [entry for entry in run.roots if entry is not root and Path(entry["path"]).is_relative_to(here)]
+        removing = [root, *inside] if with_nested else [root]
+        aliases = [entry["alias"] for entry in removing]
+        if len(run.roots) == len(removing):
+            raise RunError("last-root", f"removing {', '.join(aliases)} leaves the run no root; a run with none reviews nothing")
+        if args.get("dry_run"):
+            return {"ok": True, "alias": root["alias"], "path": root["path"], "removing": aliases, "run_id": run.run_id}
+        if with_nested:
+            expected = sorted(alias for alias in str(args.get("expect") or "").split(",") if alias)
+            if expected != sorted(aliases):
+                raise RunError(
+                    "removal-changed",
+                    f"removing {root['alias']!r} with what it holds now removes {', '.join(aliases)}, "
+                    f"not {', '.join(expected) or 'nothing named'}: nothing was removed",
+                )
         if args.get("undo"):
             _require_untouched(run, root)
-        run.data["roots"] = [entry for entry in run.data["roots"] if entry is not root]
+        run.data["roots"] = [entry for entry in run.data["roots"] if all(entry is not gone for gone in removing)]
         if not args.get("undo"):
             # An undone root is in no round history, so its alias may be given again.
-            run.data["retired_aliases"] = [*run.data.get("retired_aliases", []), root["alias"]]
+            run.data["retired_aliases"] = [*run.data.get("retired_aliases", []), *aliases]
             run.invalidate_ticket("root-removed")
             # The folder may be what held every review on `oversized`; the next prepare checks again.
             run.clear_wait("oversized")
             run.data["last_continuation"] = ""
         run.save()
-        return {"ok": True, "alias": root["alias"], "path": root["path"], "run": run.summary()}
+        return {"ok": True, "alias": root["alias"], "path": root["path"], "removed": aliases, "run": run.summary()}
 
 
 def _require_untouched(run: RunState, root: dict[str, Any]) -> None:
@@ -284,6 +311,9 @@ def cmd_root_baseline(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any
     with locked_state(paths) as loaded:
         run = _require(loaded)
         run.require_status("active", "paused")
+        # The person chose for the run they were shown: aliases repeat across runs, and a stale
+        # "current content" would hide a replacement run's changes from its diff.
+        _require_run(run, args, "no baseline was set")
         tree = workspace.set_baseline(run, str(args["alias"]), str(args["choice"]), commit=str(args.get("commit") or ""))
         # The user's choice is what the loop was waiting on: let the next turn end continue it,
         # even though the choice moves nothing the continuation token counts.
@@ -326,9 +356,20 @@ def cmd_stats(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
     return {"ok": True, "text": stats.render(figures), "stats": figures}
 
 
-def cmd_status(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
+def cmd_status(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
+    """The run's summary; with ``context``, also what a resumed session is told about it, as it is now."""
     with locked_state(paths) as run:
-        return {"ok": True, "run": run.summary() if run is not None else None}
+        answer: dict[str, Any] = {"ok": True, "run": run.summary() if run is not None else None}
+        if args.get("context") and run is not None:
+            cfg = config.load(str(paths.launch_dir), overrides=run.model_overlay)
+            answer["context"] = resume_context(run, cfg.as_str("verify_cmd"))
+        return answer
+
+
+def _require_run(run: RunState, args: Mapping[str, Any], unchanged: str) -> None:
+    """Refuse a choice the person made for another run (``run``, when given) than this one."""
+    if args.get("run") is not None and str(args["run"]) != run.run_id:
+        raise RunError("run-changed", f"the run is {run.run_id} now, not {args['run']}: {unchanged}")
 
 
 def _transition(name: str) -> Command:

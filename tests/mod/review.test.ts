@@ -499,7 +499,35 @@ test('a root without a baseline is settled by the user, then the review runs', a
     choices: ['Changes since HEAD@{2026-11-12 10:00}'],
   })
   expect(await review($, {}, reviewer([APPROVED]).run)).toBe(RECORDED.message)
-  expect(w.calls.find(call => call.args[0] === 'root-baseline')?.args).toEqual(['root-baseline', 'lib', '--commit', 'HEAD@{2026-11-12 10:00}'])
+  expect(w.calls.find(call => call.args[0] === 'root-baseline')?.args).toEqual(['root-baseline', 'lib', '--commit', 'HEAD@{2026-11-12 10:00}', '--run', 'r1'])
+})
+
+test('a late root the user removes instead is not asked about again, and the review runs on what is left', async () => {
+  at(true)
+  let removed = false
+  let prepares = 0
+  const roots = [
+    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' },
+    { alias: 'clone', path: '/tmp/s/clone', kind: 'git', baseline: 'unknown', proposed: '' },
+  ]
+  const { $, w } = fakeEngine({
+    engine: {
+      'review prepare': () => (++prepares === 1 ? { ok: false, code: 'baseline-unknown', error: 'baseline unknown for clone' } : PREPARED),
+      status: () => ({ ok: true, run: summary({ roots: removed ? roots.slice(0, 1) : roots }) }),
+      'root-remove': () => {
+        removed = true
+        return { ok: true, alias: 'clone', removed: ['clone'], run: summary() }
+      },
+      'review record': RECORDED,
+    },
+    files: PROMPTS,
+    choices: ["Remove clone (not the plan's work)"],
+  })
+  const text = await review($, {}, reviewer([APPROVED]).run)
+  expect(text).toContain('The user removed root clone from the run')
+  expect(text).toContain(String(RECORDED.message))
+  expect(prepares).toBe(2)
+  expect(w.asked).toHaveLength(1)
 })
 
 test('headless, an unknown baseline stops the review and says why', async () => {

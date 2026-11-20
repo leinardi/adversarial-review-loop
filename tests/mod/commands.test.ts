@@ -21,7 +21,7 @@
 import { expect, test } from 'claude-code/testing'
 import { implementArgs, modelArgs, openPane, runCommand, showNow } from '../../hooks/commands'
 import { pane } from '../../hooks/ui'
-import { announce, continueRun, nameTools, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
+import { announce, chooseBaselines, continueRun, nameTools, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
 import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, settle, start, summary, world } from './world'
 
 function at(isInteractive = false): void {
@@ -322,7 +322,7 @@ test('/arl-resume asks for a missing baseline, then continues', async () => {
     choices: ['Everything here is new'],
   })
   expect(await runCommand($, 'arl-resume', '')).toContain('Claude continues the run.')
-  expect(w.calls.find(call => call.args[0] === 'root-baseline')?.args).toEqual(['root-baseline', 'web', '--empty'])
+  expect(w.calls.find(call => call.args[0] === 'root-baseline')?.args).toEqual(['root-baseline', 'web', '--empty', '--run', 'r1'])
   await settle()
   expect(w.submitted).toHaveLength(1)
 })
@@ -509,17 +509,199 @@ test('/arl-config with no key shows the listing to the person, and leaves the re
   expect(w.registered.agents).toEqual([])
 })
 
-test('/arl-remove-root drops the root it names', async () => {
+test('/arl-remove-root drops the root it names, guarded by what the engine resolved', async () => {
   at()
-  const { $, w } = fakeEngine({ engine: { 'root-remove': { ok: true, alias: 'web', path: '/elsewhere/web', run: summary() }, 'next-action': CONTINUE } })
+  const { $, w } = fakeEngine({
+    engine: {
+      'root-remove': (call: { args: string[] }) =>
+        call.args.includes('--dry-run')
+          ? { ok: true, alias: 'web', path: '/elsewhere/web', removing: ['web'], run_id: 'r1' }
+          : { ok: true, alias: 'web', path: '/elsewhere/web', removed: ['web'], run: summary() },
+      'next-action': CONTINUE,
+    },
+  })
   const text = await runCommand($, 'arl-remove-root', 'web')
   expect(text).toContain('Removed root web (/elsewhere/web)')
   // The root may be what held the loop: it goes on.
   expect(text).toContain('Claude continues the run.')
-  expect(w.calls[0]?.args).toEqual(['root-remove', 'web'])
+  expect(w.calls.filter(call => call.args[0] === 'root-remove').map(call => call.args)).toEqual([
+    ['root-remove', 'web', '--with-nested', '--dry-run'],
+    ['root-remove', 'web', '--with-nested', '--expect', 'web', '--run', 'r1'],
+  ])
+  // Nothing asked: one root, nothing inside it.
+  expect(w.asked).toEqual([])
   await settle()
   expect(w.submitted).toEqual([CONTINUE.prompt])
   expect(await runCommand($, 'arl-remove-root', ' ')).toContain('Usage')
+})
+
+test('/arl-remove-root whose root gained a root inside since the dry run removes nothing', async () => {
+  at()
+  const { $, w } = fakeEngine({
+    engine: {
+      'root-remove': (call: { args: string[] }) =>
+        call.args.includes('--dry-run')
+          ? { ok: true, alias: 'web', path: '/elsewhere/web', removing: ['web'], run_id: 'r1' }
+          : { ok: false, code: 'removal-changed', error: "removing 'web' with what it holds now removes web, clone, not web: nothing was removed" },
+    },
+  })
+  const text = await runCommand($, 'arl-remove-root', 'web')
+  expect(text).toContain('removal-changed')
+  expect(text).not.toContain('Removed')
+  expect(w.commands()).not.toContain('next-action')
+})
+
+// --------------------------------------------------------------------------
+// Removing roots that are not the plan's work
+// --------------------------------------------------------------------------
+
+const WORK = { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' }
+const SCRATCH = { alias: 'scratchpad', path: '/tmp/s/scratchpad', kind: 'dir', baseline: 'set', proposed: '' }
+const CLONE = { alias: 'clone', path: '/tmp/s/scratchpad/clone', kind: 'git', baseline: 'unknown', proposed: 'abc' }
+const CLONE2 = { alias: 'clone2', path: '/tmp/s/scratchpad/clone2', kind: 'git', baseline: 'unknown', proposed: '' }
+const REMOVE = "Remove scratchpad, clone, clone2 (not the plan's work)"
+
+/** A status that shows `before` until `root-remove` ran, then `after`; and that removal's answer. */
+function removal(before: unknown[], after: unknown[], answer: Record<string, unknown>): { status: () => unknown; 'root-remove': () => unknown } {
+  let removed = false
+  return {
+    status: () => ({ ok: true, run: summary({ roots: removed ? after : before }) }),
+    'root-remove': () => {
+      removed = true
+      return answer
+    },
+  }
+}
+
+test('the baseline question offers to remove the outermost root holding a late one, with every root inside, in one call', async () => {
+  at(true)
+  const { $, w } = fakeEngine({
+    engine: removal([WORK, SCRATCH, CLONE, CLONE2], [WORK], { ok: true, alias: 'scratchpad', path: SCRATCH.path, removed: ['scratchpad', 'clone', 'clone2'], run: summary() }),
+    choices: [REMOVE],
+  })
+  const chosen = await chooseBaselines($)
+  expect(chosen.settled).toBe(true)
+  expect(chosen.removed).toEqual(['scratchpad', 'clone', 'clone2'])
+  expect([...chosen.outcomes]).toEqual([['scratchpad', 'removed'], ['clone', 'removed'], ['clone2', 'removed']])
+  // A nested root's option names its container and itself; nothing is asked about the sibling.
+  expect(w.asked).toHaveLength(1)
+  expect(w.asked[0]?.options).toEqual(['Changes since abc', 'Everything here is new', 'The current content is the baseline', REMOVE])
+  // Guarded by the set shown and by the run it was shown for.
+  expect(w.calls.filter(call => call.args[0] === 'root-remove').map(call => call.args)).toEqual([['root-remove', 'scratchpad', '--with-nested', '--expect', 'scratchpad,clone,clone2', '--run', 'r1']])
+})
+
+test('a removal whose set changed while the question was open is asked again with the new set', async () => {
+  at(true)
+  const late = { alias: 'late', path: '/tmp/s/scratchpad/late', kind: 'git', baseline: 'unknown', proposed: '' }
+  let removals = 0
+  let statuses = 0
+  const { $, w } = fakeEngine({
+    engine: {
+      status: () => ({ ok: true, run: summary({ roots: removals === 2 ? [WORK] : ++statuses === 1 ? [WORK, SCRATCH, CLONE] : [WORK, SCRATCH, CLONE, late] }) }),
+      'root-remove': () =>
+        ++removals === 1
+          ? { ok: false, code: 'removal-changed', error: 'now removes scratchpad, clone, late' }
+          : { ok: true, alias: 'scratchpad', removed: ['scratchpad', 'clone', 'late'], run: summary() },
+    },
+    choices: ["Remove scratchpad, clone (not the plan's work)", "Remove scratchpad, clone, late (not the plan's work)"],
+  })
+  expect((await chooseBaselines($)).removed).toEqual(['scratchpad', 'clone', 'late'])
+  const expected = w.calls.filter(call => call.args[0] === 'root-remove').map(call => call.args[call.args.indexOf('--expect') + 1])
+  expect(expected).toEqual(['scratchpad,clone', 'scratchpad,clone,late'])
+})
+
+test('no removal is offered when it would leave the run no root, and a question that fails is logged', async () => {
+  at(true)
+  const { $, w } = fakeEngine({ engine: { status: { ok: true, run: summary({ roots: [SCRATCH, CLONE] }) } }, choices: [] })
+  const chosen = await chooseBaselines($)
+  expect([chosen.settled, chosen.removed, [...chosen.outcomes]]).toEqual([false, [], [['clone', 'unchosen']]])
+  expect(w.asked[0]?.options.some(option => option.startsWith('Remove'))).toBe(false)
+  expect(w.logged.join('\n')).toContain('Could not ask for the baseline of root clone')
+  expect(w.commands()).not.toContain('root-remove')
+})
+
+test('a status the engine cannot answer settles nothing', async () => {
+  at(true)
+  const { $, w } = fakeEngine({ engine: { status: { ok: false, code: 'state-corrupt', error: 'bad state' } } })
+  const chosen = await chooseBaselines($)
+  expect([chosen.settled, [...chosen.outcomes]]).toEqual([false, []])
+  expect(w.asked).toEqual([])
+})
+
+test('/arl-resume that removes a root at the baseline question tells Claude the roots as they are now', async () => {
+  at(true)
+  let removed = false
+  let nexts = 0
+  const { $, w } = fakeEngine({
+    engine: {
+      resume: { ok: true, run: summary(), abandoned_review: false, context: `Workspace roots: work = ${LAUNCH}; scratchpad = ${SCRATCH.path}; clone = ${CLONE.path}.` },
+      'next-action': () => (++nexts === 1 ? { ok: true, action: 'yield', reason: 'baseline-unknown' } : CONTINUE),
+      status: (call: { args: string[] }) => ({
+        ok: true,
+        run: summary({ roots: removed ? [WORK] : [WORK, SCRATCH, CLONE] }),
+        ...(call.args.includes('--context') ? { context: `Workspace roots: work = ${LAUNCH}.` } : {}),
+      }),
+      'root-remove': () => {
+        removed = true
+        return { ok: true, alias: 'scratchpad', removed: ['scratchpad', 'clone'], run: summary() }
+      },
+    },
+    choices: ["Remove scratchpad, clone (not the plan's work)"],
+  })
+  await runCommand($, 'arl-resume', '')
+  await settle()
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toContain('The user removed roots scratchpad, clone from the run')
+  expect(w.submitted[0]).toContain(`Workspace roots: work = ${LAUNCH}.`)
+  expect(w.submitted[0]).not.toContain('clone = ')
+  expect(w.submitted[0]).toContain(CONTINUE.prompt)
+})
+
+test('the baseline question sends the choice for the run it showed', async () => {
+  at(true)
+  const { $, w } = fakeEngine({
+    engine: { ...removal([WORK, CLONE], [WORK], { ok: true }), 'root-baseline': { ok: true, run: summary() } },
+    choices: ['The current content is the baseline'],
+  })
+  await chooseBaselines($)
+  expect(w.calls.find(call => call.args[0] === 'root-baseline')?.args).toEqual(['root-baseline', 'clone', '--current', '--run', 'r1'])
+})
+
+test('/arl-remove-root on a root that holds others removes them together, on confirmation, and continues once', async () => {
+  at(true)
+  const { $, w } = fakeEngine({
+    engine: {
+      'root-remove': (call: { args: string[] }) =>
+        call.args.includes('--dry-run')
+          ? { ok: true, alias: 'scratchpad', path: SCRATCH.path, removing: ['scratchpad', 'clone'], run_id: 'r1' }
+          : { ok: true, alias: 'scratchpad', path: SCRATCH.path, removed: ['scratchpad', 'clone'], run: summary() },
+      'next-action': CONTINUE,
+    },
+    choices: ['Remove scratchpad, clone'],
+  })
+  // A relative path: the engine resolves it, as the removal will.
+  const text = await runCommand($, 'arl-remove-root', '../scratchpad')
+  expect(text).toContain('Removed roots scratchpad, clone')
+  expect(text).toContain('Claude continues the run.')
+  expect(w.calls.filter(call => call.args[0] === 'root-remove').map(call => call.args)).toEqual([
+    ['root-remove', '../scratchpad', '--with-nested', '--dry-run'],
+    ['root-remove', 'scratchpad', '--with-nested', '--expect', 'scratchpad,clone', '--run', 'r1'],
+  ])
+  expect(w.commands().filter(command => command === 'next-action')).toHaveLength(1)
+  await settle()
+  expect(w.submitted).toEqual([CONTINUE.prompt])
+})
+
+test('/arl-remove-root on a root that holds others removes nothing when declined, or headless', async () => {
+  at(true)
+  const plan = { ok: true, alias: 'scratchpad', path: SCRATCH.path, removing: ['scratchpad', 'clone'], run_id: 'r1' }
+  const declined = fakeEngine({ engine: { 'root-remove': plan }, choices: ['Keep them'] })
+  expect(await runCommand(declined.$, 'arl-remove-root', 'scratchpad')).toContain('Nothing removed')
+  expect(declined.w.calls.filter(call => call.args[0] === 'root-remove').map(call => call.args.includes('--dry-run'))).toEqual([true])
+  at(false)
+  const headless = fakeEngine({ engine: { 'root-remove': plan } })
+  expect(await runCommand(headless.$, 'arl-remove-root', 'scratchpad')).toContain('interactive session to confirm')
+  expect(headless.w.calls.filter(call => call.args[0] === 'root-remove').map(call => call.args.includes('--dry-run'))).toEqual([true])
 })
 
 test('a name the plugin does not register is not its to answer', async () => {

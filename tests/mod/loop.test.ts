@@ -96,7 +96,66 @@ test('add_root on a directory that already changed asks the user for its baselin
   await start($, true)
   expect(await callTool($, 'add_root', { path: '/lib' })).toContain('with the baseline the user chose')
   expect(w.asked[0]?.options).toEqual(['Everything here is new', 'The current content is the baseline'])
-  expect(w.calls.at(-1)?.args).toEqual(['root-baseline', 'lib', '--empty'])
+  expect(w.calls.filter(call => call.args[0] === 'root-baseline').map(call => call.args)).toEqual([['root-baseline', 'lib', '--empty', '--run', 'r1']])
+})
+
+test('add_root whose new root the user removes says it was removed, never registered', async ($, on) => {
+  let removed = false
+  const roots = [
+    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' },
+    { alias: 'lib', path: '/lib', kind: 'dir', baseline: 'unknown', proposed: '' },
+  ]
+  world(on, {
+    engine: {
+      'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', proposed: '' },
+      status: () => ({ ok: true, run: summary({ roots: removed ? roots.slice(0, 1) : roots }) }),
+      'root-remove': () => {
+        removed = true
+        return { ok: true, alias: 'lib', removed: ['lib'], run: summary() }
+      },
+    },
+    choices: ["Remove lib (not the plan's work)"],
+  })
+  await start($, true)
+  const text = await callTool($, 'add_root', { path: '/lib' })
+  expect(text).toContain('The user removed root lib from the run')
+  expect(text).not.toContain('Registered')
+})
+
+test('add_root answers its own root\'s outcome, not the run\'s: another root left unchosen does not undo it', async ($, on) => {
+  let chosen = false
+  const roots = () => [
+    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' },
+    { alias: 'lib', path: '/lib', kind: 'dir', baseline: chosen ? 'set' : 'unknown', proposed: '' },
+    { alias: 'svc', path: '/svc', kind: 'dir', baseline: 'unknown', proposed: '' },
+  ]
+  world(on, {
+    engine: {
+      'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', proposed: '' },
+      status: () => ({ ok: true, run: summary({ roots: roots() }) }),
+      'root-baseline': () => {
+        chosen = true
+        return { ok: true, run: summary() }
+      },
+    },
+    // lib's question is answered; svc's fails.
+    choices: ['Everything here is new'],
+  })
+  await start($, true)
+  expect(await callTool($, 'add_root', { path: '/lib' })).toContain('Registered root lib with the baseline the user chose')
+})
+
+test('add_root never claims a baseline was chosen when the engine could not say', async ($, on) => {
+  world(on, {
+    engine: {
+      'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', proposed: '' },
+      status: { ok: false, code: 'state-corrupt', error: 'bad state' },
+    },
+  })
+  await start($, true)
+  const text = await callTool($, 'add_root', { path: '/lib' })
+  expect(text).toContain('its baseline is unknown')
+  expect(text).not.toContain('the user chose')
 })
 
 test('headless, a root with an unknown baseline is reported, not guessed', async ($, on) => {
@@ -372,7 +431,7 @@ test('add_root on a root that has no baseline yet settles it with the user', asy
   })
   await start($, true)
   expect(await callTool($, 'add_root', { path: '/lib' })).toContain('whose baseline the user just chose')
-  expect(w.calls.at(-1)?.args).toEqual(['root-baseline', 'lib', '--current'])
+  expect(w.calls.filter(call => call.args[0] === 'root-baseline').map(call => call.args)).toEqual([['root-baseline', 'lib', '--current', '--run', 'r1']])
 })
 
 test('the band says working while Claude\'s main turn runs, and idle once it ended, whatever ended it', async ($, on) => {

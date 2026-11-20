@@ -199,12 +199,15 @@ async function resume($: EngineInterface): Promise<string> {
   const abandoned = answer.abandoned_review === true
   const resumes = abandoned ? 'The run resumes. The review that was in flight was abandoned: when the phase is ready, call review again.' : 'The run resumes.'
   // This session may not be the one that started the run: it is told what the run is.
-  const lead = withToolNames(typeof answer.context === 'string' && answer.context ? `${resumes}\n\n${answer.context}` : resumes)
+  const leadFor = (context: unknown): string => withToolNames(typeof context === 'string' && context ? `${resumes}\n\n${context}` : resumes)
+  const lead = leadFor(answer.context)
+  // Roots the baseline question removes are not the run's any more: the context is read again.
+  const relead = async (): Promise<string> => leadFor((await run($, ['status', '--context'])).context)
   const view = summaryOf(answer)
   // A conversation brought back from the background starts no session: nothing else shows the run.
   await openPane($)
   const where = view === null ? '' : ` at ${briefly(view)}`
-  return `Resumed run ${view?.run_id ?? ''}${where}${abandoned ? ' (the pending review was abandoned)' : ''}. ${await proceed($, lead)}`
+  return `Resumed run ${view?.run_id ?? ''}${where}${abandoned ? ' (the pending review was abandoned)' : ''}. ${await proceed($, lead, relead)}`
 }
 
 async function status($: EngineInterface): Promise<string> {
@@ -316,9 +319,33 @@ async function chooseModel($: EngineInterface, args: string): Promise<string> {
 async function removeRoot($: EngineInterface, args: string): Promise<string> {
   const root = args.trim()
   if (root === '') return 'Usage: /arl-remove-root <alias or path>'
-  const answer = await run($, ['root-remove', root])
+  // The engine resolves the root (an alias, an absolute or a relative path) and the roots inside
+  // it, as the removal will: a container never leaves its clone behind as a root with no baseline.
+  const planned = await run($, ['root-remove', root, '--with-nested', '--dry-run'])
+  if (!planned.ok) return refused(planned)
+  const alias = String(planned.alias)
+  const going = Array.isArray(planned.removing) ? planned.removing.map(String) : [alias]
+  if (going.length > 1) {
+    const inside = going.filter(name => name !== alias).join(', ')
+    if (!session.isInteractive) {
+      return `Root ${alias} holds ${inside}: removing it removes ${going.join(', ')}. Run /arl-remove-root ${alias} in an interactive session to confirm.`
+    }
+    const yes = `Remove ${going.join(', ')}`
+    const choice = await $.ui
+      .ask(`Root ${alias} (${String(planned.path)}) holds ${inside}. Remove them all? Nothing in them is reviewed from then on.`, [yes, 'Keep them'])
+      .catch((error: unknown) => {
+        $.ui.log(`Could not ask about removing ${alias} (${String(error)}).`)
+        return ''
+      })
+    if (choice !== yes) return `Nothing removed: ${going.join(', ')} stay in the run.`
+  }
+  // Guarded even for one root: a root that joined inside it since, or another run in its place,
+  // changes nothing.
+  const answer = await run($, ['root-remove', alias, '--with-nested', '--expect', going.join(','), '--run', String(planned.run_id)])
   if (!answer.ok) return refused(answer)
-  return `Removed root ${String(answer.alias)} (${String(answer.path)}): nothing in it is reviewed from now on. ${await proceed($)}`
+  const removed = Array.isArray(answer.removed) ? answer.removed.map(String) : going
+  const what = removed.length === 1 ? `root ${alias} (${String(answer.path)}): nothing in it` : `roots ${removed.join(', ')}: nothing in them`
+  return `Removed ${what} is reviewed from now on. ${await proceed($)}`
 }
 
 /** Run one of the commands; `undefined` for a name this plugin does not register. */
