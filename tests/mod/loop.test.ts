@@ -50,6 +50,16 @@ test('every session gets the four tools, each with a schema', async ($, on) => {
   }
 })
 
+test('each description says its rule within what tool search shows of it', async ($, on) => {
+  // Code Mode's tool search shows about the first 160 characters of a description.
+  const w = world(on, { engine: {} })
+  await start($)
+  const shown = new Map(w.registered.tools.map(spec => [spec.name, String(spec.description).slice(0, 160)]))
+  expect(shown.get('set_phases')).toContain('before changing any file')
+  expect(shown.get('add_root')).toContain('never a scratch')
+  expect(shown.get('review')).toContain('commit each changed git repository')
+})
+
 test('set_phases hands the engine the list on stdin', async ($, on) => {
   const w = world(on, { engine: { 'set-phases': { ok: true, run: summary({ phases: ['Engine', 'Mod'], phases_revision: 2 }) } } })
   await start($)

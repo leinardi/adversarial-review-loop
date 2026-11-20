@@ -40,7 +40,7 @@ Your answer is your final message (or the report you hand back, where your sessi
 export const TOOLS = {
   set_phases: {
     description:
-      'Record the phases of the plan you are implementing under adversarial-review-loop, in order, one short title per phase. Call it once after reading the plan, before changing any file. While no phase is approved you may call it again to revise the list. Once a phase is approved, revising needs replan: true, and phases then lists only the phases after the approved ones: those are kept as they are.',
+      'Record the phases of the plan you implement under adversarial-review-loop, in order, one short title each, once after reading it and before changing any file. While no phase is approved you may call it again to revise the list. Once a phase is approved, revising needs replan: true, and phases then lists only the phases after the approved ones: those are kept as they are.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -52,7 +52,7 @@ export const TOOLS = {
   },
   add_root: {
     description:
-      'Register a directory as a workspace root of the adversarial-review-loop run before you change anything in it through Bash, including a directory you are about to create. Edit and Write register their own files. A change made through Bash in a directory outside every root is never reviewed. Register only directories whose content is the work of the plan, never a scratch, build or temporary directory you use to check it (a throwaway worktree, a build output): everything in a root is reviewed, and a copy of a repository is a diff of its every file.',
+      "Register a directory holding the plan's work (never a scratch, temporary or build directory) as an adversarial-review-loop root, before changing it through Bash. That includes a directory you are about to create. Edit and Write register their own files. A change made through Bash in a directory outside every root is never reviewed. Never register a directory you only use to check the work (a throwaway clone or worktree, a build output): everything in a root is reviewed, and a copy of a repository is a diff of its every file.",
     inputSchema: {
       type: 'object',
       properties: { path: { type: 'string', description: 'The directory, absolute or relative to the launch directory.' } },
@@ -61,7 +61,7 @@ export const TOOLS = {
   },
   review: {
     description:
-      "Ask for the adversarial review of the current phase (or of the final review stage) once the phase is implemented. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. After a review that asked for changes, pass dispositions too: for each finding of that review (by its id, r<round>.<n>), whether you fixed it or reject it, with a note citing the file and line that shows it. A finding you reject with no such citation stays open. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
+      "Ask for the adversarial review of the implemented phase (or the final review); on approval, commit each changed git repository, then do what the answer says. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. After a review that asked for changes, pass dispositions too: for each finding of that review (by its id, r<round>.<n>), whether you fixed it or reject it, with a note citing the file and line that shows it. A finding you reject with no such citation stays open. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
     inputSchema: {
       type: 'object',
       properties: {
