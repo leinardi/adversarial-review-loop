@@ -121,6 +121,8 @@ export type World = {
   written: Map<string, string>
   /** Prompts the mod submitted. */
   submitted: string[]
+  /** The seconds each reviewer's clock (`sleep <n>`) was started with. */
+  clocks: number[]
   /** Questions put to the user, with their options. */
   asked: { question: string; options: string[] }[]
   /** Reviewer spawns through the kit. */
@@ -185,6 +187,8 @@ export type WorldOptions = {
   ranOn?: string[]
   /** Called with each spawned agent's id before it answers, as its tool calls would come. */
   whileRunning?: (agentId: string) => Promise<void>
+  /** How long the model check takes, to stand in for a slow setup. */
+  checkDelayMs?: number
   /** What each spawned reviewer reads before it answers: a diff chunk of the bundle by default, `none` for nothing. */
   reads?: 'none'
   /** The session's permission verdict for a write (`$.tool.check`); left out, no stand-in answers. */
@@ -202,6 +206,7 @@ function scripted(options: WorldOptions): { state: World; answer: (argv: readonl
     attached: [],
     written: new Map(),
     submitted: [],
+    clocks: [],
     asked: [],
     spawns: [],
     checked: [],
@@ -369,6 +374,7 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
     model: {
       complete: async (request: { model: string }) => {
         state.checked.push(request.model)
+        if (options.checkDelayMs !== undefined) await new Promise(resolve => setTimeout(() => resolve(undefined), options.checkDelayMs ?? 0))
         const check = checks.shift() ?? ANSWERED
         if (check === 'reject') throw new Error(`model "${request.model}" is not in this organization's allowlist`)
         return check
@@ -380,6 +386,7 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
       spawn: (request: { argv: readonly string[]; input?: string }) => {
         const pieces = async function* () {
           if (request.argv[0] === 'sleep') {
+            state.clocks.push(Number(request.argv[1]))
             // The reviewer's clock: `sleep 1` expires at once; any other runs until it is ended.
             if (request.argv[1] !== '1') await new Promise(() => undefined)
             state.expired += 1

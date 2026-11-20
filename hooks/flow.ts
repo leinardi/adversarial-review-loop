@@ -387,7 +387,15 @@ type Prepared = Answer & {
 /** Runs one reviewer: the subagent in the session, a stand-in in a test. */
 export type Reviewer = (task: Task) => Promise<Ran>
 
-async function ask($: EngineInterface, reviewer: Reviewer, prepared: Prepared, step: { prompt_file: string }, description: string): Promise<Ran> {
+async function ask(
+  $: EngineInterface,
+  reviewer: Reviewer,
+  prepared: Prepared,
+  step: { prompt_file: string },
+  deadlineMs: number | undefined,
+  description: string,
+): Promise<Ran> {
+  const cap = secondsLeft(deadlineMs)
   let prompt: string
   try {
     prompt = await $.fs.read(step.prompt_file)
@@ -398,7 +406,8 @@ async function ask($: EngineInterface, reviewer: Reviewer, prepared: Prepared, s
     prompt,
     description,
     model: prepared.reviewer_model ?? '',
-    timeoutSec: prepared.timeout_sec ?? 900,
+    timeoutSec: Math.min(prepared.timeout_sec ?? 900, cap ?? Infinity),
+    ...(deadlineMs === undefined ? {} : { deadlineMs, marginSec: RECORD_MARGIN_SEC, minSec: MIN_REVIEW_SEC, outOfTime: OUT_OF_TIME }),
     dirs: [prepared.bundle_dir, ...prepared.roots],
     bundle: prepared.bundle_dir,
   })
@@ -408,13 +417,18 @@ async function ask($: EngineInterface, reviewer: Reviewer, prepared: Prepared, s
 const INTERRUPTED = 'The review was interrupted, and nothing was recorded. Call review again when the user wants it.'
 
 /** Run the subagent on a prepared review, through the one repair a malformed answer gets. */
-async function reviewBySubagent($: EngineInterface, reviewer: Reviewer, prepared: Prepared): Promise<Answer> {
+async function reviewBySubagent($: EngineInterface, reviewer: Reviewer, prepared: Prepared, deadlineMs?: number): Promise<Answer> {
   const id = String(prepared.review_id)
   let step: { prompt_file: string; answer_file: string } = prepared
   const spent: Spent = {}
   let recorded: Answer = { ok: false, code: 'engine', error: 'no review ran' }
   for (const attempt of [1, 2]) {
-    const ran = await ask($, reviewer, prepared, step, `Review ${String(prepared.label)}, round ${String(prepared.round)}${attempt > 1 ? ' (repair)' : ''}`)
+    const left = secondsLeft(deadlineMs)
+    // Too little left for a reviewer to read anything: a timeout now, recorded, rather than a cut.
+    if (left !== undefined && left < MIN_REVIEW_SEC) {
+      return run($, ['review', 'record', id, '--failed', 'transient', '--error', OUT_OF_TIME, ...usageArgs(spent)])
+    }
+    const ran = await ask($, reviewer, prepared, step, deadlineMs, `Review ${String(prepared.label)}, round ${String(prepared.round)}${attempt > 1 ? ' (repair)' : ''}`)
     spent.usage = sum(spent.usage, ran.usage)
     if (ran.durationMs !== undefined) spent.durationMs = (spent.durationMs ?? 0) + ran.durationMs
     if (ran.requests !== undefined) spent.requests = (spent.requests ?? 0) + ran.requests
@@ -439,12 +453,42 @@ async function prepareReview($: EngineInterface, input: Record<string, unknown>)
   return run($, ['review', 'prepare', '--session', session.id], JSON.stringify({ verification: input.verification ?? [], dispositions: input.dispositions ?? [] }))
 }
 
-export async function review($: EngineInterface, input: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
-  return reviewWith($, input, task => runReviewer($, { ...task, signal }), signal)
+/**
+ * How long a review called from a script may take, of the ten minutes Code Mode gives a call a
+ * script waits on (tests/STEP0.md, M5 and M7): a reviewer still running at the cut is stopped with
+ * nothing recorded, and Claude retries it for ever. Within this budget it ends as a timeout
+ * instead, which is recorded and counts toward the failure budget.
+ *
+ * Best effort: the ten minutes run from the script's start, which the host does not expose, and
+ * the clock here starts at the review call. Eight minutes leave two for whatever the script did
+ * first (Claude often runs the checks in the same script); a script that spent longer is cut
+ * before the timeout is recorded, as without the budget.
+ */
+export const SCRIPT_BUDGET_MS = 480_000
+/** Kept back from a deadline for recording what the reviewer answered. */
+const RECORD_MARGIN_SEC = 15
+/** A reviewer given less than this could not review anything: the round fails at once instead. */
+const MIN_REVIEW_SEC = 30
+const OUT_OF_TIME =
+  "the review ran out of time: Code Mode stops a tool call at ten minutes, so a review gets eight. Review in smaller phases, or turn Code Mode off for this run's long reviews"
+
+/** Whether a tool call came from a script (Code Mode): its tool-use id says so (tests/STEP0.md, M2). */
+export function fromScript(toolUseId: unknown): boolean {
+  return typeof toolUseId === 'string' && toolUseId.startsWith('repl_')
+}
+
+/** Seconds left before `deadlineMs`, less what recording needs; `undefined` with no deadline. */
+function secondsLeft(deadlineMs: number | undefined): number | undefined {
+  return deadlineMs === undefined ? undefined : Math.floor((deadlineMs - Date.now()) / 1000) - RECORD_MARGIN_SEC
+}
+
+/** `deadlineMs`: when the call that asked for the review is cut (a call from a script); none otherwise. */
+export async function review($: EngineInterface, input: Record<string, unknown>, signal?: AbortSignal, deadlineMs?: number): Promise<string> {
+  return reviewWith($, input, task => runReviewer($, { ...task, signal }), signal, deadlineMs)
 }
 
 /** `signal` is the tool call's own: aborted when the person interrupts the review. */
-export async function reviewWith($: EngineInterface, input: Record<string, unknown>, reviewer: Reviewer, signal?: AbortSignal): Promise<string> {
+export async function reviewWith($: EngineInterface, input: Record<string, unknown>, reviewer: Reviewer, signal?: AbortSignal, deadlineMs?: number): Promise<string> {
   let prepared = await prepareReview($, input)
   let note = ''
   if (!prepared.ok && prepared.code === 'baseline-unknown') {
@@ -453,11 +497,11 @@ export async function reviewWith($: EngineInterface, input: Record<string, unkno
     if (!chosen.settled) return `${note}${refused(prepared)}\n\nStop and tell the user: a root's baseline must be chosen before the review can run.`
     prepared = await prepareReview($, input)
   }
-  return note + (await reviewPrepared($, prepared, reviewer, signal))
+  return note + (await reviewPrepared($, prepared, reviewer, signal, deadlineMs))
 }
 
 /** The review round of a ticket `review prepare` answered, or its refusal. */
-async function reviewPrepared($: EngineInterface, prepared: Answer, reviewer: Reviewer, signal?: AbortSignal): Promise<string> {
+async function reviewPrepared($: EngineInterface, prepared: Answer, reviewer: Reviewer, signal?: AbortSignal, deadlineMs?: number): Promise<string> {
   if (!prepared.ok) {
     // Whatever refused it (a stall, an oversized file, the failure budget a broken bundle spent),
     // a run that now waits for the user is put to them.
@@ -473,8 +517,8 @@ async function reviewPrepared($: EngineInterface, prepared: Answer, reviewer: Re
   try {
     recorded =
       prepared.harness === 'subagent'
-        ? await reviewBySubagent($, reviewer, prepared as Prepared)
-        : await runStream($, ['review', 'run-external', String(prepared.review_id)])
+        ? await reviewBySubagent($, reviewer, prepared as Prepared, deadlineMs)
+        : await runStream($, ['review', 'run-external', String(prepared.review_id), ...(deadlineMs === undefined ? [] : ['--deadline-sec', String(Math.max(0, Math.floor((deadlineMs - Date.now()) / 1000)))])])
     // An interrupt kills the external reviewer's engine, which then answers nothing readable. A
     // record that landed first stands, whatever the signal says.
     if (!recorded.ok && signal?.aborted) throw new Interrupted()

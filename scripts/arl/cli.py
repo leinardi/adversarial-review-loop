@@ -70,7 +70,9 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
                                              {"verification": [...], "dispositions": [...]} on stdin
   review record ID (--answer FILE | --failed transient|operational|model [--error TEXT])
                    [--usage JSON]            what the subagent round cost, for the report
-  review run-external ID                     run the opencode reviewer and record its answer
+  review run-external ID [--deadline-sec N]  run the opencode reviewer and record its answer
+                                             (--deadline-sec: all of it, repair included,
+                                             within N seconds)
   review abandon ID                          retire an interrupted review; no failure is counted
 
 Every subcommand prints one JSON object on stdout.
@@ -83,17 +85,8 @@ class _Parser(argparse.ArgumentParser):
         raise SystemExit(2)
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = _Parser(prog="arl.sh", add_help=False)
-    parser.add_argument("--dir", default=".")
-    sub = parser.add_subparsers(dest="command", parser_class=_Parser)
-    init = sub.add_parser("init", add_help=False)
-    init.add_argument("--plan", required=True)
-    init.add_argument("--root", action="append", dest="roots", default=[])
-    init.add_argument("--new", action="store_true")
-    init.add_argument("--model", default="")
-    phases = sub.add_parser("set-phases", add_help=False)
-    phases.add_argument("--replan", action="store_true")
+def _root_parsers(sub: Any) -> None:
+    """The workspace-root commands: ``root-add``, ``root-baseline``, ``root-remove``."""
     root_add = sub.add_parser("root-add", add_help=False)
     root_add.add_argument("path")
     root_add.add_argument("--not-scratch", action="store_true")
@@ -111,6 +104,20 @@ def _parser() -> argparse.ArgumentParser:
     remove.add_argument("--expect", default=None)
     remove.add_argument("--run", default=None)
     remove.add_argument("--dry-run", action="store_true")
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = _Parser(prog="arl.sh", add_help=False)
+    parser.add_argument("--dir", default=".")
+    sub = parser.add_subparsers(dest="command", parser_class=_Parser)
+    init = sub.add_parser("init", add_help=False)
+    init.add_argument("--plan", required=True)
+    init.add_argument("--root", action="append", dest="roots", default=[])
+    init.add_argument("--new", action="store_true")
+    init.add_argument("--model", default="")
+    phases = sub.add_parser("set-phases", add_help=False)
+    phases.add_argument("--replan", action="store_true")
+    _root_parsers(sub)
     sub.add_parser("attach", add_help=False).add_argument("--session", default="")
     sub.add_parser("report", add_help=False).add_argument("number", nargs="?", type=int, default=None)
     sub.add_parser("config", add_help=False)
@@ -135,7 +142,9 @@ def _parser() -> argparse.ArgumentParser:
     outcome.add_argument("--failed", choices=("transient", "operational", "model"))
     record.add_argument("--error", default="")
     record.add_argument("--usage", default="")
-    review.add_parser("run-external", add_help=False).add_argument("review_id")
+    external = review.add_parser("run-external", add_help=False)
+    external.add_argument("review_id")
+    external.add_argument("--deadline-sec", type=int, default=None)
     review.add_parser("abandon", add_help=False).add_argument("review_id")
     return parser
 

@@ -74,6 +74,15 @@ export type Task = {
   dirs: readonly string[]
   /** The review bundle: a reviewer that read none of it gives no verdict. */
   bundle: string
+  /**
+   * When the call that asked for the review is cut (a call from a Code Mode script): the wait for
+   * the answer ends `marginSec` before it, and with less than `minSec` left once the reviewer is
+   * running, the run fails at once as `outOfTime`. The model check and the spawn count against it.
+   */
+  deadlineMs?: number
+  marginSec?: number
+  minSec?: number
+  outOfTime?: string
   /** The calling hook's `next.signal`: aborted when the person interrupts the review. */
   signal?: AbortSignal
 }
@@ -305,10 +314,17 @@ export async function runReviewer($: EngineInterface, task: Task): Promise<Ran> 
   running.set(agentId, task.dirs)
   bundles.set(agentId, task.bundle)
   try {
-    const completion = await answerOf($, agentId, task.timeoutSec, task.signal)
+    let timeoutSec = task.timeoutSec
+    if (task.deadlineMs !== undefined) {
+      // The deadline was set before the model check and the spawn: what they took is spent.
+      const left = Math.floor((task.deadlineMs - Date.now()) / 1000) - (task.marginSec ?? 0)
+      if (left < (task.minSec ?? 1)) return failed('transient', task.outOfTime ?? 'the review ran out of time')
+      timeoutSec = Math.min(timeoutSec, left)
+    }
+    const completion = await answerOf($, agentId, timeoutSec, task.signal)
     // An interrupt may also end the reviewer's own run before its clock: still an interrupt.
     if (task.signal?.aborted) throw new Interrupted()
-    const ran = classify(completion, task.timeoutSec)
+    const ran = classify(completion, timeoutSec)
     // Never a verdict from a reviewer that read none of the evidence (AGENTS.md rule 1).
     if (ran.ok && !readTheBundle.has(agentId)) return failed('operational', 'the reviewer read none of the bundle', completion)
     return ran

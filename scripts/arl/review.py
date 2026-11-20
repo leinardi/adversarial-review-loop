@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -1010,6 +1011,17 @@ def _usage_arg(spent: harness.Usage | None) -> str:
     return json.dumps(harness.usage_record(spent)) if spent is not None else ""
 
 
+#: Kept back from a run's deadline for recording what the reviewer answered.
+RECORD_MARGIN_SEC: Final = 15
+#: A reviewer given less than this could not review anything: the round fails at once instead.
+MIN_REVIEW_SEC: Final = 30
+#: Why a review given a deadline (``--deadline-sec``) ended before its reviewer could run.
+OUT_OF_TIME: Final = (
+    "the review ran out of time: Code Mode stops a tool call at ten minutes, so a review gets eight. "
+    "Review in smaller phases, or turn Code Mode off for this run's long reviews"
+)
+
+
 def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     """Run the configured external reviewer for the pending review, then record its answer.
 
@@ -1017,6 +1029,9 @@ def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     the ticket, and the late answer is then refused by :func:`record`.
     """
     review_id = str(args["review_id"])
+    # A review called from a Code Mode script must end before the call is cut (tests/STEP0.md, M7).
+    # One clock from here covers everything: the model check, the review and its repair.
+    deadline = time.monotonic() + int(args["deadline_sec"]) if args.get("deadline_sec") is not None else None
     with locked_state(paths) as loaded:
         run = _require(loaded)
         try:
@@ -1036,8 +1051,17 @@ def run_external(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     except runner.ReviewerFailed as exc:
         return record(paths, {"review_id": review_id, "failed": runner.classify_op_failure(exc, answer), "error": str(exc)})
     spent: harness.Usage | None = None
+    # Each attempt gets what is left of the deadline; too little left is a timeout, recorded.
     for attempt in range(2):
-        invocation = runner.Invocation(bundle_dir=review_dir / "bundle", prompt_file=prompt, title=f"arl {review_id} {attempt}", out_path=answer)
+        cap = 0
+        if deadline is not None:
+            left = int(deadline - time.monotonic()) - RECORD_MARGIN_SEC
+            if left < MIN_REVIEW_SEC:
+                return record(paths, {"review_id": review_id, "failed": "transient", "error": OUT_OF_TIME, "usage": _usage_arg(spent)})
+            cap = min(left, cfg.as_int("timeout_sec") or left, runner.MAX_TIMEOUT_SEC)
+        invocation = runner.Invocation(
+            bundle_dir=review_dir / "bundle", prompt_file=prompt, title=f"arl {review_id} {attempt}", out_path=answer, timeout_sec=cap
+        )
         try:
             spent = harness.add_usage(spent, runner.invoke(target, invocation, config=cfg))
         except runner.LaunchError as exc:

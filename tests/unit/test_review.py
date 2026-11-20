@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -1029,6 +1030,87 @@ def test_a_failed_external_reviewer_keeps_its_output_in_the_report(ws: Path, eng
     assert outcome["verdict"] == "OP_FAILURE"
     assert "Unrecognized flag: --pure" in Path(outcome["report"]).read_text()
     assert load(ws).data["approvals"] == []
+
+
+def test_run_external_with_too_little_time_left_fails_as_a_timeout_and_runs_nothing(
+    ws: Path, engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "ran"
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    monkeypatch.setenv("ARL_REVIEWER_CMD", str(scripted_reviewer(tmp_path, f"touch {marker}")))
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws)
+
+    # 40 s, less the recording margin, leaves less than a reviewer needs.
+    outcome = engine(ws, "review", "run-external", ticket["review_id"], "--deadline-sec", "40")
+
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert not marker.exists()
+    run = load(ws)
+    assert run.data["transient_failures"] == 1
+    assert "Code Mode stops a tool call at ten minutes" in json.dumps(run.data["failure_history"])
+    assert run.data["approvals"] == []
+
+
+def test_run_external_stops_the_reviewer_at_its_deadline(ws: Path, engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("arl.review.RECORD_MARGIN_SEC", 0)
+    monkeypatch.setattr("arl.review.MIN_REVIEW_SEC", 1)
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    monkeypatch.setenv("ARL_REVIEWER_CMD", str(scripted_reviewer(tmp_path, "sleep 30")))
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws)
+
+    began = time.monotonic()
+    outcome = engine(ws, "review", "run-external", ticket["review_id"], "--deadline-sec", "2")
+
+    # The configured 900 s gives way to the deadline: a timeout, recorded, well before the cut.
+    assert time.monotonic() - began < 15
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert load(ws).data["transient_failures"] == 1
+
+
+def test_run_external_counts_the_model_check_against_its_deadline(ws: Path, engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    marker = tmp_path / "ran"
+    monkeypatch.setattr("arl.review.RECORD_MARGIN_SEC", 0)
+    monkeypatch.setattr("arl.review.MIN_REVIEW_SEC", 2)
+    monkeypatch.setattr("arl.runner.check_model", lambda _cfg: time.sleep(2.5))
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    monkeypatch.setenv("ARL_REVIEWER_CMD", str(scripted_reviewer(tmp_path, f"touch {marker}")))
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws)
+
+    # Four seconds, two and a half of them spent on the model check: too little is left.
+    outcome = engine(ws, "review", "run-external", ticket["review_id"], "--deadline-sec", "4")
+
+    assert outcome["verdict"] == "OP_FAILURE"
+    assert not marker.exists()
+    assert load(ws).data["transient_failures"] == 1
+
+
+def test_run_external_gives_the_repair_only_what_the_review_left(ws: Path, engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    caps: list[int] = []
+
+    def invoke(_target: object, run: runner.Invocation, *, config: object) -> None:
+        caps.append(run.timeout_sec)
+        time.sleep(2.2)
+        text = "<<<ARL-FINDINGS>>>\nVERDICT CHANGES_REQUIRED\n<<<ARL-END>>>\n" if "repair" in run.prompt_file.name else "It is bad.\n"
+        run.out_path.write_text(text)
+
+    monkeypatch.setattr("arl.runner.invoke", invoke)
+    monkeypatch.setattr("arl.runner.check_model", lambda _cfg: None)
+    monkeypatch.setenv("ARL_HARNESS", "opencode")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    ticket = prepare(engine, ws)
+
+    engine(ws, "review", "run-external", ticket["review_id"], "--deadline-sec", "300")
+
+    assert len(caps) == 2
+    assert caps[0] <= 300 - 15
+    assert caps[1] <= caps[0] - 2
 
 
 def test_run_external_is_refused_for_the_subagent_harness(ws: Path, engine: Engine) -> None:

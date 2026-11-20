@@ -21,8 +21,10 @@
 import type { EngineInterface } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 import { reviewWith, session } from '../../hooks/flow'
-import { Interrupted, type Ran, runReviewer, runSubagentCall } from '../../hooks/reviewer'
-import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, start, summary, world } from './world'
+import { Interrupted, type Ran, resetCheckedModels, runReviewer, runSubagentCall } from '../../hooks/reviewer'
+import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, start, summary, tool, world } from './world'
+
+declare function setTimeout(callback: () => void, ms: number): unknown
 
 function at(isInteractive = false): void {
   session.dir = LAUNCH
@@ -78,6 +80,116 @@ test('a subagent\'s scripted read goes through the registered hook to the sessio
   expect(ran).toHaveLength(1)
   // Not taken for a write: no root is registered for it.
   expect(w.commands()).not.toContain('root-add')
+})
+
+test('a review with a deadline gives its reviewer only the time left, less what recording needs', async () => {
+  at()
+  const { $ } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': RECORDED }, files: PROMPTS })
+  const r = reviewer([APPROVED])
+  await reviewWith($, {}, r.run, undefined, Date.now() + 120_000)
+  expect(r.tasks[0]?.timeoutSec).toBeGreaterThan(100)
+  expect(r.tasks[0]?.timeoutSec).toBeLessThanOrEqual(105)
+})
+
+test('a review whose deadline leaves no time for a reviewer fails as a timeout, recorded, and runs none', async () => {
+  at()
+  const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': { ...RECORDED, verdict: 'OP_FAILURE', message: 'The review failed.' } }, files: PROMPTS })
+  const r = reviewer([APPROVED])
+  await reviewWith($, {}, r.run, undefined, Date.now() + 20_000)
+  expect(r.tasks).toEqual([])
+  const record = w.calls.find(call => call.args[1] === 'record')
+  expect(record?.args.slice(3, 6)).toEqual(['--failed', 'transient', '--error'])
+  expect(record?.args[6]).toContain('Code Mode stops a tool call at ten minutes')
+})
+
+test('an external review with a deadline passes it to the engine; one without passes none', async () => {
+  at()
+  const external = { ...PREPARED, harness: 'opencode' }
+  const timed = fakeEngine({ engine: { 'review prepare': external, 'review run-external': RECORDED } })
+  await reviewWith(timed.$, {}, reviewer([]).run, undefined, Date.now() + 300_000)
+  const args = timed.w.calls.find(call => call.args[1] === 'run-external')?.args ?? []
+  expect(args.slice(0, 4)).toEqual(['review', 'run-external', 'r1-1', '--deadline-sec'])
+  expect(Number(args[4])).toBeGreaterThan(290)
+  const plain = fakeEngine({ engine: { 'review prepare': external, 'review run-external': RECORDED } })
+  await reviewWith(plain.$, {}, reviewer([]).run)
+  expect(plain.w.calls.find(call => call.args[1] === 'run-external')?.args).toEqual(['review', 'run-external', 'r1-1'])
+})
+
+test('the review tool sets the eight-minute deadline only for a call from a script', async ($, on) => {
+  const external = { ...PREPARED, harness: 'opencode' }
+  const w = world(on, { engine: { 'review prepare': external, 'review run-external': RECORDED } })
+  await start($)
+  await $.tool.call({ tool: tool('review'), tool_use_id: 'repl_ced53612' } as never)
+  await $.tool.call({ tool: tool('review'), tool_use_id: 'toolu_01abc' } as never)
+  const runs = w.calls.filter(call => call.args[1] === 'run-external').map(call => call.args)
+  expect(runs[0]?.[3]).toBe('--deadline-sec')
+  expect(Number(runs[0]?.[4])).toBeGreaterThan(470)
+  expect(Number(runs[0]?.[4])).toBeLessThanOrEqual(480)
+  expect(runs[1]).toEqual(['review', 'run-external', 'r1-1'])
+})
+
+test('one deadline covers the model check and the spawn: a slow setup shortens the wait for the answer', async () => {
+  for (const [delay, most] of [[0, 85], [3000, 82]] as const) {
+    resetCheckedModels()
+    const { $, w } = fakeEngine({ engine: {}, agents: [{ answer: VALID_APPROVAL, reason: 'answer', durationMs: 5 }], checkDelayMs: delay })
+    await runReviewer($, {
+      prompt: 'Review it.',
+      description: 'Review',
+      model: 'opus',
+      timeoutSec: 900,
+      dirs: [PREPARED.bundle_dir],
+      bundle: PREPARED.bundle_dir,
+      deadlineMs: Date.now() + 100_000,
+      marginSec: 15,
+      minSec: 30,
+    })
+    expect(w.clocks[0]).toBeLessThanOrEqual(most)
+    expect(w.clocks[0]).toBeGreaterThan(most - 3)
+  }
+})
+
+test('a setup that leaves too little of the deadline fails as out of time, never waits', async () => {
+  resetCheckedModels()
+  const { $, w } = fakeEngine({ engine: {}, agents: [{ answer: VALID_APPROVAL, reason: 'answer', durationMs: 5 }], checkDelayMs: 1500 })
+  const ran = await runReviewer($, {
+    prompt: 'Review it.',
+    description: 'Review',
+    model: 'opus',
+    timeoutSec: 900,
+    dirs: [PREPARED.bundle_dir],
+    bundle: PREPARED.bundle_dir,
+    deadlineMs: Date.now() + 46_000,
+    marginSec: 15,
+    minSec: 30,
+    outOfTime: 'out of time',
+  })
+  expect(ran).toEqual(expect.objectContaining({ ok: false, kind: 'transient', error: 'out of time' }))
+  expect(w.clocks).toEqual([])
+})
+
+test('the repair gets only what the review left of the deadline', async () => {
+  at()
+  const { $ } = fakeEngine({
+    engine: {
+      'review prepare': PREPARED,
+      'review record': (call: { args: string[] }) =>
+        call.args.includes('/work/.arl/reviews/r1-001/answer.md')
+          ? { ok: true, status: 'repair', prompt_file: '/work/.arl/reviews/r1-001/repair-prompt.md', answer_file: '/work/.arl/reviews/r1-001/repair-answer.md' }
+          : RECORDED,
+    },
+    files: PROMPTS,
+  })
+  const tasks: { timeoutSec: number; deadlineMs?: number }[] = []
+  const slow = async (task: { timeoutSec: number; deadlineMs?: number }): Promise<Ran> => {
+    tasks.push(task)
+    await new Promise(resolve => setTimeout(() => resolve(undefined), 2100))
+    return { ok: true, answer: 'no block', durationMs: 2100 }
+  }
+  const deadline = Date.now() + 100_000
+  await reviewWith($, {}, slow as never, undefined, deadline)
+  expect(tasks).toHaveLength(2)
+  expect(tasks.map(task => task.deadlineMs)).toEqual([deadline, deadline])
+  expect(tasks[1]!.timeoutSec).toBeLessThanOrEqual(tasks[0]!.timeoutSec - 2)
 })
 
 test('a reviewer that read none of the bundle is recorded as a failure, never its APPROVED', async () => {
