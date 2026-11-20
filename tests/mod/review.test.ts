@@ -462,6 +462,26 @@ test('an interrupted review records nothing, and retires its ticket so the loop 
   ])
 })
 
+// Measured under Code Mode (tests/STEP0.md, M5): after the ten-minute cut every engine call in the
+// cancelled dispatch throws, so the abandon fails as a rule there, not as an edge.
+for (const [label, abandon] of [
+  ['throws', () => {
+    throw new Error('$.process.run(arl.sh) aborted')
+  }],
+  ['answers an engine failure', () => ({ ok: false, code: 'engine', error: 'the engine was stopped' })],
+] as const) {
+  test(`an interrupted review whose abandon ${label} still says interrupted, and claims no retired ticket`, async () => {
+    at()
+    const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review abandon': abandon }, files: PROMPTS })
+    const text = await review($, {}, async () => {
+      throw new Interrupted()
+    })
+    expect(text).toBe('The review was interrupted, and nothing was recorded. Call review again when the user wants it.')
+    expect(text).not.toMatch(/retired|abandoned/)
+    expect(w.commands()).toEqual(['review prepare', 'review abandon'])
+  })
+}
+
 test('an interrupted external review is retired as well, not reported as an engine refusal', async () => {
   at()
   const { $, w } = fakeEngine({
