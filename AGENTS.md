@@ -88,7 +88,7 @@ The architecture ([docs/architecture.md](docs/architecture.md) has the long form
 | `tests/mod/` | the mod's tests under `claude plugin test`; the scripted engine and user in `world.ts` |
 | `tests/selftest.sh` | smoke test for `scripts/arl.sh` |
 | `tests/bench/` | the reviewer benchmark: `bench.py`, the seeded phases in `seeds/`, the baseline in its `README.md`; calls models, never part of `make test` |
-| `tests/STEP0.md` | live-session measurements of the Claude Code host; Session J covers the v4 mod surface |
+| `tests/STEP0.md` | live-session measurements of the Claude Code host; Session J covers the v4 mod surface, Session M Code Mode |
 
 ## Generated: never hand-edit
 

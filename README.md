@@ -132,6 +132,13 @@ variables) and the project's own review skill are in [docs/configuration.md](doc
   up in that phase's diff.
 - The failure budget makes the loop stop prompting Claude, but a `review` Claude calls anyway still
   runs.
+- **Code Mode** (`CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1`): every call in a script reaches the
+  plugin's checks as a direct call does (measured on Claude Code 2.1.329). A probe found that a
+  call Claude's script waits on is cut at ten minutes, in `default` and `auto` mode alike, so a
+  review that runs longer is cut. Whether a cut review recovers through `/arl-resume`, on each
+  harness, is pending, and so is an end-to-end run of the loop under Code Mode. A subagent
+  reviewer's git reads from a script use `.cwd(<root>)`; an answer from a reviewer that read none
+  of the phase's diff is a failure, never an approval.
 - A subagent reviewer that times out cannot be stopped (Claude Code has no call for it): it runs on
   in the background, denied every tool, and its late answer is never recorded or shown to Claude.
 

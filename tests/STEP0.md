@@ -1208,6 +1208,75 @@ or credential refusal (`provider.no-route`, `provider.auth`) from a transport fa
 whether a model exists, not whether it can be used. `opencode models` has no `--verbose`, and
 nothing lists a model's variants.
 
+## Session M — Code Mode, measured 2026-11-20
+
+What changes for the plugin when Claude Code runs in Code Mode
+(`CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1`, interactive only), where Claude and subagents call tools
+from JavaScript run by a `REPL` tool. Claude Code 2.1.329. The probe was a throwaway mod (built as
+in J's "How the probes were built") that logged every `tool.check` and `tool.call` to a file,
+with the agent id and the exact input, and registered a read-only probe subagent (Read, Grep,
+Glob and Bash, no CLAUDE.md) as the reviewer is registered. The person ran it interactively, first
+in `default` mode, then in `auto`; one log holds both runs.
+
+### M1. A script's `write()` reaches `tool.call` before the file exists: pass
+
+`write('<outside>/a.txt', 'alpha')` from Claude's script arrived at `tool.call` as `Write`, with
+`file_path` and `content`, while the file did not exist; it existed once `next(e)` answered. The
+same call reached `tool.check`. A script's writes register their root as the tools' own do.
+
+### M2. `REPL` itself reaches no mod hook; the calls inside it do: measured
+
+No `tool.check` or `tool.call` ever named `REPL`, for Claude or for the subagent. Every call
+inside a script arrived under its own name (`Read`, `Bash`, `Write`), the subagent's with its
+`agentId`, and a `tool_use_id` starting `repl_`. The probe subagent did run its task as one
+script. So the reviewer's `permit()` never sees a `REPL` and cannot refuse one, and every call a
+reviewer's script makes is checked as a direct call is.
+
+### M3. A read-only subagent's writes: pass
+
+The probe subagent's `touch` was denied by `tool.check`; it never attempted a `Write` (Code Mode
+seems not to offer `write()` to a subagent without Write). Neither forbidden file existed after.
+
+### M4. `.cwd(dir)` is `cd '<dir>' && <command>`: measured
+
+From a script, ``$`git log -1 --oneline`.cwd('<repo>')`` arrived as exactly
+`cd '<repo>' && git log -1 --oneline`, the directory single-quoted, with no `isReadOnly`; a
+plain `ls '<dir>'` came with `isReadOnly: true`.
+
+The reviewer's `permit()` accepts that shape for a git read in a root (`scriptGitRead`,
+`hooks/reviewer.ts`), under the same git rules as `git -C`. So the command measured here is
+refused as written: `log` must carry `--no-ext-diff --no-textconv` right after the subcommand.
+The accepted form is `cd '<root>' && git log --no-ext-diff --no-textconv -1 --oneline`.
+
+### M5. The ten-minute limit, in both modes: measured
+
+A registered tool that waited on `$.process.spawn(['sleep', '660'])` was cut at ten minutes in
+`default` mode and in `auto` alike (auto did not move the script to the background). At the cut
+`next.signal` aborted, the pull threw `$.process.spawn(sleep) aborted`, `finally` ran, and a
+`$.process.run(['true'])` there threw `aborted` too: no engine call can follow a cut inside the
+cancelled call. Claude saw `REPL execution exceeded its wall-clock limit of 10m … while its MCP
+call was waiting to run`. A review that runs past ten minutes is therefore cut, its `review
+abandon` cannot run, and the next `/arl-resume` (or `review`) retires the ticket. Whether a real
+review recovers on each harness is measured on its own (the plan's step 8), not by this probe.
+
+### M6. A tool hook that awaits a plain promise is skipped after 10 s: measured
+
+The probe served its tools from `tool.call` and awaited a subagent's `turn.complete` as a plain
+promise; after 10 s the host logged `tool.call hook skipped: ran past its 10s budget` and Claude
+got `no hook answered this call`, while the hook ran on. This is J5's budget, unchanged: the
+plugin waits with a `sleep` child in flight (`answerOf`, `hooks/reviewer.ts`).
+
+### What Code Mode changed in the plugin
+
+- Tool search shows about the first 160 characters of a description: each tool's rule now leads
+  it (`hooks/text.ts`).
+- The prompts name the tools by their full names, and scratch places are judged by the engine on
+  the resolved path (`root-add --not-scratch`): the gx52 run had registered its session
+  scratchpad, and a clone in it, as roots.
+- The baseline question can remove a late root with the roots around it, in one guarded call.
+- A reviewer answer is a verdict only once the reviewer read change evidence from the bundle
+  (`runSubagentCall`), so a reviewer that cannot read under Code Mode fails, never approves.
+
 ## If A1 fails
 
 Expansion not running in skill bodies is the only outcome that forces a redesign. The fallback:
