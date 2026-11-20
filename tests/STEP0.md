@@ -1266,6 +1266,33 @@ promise; after 10 s the host logged `tool.call hook skipped: ran past its 10s bu
 got `no hook answered this call`, while the hook ran on. This is J5's budget, unchanged: the
 plugin waits with a `sleep` child in flight (`answerOf`, `hooks/reviewer.ts`).
 
+### M7. Live runs of the loop under Code Mode: measured
+
+Three interactive sessions on a one-phase plan, Claude Code 2.1.329, `default` mode, the probe mod
+alongside, scripted by `run-step8.sh` (results kept outside the repo).
+
+- **External harness, a reviewer that takes 700 s** (a stand-in `opencode` first on `PATH`).
+  Every `review` call carried a `repl_` tool-use id, including the one Claude's transcript shows
+  as a plain MCP call: under Code Mode Claude calls every tool from a script. Two calls were cut
+  at exactly ten minutes (16:11:40 to 16:21:40, 16:21:51 to 16:31:51); each answered "The review
+  was interrupted, and nothing was recorded", and Claude called `review` again by itself within
+  seconds. Each new `review prepare` retired the previous ticket as `superseded`, the cut
+  reviewer's process did not run on, and nothing was approved. A review longer than ten minutes
+  therefore never finishes under Code Mode, and Claude retries it for as long as it is let: the
+  mod now gives a review called from a script eight minutes from the call, model check, spawn
+  and repair included, after which the reviewer ends as a timeout that is recorded and counted
+  (`SCRIPT_BUDGET_MS`, `hooks/flow.ts`; `--deadline-sec`, `review run-external`). Best effort:
+  the ten minutes run from the script's start, which the host does not expose.
+- **Subagent harness.** The review guide told the reviewer to run `sleep 650` first; it did not,
+  rightly, since the prompt fences the guide as guidance, not orders. So no native review could
+  be made to outlast the cut. The reviewer did its reading in one script: `Read` of
+  `range.txt`, `changes.00.diff` and `verification.txt`, each with a `repl_` id and the
+  reviewer's `agentId`, reaching `tool.check` and `tool.call`; the round approved, so the
+  evidence gate counted the diff read through the real hook. A `Read` result is
+  `{ result: { type: 'text', file: { filePath, content, ... } } }`.
+- **A `Read` of a missing file** ends with `isError: true` and `result` the error text
+  (`Error: File does not exist. …`): the gate does not count it.
+
 ### What Code Mode changed in the plugin
 
 - Tool search shows about the first 160 characters of a description: each tool's rule now leads
@@ -1276,6 +1303,7 @@ plugin waits with a `sleep` child in flight (`answerOf`, `hooks/reviewer.ts`).
 - The baseline question can remove a late root with the roots around it, in one guarded call.
 - A reviewer answer is a verdict only once the reviewer read change evidence from the bundle
   (`runSubagentCall`), so a reviewer that cannot read under Code Mode fails, never approves.
+- A review called from a script gets eight minutes, its repair included, best effort (M7).
 
 ## If A1 fails
 
