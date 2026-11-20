@@ -56,8 +56,11 @@ The loop asks you rather than review a cut diff. Remove the file, or ignore it i
 ### A folder became a root by mistake
 
 `/arl-remove-root <alias>`. Nothing in it is reviewed from then on, later reviews are told it was
-removed, and its alias is never given to another root. The run's last root cannot be removed, and
-neither can a repository inside another root (give it a baseline instead).
+removed, and its alias is never given to another root. A root that holds other roots (a scratch
+folder with a clone in it) is removed with all of them, once you confirm. The run's last root
+cannot be removed, and neither can a repository inside another root on its own: remove its
+container, or give it a baseline. When the loop asks for a late root's baseline, it also offers
+to remove that root and the roots around it, if it is not the plan's work.
 
 ### Can I approve a phase myself?
 

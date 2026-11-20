@@ -24,7 +24,9 @@ export const REVIEWER_SYSTEM_PROMPT = `You are an adversarial code reviewer, run
 
 Your task message is the review: what to look at, where the review bundle is, and the output contract your answer must follow.
 
-You only read. Prefer Read, Grep and Glob: they work on the bundle and on every workspace root it names. Bash runs only a command your session judges read-only, and it judges strictly: one plain command per call (grep, find, ls, cat, head, sed -n), with no \`cd\`, no variables, no \`echo\`, no redirection such as \`2>/dev/null\` and no \`$(...)\` or \`<(...)\`. git reads any root, one plain call at a time: \`git -C <the root's absolute path> <subcommand> ...\` with log, show, diff, rev-parse, ls-tree, ls-files, cat-file, merge-base, blame, grep, describe, show-ref, for-each-ref, name-rev or \`tag -l\`. \`cd ... && git\`, \`--git-dir\`, \`-c\`, \`--output\`, \`--no-index\` and a pipe after git are refused. Never change a file, and never run a build, a test or anything else with side effects: the implementer already ran the project's checks, and a command that is not read-only is refused.
+You only read. Prefer Read, Grep and Glob: they work on the bundle and on every workspace root it names. Bash runs only a command your session judges read-only, and it judges strictly: one plain command per call (grep, find, ls, cat, head, sed -n), with no \`cd\`, no variables, no \`echo\`, no redirection such as \`2>/dev/null\` and no \`$(...)\` or \`<(...)\`. git reads any root, one plain call at a time: \`git -C <the root's absolute path> <subcommand> ...\` with log, show, diff, rev-parse, ls-tree, ls-files, cat-file, merge-base, blame, grep, describe, show-ref, for-each-ref, name-rev or \`tag -l\`. \`diff\`, \`show\` and \`log\` must carry \`--no-ext-diff --no-textconv\`, and \`blame\` \`--no-textconv\`, right after the subcommand (\`git -C <root> diff --no-ext-diff --no-textconv HEAD~1\`): without them git may start a diff driver or a conversion filter, and the call is refused. \`cd ... && git\` (but for a script's \`.cwd()\`, below), \`--git-dir\`, \`-c\`, \`--output\`, \`--no-index\` and a pipe after git are refused. Never change a file, and never run a build, a test or anything else with side effects: the implementer already ran the project's checks, and a command that is not read-only is refused.
+
+If your session runs tool calls through scripts (a REPL tool), the same rules hold for every call in a script: reads anywhere in the bundle and the roots, \`$\` commands only read-only and one plain command each, and a git read may run in a root with \`.cwd(<the root's absolute path>)\` instead of \`-C\` (with no \`-C\` of its own). Put a message's reads in one script: it is one message.
 
 Work in few messages. Every message you send re-reads your whole context (the bundle and every file you opened), so the cost of a review is its context times its number of messages, not its number of tool calls.
 
@@ -40,7 +42,7 @@ Your answer is your final message (or the report you hand back, where your sessi
 export const TOOLS = {
   set_phases: {
     description:
-      'Record the phases of the plan you are implementing under adversarial-review-loop, in order, one short title per phase. Call it once after reading the plan, before changing any file. While no phase is approved you may call it again to revise the list. Once a phase is approved, revising needs replan: true, and phases then lists only the phases after the approved ones: those are kept as they are.',
+      'Record the phases of the plan you implement under adversarial-review-loop, in order, one short title each, once after reading it and before changing any file. While no phase is approved you may call it again to revise the list. Once a phase is approved, revising needs replan: true, and phases then lists only the phases after the approved ones: those are kept as they are.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -52,7 +54,7 @@ export const TOOLS = {
   },
   add_root: {
     description:
-      'Register a directory as a workspace root of the adversarial-review-loop run before you change anything in it through Bash, including a directory you are about to create. Edit and Write register their own files. A change made through Bash in a directory outside every root is never reviewed. Register only directories whose content is the work of the plan, never a scratch, build or temporary directory you use to check it (a throwaway worktree, a build output): everything in a root is reviewed, and a copy of a repository is a diff of its every file.',
+      "Register a directory holding the plan's work (never a scratch, temporary or build directory) as an adversarial-review-loop root, before changing it through Bash. That includes a directory you are about to create. Edit and Write register their own files. A change made through Bash in a directory outside every root is never reviewed. Never register a directory you only use to check the work (a throwaway clone or worktree, a build output): everything in a root is reviewed, and a copy of a repository is a diff of its every file.",
     inputSchema: {
       type: 'object',
       properties: { path: { type: 'string', description: 'The directory, absolute or relative to the launch directory.' } },
@@ -61,7 +63,7 @@ export const TOOLS = {
   },
   review: {
     description:
-      "Ask for the adversarial review of the current phase (or of the final review stage) once the phase is implemented. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. After a review that asked for changes, pass dispositions too: for each finding of that review (by its id, r<round>.<n>), whether you fixed it or reject it, with a note citing the file and line that shows it. A finding you reject with no such citation stays open. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
+      "Ask for the adversarial review of the implemented phase (or the final review); on approval, commit each changed git repository, then do what the answer says. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. After a review that asked for changes, pass dispositions too: for each finding of that review (by its id, r<round>.<n>), whether you fixed it or reject it, with a note citing the file and line that shows it. A finding you reject with no such citation stays open. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
     inputSchema: {
       type: 'object',
       properties: {

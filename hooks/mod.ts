@@ -23,20 +23,20 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { COMMANDS, openPane, registerCommands, runCommand, showNow } from './commands'
 import { engine } from './engine'
-import { addRoot, continueRun, ensureRoot, parentOf, type Registration, review, session, resetWrites, setPhases, sweepRoots, track, unregistered, writeIn } from './flow'
-import { countStep, deliver, registerReviewer, resetCheckedModels, REVIEWER, reviewerDecision, runHandback } from './reviewer'
+import { addRoot, continueRun, ensureRoot, fromScript, nameTools, parentOf, type Registration, review, session, resetWrites, setPhases, SCRIPT_BUDGET_MS, sweepRoots, track, unregistered, writeIn } from './flow'
+import { countStep, deliver, registerReviewer, resetCheckedModels, REVIEWER, reviewerDecision, runHandback, runSubagentCall } from './reviewer'
 import { TOOLS, type ToolName } from './text'
 import { pane, registerUi, showBusy } from './ui'
 
 /** Serve one of the plugin's tools; `undefined` for a name it does not register. */
-async function serve($: EngineInterface, name: string, input: Record<string, unknown>, signal: AbortSignal): Promise<string | undefined> {
+async function serve($: EngineInterface, name: string, input: Record<string, unknown>, signal: AbortSignal, deadlineMs?: number): Promise<string | undefined> {
   switch (name as ToolName) {
     case 'set_phases':
       return setPhases($, input)
     case 'add_root':
       return addRoot($, input)
     case 'review':
-      return review($, input, signal)
+      return review($, input, signal, deadlineMs)
     default:
       return undefined
   }
@@ -50,6 +50,7 @@ async function registerTools($: EngineInterface): Promise<void> {
     const registered = await $.tool.register({ name, description: spec.description, inputSchema: spec.inputSchema })
     tools.set(registered.tool, name)
   }
+  nameTools([...tools].map(([full, own]) => [own, full]))
 }
 
 /** The tool's arguments, without the envelope `tool.call` adds. */
@@ -123,9 +124,13 @@ export const register: Register = on => {
     if (call.tool === 'SubagentHandback' && e.agentId !== undefined) return runHandback(e.agentId, call.message, () => next(e))
     const own = tools.get(call.tool)
     if (own !== undefined) {
-      const answer = await serve($, own, argumentsOf(call), next.signal)
+      // A call from a script is cut at ten minutes: a review then keeps within its budget.
+      const deadline = fromScript(call.tool_use_id) ? Date.now() + SCRIPT_BUDGET_MS : undefined
+      const answer = await serve($, own, argumentsOf(call), next.signal, deadline)
       return answer === undefined ? next(e) : { result: answer }
     }
+    // A subagent's read, once it ran: what tells a reviewer that read the phase from one that did not.
+    if (e.agentId !== undefined && (call.tool === 'Read' || call.tool === 'Bash')) return runSubagentCall(e.agentId, call.tool, argumentsOf(call), () => next(e))
     const file = writtenFile(call)
     if (file === undefined) return next(e)
     // A write the session's rules deny makes no root. One that may run (allowed, or put to the

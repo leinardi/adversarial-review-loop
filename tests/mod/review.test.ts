@@ -21,8 +21,10 @@
 import type { EngineInterface } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 import { reviewWith, session } from '../../hooks/flow'
-import { Interrupted, type Ran } from '../../hooks/reviewer'
-import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, start, summary, world } from './world'
+import { Interrupted, type Ran, resetCheckedModels, runReviewer, runSubagentCall } from '../../hooks/reviewer'
+import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, start, summary, tool, world } from './world'
+
+declare function setTimeout(callback: () => void, ms: number): unknown
 
 function at(isInteractive = false): void {
   session.dir = LAUNCH
@@ -37,6 +39,174 @@ function review($: EngineInterface, input: Record<string, unknown>, run: ReturnT
 
 const APPROVED = { ok: true as const, answer: 'All good.\nVERDICT APPROVED', usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4, model: 'haiku' }, durationMs: 1000 }
 
+/** An approval the engine's contract parser accepts: only the evidence gate can stop it. */
+const VALID_APPROVAL = 'Nothing to fix.\n<<<ARL-FINDINGS>>>\nVERDICT APPROVED\n<<<ARL-END>>>'
+
+for (const [label, outcome, recorded] of [
+  ['a read of the diff that failed', { result: 'File does not exist.', isError: true }, '--failed'],
+  ['a read of the diff that ran and printed nothing', { result: { stdout: '', stderr: '' } }, '--failed'],
+  ['a read of the diff that ran', { result: { file: { content: 'diff --git a/x b/x\n@@ -1 +1 @@\n' } } }, '--answer'],
+] as const) {
+  test(`a reviewer's valid approval after ${label} is recorded with ${recorded}`, async () => {
+    at()
+    const { $, w } = fakeEngine({
+      engine: { 'review prepare': PREPARED, 'review record': RECORDED },
+      files: PROMPTS,
+      agents: [{ answer: VALID_APPROVAL, reason: 'answer', durationMs: 5 }],
+      reads: 'none',
+      // The read goes through the call the mod's tool.call hook makes around the session's own.
+      whileRunning: async agentId => {
+        await runSubagentCall(agentId, 'Read', { file_path: `${PREPARED.bundle_dir}/changes.00.diff` }, async () => outcome)
+      },
+    })
+    await review($, {}, task => runReviewer($, task))
+    const record = w.calls.find(call => call.args[1] === 'record')
+    expect(record?.args[3]).toBe(recorded)
+  })
+}
+
+test('a subagent\'s scripted read goes through the registered hook to the session and back unchanged', async ($, on) => {
+  const w = world(on, { engine: {} })
+  const shown = { result: { type: 'text', file: { content: 'diff --git a/x b/x\n' } } }
+  const ran: unknown[] = []
+  on('tool.call', { tool: 'Read' }, (_, e) => {
+    ran.push(e)
+    return shown as never
+  })
+  await start($)
+  // As a script's inner call arrives (tests/STEP0.md): the agent's id, and a repl_ tool-use id.
+  const result = await $.tool.call({ tool: 'Read', file_path: `${PREPARED.bundle_dir}/changes.00.diff`, agentId: 'agent-r', tool_use_id: 'repl_0877ffc1' } as never)
+  expect(result).toEqual(expect.objectContaining(shown))
+  expect(ran).toHaveLength(1)
+  // Not taken for a write: no root is registered for it.
+  expect(w.commands()).not.toContain('root-add')
+})
+
+test('a review with a deadline gives its reviewer only the time left, less what recording needs', async () => {
+  at()
+  const { $ } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': RECORDED }, files: PROMPTS })
+  const r = reviewer([APPROVED])
+  await reviewWith($, {}, r.run, undefined, Date.now() + 120_000)
+  expect(r.tasks[0]?.timeoutSec).toBeGreaterThan(100)
+  expect(r.tasks[0]?.timeoutSec).toBeLessThanOrEqual(105)
+})
+
+test('a review whose deadline leaves no time for a reviewer fails as a timeout, recorded, and runs none', async () => {
+  at()
+  const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': { ...RECORDED, verdict: 'OP_FAILURE', message: 'The review failed.' } }, files: PROMPTS })
+  const r = reviewer([APPROVED])
+  await reviewWith($, {}, r.run, undefined, Date.now() + 20_000)
+  expect(r.tasks).toEqual([])
+  const record = w.calls.find(call => call.args[1] === 'record')
+  expect(record?.args.slice(3, 6)).toEqual(['--failed', 'transient', '--error'])
+  expect(record?.args[6]).toContain('Code Mode stops a tool call at ten minutes')
+})
+
+test('an external review with a deadline passes it to the engine; one without passes none', async () => {
+  at()
+  const external = { ...PREPARED, harness: 'opencode' }
+  const timed = fakeEngine({ engine: { 'review prepare': external, 'review run-external': RECORDED } })
+  await reviewWith(timed.$, {}, reviewer([]).run, undefined, Date.now() + 300_000)
+  const args = timed.w.calls.find(call => call.args[1] === 'run-external')?.args ?? []
+  expect(args.slice(0, 4)).toEqual(['review', 'run-external', 'r1-1', '--deadline-sec'])
+  expect(Number(args[4])).toBeGreaterThan(290)
+  const plain = fakeEngine({ engine: { 'review prepare': external, 'review run-external': RECORDED } })
+  await reviewWith(plain.$, {}, reviewer([]).run)
+  expect(plain.w.calls.find(call => call.args[1] === 'run-external')?.args).toEqual(['review', 'run-external', 'r1-1'])
+})
+
+test('the review tool sets the eight-minute deadline only for a call from a script', async ($, on) => {
+  const external = { ...PREPARED, harness: 'opencode' }
+  const w = world(on, { engine: { 'review prepare': external, 'review run-external': RECORDED } })
+  await start($)
+  await $.tool.call({ tool: tool('review'), tool_use_id: 'repl_ced53612' } as never)
+  await $.tool.call({ tool: tool('review'), tool_use_id: 'toolu_01abc' } as never)
+  const runs = w.calls.filter(call => call.args[1] === 'run-external').map(call => call.args)
+  expect(runs[0]?.[3]).toBe('--deadline-sec')
+  expect(Number(runs[0]?.[4])).toBeGreaterThan(470)
+  expect(Number(runs[0]?.[4])).toBeLessThanOrEqual(480)
+  expect(runs[1]).toEqual(['review', 'run-external', 'r1-1'])
+})
+
+test('one deadline covers the model check and the spawn: a slow setup shortens the wait for the answer', async () => {
+  for (const [delay, most] of [[0, 85], [3000, 82]] as const) {
+    resetCheckedModels()
+    const { $, w } = fakeEngine({ engine: {}, agents: [{ answer: VALID_APPROVAL, reason: 'answer', durationMs: 5 }], checkDelayMs: delay })
+    await runReviewer($, {
+      prompt: 'Review it.',
+      description: 'Review',
+      model: 'opus',
+      timeoutSec: 900,
+      dirs: [PREPARED.bundle_dir],
+      bundle: PREPARED.bundle_dir,
+      deadlineMs: Date.now() + 100_000,
+      marginSec: 15,
+      minSec: 30,
+    })
+    expect(w.clocks[0]).toBeLessThanOrEqual(most)
+    expect(w.clocks[0]).toBeGreaterThan(most - 3)
+  }
+})
+
+test('a setup that leaves too little of the deadline fails as out of time, never waits', async () => {
+  resetCheckedModels()
+  const { $, w } = fakeEngine({ engine: {}, agents: [{ answer: VALID_APPROVAL, reason: 'answer', durationMs: 5 }], checkDelayMs: 1500 })
+  const ran = await runReviewer($, {
+    prompt: 'Review it.',
+    description: 'Review',
+    model: 'opus',
+    timeoutSec: 900,
+    dirs: [PREPARED.bundle_dir],
+    bundle: PREPARED.bundle_dir,
+    deadlineMs: Date.now() + 46_000,
+    marginSec: 15,
+    minSec: 30,
+    outOfTime: 'out of time',
+  })
+  expect(ran).toEqual(expect.objectContaining({ ok: false, kind: 'transient', error: 'out of time' }))
+  expect(w.clocks).toEqual([])
+})
+
+test('the repair gets only what the review left of the deadline', async () => {
+  at()
+  const { $ } = fakeEngine({
+    engine: {
+      'review prepare': PREPARED,
+      'review record': (call: { args: string[] }) =>
+        call.args.includes('/work/.arl/reviews/r1-001/answer.md')
+          ? { ok: true, status: 'repair', prompt_file: '/work/.arl/reviews/r1-001/repair-prompt.md', answer_file: '/work/.arl/reviews/r1-001/repair-answer.md' }
+          : RECORDED,
+    },
+    files: PROMPTS,
+  })
+  const tasks: { timeoutSec: number; deadlineMs?: number }[] = []
+  const slow = async (task: { timeoutSec: number; deadlineMs?: number }): Promise<Ran> => {
+    tasks.push(task)
+    await new Promise(resolve => setTimeout(() => resolve(undefined), 2100))
+    return { ok: true, answer: 'no block', durationMs: 2100 }
+  }
+  const deadline = Date.now() + 100_000
+  await reviewWith($, {}, slow as never, undefined, deadline)
+  expect(tasks).toHaveLength(2)
+  expect(tasks.map(task => task.deadlineMs)).toEqual([deadline, deadline])
+  expect(tasks[1]!.timeoutSec).toBeLessThanOrEqual(tasks[0]!.timeoutSec - 2)
+})
+
+test('a reviewer that read none of the bundle is recorded as a failure, never its APPROVED', async () => {
+  at()
+  const failed = { ok: true, status: 'failed', message: 'The review failed: the reviewer read none of the bundle.', run: summary() }
+  const { $, w } = fakeEngine({
+    engine: { 'review prepare': PREPARED, 'review record': failed },
+    files: PROMPTS,
+    agents: [{ answer: VALID_APPROVAL, reason: 'answer', durationMs: 5 }],
+    reads: 'none',
+  })
+  await review($, {}, task => runReviewer($, task))
+  const record = w.calls.find(call => call.args[1] === 'record')
+  expect(record?.args.slice(0, 7)).toEqual(['review', 'record', 'r1-1', '--failed', 'operational', '--error', 'the reviewer read none of the bundle'])
+  expect(w.written.has(PREPARED.answer_file)).toBe(false)
+})
+
 test('a review runs one fresh reviewer on the prepared prompt and records its answer', async () => {
   at()
   const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review record': RECORDED }, files: PROMPTS })
@@ -46,7 +216,7 @@ test('a review runs one fresh reviewer on the prepared prompt and records its an
 
   expect(text).toBe(RECORDED.message)
   expect(r.tasks).toEqual([
-    { prompt: 'Review phase 1.', description: 'Review phase1, round 1', model: 'opus', timeoutSec: 900, dirs: [PREPARED.bundle_dir, ...PREPARED.roots] },
+    { prompt: 'Review phase 1.', description: 'Review phase1, round 1', model: 'opus', timeoutSec: 900, dirs: [PREPARED.bundle_dir, ...PREPARED.roots], bundle: PREPARED.bundle_dir },
   ])
   expect(w.written.get(PREPARED.answer_file)).toBe(APPROVED.answer)
   expect(w.commands()).toEqual(['review prepare', 'review record'])
@@ -404,6 +574,26 @@ test('an interrupted review records nothing, and retires its ticket so the loop 
   ])
 })
 
+// Measured under Code Mode (tests/STEP0.md, M5): after the ten-minute cut every engine call in the
+// cancelled dispatch throws, so the abandon fails as a rule there, not as an edge.
+for (const [label, abandon] of [
+  ['throws', () => {
+    throw new Error('$.process.run(arl.sh) aborted')
+  }],
+  ['answers an engine failure', () => ({ ok: false, code: 'engine', error: 'the engine was stopped' })],
+] as const) {
+  test(`an interrupted review whose abandon ${label} still says interrupted, and claims no retired ticket`, async () => {
+    at()
+    const { $, w } = fakeEngine({ engine: { 'review prepare': PREPARED, 'review abandon': abandon }, files: PROMPTS })
+    const text = await review($, {}, async () => {
+      throw new Interrupted()
+    })
+    expect(text).toBe('The review was interrupted, and nothing was recorded. Call review again when the user wants it.')
+    expect(text).not.toMatch(/retired|abandoned/)
+    expect(w.commands()).toEqual(['review prepare', 'review abandon'])
+  })
+}
+
 test('an interrupted external review is retired as well, not reported as an engine refusal', async () => {
   at()
   const { $, w } = fakeEngine({
@@ -499,7 +689,35 @@ test('a root without a baseline is settled by the user, then the review runs', a
     choices: ['Changes since HEAD@{2026-11-12 10:00}'],
   })
   expect(await review($, {}, reviewer([APPROVED]).run)).toBe(RECORDED.message)
-  expect(w.calls.find(call => call.args[0] === 'root-baseline')?.args).toEqual(['root-baseline', 'lib', '--commit', 'HEAD@{2026-11-12 10:00}'])
+  expect(w.calls.find(call => call.args[0] === 'root-baseline')?.args).toEqual(['root-baseline', 'lib', '--commit', 'HEAD@{2026-11-12 10:00}', '--run', 'r1'])
+})
+
+test('a late root the user removes instead is not asked about again, and the review runs on what is left', async () => {
+  at(true)
+  let removed = false
+  let prepares = 0
+  const roots = [
+    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' },
+    { alias: 'clone', path: '/tmp/s/clone', kind: 'git', baseline: 'unknown', proposed: '' },
+  ]
+  const { $, w } = fakeEngine({
+    engine: {
+      'review prepare': () => (++prepares === 1 ? { ok: false, code: 'baseline-unknown', error: 'baseline unknown for clone' } : PREPARED),
+      status: () => ({ ok: true, run: summary({ roots: removed ? roots.slice(0, 1) : roots }) }),
+      'root-remove': () => {
+        removed = true
+        return { ok: true, alias: 'clone', removed: ['clone'], run: summary() }
+      },
+      'review record': RECORDED,
+    },
+    files: PROMPTS,
+    choices: ["Remove clone (not the plan's work)"],
+  })
+  const text = await review($, {}, reviewer([APPROVED]).run)
+  expect(text).toContain('The user removed root clone from the run')
+  expect(text).toContain(String(RECORDED.message))
+  expect(prepares).toBe(2)
+  expect(w.asked).toHaveLength(1)
 })
 
 test('headless, an unknown baseline stops the review and says why', async () => {

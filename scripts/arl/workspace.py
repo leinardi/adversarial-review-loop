@@ -83,6 +83,7 @@ __all__ = [
     "empty_tree",
     "follow_moves",
     "git_command",
+    "is_scratch",
     "register",
     "remember_commit",
     "remember_heads",
@@ -186,6 +187,35 @@ def resolve(path: Path) -> tuple[Path, str]:
 
 def _within(inner: Path, outer: Path) -> bool:
     return inner == outer or outer in inner.parents
+
+
+def _scratch_places() -> list[Path]:
+    """Temp folders and Claude Code's own (plans, memory, the session scratchpad), as written and resolved."""
+    places = [Path("/tmp"), Path("/var/tmp"), Path.home() / ".claude"]
+    tmpdir = os.environ.get("TMPDIR", "")
+    if tmpdir:
+        places.append(Path(tmpdir))
+    resolved = [place.resolve() for place in places]
+    return list(dict.fromkeys([*places, *resolved]))
+
+
+def is_scratch(run: RunState, target: Path) -> bool:
+    """Whether the resolved root ``target`` lies in a place for scratch files.
+
+    Nothing there is the plan's work, and a root there would review a folder other sessions fill
+    (a clone made in the session scratchpad is a diff of its every file). A run may itself live in
+    such a place (a workspace under ``/tmp``): a target that shares the place's top-level folder
+    with one of the run's roots is the run's, not scratch. ``target`` is what :func:`resolve`
+    answered, so a symlink or a path inside a repository is judged where it really lands.
+    """
+    places = [place for place in _scratch_places() if _within(target, place)]
+    if not places:
+        return False
+    place = max(places, key=lambda candidate: len(candidate.parts))
+    if target == place:
+        return True
+    top = place / target.relative_to(place).parts[0]
+    return not any(_within(Path(root["path"]), top) for root in run.data["roots"])
 
 
 def taken_aliases(run: RunState) -> list[str]:
@@ -747,15 +777,21 @@ def _add(run: RunState, path: Path, kind: str, *, late: bool) -> dict[str, Any]:
     return root
 
 
-def register(run: RunState, path: Path, *, late: bool) -> dict[str, Any]:
+def register(run: RunState, path: Path, *, late: bool, not_scratch: bool = False) -> dict[str, Any]:
     """Register the root ``path`` belongs to, answering what happened.
 
     ``known`` when it is a root already; ``covered`` when it lies inside one (and is not a
     repository of its own); ``added`` otherwise, with the new root's ``baseline``. ``late`` is
     every registration after ``init``: one whose content has changed since the run started is
-    added with an unknown baseline.
+    added with an unknown baseline. With ``not_scratch``, a new root in a scratch place
+    (:func:`is_scratch`) is refused with ``scratch`` and nothing is added.
     """
     target, kind = resolve(path)
+    # Where the path itself lands, before a git worktree widens it: a scratch place inside an
+    # unregistered repository (``TMPDIR`` under a checkout) must not register the repository.
+    landed = path.expanduser().resolve()
+    if landed.exists() and not landed.is_dir():
+        landed = landed.parent
     for root in run.data["roots"]:
         here = Path(root["path"])
         if target == here:
@@ -764,6 +800,9 @@ def register(run: RunState, path: Path, *, late: bool) -> dict[str, Any]:
         here = Path(root["path"])
         if _within(target, here) and kind != "git":
             return {"status": "covered", "alias": root["alias"], "baseline": root["baseline"]}
+    if not_scratch and (is_scratch(run, landed) or is_scratch(run, target)):
+        where = landed if is_scratch(run, landed) else target
+        raise RunError("scratch", f"{where} is a scratch directory (temporary or Claude Code's own)")
     added = _add(run, target, kind, late=late)
     return {"status": "added", "alias": added["alias"], "baseline": added["baseline"], "proposed": added["proposed"]}
 

@@ -241,6 +241,58 @@ def test_root_add_answers_known_and_covered(ws: Path, engine: Engine) -> None:
     assert engine(ws, "root-add", str(ws))["status"] == "known"
 
 
+def test_root_add_not_scratch_refuses_scratch_places_on_the_resolved_path(
+    run_env: Path, ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scratch = run_env / "scratch"
+    (scratch / "session").mkdir(parents=True)
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    started(engine, ws)
+    claude = run_env / ".claude" / "plans"
+    claude.mkdir(parents=True)
+    (run_env / "link").symlink_to(scratch / "session")
+    upstream = make_repo(run_env / "upstream")
+    git_at(run_env, "clone", "-q", str(upstream), str(scratch / "session" / "clone"))
+    before = load(ws).data["roots"]
+
+    for path in ["~/.claude/plans", str(run_env / "link"), str(scratch / "session" / "clone" / "src"), str(scratch)]:
+        refused = engine(ws, "root-add", path, "--not-scratch")
+        assert refused["code"] == "scratch", path
+    assert load(ws).data["roots"] == before
+
+    # Without the flag (a folder the person added with /add-dir) it registers.
+    assert engine(ws, "root-add", str(scratch / "session"))["status"] == "added"
+
+
+def test_root_add_not_scratch_judges_the_path_before_its_repository_widens_it(
+    run_env: Path, ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # TMPDIR inside an unregistered checkout: a write there must not register the checkout.
+    other = make_repo(run_env / "other")
+    (other / "tmp" / "job").mkdir(parents=True)
+    monkeypatch.setenv("TMPDIR", str(other / "tmp"))
+    started(engine, ws)
+    before = load(ws).data["roots"]
+    assert engine(ws, "root-add", str(other / "tmp" / "job"), "--not-scratch")["code"] == "scratch"
+    assert load(ws).data["roots"] == before
+    assert engine(ws, "root-add", str(other / "src"), "--not-scratch")["status"] == "added"
+
+
+def test_root_add_not_scratch_keeps_a_run_that_lives_in_a_scratch_place(
+    run_env: Path, ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The run lives under TMPDIR/home/ws: a folder beside it, below the same top-level folder of
+    # TMPDIR, is the run's; a folder under another top-level folder there is not.
+    monkeypatch.setenv("TMPDIR", str(run_env.parent))
+    started(engine, ws)
+    sibling = run_env / "ws-notes"
+    sibling.mkdir()
+    other = run_env.parent / "other-session"
+    other.mkdir()
+    assert engine(ws, "root-add", str(sibling), "--not-scratch")["status"] == "added"
+    assert engine(ws, "root-add", str(other), "--not-scratch")["code"] == "scratch"
+
+
 def test_an_untouched_late_folder_takes_its_current_content(run_env: Path, ws: Path, engine: Engine) -> None:
     started(engine, ws)
     old = run_env / "old"

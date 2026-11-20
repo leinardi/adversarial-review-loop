@@ -22,7 +22,7 @@
 import type { EngineInterface, TurnUsage } from 'claude-code'
 import type { RunView } from '../types'
 import { type Answer, engine, engineStream } from './engine'
-import { Interrupted, normalize, type Ran, runReviewer, type Task, within } from './reviewer'
+import { Interrupted, type Ran, runReviewer, type Task, within } from './reviewer'
 import { ACCEPT, KEEP_GOING, STOP, USE_DEFAULT_MODEL, useModel } from './text'
 import { showActivity, showLast, showRun } from './ui'
 
@@ -207,18 +207,75 @@ async function waitingDecision($: EngineInterface): Promise<string> {
   return waiting ? decide($, waiting) : ''
 }
 
-/** Ask the user for the baseline of each root that has none; false when any is left unchosen. */
-export async function chooseBaselines($: EngineInterface): Promise<boolean> {
-  const status = await run($, ['status'])
-  const summary = status.run as RunSummary | null | undefined
-  const unknown = summary?.roots.filter(root => root.baseline === 'unknown') ?? []
-  if (!session.isInteractive) return unknown.length === 0
-  for (const root of unknown) {
+/** What became of one root the baseline question was about. */
+export type Outcome = 'chosen' | 'removed' | 'unchosen'
+
+/**
+ * What asking for the missing baselines came to: each root asked about (or removed with one)
+ * by alias, the roots removed, and whether every remaining root is known to have a baseline. A
+ * status the engine could not answer leaves it unsettled: nothing is known to be chosen.
+ */
+export type Baselines = { settled: boolean; removed: string[]; outcomes: Map<string, Outcome> }
+
+/** What Claude is told about roots the user removed from the baseline question. */
+export function removedNote(removed: readonly string[]): string {
+  if (removed.length === 0) return ''
+  return `The user removed root${removed.length === 1 ? '' : 's'} ${removed.join(', ')} from the run: nothing in ${removed.length === 1 ? 'it' : 'them'} is reviewed. Don't change ${removed.length === 1 ? 'it' : 'them'} for the plan.\n\n`
+}
+
+/**
+ * Ask the user for the baseline of each root that has none, or to remove it: a scratch folder
+ * registered by mistake, or the clone found in it, is not the plan's work. Removal takes the
+ * outermost root holding it with every root inside, in one engine call that checks the set is
+ * still the one shown. The roots are read again after each answer, so a root just removed is
+ * never asked about.
+ */
+export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
+  const removed: string[] = []
+  const outcomes = new Map<string, Outcome>()
+  const done = (settled: boolean): Baselines => ({ settled, removed, outcomes })
+  // Roots whose removal met a changed set, and were asked again once.
+  const retried = new Set<string>()
+  for (;;) {
+    const status = await run($, ['status'])
+    const summary = status.run as RunSummary | null | undefined
+    if (!status.ok || summary == null) return done(false)
+    // A root whose baseline the engine took is not asked again, whatever a stale status says.
+    const unknown = summary.roots.filter(root => root.baseline === 'unknown' && outcomes.get(root.alias) !== 'chosen')
+    const root = unknown[0]
+    if (root === undefined) return done(true)
+    if (!session.isInteractive) return done(false)
+    const roots = summary.roots
+    // The outermost root holding it (itself when none does): removing a root leaves nothing of it
+    // inside another, so the container goes with it, and every root it holds.
+    const top = roots.filter(other => within(root.path, other.path)).sort((a, b) => a.path.length - b.path.length)[0] ?? root
+    const going = roots.filter(other => within(other.path, top.path)).map(other => other.alias)
+    const remove = going.length < roots.length ? `Remove ${going.join(', ')} (not the plan's work)` : ''
     const since = root.proposed ? `Changes since ${root.proposed}` : ''
-    const options = [...(since ? [since] : []), 'Everything here is new', 'The current content is the baseline']
+    const options = [...(since ? [since] : []), 'Everything here is new', 'The current content is the baseline', ...(remove ? [remove] : [])]
     const choice = await $.ui
       .ask(`Root ${root.alias} (${root.path}) joined the run after it changed. What should its review compare against?`, options)
-      .catch(() => '')
+      .catch((error: unknown) => {
+        $.ui.log(`Could not ask for the baseline of root ${root.alias} (${String(error)}).`)
+        return ''
+      })
+    if (choice === remove && remove) {
+      const answer = await run($, ['root-remove', top.alias, '--with-nested', '--expect', going.join(','), '--run', summary.run_id])
+      if (answer.ok) {
+        const gone = Array.isArray(answer.removed) ? answer.removed.map(String) : going
+        removed.push(...gone)
+        for (const alias of gone) outcomes.set(alias, 'removed')
+        continue
+      }
+      // A root joined or left while the question was open: ask again, once, with the new set.
+      if (answer.code === 'removal-changed' && !retried.has(root.alias)) {
+        retried.add(root.alias)
+        continue
+      }
+      $.ui.log(`Could not remove ${going.join(', ')}: ${answer.error ?? answer.code ?? 'no reason given'}`)
+      outcomes.set(root.alias, 'unchosen')
+      return done(false)
+    }
     const args =
       choice === since && since
         ? ['root-baseline', root.alias, '--commit', root.proposed]
@@ -227,9 +284,14 @@ export async function chooseBaselines($: EngineInterface): Promise<boolean> {
           : choice === 'The current content is the baseline'
             ? ['root-baseline', root.alias, '--current']
             : undefined
-    if (args === undefined || !(await run($, args)).ok) return false
+    // Chosen for the run the question showed: another session may have replaced it meanwhile.
+    if (args !== undefined) args.push('--run', summary.run_id)
+    if (args === undefined || !(await run($, args)).ok) {
+      outcomes.set(root.alias, 'unchosen')
+      return done(false)
+    }
+    outcomes.set(root.alias, 'chosen')
   }
-  return true
 }
 
 // --------------------------------------------------------------------------
@@ -246,7 +308,10 @@ export async function setPhases($: EngineInterface, input: Record<string, unknow
 
 export async function addRoot($: EngineInterface, input: Record<string, unknown>): Promise<string> {
   if (typeof input.path !== 'string' || input.path === '') return 'add_root needs a path.'
-  const answer = await run($, ['root-add', input.path])
+  const answer = await run($, ['root-add', input.path, '--not-scratch'])
+  if (!answer.ok && answer.code === 'scratch') {
+    return `${input.path} is a scratch directory (temporary or Claude Code's own), so it is not registered: everything in a root is reviewed. Do throwaway checks there unregistered. If it really holds the plan's work, ask the user to add it with /add-dir.`
+  }
   if (!answer.ok) return refused(answer)
   // `root-add` answers no run summary: refresh the cached roots.
   await run($, ['status'])
@@ -259,12 +324,20 @@ export async function addRoot($: EngineInterface, input: Record<string, unknown>
   if (answer.status !== 'added') {
     if (answer.baseline !== 'unknown') return `${input.path} is already covered by root ${String(answer.alias)}.`
     // A root with no baseline yet reviews nothing: settle it now rather than at the next review.
-    if (await chooseBaselines($)) return `${input.path} is covered by root ${String(answer.alias)}, whose baseline the user just chose.`
-    return `${input.path} is covered by root ${String(answer.alias)}, whose baseline is unknown: nothing in it can be reviewed until the user picks one. Tell the user.`
+    const chosen = await chooseBaselines($)
+    const outcome = chosen.outcomes.get(String(answer.alias))
+    if (outcome === 'removed') return removedNote(chosen.removed).trim()
+    if (outcome === 'chosen') return `${removedNote(chosen.removed)}${input.path} is covered by root ${String(answer.alias)}, whose baseline the user just chose.`
+    return removedNote(chosen.removed) + `${input.path} is covered by root ${String(answer.alias)}, whose baseline is unknown: nothing in it can be reviewed until the user picks one. Tell the user.`
   }
   if (answer.baseline !== 'unknown') return `Registered root ${String(answer.alias)}; its current content is the baseline.`
-  if (await chooseBaselines($)) return `Registered root ${String(answer.alias)} with the baseline the user chose.`
-  return `Registered root ${String(answer.alias)}, but it already holds changes, so its baseline is unknown and nothing in it can be reviewed until the user picks one. Tell the user.`
+  const chosen = await chooseBaselines($)
+  // This root's own outcome, never the run's: another root's question may have failed.
+  const outcome = chosen.outcomes.get(String(answer.alias))
+  // Removed, never "registered": nothing in it is reviewed now.
+  if (outcome === 'removed') return removedNote(chosen.removed).trim()
+  if (outcome === 'chosen') return `${removedNote(chosen.removed)}Registered root ${String(answer.alias)} with the baseline the user chose.`
+  return removedNote(chosen.removed) + `Registered root ${String(answer.alias)}, but it already holds changes, so its baseline is unknown and nothing in it can be reviewed until the user picks one. Tell the user.`
 }
 
 /** What a review round's runs cost so far, summed over the review and its repair. */
@@ -314,7 +387,15 @@ type Prepared = Answer & {
 /** Runs one reviewer: the subagent in the session, a stand-in in a test. */
 export type Reviewer = (task: Task) => Promise<Ran>
 
-async function ask($: EngineInterface, reviewer: Reviewer, prepared: Prepared, step: { prompt_file: string }, description: string): Promise<Ran> {
+async function ask(
+  $: EngineInterface,
+  reviewer: Reviewer,
+  prepared: Prepared,
+  step: { prompt_file: string },
+  deadlineMs: number | undefined,
+  description: string,
+): Promise<Ran> {
+  const cap = secondsLeft(deadlineMs)
   let prompt: string
   try {
     prompt = await $.fs.read(step.prompt_file)
@@ -325,8 +406,10 @@ async function ask($: EngineInterface, reviewer: Reviewer, prepared: Prepared, s
     prompt,
     description,
     model: prepared.reviewer_model ?? '',
-    timeoutSec: prepared.timeout_sec ?? 900,
+    timeoutSec: Math.min(prepared.timeout_sec ?? 900, cap ?? Infinity),
+    ...(deadlineMs === undefined ? {} : { deadlineMs, marginSec: RECORD_MARGIN_SEC, minSec: MIN_REVIEW_SEC, outOfTime: OUT_OF_TIME }),
     dirs: [prepared.bundle_dir, ...prepared.roots],
+    bundle: prepared.bundle_dir,
   })
 }
 
@@ -334,13 +417,18 @@ async function ask($: EngineInterface, reviewer: Reviewer, prepared: Prepared, s
 const INTERRUPTED = 'The review was interrupted, and nothing was recorded. Call review again when the user wants it.'
 
 /** Run the subagent on a prepared review, through the one repair a malformed answer gets. */
-async function reviewBySubagent($: EngineInterface, reviewer: Reviewer, prepared: Prepared): Promise<Answer> {
+async function reviewBySubagent($: EngineInterface, reviewer: Reviewer, prepared: Prepared, deadlineMs?: number): Promise<Answer> {
   const id = String(prepared.review_id)
   let step: { prompt_file: string; answer_file: string } = prepared
   const spent: Spent = {}
   let recorded: Answer = { ok: false, code: 'engine', error: 'no review ran' }
   for (const attempt of [1, 2]) {
-    const ran = await ask($, reviewer, prepared, step, `Review ${String(prepared.label)}, round ${String(prepared.round)}${attempt > 1 ? ' (repair)' : ''}`)
+    const left = secondsLeft(deadlineMs)
+    // Too little left for a reviewer to read anything: a timeout now, recorded, rather than a cut.
+    if (left !== undefined && left < MIN_REVIEW_SEC) {
+      return run($, ['review', 'record', id, '--failed', 'transient', '--error', OUT_OF_TIME, ...usageArgs(spent)])
+    }
+    const ran = await ask($, reviewer, prepared, step, deadlineMs, `Review ${String(prepared.label)}, round ${String(prepared.round)}${attempt > 1 ? ' (repair)' : ''}`)
     spent.usage = sum(spent.usage, ran.usage)
     if (ran.durationMs !== undefined) spent.durationMs = (spent.durationMs ?? 0) + ran.durationMs
     if (ran.requests !== undefined) spent.requests = (spent.requests ?? 0) + ran.requests
@@ -365,17 +453,55 @@ async function prepareReview($: EngineInterface, input: Record<string, unknown>)
   return run($, ['review', 'prepare', '--session', session.id], JSON.stringify({ verification: input.verification ?? [], dispositions: input.dispositions ?? [] }))
 }
 
-export async function review($: EngineInterface, input: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
-  return reviewWith($, input, task => runReviewer($, { ...task, signal }), signal)
+/**
+ * How long a review called from a script may take, of the ten minutes Code Mode gives a call a
+ * script waits on (tests/STEP0.md, M5 and M7): a reviewer still running at the cut is stopped with
+ * nothing recorded, and Claude retries it for ever. Within this budget it ends as a timeout
+ * instead, which is recorded and counts toward the failure budget.
+ *
+ * Best effort: the ten minutes run from the script's start, which the host does not expose, and
+ * the clock here starts at the review call. Eight minutes leave two for whatever the script did
+ * first (Claude often runs the checks in the same script); a script that spent longer is cut
+ * before the timeout is recorded, as without the budget.
+ */
+export const SCRIPT_BUDGET_MS = 480_000
+/** Kept back from a deadline for recording what the reviewer answered. */
+const RECORD_MARGIN_SEC = 15
+/** A reviewer given less than this could not review anything: the round fails at once instead. */
+const MIN_REVIEW_SEC = 30
+const OUT_OF_TIME =
+  "the review ran out of time: Code Mode stops a tool call at ten minutes, so a review gets eight. Review in smaller phases, or turn Code Mode off for this run's long reviews"
+
+/** Whether a tool call came from a script (Code Mode): its tool-use id says so (tests/STEP0.md, M2). */
+export function fromScript(toolUseId: unknown): boolean {
+  return typeof toolUseId === 'string' && toolUseId.startsWith('repl_')
+}
+
+/** Seconds left before `deadlineMs`, less what recording needs; `undefined` with no deadline. */
+function secondsLeft(deadlineMs: number | undefined): number | undefined {
+  return deadlineMs === undefined ? undefined : Math.floor((deadlineMs - Date.now()) / 1000) - RECORD_MARGIN_SEC
+}
+
+/** `deadlineMs`: when the call that asked for the review is cut (a call from a script); none otherwise. */
+export async function review($: EngineInterface, input: Record<string, unknown>, signal?: AbortSignal, deadlineMs?: number): Promise<string> {
+  return reviewWith($, input, task => runReviewer($, { ...task, signal }), signal, deadlineMs)
 }
 
 /** `signal` is the tool call's own: aborted when the person interrupts the review. */
-export async function reviewWith($: EngineInterface, input: Record<string, unknown>, reviewer: Reviewer, signal?: AbortSignal): Promise<string> {
+export async function reviewWith($: EngineInterface, input: Record<string, unknown>, reviewer: Reviewer, signal?: AbortSignal, deadlineMs?: number): Promise<string> {
   let prepared = await prepareReview($, input)
+  let note = ''
   if (!prepared.ok && prepared.code === 'baseline-unknown') {
-    if (!(await chooseBaselines($))) return `${refused(prepared)}\n\nStop and tell the user: a root's baseline must be chosen before the review can run.`
+    const chosen = await chooseBaselines($)
+    note = removedNote(chosen.removed)
+    if (!chosen.settled) return `${note}${refused(prepared)}\n\nStop and tell the user: a root's baseline must be chosen before the review can run.`
     prepared = await prepareReview($, input)
   }
+  return note + (await reviewPrepared($, prepared, reviewer, signal, deadlineMs))
+}
+
+/** The review round of a ticket `review prepare` answered, or its refusal. */
+async function reviewPrepared($: EngineInterface, prepared: Answer, reviewer: Reviewer, signal?: AbortSignal, deadlineMs?: number): Promise<string> {
   if (!prepared.ok) {
     // Whatever refused it (a stall, an oversized file, the failure budget a broken bundle spent),
     // a run that now waits for the user is put to them.
@@ -391,8 +517,8 @@ export async function reviewWith($: EngineInterface, input: Record<string, unkno
   try {
     recorded =
       prepared.harness === 'subagent'
-        ? await reviewBySubagent($, reviewer, prepared as Prepared)
-        : await runStream($, ['review', 'run-external', String(prepared.review_id)])
+        ? await reviewBySubagent($, reviewer, prepared as Prepared, deadlineMs)
+        : await runStream($, ['review', 'run-external', String(prepared.review_id), ...(deadlineMs === undefined ? [] : ['--deadline-sec', String(Math.max(0, Math.floor((deadlineMs - Date.now()) / 1000)))])])
     // An interrupt kills the external reviewer's engine, which then answers nothing readable. A
     // record that landed first stands, whatever the signal says.
     if (!recorded.ok && signal?.aborted) throw new Interrupted()
@@ -450,14 +576,22 @@ export async function ensureRoot($: EngineInterface, directory: string, { explic
   const here = await runHere($)
   if (here === 'no') return {}
   if (here !== 'yes') return { note: unregistered(directory, here.unknown) }
-  if ((roots ?? []).some(root => within(directory, root))) return {}
-  // A folder the person added to the session is meant to be worked in, wherever it is.
-  if (!explicit && (await isScratch($, directory))) return {}
+  // Covered only where the folder really lands: a symlink inside a root that leads to another
+  // project would otherwise send the write there unreviewed (a snapshot tracks the link, not
+  // what it points to). A folder that cannot be placed goes to the engine, which resolves it.
+  if ((roots ?? []).some(root => within(directory, root))) {
+    const real = await landing($, directory)
+    if (real !== undefined && (roots ?? []).some(root => within(real, root))) return {}
+  }
   // A folder being created registers as the folder, not as its deepest new subfolder: a later
   // file beside that subfolder would otherwise join late, with an unknown baseline.
   let target = directory
   while (parentOf(target) !== target && !(await $.fs.exists(parentOf(target)))) target = parentOf(target)
-  const answer = await run($, ['root-add', target])
+  // A write in a scratch place (a temp folder, Claude Code's own) is not part of the plan; the
+  // engine judges it on the resolved path. A folder the person added to the session is meant to
+  // be worked in, wherever it is.
+  const answer = await run($, ['root-add', target, ...(explicit ? [] : ['--not-scratch'])])
+  if (!answer.ok && answer.code === 'scratch') return {}
   if (!answer.ok) return { note: unregistered(target, answer.error ?? answer.code ?? 'no reason given') }
   // `root-add` answers no run summary: refresh the cached roots.
   await run($, ['status'])
@@ -576,29 +710,41 @@ export async function sweepRoots($: EngineInterface): Promise<void> {
 }
 
 /**
- * Whether `directory` is a place for scratch files: temp folders and Claude Code's own (plans,
- * memory, the session scratchpad). A write there is not part of the plan, and registering it
- * would make a root of a folder other sessions fill. `add_root` still registers one on purpose.
- *
- * A run may itself live in such a place (a workspace under `/tmp`): a folder that shares a
- * top-level folder of the place with one of the run's roots is the run's, not scratch.
+ * Where `path` really lands: its nearest existing ancestor with every symlink resolved, then the
+ * rest as spelled (folders not created yet). `undefined` when no ancestor can be resolved.
  */
-async function isScratch($: EngineInterface, directory: string): Promise<boolean> {
-  const [home, tmp] = await Promise.all([$.env.get('HOME'), $.env.get('TMPDIR')])
-  const places = ['/tmp', '/var/tmp', ...(tmp ? [tmp] : []), ...(home ? [`${home}/.claude`] : [])]
-  const place = places.filter(candidate => within(directory, candidate)).sort((a, b) => b.length - a.length)[0]
-  if (place === undefined) return false
-  const top = topBelow(directory, place)
-  return top === undefined || !(roots ?? []).some(root => within(root, top))
+async function landing($: EngineInterface, path: string): Promise<string | undefined> {
+  let probe = path
+  let rest = ''
+  for (;;) {
+    const stat = await $.fs.stat(probe, { resolve: true }).catch(() => undefined)
+    if (stat !== undefined) return stat.realPath === undefined ? undefined : `${stat.realPath.replace(/\/$/, '')}${rest}`
+    const up = parentOf(probe)
+    if (up === probe) return undefined
+    rest = `${probe.slice(up === '/' ? 0 : up.length)}${rest}`
+    probe = up
+  }
 }
 
-/** The folder directly below `place` that `path` lies in; `undefined` for `place` itself. */
-function topBelow(path: string, place: string): string | undefined {
-  const inner = normalize(path)
-  const outer = normalize(place)
-  if (inner === undefined || outer === undefined || inner === outer) return undefined
-  const rest = inner.slice(outer === '/' ? 1 : outer.length + 1)
-  return `${outer === '/' ? '' : outer}/${rest.split('/')[0]}`
+/** Each of the plugin's tools by its own name, to the full name the host registered it by. */
+const fullNames = new Map<string, string>()
+
+/** Record the full names the host gave the plugin's tools (`mcp__<server>__<name>`). */
+export function nameTools(names: Iterable<[own: string, full: string]>): void {
+  fullNames.clear()
+  for (const [own, full] of names) fullNames.set(own, full)
+}
+
+/**
+ * `text`, then the line naming the loop's tools in full. A start, resume or compacted prompt
+ * says only the short names, and under Code Mode Claude calls a tool from a script by its full
+ * name: a short name alone sends it searching, and a search shows only part of a description.
+ */
+export function withToolNames(text: string): string {
+  if (fullNames.size === 0) return text
+  const line = `The loop's tools, by their full names: ${[...fullNames].map(([own, full]) => `${own} is ${full}`).join(', ')}.`
+  // Said once: a resumed prompt that is then compacted already holds it.
+  return text.includes(line) ? text : `${text}\n\n${line}`
 }
 
 /** What Claude is told when a folder about to be written could not become a root. */
@@ -642,7 +788,8 @@ async function compactThenSubmit($: EngineInterface, prompt: string): Promise<vo
   } catch (error) {
     $.ui.log(`Could not compact before the next phase (${String(error)}); continuing without.`)
   }
-  await $.prompt.submit({ text: prompt }).catch((error: unknown) => {
+  // A compacted conversation may have lost the tools' full names.
+  await $.prompt.submit({ text: withToolNames(prompt) }).catch((error: unknown) => {
     $.ui.log(`Could not continue the run (${String(error)}): /arl-resume continues it.`)
   })
 }
@@ -651,10 +798,14 @@ async function compactThenSubmit($: EngineInterface, prompt: string): Promise<vo
  * After the person moved the run on (`/arl-accept`, `/arl-finish`, `/arl-resume`): continue it
  * once the command has ended, when the engine says so. Answers what the person is told.
  */
-export async function proceed($: EngineInterface, lead = ''): Promise<string> {
+export async function proceed($: EngineInterface, lead = '', relead?: () => Promise<string>): Promise<string> {
   let next = await engine($, session.dir, ['next-action'])
-  if (next.ok && next.action === 'yield' && next.reason === 'baseline-unknown' && (await chooseBaselines($))) {
-    next = await engine($, session.dir, ['next-action'])
+  if (next.ok && next.action === 'yield' && next.reason === 'baseline-unknown') {
+    const chosen = await chooseBaselines($)
+    // A lead that names the roots is written again once some are gone.
+    if (chosen.removed.length > 0 && relead !== undefined) lead = await relead()
+    lead = (removedNote(chosen.removed) + lead).trim()
+    if (chosen.settled) next = await engine($, session.dir, ['next-action'])
   }
   if (!next.ok) return refused(next)
   if (next.action !== 'continue' || typeof next.prompt !== 'string') {

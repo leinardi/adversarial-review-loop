@@ -45,16 +45,24 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
                                              --model: this run's reviewer model on every round)
   resume [--session ID]                      continue the run in this session
   set-phases [--replan]                      read a JSON array of phase descriptions on stdin
-  root-add PATH                              register a root before changing it
-  root-baseline ALIAS (--commit REV | --empty | --current)
-  root-remove ALIAS|PATH [--undo]            drop a root registered by mistake (--undo: only
-                                             while unchanged, for a write that did not run)
+  root-add PATH [--not-scratch]              register a root before changing it (--not-scratch:
+                                             refuse a temp or Claude Code folder)
+  root-baseline ALIAS (--commit REV | --empty | --current) [--run ID]
+                                             a late root's baseline (--run: only in run ID)
+  root-remove ALIAS|PATH [--undo | --with-nested (--dry-run | --expect A,B)] [--run ID]
+                                             drop a root registered by mistake (--undo: only
+                                             while unchanged, for a write that did not run;
+                                             --with-nested: and every root inside it, which
+                                             must be exactly the --expect aliases; --dry-run:
+                                             answer that set and change nothing; --run: only
+                                             in run ID)
   attach [--session ID]                      a session starts: the run, and another session's review
   report [N]                                 the newest stored report, or the N-th
   config                                     show, set or unset a key; arguments as text on stdin
   model [set all|first|late M | reset [all|first|late]]
                                              this run's reviewer model, never written to a file
-  status [--json]                            the run summary
+  status [--json] [--context]                the run summary (--context: and what a resumed
+                                             session is told about it)
   stats [--json]                             what each review round cost and found
   pause | stop | finish | accept             user decisions
   next-action                                whether the loop continues after a turn
@@ -62,7 +70,9 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
                                              {"verification": [...], "dispositions": [...]} on stdin
   review record ID (--answer FILE | --failed transient|operational|model [--error TEXT])
                    [--usage JSON]            what the subagent round cost, for the report
-  review run-external ID                     run the opencode reviewer and record its answer
+  review run-external ID [--deadline-sec N]  run the opencode reviewer and record its answer
+                                             (--deadline-sec: all of it, repair included,
+                                             within N seconds)
   review abandon ID                          retire an interrupted review; no failure is counted
 
 Every subcommand prints one JSON object on stdout.
@@ -73,6 +83,27 @@ class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         sys.stderr.write(f"arl: {message}\n{USAGE}")
         raise SystemExit(2)
+
+
+def _root_parsers(sub: Any) -> None:
+    """The workspace-root commands: ``root-add``, ``root-baseline``, ``root-remove``."""
+    root_add = sub.add_parser("root-add", add_help=False)
+    root_add.add_argument("path")
+    root_add.add_argument("--not-scratch", action="store_true")
+    baseline = sub.add_parser("root-baseline", add_help=False)
+    baseline.add_argument("alias")
+    choice = baseline.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--commit", default=None)
+    choice.add_argument("--empty", action="store_const", const="empty", dest="choice")
+    choice.add_argument("--current", action="store_const", const="current", dest="choice")
+    baseline.add_argument("--run", default=None)
+    remove = sub.add_parser("root-remove", add_help=False)
+    remove.add_argument("root")
+    remove.add_argument("--undo", action="store_true")
+    remove.add_argument("--with-nested", action="store_true")
+    remove.add_argument("--expect", default=None)
+    remove.add_argument("--run", default=None)
+    remove.add_argument("--dry-run", action="store_true")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -86,17 +117,7 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--model", default="")
     phases = sub.add_parser("set-phases", add_help=False)
     phases.add_argument("--replan", action="store_true")
-    root_add = sub.add_parser("root-add", add_help=False)
-    root_add.add_argument("path")
-    baseline = sub.add_parser("root-baseline", add_help=False)
-    baseline.add_argument("alias")
-    choice = baseline.add_mutually_exclusive_group(required=True)
-    choice.add_argument("--commit", default=None)
-    choice.add_argument("--empty", action="store_const", const="empty", dest="choice")
-    choice.add_argument("--current", action="store_const", const="current", dest="choice")
-    remove = sub.add_parser("root-remove", add_help=False)
-    remove.add_argument("root")
-    remove.add_argument("--undo", action="store_true")
+    _root_parsers(sub)
     sub.add_parser("attach", add_help=False).add_argument("--session", default="")
     sub.add_parser("report", add_help=False).add_argument("number", nargs="?", type=int, default=None)
     sub.add_parser("config", add_help=False)
@@ -104,6 +125,7 @@ def _parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", add_help=False)
     # Accepted and ignored: every answer is JSON already, and the plan's spelling is `status --json`.
     status.add_argument("--json", action="store_true", dest="_json")
+    status.add_argument("--context", action="store_true")
     # The same: the answer carries the text and the figures both.
     sub.add_parser("stats", add_help=False).add_argument("--json", action="store_true", dest="_json")
     resume = sub.add_parser("resume", add_help=False)
@@ -120,7 +142,9 @@ def _parser() -> argparse.ArgumentParser:
     outcome.add_argument("--failed", choices=("transient", "operational", "model"))
     record.add_argument("--error", default="")
     record.add_argument("--usage", default="")
-    review.add_parser("run-external", add_help=False).add_argument("review_id")
+    external = review.add_parser("run-external", add_help=False)
+    external.add_argument("review_id")
+    external.add_argument("--deadline-sec", type=int, default=None)
     review.add_parser("abandon", add_help=False).add_argument("review_id")
     return parser
 

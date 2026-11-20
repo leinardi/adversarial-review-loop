@@ -25,7 +25,7 @@
 
 import type { EngineInterface, On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { type Completion, deliver, type Ran, type Task } from '../../hooks/reviewer'
+import { type Completion, deliver, noteToolResult, type Ran, type Task } from '../../hooks/reviewer'
 
 /** A `$.model.complete` result, as a check of the reviewer's model sees it. */
 export type ModelCheck =
@@ -121,6 +121,8 @@ export type World = {
   written: Map<string, string>
   /** Prompts the mod submitted. */
   submitted: string[]
+  /** The seconds each reviewer's clock (`sleep <n>`) was started with. */
+  clocks: number[]
   /** Questions put to the user, with their options. */
   asked: { question: string; options: string[] }[]
   /** Reviewer spawns through the kit. */
@@ -163,6 +165,8 @@ export type WorldOptions = {
   missing?: string[]
   /** The state file's modification time, as `$.fs.stat` reads it. */
   stateMtime?: number
+  /** Symlinks, by the path of the link: what `$.fs.stat` with `resolve` answers as `realPath` below it. */
+  links?: Record<string, string>
   /** The server name the host gives the plugin's tools (`mcp__<it>__<name>`); the plugin's own name by default. */
   toolServer?: string
   /** Make `$.env.get` reject, as a failing host would. */
@@ -183,6 +187,10 @@ export type WorldOptions = {
   ranOn?: string[]
   /** Called with each spawned agent's id before it answers, as its tool calls would come. */
   whileRunning?: (agentId: string) => Promise<void>
+  /** How long the model check takes, to stand in for a slow setup. */
+  checkDelayMs?: number
+  /** What each spawned reviewer reads before it answers: a diff chunk of the bundle by default, `none` for nothing. */
+  reads?: 'none'
   /** The session's permission verdict for a write (`$.tool.check`); left out, no stand-in answers. */
   check?: 'allow' | 'ask' | 'deny'
   /** What the write itself comes to: `'deny'` as when the person refuses it in the dialog. */
@@ -198,6 +206,7 @@ function scripted(options: WorldOptions): { state: World; answer: (argv: readonl
     attached: [],
     written: new Map(),
     submitted: [],
+    clocks: [],
     asked: [],
     spawns: [],
     checked: [],
@@ -234,6 +243,13 @@ function scripted(options: WorldOptions): { state: World; answer: (argv: readonl
   return { state, answer, choose }
 }
 
+function realPath(options: WorldOptions, path: string): string {
+  for (const [link, target] of Object.entries(options.links ?? {})) {
+    if (path === link || path.startsWith(`${link}/`)) return `${target}${path.slice(link.length)}`
+  }
+  return path
+}
+
 function exists(options: WorldOptions, path: string): boolean {
   if (path === `${LAUNCH}/.arl/state.json`) return options.hasState ?? true
   return !(options.missing ?? []).includes(path)
@@ -263,7 +279,10 @@ export function world(on: On, options: WorldOptions): World {
     if (options.existsFails) throw new Error('fs unavailable')
     return { value: exists(options, e.path) }
   })
-  on('fs.stat', () => ({ value: { mtimeMs: options.stateMtime ?? 1, size: 1, isFile: true, isDirectory: false, isSymbolicLink: false } as never }))
+  on('fs.stat', (_, e) => {
+    if (!exists(options, e.path)) throw new Error(`ENOENT: ${e.path}`)
+    return { value: { mtimeMs: options.stateMtime ?? 1, size: 1, isFile: true, isDirectory: false, isSymbolicLink: false, realPath: realPath(options, e.path) } as never }
+  })
   on('env.get', (_, e) => {
     if (options.envFails) throw new Error('env unavailable')
     return { value: ENV[e.name] }
@@ -355,6 +374,7 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
     model: {
       complete: async (request: { model: string }) => {
         state.checked.push(request.model)
+        if (options.checkDelayMs !== undefined) await new Promise(resolve => setTimeout(() => resolve(undefined), options.checkDelayMs ?? 0))
         const check = checks.shift() ?? ANSWERED
         if (check === 'reject') throw new Error(`model "${request.model}" is not in this organization's allowlist`)
         return check
@@ -366,6 +386,7 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
       spawn: (request: { argv: readonly string[]; input?: string }) => {
         const pieces = async function* () {
           if (request.argv[0] === 'sleep') {
+            state.clocks.push(Number(request.argv[1]))
             // The reviewer's clock: `sleep 1` expires at once; any other runs until it is ended.
             if (request.argv[1] !== '1') await new Promise(() => undefined)
             state.expired += 1
@@ -462,6 +483,8 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
         const agentId = `agent-${state.spawns.length}`
         if (end !== undefined) {
           setTimeout(() => {
+            // A stand-in reviewer reads its bundle's diff first, and the read succeeds.
+            if (options.reads !== 'none') noteToolResult(agentId, 'Read', { file_path: `${PREPARED.bundle_dir}/changes.00.diff` }, { result: { type: 'text', file: { content: 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n' } } })
             void (options.whileRunning?.(agentId) ?? Promise.resolve()).then(() => deliver(agentId, end))
           }, 0)
         }
