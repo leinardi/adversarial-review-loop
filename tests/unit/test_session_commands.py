@@ -307,6 +307,16 @@ def test_init_answers_the_start_prompt(engine: Engine, ws: Path) -> None:
     assert "set_phases" in prompt
     assert "`make test`" in prompt
     assert f"api = {ws / 'api'}" in prompt
+    assert "through Bash, call add_root for it only if it holds the plan's work; never register a scratch" in prompt
+    assert "call add_root for that directory" not in prompt
+
+
+def test_resume_context_carries_the_scratch_rule(engine: Engine, ws: Path) -> None:
+    started(engine, ws)
+    engine(ws, "set-phases", stdin='["one"]')
+    context = engine(ws, "resume")["context"]
+    assert "through Bash, call add_root for it only if it holds the plan's work; never register a scratch" in context
+    assert "call add_root for that directory" not in context
 
 
 def approve_phase_one(engine: Engine, launch: Path) -> None:
