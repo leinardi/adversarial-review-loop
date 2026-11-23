@@ -21,7 +21,7 @@
 // Every decision about the run is the engine's (`scripts/arl/`); see flow.ts.
 
 import type { EngineInterface, Register } from 'claude-code'
-import { COMMANDS, openPane, registerCommands, runCommand, showNow } from './commands'
+import { asOf, COMMANDS, openPane, registerCommands, runCommand, showNow } from './commands'
 import { engine } from './engine'
 import { addRoot, continueRun, ensureRoot, fromScript, nameTools, parentOf, type Registration, review, session, resetWrites, setPhases, SCRIPT_BUDGET_MS, sweepRoots, track, unregistered, writeIn } from './flow'
 import { countStep, deliver, registerReviewer, resetCheckedModels, REVIEWER, reviewerDecision, runHandback, runSubagentCall } from './reviewer'
@@ -197,7 +197,7 @@ export const register: Register = on => {
     on('command.run', { command: spec.name }, async ($, e) => {
       const text = await runCommand($, e.command, e.args)
       if (text !== undefined) await showNow($, e.command, text)
-      return { text: text ?? `No command ${e.command} here.` }
+      return { text: text === undefined ? `No command ${e.command} here.` : asOf(e.command, text) }
     }).catch(($, e) => ({ text: `/${e.command} failed.` }))
   }
 
