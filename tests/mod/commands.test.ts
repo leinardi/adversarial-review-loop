@@ -19,7 +19,7 @@
 // phase, and the root a refused write leaves behind.
 
 import { expect, test } from 'claude-code/testing'
-import { implementArgs, modelArgs, openPane, runCommand, showNow } from '../../hooks/commands'
+import { asOf, implementArgs, modelArgs, openPane, runCommand, showNow } from '../../hooks/commands'
 import { pane } from '../../hooks/ui'
 import { announce, chooseBaselines, continueRun, nameTools, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
 import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, settle, start, summary, world } from './world'
@@ -147,6 +147,21 @@ test('at rest, or headless, a command only answers its text: the host prints it 
   }
 })
 
+test("only a command reporting the run is dated, and only while Claude's turn runs in an interactive session", () => {
+  const now = new Date(2026, 10, 23, 9, 5, 7)
+  at(true)
+  session.turnRunning = true
+  expect(asOf('arl-phases', '▶ 1. one', now)).toBe("As of 09:05:07, while Claude's turn was running. The run may have moved on: /arl-phases shows it now.\n▶ 1. one")
+  expect(asOf('arl-status', 'Run r1', now)).toContain('As of 09:05:07')
+  expect(asOf('arl-pause', 'Paused.', now)).toBe('Paused.')
+  expect(asOf('arl-phases', ' ', now)).toBe(' ')
+  session.turnRunning = false
+  expect(asOf('arl-phases', '▶ 1. one', now)).toBe('▶ 1. one')
+  at(false)
+  session.turnRunning = true
+  expect(asOf('arl-phases', '▶ 1. one', now)).toBe('▶ 1. one')
+})
+
 test("/arl-phases typed while Claude's turn runs opens the pane at once, and not once the turn ended", async ($, on) => {
   const w = world(on, { engine: { attach: { ok: true, run: summary(), foreign_review: false, effort: '' }, status: { ok: true, run: summary() }, 'next-action': { ok: true, action: 'yield', reason: 'unchanged' } } })
   on('turn.start', (_, e) => e as never)
@@ -157,9 +172,12 @@ test("/arl-phases typed while Claude's turn runs opens the pane at once, and not
   expect(reports()).toBe(1)
   // Still answered as its text: the host prints that once the turn ends.
   expect(text).toContain('1. one')
+  // Printed that late, it says when it was true.
+  expect(text).toMatch(/^As of \d\d:\d\d:\d\d, while Claude's turn was running\./)
   await $.turn.complete({ answer: 'done', reason: 'aborted', durationMs: 5, isAborted: true, turnId: 't1' } as never)
-  await $.command.run({ command: 'arl-phases' } as never)
+  const atRest = await $.command.run({ command: 'arl-phases' } as never)
   expect(reports()).toBe(1)
+  expect(atRest.text).not.toContain('As of')
 })
 
 // --------------------------------------------------------------------------

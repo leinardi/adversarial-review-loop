@@ -52,6 +52,9 @@ export const COMMANDS: readonly CommandSpec[] = [
 /** Commands that already put their output in a pane, or are about the pane itself. */
 const SHOWN_IN_A_PANE: ReadonlySet<string> = new Set(['arl-report', 'arl-stats', 'arl-pane'])
 
+/** Commands whose text is the run's state at the moment they ran. */
+const REPORTS_THE_RUN: ReadonlySet<string> = new Set(['arl-status', 'arl-phases'])
+
 /** The title of the pane a command's output is shown in while Claude's turn runs. */
 export const commandTitle = (name: string): string => `/${name}`
 
@@ -71,6 +74,19 @@ export async function showNow($: EngineInterface, name: string, text: string): P
   }
   await showReport($, text).catch(() => undefined)
   await $.ui.open({ id: REPORT_PANE, title: commandTitle(name), focus: true, closeOnEscape: true }).catch(() => undefined)
+}
+
+/**
+ * Date the answer of a command that reports the run, when Claude's turn is running.
+ *
+ * The host prints that text only when the turn ends, so without a time an old state reads as the
+ * current one (measured: `/arl-phases` typed at 19:35 showed round 1 at 21:08, after the approval).
+ * The pane `showNow` opens is current, and keeps the plain text.
+ */
+export function asOf(name: string, text: string, now: Date = new Date()): string {
+  if (!session.isInteractive || !session.turnRunning || !REPORTS_THE_RUN.has(name) || text.trim() === '') return text
+  const time = [now.getHours(), now.getMinutes(), now.getSeconds()].map(part => String(part).padStart(2, '0')).join(':')
+  return `As of ${time}, while Claude's turn was running. The run may have moved on: /${name} shows it now.\n${text}`
 }
 
 /** Register each command; one the host refuses is said, and the rest still register. */
