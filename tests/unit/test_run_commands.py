@@ -380,6 +380,56 @@ def test_a_repository_cloned_during_the_run_proposes_the_clone(run_env: Path, ws
     assert (added["baseline"], added["proposed"]) == ("unknown", git_at(upstream, "rev-parse", "HEAD"))
 
 
+def test_a_worktree_added_during_the_run_proposes_its_checkout(run_env: Path, ws: Path, engine: Engine) -> None:
+    upstream = make_repo(run_env / "upstream")
+    base = git_at(upstream, "rev-parse", "HEAD")
+    backdate(upstream)
+    started(engine, ws)
+    git_at(upstream, "worktree", "add", "-q", "-b", "work", str(run_env / "tree"))
+
+    added = engine(ws, "root-add", str(run_env / "tree"))
+    assert (added["baseline"], added["proposed"]) == ("unknown", base)
+
+
+def test_a_folder_registered_before_its_worktree_existed_is_made_a_git_root_again(run_env: Path, ws: Path, engine: Engine) -> None:
+    upstream = make_repo(run_env / "upstream")
+    base = git_at(upstream, "rev-parse", "HEAD")
+    backdate(upstream)
+    started(engine, ws)
+    early = engine(ws, "root-add", str(run_env / "tree"))
+    assert (early["status"], early["baseline"]) == ("added", "set")
+    git_at(upstream, "worktree", "add", "-q", "-b", "work", str(run_env / "tree"))
+
+    again = engine(ws, "root-add", str(run_env / "tree"))
+    assert again == {"ok": True, "status": "known", "alias": early["alias"], "baseline": "unknown", "proposed": base, "rekinded": True}
+    root = load(ws).root(early["alias"])
+    assert root is not None
+    assert (root["kind"], root["start_tree"]) == ("git", "")
+    assert engine(ws, "next-action")["reason"] == "baseline-unknown"
+
+    chosen = engine(ws, "root-baseline", early["alias"], "--commit", again["proposed"])
+    assert chosen["tree"] == git_at(upstream, "rev-parse", f"{base}^{{tree}}")
+    # Settled: naming it again changes nothing.
+    assert engine(ws, "root-add", str(run_env / "tree")) == {"ok": True, "status": "known", "alias": early["alias"], "baseline": "set"}
+
+
+def test_a_folder_with_an_approved_base_is_never_made_a_git_root(run_env: Path, ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    early = engine(ws, "root-add", str(run_env / "tree"))
+    make_repo(run_env / "tree")
+    run = load(ws)
+    root = run.root(early["alias"])
+    assert root is not None
+    root["approved_tree"] = "0" * 40
+    run.save()
+
+    again = engine(ws, "root-add", str(run_env / "tree"))
+    assert (again["status"], again["baseline"], "rekinded" in again) == ("known", "set", False)
+    root = load(ws).root(early["alias"])
+    assert root is not None
+    assert root["kind"] == "dir"
+
+
 def test_a_repository_created_after_init_is_found_by_the_scan(ws: Path, engine: Engine) -> None:
     started(engine, ws)
     make_repo(ws / "libs" / "fresh", when=None)

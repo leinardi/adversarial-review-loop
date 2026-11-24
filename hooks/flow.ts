@@ -322,7 +322,9 @@ export async function addRoot($: EngineInterface, input: Record<string, unknown>
     retry.delete(answer.alias)
   }
   if (answer.status !== 'added') {
-    if (answer.baseline !== 'unknown') return `${input.path} is already covered by root ${String(answer.alias)}.`
+    if (answer.baseline !== 'unknown') {
+      return `${input.path} is already covered by root ${String(answer.alias)}. If its baseline is wrong (a review sees files that predate the run as new), only the user can fix it: ask them to run /arl-remove-root ${String(answer.alias)}, then call add_root again.`
+    }
     // A root with no baseline yet reviews nothing: settle it now rather than at the next review.
     const chosen = await chooseBaselines($)
     const outcome = chosen.outcomes.get(String(answer.alias))
