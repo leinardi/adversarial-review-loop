@@ -465,6 +465,9 @@ test('a read of a diff chunk, the increment or a repair transcript that ran coun
     ['Read', { file_path: `${B}/changes.03.diff` }, { result: { file: { content: '     1\tdiff --git a/x b/x\n     2\t@@ -1 +1 @@\n' } } }],
     ['Read', { file_path: `${B}/incremental.diff`, offset: 200 }, { result: { file: { content: '@@ -40,3 +40,4 @@\n+x\n' } } }],
     ['Read', { file_path: `${B}/incremental.diff` }, { result: { file: { content: '(no change since the previous round)\n' } } }],
+    // A phase that needed no change, or whose only change is a removed root, is still reviewed.
+    ['Read', { file_path: `${B}/changes.00.diff` }, { result: { file: { content: "     1\t(no root changed between the review's base and head trees)\n" } } }],
+    ['Bash', { command: `cat ${B}/changes.00.diff` }, { result: { stdout: '(root web was removed; its old content cannot be shown)\n' } }],
     ['Read', { file_path: `${B}/repair.txt` }, { result: { file: { content: 'FINDING severity=high ...' } } }],
     ['Bash', { command: `sed -n 1,400p ${B}/changes.00.diff` }, { result: { stdout: 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n' } }],
   ] as const) {

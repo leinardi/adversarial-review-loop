@@ -65,9 +65,12 @@ __all__ = [
     "CHUNK_MAX_LINES",
     "MAX_CHUNKS",
     "NOTE_CHARS",
+    "NO_INCREMENT",
+    "NO_ROOT_CHANGED",
     "PLAN_EXCERPT_BYTES",
     "PLAN_HEADING",
     "REASONING_BYTES",
+    "ROOT_REMOVED",
     "Bundle",
     "BundleError",
     "BundleTooLarge",
@@ -99,6 +102,22 @@ MAX_CHUNKS: Final = 100
 #: reviewer's ``Read`` stops at 2,000 lines, which a chunk of short lines reaches well inside its
 #: bytes. Below that limit with room for a margin.
 CHUNK_MAX_LINES: Final = 1500
+
+#: What ``changes.00.diff`` holds when no root changed. A phase that needed no change is still
+#: reviewed: the reviewer checks the claim that nothing was needed.
+#:
+#: This, :data:`ROOT_REMOVED` and :data:`NO_INCREMENT` are the whole of a diff file that has no
+#: diff in it, so the mod counts a read that printed one as a read of the phase's evidence
+#: (``DIFF_CONTENT`` in ``hooks/reviewer.ts``, held to these by ``test_bundle.py``). A note added
+#: here and not there leaves every review that shows it failed: "the reviewer read none of the
+#: bundle".
+NO_ROOT_CHANGED: Final = "(no root changed between the review's base and head trees)\n"
+
+#: One line of ``changes.00.diff`` per root removed, when that is the phase's only change.
+ROOT_REMOVED: Final = "(root {alias} was removed; its old content cannot be shown)\n"
+
+#: What ``incremental.diff`` holds when nothing changed since the previous round.
+NO_INCREMENT: Final = "(no change since the previous round)\n"
 
 #: How much of one verification entry's output ``verification.txt`` keeps (its tail).
 VERIFICATION_OUTPUT_BYTES: Final = 16384
@@ -356,10 +375,7 @@ def _write_chunks(dest: Path, diff: bytes, limit: int, gone: Sequence[str] = ())
     diff. Nothing is ever dropped: the chunks joined are the diff, byte for byte.
     """
     if not diff:
-        text = (
-            "".join(f"(root {alias} was removed; its old content cannot be shown)\n" for alias in gone)
-            or "(no root changed between the review's base and head trees)\n"
-        )
+        text = "".join(ROOT_REMOVED.format(alias=alias) for alias in gone) or NO_ROOT_CHANGED
         write_private_file(dest / "changes.00.diff", encode(text))
         return ["changes.00.diff"]
     max_lines = CHUNK_MAX_LINES
@@ -876,7 +892,7 @@ def build(  # noqa: PLR0912, PLR0913, PLR0915 - one independently meaningful pie
         if len(data) > ceiling:
             data = encode(_INCREMENTAL_OMITTED.format(ceiling=ceiling))
             gaps.append(f"incremental.diff is past hard_diff_ceiling ({ceiling} bytes) and was left out")
-        write_private_file(dest / "incremental.diff", data or b"(no change since the previous round)\n")
+        write_private_file(dest / "incremental.diff", data or encode(NO_INCREMENT))
         files.append("incremental.diff")
 
     prior = _prior_rounds(run, target, config)

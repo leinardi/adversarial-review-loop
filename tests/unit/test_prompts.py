@@ -40,3 +40,11 @@ def test_a_handed_back_report_must_carry_the_findings_block(name: str) -> None:
     rule = contract.partition("<<<ARL-FINDINGS>>>")[0]
     assert "`SubagentHandback`" in rule
     assert "the prose, then this block" in rule
+
+
+def test_the_phase_prompt_says_a_phase_with_no_change_is_reviewed_on_its_claim() -> None:
+    """**Fails on the old prompt**, which never said what an empty ``changes.00.diff`` means."""
+    text = arl.prompt_path("reviewer-phase").read_text(encoding="utf-8")
+    given = text.partition("## What you have been given")[2].partition("\n## ")[0]
+    assert "**A phase that changed nothing**" in given
+    assert "approve only when every clause is already met" in given

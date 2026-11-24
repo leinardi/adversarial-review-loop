@@ -423,9 +423,13 @@ const PRINTERS = new Set(['cat', 'head', 'tail', 'sed'])
 
 /**
  * What a diff's content looks like: a file header or a hunk, possibly after a line number and a
- * tab (as Read numbers its lines), or the engine's own line for an increment with no change.
+ * tab (as Read numbers its lines), or one of the engine's notes for a diff file with no diff in it
+ * (`NO_ROOT_CHANGED`, `ROOT_REMOVED` and `NO_INCREMENT` in `scripts/arl/bundle.py`, which
+ * `tests/unit/test_bundle.py` holds this to). A phase that needed no change is reviewed too: missing
+ * its note here, every such review failed as one that read none of the bundle.
  */
-const DIFF_CONTENT = /(^|\t)(diff --git |@@ -\d)|\(no change since the previous round\)/m
+const DIFF_CONTENT =
+  /(^|\t)(diff --git |@@ -\d|\(no root changed between the review's base and head trees\)|\(root \S+ was removed; its old content cannot be shown\)|\(no change since the previous round\))/m
 
 /** Every string in a tool result, one per line: Read's content, Bash's output, wherever the session puts them. */
 function textOf(value: unknown, depth = 0): string {

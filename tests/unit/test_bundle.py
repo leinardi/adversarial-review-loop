@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -31,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import config_with
+from conftest import PLUGIN_ROOT, config_with
 from run_common import arl, run_env, ws
 
 from arl import bundle, config, contract, state, workspace
@@ -326,7 +327,35 @@ def test_a_phase_whose_only_change_is_a_removed_root_says_so(ws: Path, engine: E
     started(engine, ws)
     shutil.rmtree(ws / "web")
     ticket = engine(ws, "review", "prepare")
-    assert (Path(ticket["bundle_dir"]) / "changes.00.diff").read_text() == "(root web was removed; its old content cannot be shown)\n"
+    assert (Path(ticket["bundle_dir"]) / "changes.00.diff").read_text() == bundle.ROOT_REMOVED.format(alias="web")
+
+
+def test_a_phase_with_no_change_is_still_reviewed_and_its_diff_says_so(ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    assert (Path(ticket["bundle_dir"]) / "changes.00.diff").read_text() == bundle.NO_ROOT_CHANGED
+
+
+def _mod_diff_content() -> re.Pattern[str]:
+    """``DIFF_CONTENT`` from ``hooks/reviewer.ts``: what the mod counts as a read of the evidence."""
+    source = (PLUGIN_ROOT / "hooks" / "reviewer.ts").read_text(encoding="utf-8")
+    found = re.search(r"^const DIFF_CONTENT =\s*/(.+)/m$", source, re.MULTILINE)
+    assert found, "hooks/reviewer.ts no longer defines DIFF_CONTENT as one /.../m literal"
+    return re.compile(found.group(1), re.MULTILINE)
+
+
+@pytest.mark.parametrize(
+    "note",
+    [bundle.NO_ROOT_CHANGED, bundle.ROOT_REMOVED.format(alias="docs-site_2.x"), bundle.NO_INCREMENT],
+)
+def test_the_mod_counts_every_note_a_diff_file_can_hold_as_its_evidence(note: str) -> None:
+    """**Fails on the old mod**, which knew only ``NO_INCREMENT``: a phase that needed no change
+    failed every review as "the reviewer read none of the bundle"."""
+    pattern = _mod_diff_content()
+    assert pattern.search(note)
+    # As ``Read`` prints it: a line number and a tab before the line.
+    assert pattern.search(f"     1\t{note}")
 
 
 # --------------------------------------------------------------------------
