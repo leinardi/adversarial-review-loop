@@ -62,6 +62,14 @@ cannot be removed, and neither can a repository inside another root on its own: 
 container, or give it a baseline. When the loop asks for a late root's baseline, it also offers
 to remove that root and the roots around it, if it is not the plan's work.
 
+### Every file of a clone or a worktree is new to the review
+
+The folder was registered before the clone or worktree was made in it, so its baseline is the
+empty tree. Have Claude call `add_root` on it again: a folder that is a git repository now, with
+nothing approved in it yet, becomes a git root and the loop asks for its baseline, proposing the
+commit it was checked out at. Once a phase in it is approved, `/arl-remove-root` it and add it
+again.
+
 ### Can I approve a phase myself?
 
 `/arl-accept` approves the current phase as it stands, with no review. The approval is recorded as

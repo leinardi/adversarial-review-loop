@@ -536,10 +536,12 @@ def _proposed_commit(repo: str, start_ns: int) -> str:
     """Where HEAD was when the run started, from the reflog; else the commit it was cloned at.
 
     The newest reflog entry older than the start is HEAD as the run found it. A repository with
-    no such entry was created or cloned during the run. Only a clone arrived with content the
-    run did not write, so only a ``clone:`` oldest entry is proposed; a repository the run
-    ``git init``-ed has no commit that predates its work, and gets ``""`` -- the user picks an
-    empty baseline or the current content.
+    no such entry was created, cloned or checked out as a worktree during the run. A clone and a
+    linked worktree (``git worktree add``) arrived with content the run did not write, so their
+    oldest entry is proposed: a clone's says ``clone:``, and a linked worktree's reflog starts
+    where it was checked out. A repository the run ``git init``-ed has no commit that predates
+    its work, and gets ``""`` -- the user picks an empty baseline or the current content. It is a
+    proposal the user accepts or not, never taken on its own.
     """
     proc = git_run(repo, ["reflog", "show", "--date=unix", "--format=%H%x09%gd%x09%gs", "HEAD"])
     entries: list[tuple[str, int, str]] = []
@@ -552,9 +554,16 @@ def _proposed_commit(repo: str, start_ns: int) -> str:
     before = [commit for commit, at, _ in entries if at < start_ns - TOUCH_TOLERANCE_NS]
     if before:
         return before[0]
-    if entries and entries[-1][2].startswith("clone:"):
+    if entries and (entries[-1][2].startswith("clone:") or _linked_worktree(repo)):
         return entries[-1][0]
     return ""
+
+
+def _linked_worktree(repo: str) -> bool:
+    """Whether ``repo`` is a worktree ``git worktree add`` made: its git dir is not the common one."""
+    proc = git_run(repo, ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"])
+    lines = proc.stdout.decode("utf-8", "surrogateescape").splitlines() if proc.returncode == 0 else []
+    return len(lines) == 2 and Path(lines[0]).resolve() != Path(lines[1]).resolve()
 
 
 def _exclude_run_dir(root: dict[str, Any], paths: RunPaths) -> None:
@@ -781,7 +790,9 @@ def register(run: RunState, path: Path, *, late: bool, not_scratch: bool = False
     """Register the root ``path`` belongs to, answering what happened.
 
     ``known`` when it is a root already; ``covered`` when it lies inside one (and is not a
-    repository of its own); ``added`` otherwise, with the new root's ``baseline``. ``late`` is
+    repository of its own); ``added`` otherwise, with the new root's ``baseline``. A known folder
+    registered before it existed that is a repository now is made a git root again with an
+    unknown baseline (:func:`_rekind`), and answers ``known`` with ``rekinded``. ``late`` is
     every registration after ``init``: one whose content has changed since the run started is
     added with an unknown baseline. With ``not_scratch``, a new root in a scratch place
     (:func:`is_scratch`) is refused with ``scratch`` and nothing is added.
@@ -795,6 +806,8 @@ def register(run: RunState, path: Path, *, late: bool, not_scratch: bool = False
     for root in run.data["roots"]:
         here = Path(root["path"])
         if target == here:
+            if kind == "git" and _rekind(run, root):
+                return {"status": "known", "alias": root["alias"], "baseline": "unknown", "proposed": root["proposed"], "rekinded": True}
             return {"status": "known", "alias": root["alias"], "baseline": root["baseline"]}
     for root in run.data["roots"]:
         here = Path(root["path"])
@@ -805,6 +818,30 @@ def register(run: RunState, path: Path, *, late: bool, not_scratch: bool = False
         raise RunError("scratch", f"{where} is a scratch directory (temporary or Claude Code's own)")
     added = _add(run, target, kind, late=late)
     return {"status": "added", "alias": added["alias"], "baseline": added["baseline"], "proposed": added["proposed"]}
+
+
+def _rekind(run: RunState, root: dict[str, Any]) -> bool:
+    """Make a folder root that is a git repository now a git root whose baseline the user picks.
+
+    A path registered before it existed is a folder with the empty tree as its baseline: right
+    for files the run is about to write there, wrong for a clone or a worktree made there after,
+    whose every file the review then sees as new (and refuses as oversized). Only such a root,
+    one that never had anything approved past that empty start: an approved base is the run's
+    own work and never moves. Its baseline goes back to unknown rather than to the checkout, so
+    it moves only with the user's choice, "everything here is new" among them; a pending ticket
+    was prepared for the folder and is retired.
+    """
+    if root["kind"] != "dir" or root["baseline"] != "set":
+        return False
+    empty = empty_tree(root, run.paths)
+    if root["start_tree"] != empty or root["approved_tree"] != empty:
+        return False
+    root.update(kind="git", baseline="unknown", start_tree="", approved_tree="", proposed=_proposed_commit(root["path"], run.data["created_at_ns"]))
+    _exclude_run_dir(root, run.paths)
+    run.invalidate_ticket("root-rekinded")
+    run.clear_wait("oversized")
+    run.data["last_continuation"] = ""
+    return True
 
 
 def discover(run: RunState, *, late: bool) -> list[str]:

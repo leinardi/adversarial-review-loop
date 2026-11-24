@@ -74,8 +74,10 @@ The loop stops prompting Claude and asks you (or, headless, tells Claude to stop
 - the reviewer's model cannot be used (below): at once, with nothing retried;
 - a changed file or the whole diff is too large to review;
 - a folder joined the run with changes already in it, so its baseline cannot be known. You pick:
-  the changes since a proposed commit, everything in it is new, or its current content is the
-  baseline.
+  the changes since a proposed commit (the commit a clone or a worktree made during the run was
+  checked out at), everything in it is new, or its current content is the baseline. A folder
+  registered before it existed, then filled by a clone or a worktree, is asked about the same way
+  when Claude registers it again.
 
 You can accept the stage as it stands (`/arl-accept`), keep going (`/arl-resume`), or stop
 (`/arl-stop`).
