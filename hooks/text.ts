@@ -54,7 +54,7 @@ export const TOOLS = {
   },
   add_root: {
     description:
-      "Register a directory holding the plan's work (never a scratch, temporary or build directory) as an adversarial-review-loop root, before changing it through Bash. That includes a directory you are about to create. Edit and Write register their own files. A change made through Bash in a directory outside every root is never reviewed. Never register a directory you only use to check the work (a throwaway clone or worktree, a build output): everything in a root is reviewed, and a copy of a repository is a diff of its every file.",
+      "Register a directory holding the plan's work (never a scratch, temporary or build directory) as an adversarial-review-loop root, before changing it through Bash. That includes a directory you are about to create, whose every file is then new to the review: a clone or a worktree you will work in is registered after you create it, never before. Edit and Write register their own files. A change made through Bash in a directory outside every root is never reviewed. Never register a directory you only use to check the work (a throwaway clone or worktree, a build output): everything in a root is reviewed, and a copy of a repository is a diff of its every file.",
     inputSchema: {
       type: 'object',
       properties: { path: { type: 'string', description: 'The directory, absolute or relative to the launch directory.' } },
