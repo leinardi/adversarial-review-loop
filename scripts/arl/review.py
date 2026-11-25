@@ -129,8 +129,8 @@ def _subagent_settings(cfg: config.Config) -> dict[str, Any]:
 
 
 def _validated_verification(raw: object) -> list[dict[str, Any]]:
-    """The implementer's verification entries, or a refusal: each names its working directory,
-    the one thing that tells which root its command checked."""
+    """The implementer's verification entries, or a refusal: each names the directory its command
+    ran in, which the bundle shows beside the root the implementer says it checked."""
     if raw is None:
         return []
     if not isinstance(raw, list) or not all(isinstance(entry, dict) for entry in raw):

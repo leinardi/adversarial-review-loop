@@ -80,9 +80,9 @@ export const TOOLS = {
           items: {
             type: 'object',
             properties: {
-              root: { type: 'string', description: 'The root the command ran for (its alias or path).' },
+              root: { type: 'string', description: 'The root the command checked, as you see it (its alias or path).' },
               command: { type: 'string' },
-              cwd: { type: 'string', description: 'The directory it ran in, absolute or relative to the launch directory: it tells which root it checked.' },
+              cwd: { type: 'string', description: 'The directory it ran in, absolute or relative to the launch directory.' },
               status: { type: 'integer', description: 'Exit status.' },
               output: { type: 'string', description: 'The last lines the command itself printed, verbatim: never a summary of them.' },
             },

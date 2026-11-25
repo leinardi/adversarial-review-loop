@@ -649,20 +649,26 @@ def remember_heads(roots: Sequence[dict[str, Any]], *, start: bool = False) -> N
             root.pop(f"{side}_moved", None)
         if start:
             root["start_commit"] = _clean_head(root, str(root.get("start_tree") or ""))
+            root.pop("start_chosen", None)
 
 
-def remember_commit(root: dict[str, Any]) -> None:
-    """Record a starting base the user chose as a commit: on no branch, and with no commit to
-    follow. The user named it, so it stays exactly that (:func:`follow_moves` moves only a base
-    taken from HEAD as it was).
+def remember_commit(root: dict[str, Any], commit: str, *, follows: bool) -> None:
+    """Record a starting base the user chose as ``commit``, on no branch.
 
-    Known limit: a run whose baseline was chosen before this rule stored the chosen commit as
+    ``follows`` when it is the commit HEAD was at as the run started: that is a base taken from
+    HEAD as it was, and it follows the checkout as any such base does (:func:`follow_moves`).
+    Any other commit the user named stays exactly that (``start_chosen``), and a review whose
+    HEAD has left its line says so rather than moving it.
+
+    Known limit: a run whose baseline was chosen before this rule stored any chosen commit as
     ``start_commit``, and that base still follows the checkout. It cannot be told from a base
     taken from a detached HEAD, which rightly follows, so it is left as it was saved.
     """
     remember_heads([root], start=True)
     root["start_branch"] = root["approved_branch"] = ""
-    root["start_commit"] = ""
+    root["start_commit"] = commit if follows else ""
+    if not follows:
+        root["start_chosen"] = commit
 
 
 def _is_ancestor(repo: str, commit: str) -> bool:
@@ -761,6 +767,14 @@ def _follow(root: dict[str, Any], *, final: bool) -> tuple[str, bool]:
     commit = str(root.get("start_commit") or "") if still_start else ""
     if (commit and _is_ancestor(repo, commit)) or (root.get(f"{side}_tree") or "") in EMPTY_TREES:
         return "", False
+    chosen = str(root.get("start_chosen") or "") if still_start else ""
+    if not commit and chosen and not _is_ancestor(repo, chosen):
+        # The user named it: it stays, and is said, since what only it holds reads as removed.
+        return (
+            f"{alias}: its base, commit {chosen[:12]} as the user chose it, is not in the history of HEAD (now on "
+            f"{_where(now)}). A chosen base does not follow the checkout, so whatever only it holds shows in this diff "
+            "as removed by this stage."
+        ), False
     if not commit:
         return _why_it_stays(root, approved=not still_start, was_branch=was_branch, now=now), False
     merge_base = _merge_base(repo, commit)
@@ -981,7 +995,10 @@ def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") ->
         tree = gitsnap.rev_parse(root["path"], f"{sha}^{{tree}}") if sha else ""
         if not tree:
             raise RunError("bad-commit", f"{commit!r} does not name a commit in {alias!r}")
-        if not _is_ancestor(root["path"], sha):
+        # HEAD as the run found it follows the checkout like any base taken from HEAD; any
+        # other commit is the base exactly as named.
+        follows = any(entry.get("why") == "start" and entry.get("commit") == sha for entry in root.get("candidates") or [])
+        if not follows and not _is_ancestor(root["path"], sha):
             note = (
                 f"{alias}: commit {sha[:12]} is not in the history of HEAD. It is the baseline as chosen, so what only it "
                 "holds reads as removed in the review."
@@ -993,7 +1010,7 @@ def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") ->
     root["candidates"] = []
     root.pop("suggested", None)
     if choice == "commit":
-        remember_commit(root)
+        remember_commit(root, sha, follows=follows)
     else:
         remember_heads([root], start=True)
     return tree, note
