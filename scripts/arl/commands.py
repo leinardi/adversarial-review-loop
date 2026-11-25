@@ -260,7 +260,9 @@ def cmd_root_remove(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     ``with_nested`` also drops every root inside it, in one save: a scratch folder registered by
     mistake, and the clone found in it. ``expect`` is the aliases the person was shown, all of
     them: when the set to remove is no longer exactly those (a root joined or left since), nothing
-    changes and the answer is ``removal-changed``. ``run`` is the run id the person was shown: aliases repeat
+    changes and the answer is ``removal-changed``. ``expect_baselines`` (``alias=set|unknown,…``) is the
+    baseline state the person was shown for each root to remove: when any differs now, nothing
+    changes and the answer is ``removal-changed`` too. ``run`` is the run id the person was shown: aliases repeat
     across runs, so consent given for one run never removes roots of a run that replaced it
     (``run-changed``). ``dry_run`` answers what ``with_nested`` would remove, resolved as the removal
     resolves it, and the run id, and changes nothing.
@@ -298,6 +300,17 @@ def cmd_root_remove(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
                     "removal-changed",
                     f"removing {root['alias']!r} with what it holds now removes {', '.join(aliases)}, "
                     f"not {', '.join(expected) or 'nothing named'}: nothing was removed",
+                )
+        if args.get("expect_baselines") is not None:
+            # The baseline each root had when the person was asked: one set meanwhile (by another
+            # session, or by hand) may be wanted now, so its removal is not what was agreed to.
+            shown = dict(pair.partition("=")[::2] for pair in str(args["expect_baselines"]).split(",") if pair)
+            now = {entry["alias"]: entry["baseline"] for entry in removing}
+            if shown != now:
+                changed = sorted(alias for alias in now.keys() | shown.keys() if shown.get(alias) != now.get(alias))
+                raise RunError(
+                    "removal-changed",
+                    f"the baselines of {', '.join(changed)} are not what was shown: nothing was removed",
                 )
         if args.get("undo"):
             _require_untouched(run, root)

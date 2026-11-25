@@ -51,12 +51,14 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
   root-baseline ALIAS (--commit REV | --empty | --current) [--run ID]
                                              a late root's baseline (--run: only in run ID)
   root-remove ALIAS|PATH [--undo | --with-nested (--dry-run | --expect A,B)] [--run ID]
+              [--expect-baselines A=set,B=unknown]
                                              drop a root registered by mistake (--undo: only
                                              while unchanged, for a write that did not run;
                                              --with-nested: and every root inside it, which
                                              must be exactly the --expect aliases; --dry-run:
                                              answer that set and change nothing; --run: only
-                                             in run ID)
+                                             in run ID; --expect-baselines: only while each
+                                             has the baseline state given)
   attach [--session ID]                      a session starts: the run, and another session's review
   report [N]                                 the newest stored report, or the N-th
   config                                     show, set or unset a key; arguments as text on stdin
@@ -104,6 +106,7 @@ def _root_parsers(sub: Any) -> None:
     remove.add_argument("--undo", action="store_true")
     remove.add_argument("--with-nested", action="store_true")
     remove.add_argument("--expect", default=None)
+    remove.add_argument("--expect-baselines", default=None)
     remove.add_argument("--run", default=None)
     remove.add_argument("--dry-run", action="store_true")
 

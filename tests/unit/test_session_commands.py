@@ -230,6 +230,30 @@ def test_root_remove_with_nested_changes_nothing_when_the_set_is_not_what_was_sh
     assert engine(ws, "root-remove", "scratch", "--with-nested", "--expect", "scratch,clone,late")["ok"]
 
 
+def test_root_remove_changes_nothing_when_a_nested_baseline_was_set_since_it_was_shown(engine: Engine, ws: Path, run_env: Path) -> None:
+    """The container still has no baseline, but a clone inside it got one while the person was
+    asked: removing it now would drop a root someone just chose to review."""
+    started(engine, ws)
+    scratch = run_env / "scratch"
+    clone = make_repo(scratch / "clone")
+    (scratch / "note.txt").write_text("written during the run\n")
+    (clone / "README.md").write_text("changed during the run\n")
+    engine(ws, "root-add", str(scratch))
+    roots = {root["alias"]: root["baseline"] for root in engine(ws, "status")["run"]["roots"]}
+    assert (roots["scratch"], roots["clone"]) == ("unknown", "unknown")
+    assert engine(ws, "root-baseline", "clone", "--current")["ok"]
+    before = (ws / ".arl" / "state.json").read_bytes()
+
+    shown = "scratch=unknown,clone=unknown"
+    answer = engine(ws, "root-remove", "scratch", "--with-nested", "--expect", "scratch,clone", "--expect-baselines", shown)
+    assert answer["code"] == "removal-changed"
+    assert "clone" in answer["error"]
+    assert (ws / ".arl" / "state.json").read_bytes() == before
+    # As it is now, the removal goes ahead.
+    now = "scratch=unknown,clone=set"
+    assert engine(ws, "root-remove", "scratch", "--with-nested", "--expect", "scratch,clone", "--expect-baselines", now)["ok"]
+
+
 def test_root_remove_with_nested_removes_a_chain_from_its_top(engine: Engine, ws: Path, run_env: Path) -> None:
     started(engine, ws)
     scratch = run_env / "scratch"

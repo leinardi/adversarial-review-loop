@@ -605,7 +605,7 @@ test('the baseline question offers to remove the outermost root holding a late o
   expect(w.asked).toHaveLength(1)
   expect(w.asked[0]?.options).toEqual(['Changes since abc (as cloned)', 'Everything here is new', 'The current content is the baseline', REMOVE])
   // Guarded by the set shown and by the run it was shown for.
-  expect(w.calls.filter(call => call.args[0] === 'root-remove').map(call => call.args)).toEqual([['root-remove', 'scratchpad', '--with-nested', '--expect', 'scratchpad,clone,clone2', '--run', 'r1']])
+  expect(w.calls.filter(call => call.args[0] === 'root-remove').map(call => call.args)).toEqual([['root-remove', 'scratchpad', '--with-nested', '--expect', 'scratchpad,clone,clone2', '--expect-baselines', 'scratchpad=set,clone=unknown,clone2=unknown', '--run', 'r1']])
 })
 
 test('a removal whose set changed while the question was open is asked again with the new set', async () => {
@@ -1079,4 +1079,80 @@ test('text typed for a folder root never reaches the engine as a commit', async 
   expect([...chosen.outcomes]).toEqual([['web', 'chosen']])
   expect(w.calls.filter(call => call.args[0] === 'root-baseline').map(call => call.args)).toEqual([['root-baseline', 'web', '--empty', '--run', 'r1']])
   expect(w.logged.join('\n')).toContain('type a commit only for a git repository')
+})
+
+test('a baseline set elsewhere while its question was open counts as chosen, and the next root is asked', async () => {
+  at(true)
+  const { $, w } = fakeEngine({
+    engine: {
+      ...removal([WORK, SCRATCH, CLONE, CLONE2], [WORK], { ok: true }),
+      'root-baseline': (call: { args: string[] }) => (call.args[1] === 'clone' ? { ok: false, code: 'baseline-set', error: "root 'clone' already has a baseline" } : { ok: true, run: summary() }),
+    },
+    choices: ['The current content is the baseline', 'The current content is the baseline'],
+  })
+  const chosen = await chooseBaselines($)
+  expect([chosen.settled, [...chosen.outcomes]]).toEqual([true, [['clone', 'chosen'], ['clone2', 'chosen']]])
+  expect(w.asked).toHaveLength(2)
+})
+
+test('a removal refused because a baseline inside was set meanwhile asks again, saying so in the option', async () => {
+  at(true)
+  let statuses = 0
+  const clone2Set = { ...CLONE2, baseline: 'set' }
+  const { $, w } = fakeEngine({
+    engine: {
+      status: () => ({ ok: true, run: summary({ roots: ++statuses === 1 ? [WORK, SCRATCH, CLONE, CLONE2] : [WORK, SCRATCH, CLONE, clone2Set] }) }),
+      'root-remove': { ok: false, code: 'removal-changed', error: 'the baselines of clone2 are not what was shown: nothing was removed' },
+    },
+    choices: [REMOVE, 'Something else'],
+  })
+  await chooseBaselines($)
+  expect(w.asked).toHaveLength(2)
+  expect(w.asked[1]?.options).toContain("Remove scratchpad, clone, clone2 (not the plan's work; clone2 already has a baseline)")
+  expect(w.asked[1]?.options).not.toContain(REMOVE)
+  expect(w.logged.join('\n')).toContain('the baselines of clone2 are not what was shown')
+})
+
+test('the baseline questions stop when the run is replaced meanwhile, whatever its roots are called', async () => {
+  at(true)
+  let statuses = 0
+  const { $, w } = fakeEngine({
+    engine: {
+      status: () => ({ ok: true, run: summary({ run_id: ++statuses === 1 ? 'r1' : 'r2', roots: [WORK, CLONE] }) }),
+      'root-baseline': { ok: false, code: 'baseline-set', error: 'already' },
+    },
+    choices: ['The current content is the baseline', 'The current content is the baseline'],
+  })
+  const chosen = await chooseBaselines($)
+  expect(chosen.settled).toBe(false)
+  expect(w.asked).toHaveLength(1)
+  expect(w.logged.join('\n')).toContain('The run changed while its baselines were asked')
+})
+
+test('a root another session removed while it was asked about is not reported unresolved', async () => {
+  at(true)
+  let statuses = 0
+  const { $, w } = fakeEngine({
+    engine: {
+      status: () => ({ ok: true, run: summary({ roots: ++statuses === 1 ? [WORK, CLONE] : [WORK] }) }),
+      'root-baseline': { ok: false, code: 'unknown-root', error: "no root named 'clone'" },
+    },
+    choices: ['The current content is the baseline'],
+  })
+  const chosen = await chooseBaselines($)
+  expect(chosen.settled).toBe(true)
+  expect(w.asked).toHaveLength(1)
+})
+
+test('a removal whose target another session removed already reads the roots again', async () => {
+  at(true)
+  let statuses = 0
+  const { $ } = fakeEngine({
+    engine: {
+      status: () => ({ ok: true, run: summary({ roots: ++statuses === 1 ? [WORK, SCRATCH, CLONE, CLONE2] : [WORK] }) }),
+      'root-remove': { ok: false, code: 'unknown-root', error: "no root named or at 'scratchpad'" },
+    },
+    choices: [REMOVE],
+  })
+  expect((await chooseBaselines($)).settled).toBe(true)
 })

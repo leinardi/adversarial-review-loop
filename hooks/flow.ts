@@ -313,10 +313,19 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
   // How many typed answers each root's question refused: a person who keeps mistyping is asked
   // again, but not forever.
   const refusedTyped = new Map<string, number>()
+  // Roots an answer found gone (another session removed them), and asked about again once.
+  const vanished = new Set<string>()
+  // The run the questions are about: outcomes are kept by alias, and aliases repeat across runs.
+  let runId: string | undefined
   for (;;) {
     const status = await run($, ['status'])
     const summary = status.run as RunSummary | null | undefined
     if (!status.ok || summary == null) return done(false)
+    runId ??= summary.run_id
+    if (summary.run_id !== runId) {
+      $.ui.log(`The run changed while its baselines were asked (now ${summary.run_id}): nothing more is asked.`)
+      return done(false)
+    }
     // A root whose baseline the engine took is not asked again, whatever a stale status says.
     const unknown = summary.roots.filter(root => root.baseline === 'unknown' && outcomes.get(root.alias) !== 'chosen')
     const root = unknown[0]
@@ -327,7 +336,10 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
     // inside another, so the container goes with it, and every root it holds.
     const top = roots.filter(other => within(root.path, other.path)).sort((a, b) => a.path.length - b.path.length)[0] ?? root
     const going = roots.filter(other => within(other.path, top.path)).map(other => other.alias)
-    const remove = going.length < roots.length ? `Remove ${going.join(', ')} (not the plan's work)` : ''
+    // A root inside that has a baseline is said: someone chose to review it.
+    const kept = roots.filter(other => going.includes(other.alias) && other.alias !== top.alias && other.baseline === 'set').map(other => other.alias)
+    const keptNote = kept.length === 0 ? '' : `; ${kept.join(', ')} already ${kept.length === 1 ? 'has' : 'have'} a baseline`
+    const remove = going.length < roots.length ? `Remove ${going.join(', ')} (not the plan's work${keptNote})` : ''
     const { question, options, choose } = baselineQuestion(root, remove)
     const answered = await $.ui.ask(question, options).catch((error: unknown) => {
       $.ui.log(`Could not ask for the baseline of root ${root.alias} (${String(error)}).`)
@@ -343,16 +355,25 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
       return done(false)
     }
     if (choice?.kind === 'remove') {
-      const answer = await run($, ['root-remove', top.alias, '--with-nested', '--expect', going.join(','), '--run', summary.run_id])
+      // The baselines as shown too: one set meanwhile, a nested clone's say, may be wanted now.
+      const shown = roots.filter(other => going.includes(other.alias)).map(other => `${other.alias}=${other.baseline}`)
+      const answer = await run($, ['root-remove', top.alias, '--with-nested', '--expect', going.join(','), '--expect-baselines', shown.join(','), '--run', summary.run_id])
       if (answer.ok) {
         const gone = Array.isArray(answer.removed) ? answer.removed.map(String) : going
         removed.push(...gone)
         for (const alias of gone) outcomes.set(alias, 'removed')
         continue
       }
-      // A root joined or left while the question was open: ask again, once, with the new set.
+      // A root joined or left, or a baseline was set, while the question was open: say what
+      // changed, then ask again, once, with the roots as they are now.
       if (answer.code === 'removal-changed' && !retried.has(root.alias)) {
         retried.add(root.alias)
+        $.ui.log(`Nothing was removed: ${answer.error ?? 'the roots changed while you were asked'}. Asking again.`)
+        continue
+      }
+      // Gone already: removed by another session. Read the roots again.
+      if (answer.code === 'unknown-root' && !vanished.has(root.alias)) {
+        vanished.add(root.alias)
         continue
       }
       $.ui.log(`Could not remove ${going.join(', ')}: ${answer.error ?? answer.code ?? 'no reason given'}`)
@@ -380,6 +401,16 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
       refusedTyped.set(root.alias, tries)
       $.ui.log(`Not a commit in ${root.alias}: ${set.error ?? choice.commit}`)
       if (tries < MAX_TYPED_TRIES) continue
+    }
+    // Set meanwhile, by another session or by hand: chosen, not this question's to answer.
+    if (!set.ok && set.code === 'baseline-set') {
+      outcomes.set(root.alias, 'chosen')
+      continue
+    }
+    // Removed meanwhile by another session: nothing left to choose for it. Read the roots again.
+    if (!set.ok && set.code === 'unknown-root' && !vanished.has(root.alias)) {
+      vanished.add(root.alias)
+      continue
     }
     if (!set.ok) {
       outcomes.set(root.alias, 'unchosen')
