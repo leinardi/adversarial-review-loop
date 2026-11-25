@@ -77,10 +77,11 @@ The loop stops prompting Claude and asks you (or, headless, tells Claude to stop
   the changes since a commit the engine offers, everything in it is new, or its current content
   is the baseline. For a clone or a worktree made during the run it offers both where the
   checkouts right after it left HEAD (a guess at where the work began) and the commit it was
-  cloned or created at. You can also type any commit. A commit you choose is the baseline exactly,
-  even one that is not in HEAD's history (you are told so). A folder
-  registered before it existed, then filled by a clone or a worktree, is asked about the same way
-  when Claude registers it again.
+  cloned or created at. When Claude knows where its work there began, it passes that commit with
+  `add_root`, and it is offered first as Claude's suggestion. You can also type any commit. A
+  commit you choose is the baseline exactly, even one that is not in HEAD's history (you are told
+  so). A folder registered before it existed, then filled by a clone or a worktree, is asked about
+  the same way when Claude registers it again.
 
 You can accept the stage as it stands (`/arl-accept`), keep going (`/arl-resume`), or stop
 (`/arl-stop`).

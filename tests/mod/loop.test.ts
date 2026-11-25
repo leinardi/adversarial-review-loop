@@ -158,6 +158,57 @@ test('add_root never claims a baseline was chosen when the engine could not say'
   expect(text).not.toContain('the user chose')
 })
 
+test('add_root with a base asks nothing, and names the roots still without a suggestion', async ($, on) => {
+  const A = 'a'.repeat(40)
+  const B = 'b'.repeat(40)
+  let suggestedA = false
+  let suggestedB = false
+  const roots = () => [
+    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', candidates: [] },
+    { alias: 'one', path: '/c/one', kind: 'git', baseline: 'unknown', candidates: [], suggested: suggestedA ? A : '' },
+    { alias: 'two', path: '/c/two', kind: 'git', baseline: 'unknown', candidates: [], suggested: suggestedB ? B : '' },
+  ]
+  const w = world(on, {
+    engine: {
+      'root-add': (call: { args: string[] }) => {
+        const one = call.args[1] === '/c/one'
+        if (one) suggestedA = true
+        else suggestedB = true
+        return { ok: true, status: 'known', alias: one ? 'one' : 'two', baseline: 'unknown', suggested: one ? A : B, candidates: [] }
+      },
+      status: () => ({ ok: true, run: summary({ roots: roots() }) }),
+    },
+  })
+  await start($, true)
+  const first = await callTool($, 'add_root', { path: '/c/one', base: 'main~2' })
+  expect(first).toContain(`offered ${A.slice(0, 12)} first`)
+  expect(first).toContain('Roots two have no baseline and no suggestion either')
+  const second = await callTool($, 'add_root', { path: '/c/two', base: '--empty' })
+  expect(second).toContain('Call review when the phase is done.')
+  expect(w.asked).toEqual([])
+  expect(w.calls.filter(call => call.args[0] === 'root-add').map(call => call.args)).toEqual([
+    ['root-add', '/c/one', '--not-scratch', '--base=main~2'],
+    ['root-add', '/c/two', '--not-scratch', '--base=--empty'],
+  ])
+})
+
+test('add_root with a base it cannot take says why, and still asks nothing', async ($, on) => {
+  const answers: Record<string, unknown> = {
+    '/f': { ok: true, status: 'known', alias: 'f', baseline: 'unknown', base_ignored: true },
+    '/s': { ok: true, status: 'known', alias: 's', baseline: 'set', base_ignored: true },
+  }
+  const w = world(on, {
+    engine: {
+      'root-add': (call: { args: string[] }) => answers[call.args[1] ?? ''],
+      status: { ok: true, run: summary({ roots: [{ alias: 'f', path: '/f', kind: 'dir', baseline: 'unknown', candidates: [] }] }) },
+    },
+  })
+  await start($, true)
+  expect(await callTool($, 'add_root', { path: '/f', base: 'HEAD' })).toContain('it is not a git repository, so the base you gave is not used')
+  expect(await callTool($, 'add_root', { path: '/s', base: 'HEAD' })).toContain('which already has a baseline, so the base you gave is not used')
+  expect(w.asked).toEqual([])
+})
+
 test('headless, a root with an unknown baseline is reported, not guessed', async ($, on) => {
   const unknown = summary({ roots: [{ alias: 'lib', path: '/lib', kind: 'dir', baseline: 'unknown', candidates: [] }] })
   const w = world(on, {

@@ -78,6 +78,7 @@ __all__ = [
     "WALK_LIMIT",
     "Oversized",
     "alias_for",
+    "can_suggest",
     "current_branch",
     "discover",
     "empty_tree",
@@ -88,10 +89,12 @@ __all__ = [
     "remember_commit",
     "remember_heads",
     "resolve",
+    "resolve_commit",
     "scan_nested",
     "set_baseline",
     "snapshot",
     "snapshot_all",
+    "suggest_base",
     "taken_aliases",
     "touched_since",
 ]
@@ -860,11 +863,17 @@ def _rekind(run: RunState, root: dict[str, Any]) -> bool:
     own work and never moves. Its baseline goes back to unknown rather than to the checkout, so
     it moves only with the user's choice, "everything here is new" among them; a pending ticket
     was prepared for the folder and is retired.
+
+    A folder whose baseline is still unknown is made a git root too: nothing was chosen for it, so
+    nothing is lost, and the user is then offered the repository's commits.
     """
-    if root["kind"] != "dir" or root["baseline"] != "set":
+    if root["kind"] != "dir":
         return False
-    empty = empty_tree(root, run.paths)
-    if root["start_tree"] != empty or root["approved_tree"] != empty:
+    if root["baseline"] == "set":
+        empty = empty_tree(root, run.paths)
+        if root["start_tree"] != empty or root["approved_tree"] != empty:
+            return False
+    elif root["baseline"] != "unknown":
         return False
     root.update(kind="git", baseline="unknown", start_tree="", approved_tree="", candidates=_candidates(root["path"], run.data["created_at_ns"]))
     _exclude_run_dir(root, run.paths)
@@ -910,6 +919,35 @@ def discover(run: RunState, *, late: bool) -> list[str]:
     return added
 
 
+def resolve_commit(repo: str, spec: str) -> str:
+    """The commit ``spec`` names in ``repo``, or ``""`` when it names none.
+
+    The expression as given first, then its object peeled: a suffix on the raw text would be read
+    as part of a path (``HEAD:src`` + ``^{commit}`` names ``src^{commit}``) or of a message
+    search (``:/text``). A spec that looks like an option names nothing.
+    """
+    if not spec or spec.startswith("-"):
+        return ""
+    named = gitsnap.rev_parse(repo, spec)
+    return gitsnap.rev_parse(repo, f"{named}^{{commit}}") if named else ""
+
+
+def suggest_base(root: dict[str, Any], commit: str) -> bool:
+    """Record ``commit`` (a full id) as the implementer's suggested baseline for a root: it knows
+    where its work in a clone began, and the user is offered it first. Only for a git root whose
+    baseline is unknown, which answers ``True``. Kept apart from the engine's own candidates, so
+    a later suggestion replaces only the earlier one. The user still chooses."""
+    if not can_suggest(root):
+        return False
+    root["suggested"] = commit
+    return True
+
+
+def can_suggest(root: dict[str, Any]) -> bool:
+    """Whether a root takes a suggested baseline: a git root whose baseline is unknown."""
+    return root.get("kind") == "git" and root.get("baseline") == "unknown"
+
+
 def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") -> tuple[str, str]:
     """Settle an unknown baseline: ``commit`` (a git root's revision), ``empty`` or ``current``.
 
@@ -939,11 +977,7 @@ def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") ->
         # Only the commit named: never a candidate in its stead, which may be the checkout guess.
         if not commit or commit.startswith("-"):
             raise RunError("bad-commit", f"no commit to take as the baseline of {alias!r}")
-        # The expression as typed first, then its object peeled: a suffix on the raw text would be
-        # read as part of a path (``HEAD:src`` + ``^{commit}`` names ``src^{commit}``) or of a
-        # message search (``:/text``).
-        named = gitsnap.rev_parse(root["path"], commit)
-        sha = gitsnap.rev_parse(root["path"], f"{named}^{{commit}}") if named else ""
+        sha = resolve_commit(root["path"], commit)
         tree = gitsnap.rev_parse(root["path"], f"{sha}^{{tree}}") if sha else ""
         if not tree:
             raise RunError("bad-commit", f"{commit!r} does not name a commit in {alias!r}")
@@ -957,6 +991,7 @@ def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") ->
     root["start_tree"] = root["approved_tree"] = tree
     root["baseline"] = "set"
     root["candidates"] = []
+    root.pop("suggested", None)
     if choice == "commit":
         remember_commit(root)
     else:

@@ -1020,6 +1020,18 @@ test('the baseline question offers every commit it can fit, and the rest can be 
   expect(folder.question).not.toContain('Or type')
   expect(folder.choose('abc123')).toEqual({ kind: 'not-git', text: 'abc123' })
 
+  const suggested = baselineQuestion({ ...root, suggested: 'd'.repeat(40) }, 'Remove clone')
+  expect(suggested.options.slice(0, 3)).toEqual([
+    `Changes since ${'d'.repeat(12)} (Claude's suggestion)`,
+    `Changes since ${'a'.repeat(12)} (after the clone's checkout; a guess)`,
+    `Changes since ${'b'.repeat(12)} (as cloned)`,
+  ])
+  expect(suggested.question).toContain("'current' for its current content")
+
+  // A suggestion of a commit the engine offers too is listed once, as Claude's.
+  const same = baselineQuestion({ ...root, suggested: 'b'.repeat(40) }, '')
+  expect(same.options.slice(0, 2)).toEqual([`Changes since ${'b'.repeat(12)} (Claude's suggestion)`, `Changes since ${'a'.repeat(12)} (after the clone's checkout; a guess)`])
+
   const twice = baselineQuestion({ ...root, candidates: [{ commit: 'c'.repeat(40), why: 'start' }, { commit: 'c'.repeat(40), why: 'clone' }] }, '')
   expect(twice.options).toEqual([`Changes since ${'c'.repeat(12)} (when the run started)`, 'Everything here is new', 'The current content is the baseline'])
 })

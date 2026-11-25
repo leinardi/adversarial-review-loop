@@ -473,6 +473,77 @@ def test_a_checkout_that_carried_an_edit_still_offers_the_clone(run_env: Path, w
     assert git_at(clone, "diff", "--name-only", chosen["tree"], "HEAD^{tree}") == "README.md"
 
 
+def test_a_suggested_base_is_kept_apart_and_only_where_a_baseline_is_unknown(run_env: Path, ws: Path, engine: Engine) -> None:
+    upstream = make_repo(run_env / "upstream")
+    older = git_at(upstream, "rev-parse", "HEAD")
+    (upstream / "later.txt").write_text("later\n")
+    git_at(upstream, "add", "later.txt")
+    git_at(upstream, "commit", "-qm", "later")
+    cloned = git_at(upstream, "rev-parse", "HEAD")
+    started(engine, ws)
+    clone = _clone_during_run(run_env, upstream)
+    (clone / "README.md").write_text("the run's change\n")
+    offered = [{"commit": cloned, "why": "clone"}]
+
+    # The clone point suggested, then another commit: the engine's own candidate is never lost.
+    added = engine(ws, "root-add", str(clone), "--base", "HEAD")
+    assert (added["status"], added["suggested"], added["candidates"]) == ("added", cloned, offered)
+    again = engine(ws, "root-add", str(clone), "--base", older[:10])
+    assert (again["status"], again["suggested"], again["candidates"]) == ("known", older, offered)
+    assert load(ws).summary()["roots"][-1] | {"path": ""} == {
+        "alias": added["alias"],
+        "path": "",
+        "kind": "git",
+        "baseline": "unknown",
+        "suggested": older,
+        "candidates": offered,
+    }
+
+    assert engine(ws, "root-baseline", added["alias"], f"--commit={older}")["ok"]
+    root = load(ws).root(added["alias"])
+    assert root is not None
+    assert (root["candidates"], "suggested" in root) == ([], False)
+    # Settled: a base is not even resolved, so a stale one changes nothing and fails nothing.
+    settled = engine(ws, "root-add", str(clone), "--base", "no-such-commit")
+    assert (settled["ok"], settled["status"], settled["base_ignored"]) == (True, "known", True)
+
+
+def test_a_folder_with_no_baseline_that_becomes_a_repository_takes_a_suggestion(run_env: Path, ws: Path, engine: Engine) -> None:
+    upstream = make_repo(run_env / "upstream")
+    cloned = git_at(upstream, "rev-parse", "HEAD")
+    started(engine, ws)
+    folder = run_env / "folder"
+    folder.mkdir()
+    (folder / "note.txt").write_text("written during the run\n")
+    early = engine(ws, "root-add", str(folder))
+    assert (early["baseline"], load(ws).root(early["alias"])["kind"]) == ("unknown", "dir")  # type: ignore[index]
+    (folder / "note.txt").unlink()
+    folder.rmdir()
+    _clone_during_run(run_env, upstream, "folder")
+    (folder / "README.md").write_text("the run's change\n")
+
+    again = engine(ws, "root-add", str(folder), "--base", "HEAD")
+    assert (again["status"], again["alias"], again["suggested"]) == ("known", early["alias"], cloned)
+    root = load(ws).root(early["alias"])
+    assert root is not None
+    assert (root["kind"], root["baseline"]) == ("git", "unknown")
+
+
+def test_a_suggested_base_that_names_no_commit_registers_nothing(run_env: Path, ws: Path, engine: Engine) -> None:
+    upstream = make_repo(run_env / "upstream")
+    started(engine, ws)
+    clone = _clone_during_run(run_env, upstream)
+    (clone / "README.md").write_text("the run's change\n")
+    before = [root["alias"] for root in load(ws).roots]
+
+    assert engine(ws, "root-add", str(clone), "--base", "no-such-commit")["code"] == "bad-commit"
+    assert engine(ws, "root-add", str(clone), "--base=--empty")["code"] == "bad-commit"
+    folder = run_env / "folder"
+    folder.mkdir()
+    assert engine(ws, "root-add", str(folder), "--base", "HEAD")["code"] == "not-git"
+    assert [root["alias"] for root in load(ws).roots] == before
+
+
 def test_a_reset_after_work_began_ends_the_walk_at_the_clone(run_env: Path, ws: Path, engine: Engine) -> None:
     # A same-commit reset is skipped only where ``worktree add`` writes one. In a clone it may
     # be work (an edit staged, then unstaged), so a checkout after it is not offered.

@@ -247,6 +247,8 @@ def _migrate_candidates(root: dict[str, Any]) -> None:
     if offered is None:
         offered = [{"commit": proposed, "why": "start"}] if isinstance(proposed, str) and proposed else []
     entries = offered if isinstance(offered, list) else []
+    if not isinstance(root.get("suggested", ""), str):
+        root.pop("suggested")
     root["candidates"] = [
         {"commit": entry["commit"], "why": entry["why"]}
         for entry in entries
@@ -587,7 +589,10 @@ class RunState:
             "pending_review": self.data["pending_ticket"] is not None,
             "waiting": self.data["waiting"],
             "roots": [
-                {**{key: root.get(key, "") for key in ("alias", "path", "kind", "baseline")}, "candidates": list(root.get("candidates") or [])}
+                {
+                    **{key: root.get(key, "") for key in ("alias", "path", "kind", "baseline", "suggested")},
+                    "candidates": list(root.get("candidates") or []),
+                }
                 for root in self.data["roots"]
             ],
         }

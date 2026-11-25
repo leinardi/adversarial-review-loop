@@ -218,7 +218,28 @@ def cmd_root_add(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         run.require_status("active", "paused")
         target = Path(str(args["path"])).expanduser()
         where = target if target.is_absolute() else paths.launch_dir / target
+        base = str(args.get("base") or "")
+        commit = ""
+        top, kind = workspace.resolve(where)
+        known = next((root for root in run.roots if Path(root["path"]) == top), None)
+        # A root that already has a baseline takes no suggestion, so its base is never resolved:
+        # a stale one does not fail a registration that changes nothing. Anything else is checked
+        # before anything is registered: a suggestion that names nothing adds nothing.
+        settled = known is not None and known["baseline"] == "set" and not (kind == "git" and known["kind"] == "dir")
+        if base and not settled:
+            if kind != "git":
+                raise RunError("not-git", f"{top} is not a git repository: a base is a commit, for a repository only")
+            commit = workspace.resolve_commit(str(top), base)
+            if not commit:
+                raise RunError("bad-commit", f"{base!r} does not name a commit in {top}")
         outcome = workspace.register(run, where, late=True, not_scratch=bool(args.get("not_scratch")))
+        if base:
+            root = run.root(str(outcome["alias"]))
+            if commit and root is not None and workspace.suggest_base(root, commit):
+                outcome["suggested"] = commit
+                outcome["candidates"] = root["candidates"]
+            else:
+                outcome["base_ignored"] = True
         run.save()
         return {"ok": True, **outcome}
 

@@ -259,7 +259,9 @@ export type BaselineChoice =
  */
 export function baselineQuestion(root: RunView['roots'][number], remove: string): { question: string; options: string[]; choose: (answer: string) => BaselineChoice } {
   const commits = new Map<string, string>()
-  for (const offered of root.candidates ?? []) {
+  // Claude's suggestion first; a commit offered twice is listed once, under its first reason.
+  const offers = [...(root.suggested ? [{ commit: root.suggested, why: 'suggested' }] : []), ...(root.candidates ?? [])]
+  for (const offered of offers) {
     if (!offered.commit || [...commits.values()].includes(offered.commit)) continue
     commits.set(`Changes since ${offered.commit.slice(0, 12)} (${WHY[offered.why] ?? offered.why})`, offered.commit)
   }
@@ -402,39 +404,64 @@ export async function setPhases($: EngineInterface, input: Record<string, unknow
 
 export async function addRoot($: EngineInterface, input: Record<string, unknown>): Promise<string> {
   if (typeof input.path !== 'string' || input.path === '') return 'add_root needs a path.'
-  const answer = await run($, ['root-add', input.path, '--not-scratch'])
+  const base = typeof input.base === 'string' ? input.base.trim() : ''
+  // One argument, so a base is never read as an option.
+  const answer = await run($, ['root-add', input.path, '--not-scratch', ...(base ? [`--base=${base}`] : [])])
   if (!answer.ok && answer.code === 'scratch') {
     return `${input.path} is a scratch directory (temporary or Claude Code's own), so it is not registered: everything in a root is reviewed. Do throwaway checks there unregistered. If it really holds the plan's work, ask the user to add it with /add-dir.`
   }
   if (!answer.ok) return refused(answer)
   // `root-add` answers no run summary: refresh the cached roots.
-  await run($, ['status'])
+  const status = await run($, ['status'])
   // Named on purpose: a root a refused write left behind, or one a running write registered, is
   // the run's now, not taken back.
   if (typeof answer.alias === 'string') {
     named.add(answer.alias)
     retry.delete(answer.alias)
   }
+  const alias = String(answer.alias)
+  // A suggestion asks nothing now: the question covers every root without a baseline, so asking
+  // here would put the others to the user before Claude could suggest theirs. Review asks.
+  if (typeof answer.suggested === 'string') {
+    const roots = (status.run as RunSummary | null | undefined)?.roots ?? []
+    const others = roots.filter(root => root.alias !== alias && root.baseline === 'unknown' && root.kind === 'git' && !root.suggested)
+    const rest =
+      others.length > 0
+        ? ` Roots ${others.map(root => root.alias).join(', ')} have no baseline and no suggestion either: call add_root with path and base for each one whose starting commit you know, then call review.`
+        : ' Call review when the phase is done.'
+    return `${answer.status === 'added' ? 'Registered root' : 'Root'} ${alias} has no baseline yet; the user is offered ${answer.suggested.slice(0, 12)} first as its baseline when review asks.${rest}`
+  }
+  // A base given asks nothing either way: say why it was not taken.
+  if (base !== '') {
+    if (answer.baseline !== 'unknown') {
+      return `${answer.status === 'added' ? `Registered root ${alias}; its current content is the baseline` : `${input.path} is covered by root ${alias}, which already has a baseline`}, so the base you gave is not used.`
+    }
+    return `Root ${alias} has no baseline, but it is not a git repository, so the base you gave is not used: the user picks its baseline when review asks.`
+  }
   if (answer.status !== 'added') {
     if (answer.baseline !== 'unknown') {
-      return `${input.path} is already covered by root ${String(answer.alias)}. If its baseline is wrong (a review sees files that predate the run as new), only the user can fix it: ask them to run /arl-remove-root ${String(answer.alias)}, then call add_root again.`
+      return `${input.path} is already covered by root ${alias}. If its baseline is wrong (a review sees files that predate the run as new), only the user can fix it: ask them to run /arl-remove-root ${alias}, then call add_root again.`
     }
     // A root with no baseline yet reviews nothing: settle it now rather than at the next review.
     const chosen = await chooseBaselines($)
-    const outcome = chosen.outcomes.get(String(answer.alias))
+    const outcome = chosen.outcomes.get(alias)
     if (outcome === 'removed') return removedNote(chosen.removed).trim()
-    if (outcome === 'chosen') return `${removedNote(chosen.removed)}${input.path} is covered by root ${String(answer.alias)}, whose baseline the user just chose.`
-    return removedNote(chosen.removed) + `${input.path} is covered by root ${String(answer.alias)}, whose baseline is unknown: nothing in it can be reviewed until the user picks one. Tell the user.`
+    if (outcome === 'chosen') return `${removedNote(chosen.removed)}${input.path} is covered by root ${alias}, whose baseline the user just chose.`
+    return removedNote(chosen.removed) + `${input.path} is covered by root ${alias}, whose baseline is unknown: nothing in it can be reviewed until the user picks one. ${SUGGEST_BASE}`
   }
-  if (answer.baseline !== 'unknown') return `Registered root ${String(answer.alias)}; its current content is the baseline.`
+  if (answer.baseline !== 'unknown') return `Registered root ${alias}; its current content is the baseline.`
   const chosen = await chooseBaselines($)
   // This root's own outcome, never the run's: another root's question may have failed.
-  const outcome = chosen.outcomes.get(String(answer.alias))
+  const outcome = chosen.outcomes.get(alias)
   // Removed, never "registered": nothing in it is reviewed now.
   if (outcome === 'removed') return removedNote(chosen.removed).trim()
-  if (outcome === 'chosen') return `${removedNote(chosen.removed)}Registered root ${String(answer.alias)} with the baseline the user chose.`
-  return removedNote(chosen.removed) + `Registered root ${String(answer.alias)}, but it already holds changes, so its baseline is unknown and nothing in it can be reviewed until the user picks one. Tell the user.`
+  if (outcome === 'chosen') return `${removedNote(chosen.removed)}Registered root ${alias} with the baseline the user chose.`
+  return removedNote(chosen.removed) + `Registered root ${alias}, but it already holds changes, so its baseline is unknown and nothing in it can be reviewed until the user picks one. ${SUGGEST_BASE}`
 }
+
+/** What Claude is told it can do about a root whose baseline is unknown. */
+const SUGGEST_BASE =
+  'If you know the commit your work in it started from, call add_root with its path and that commit as base, for every such root, then call review: the user is offered each first. Otherwise tell the user.'
 
 /** What a review round's runs cost so far, summed over the review and its repair. */
 type Spent = { usage?: TurnUsage; durationMs?: number; requests?: number }
@@ -590,7 +617,7 @@ export async function reviewWith($: EngineInterface, input: Record<string, unkno
   if (!prepared.ok && prepared.code === 'baseline-unknown') {
     const chosen = await chooseBaselines($)
     note = removedNote(chosen.removed)
-    if (!chosen.settled) return `${note}${refused(prepared)}\n\nStop and tell the user: a root's baseline must be chosen before the review can run.`
+    if (!chosen.settled) return `${note}${refused(prepared)}\n\nStop: a root's baseline must be chosen before the review can run. ${SUGGEST_BASE}`
     prepared = await prepareReview($, input)
   }
   return note + (await reviewPrepared($, prepared, reviewer, signal, deadlineMs))
@@ -697,7 +724,7 @@ export async function ensureRoot($: EngineInterface, directory: string, { explic
     return {
       added: alias,
       path: target,
-      note: `adversarial-review-loop registered ${target} as root ${alias}, but it already holds changes: its baseline is unknown, and the next review asks the user for one.`,
+      note: `adversarial-review-loop registered ${target} as root ${alias}, but it already holds changes: its baseline is unknown, and the next review asks the user for one. If you know the commit your work in it started from, call add_root with path ${target} and that commit as base before calling review.`,
     }
   }
   return { added: alias, path: target, note: `adversarial-review-loop registered ${target} as root ${alias}; its content before this change is the baseline.` }

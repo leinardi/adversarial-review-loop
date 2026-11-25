@@ -34,7 +34,7 @@ export type RunView = {
   final_required: boolean
   pending_review: boolean
   waiting: { kind: string; detail?: string; switch?: { which: string; word: string } } | null
-  roots: { alias: string; path: string; kind: string; baseline: string; candidates: Candidate[] }[]
+  roots: { alias: string; path: string; kind: string; baseline: string; candidates: Candidate[]; suggested?: string }[]
 }
 
 /** The latest review this session recorded, as the engine answered it. */
