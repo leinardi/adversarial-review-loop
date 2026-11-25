@@ -201,6 +201,69 @@ def test_a_run_stored_before_commits_were_recorded_does_not_guess_its_base(ws: P
     assert "api:" not in warnings_of(ws, ticket)
 
 
+def test_a_commit_the_user_chose_is_the_base_exactly_even_off_heads_history(ws: Path, engine: Engine) -> None:
+    """A chosen commit is never moved to a merge-base: the user named it, and the review diffs
+    from exactly that, saying it is not in HEAD's history."""
+    lib = make_repo(ws.parent / "lib", when=PAST, files={"lib.py": "print('lib')\n"})
+    git_at(lib, "checkout", "-q", "-b", "side")
+    (lib / "side.py").write_text("print('only on side')\n")
+    git_at(lib, "add", "side.py")
+    git_at(lib, "commit", "-qm", "side work", when=PAST)
+    side = git_at(lib, "rev-parse", "HEAD")
+    git_at(lib, "checkout", "-q", "main")
+    started(engine, ws)
+    (lib / "lib.py").write_text("print('the run')\n")
+    added = engine(ws, "root-add", str(lib))
+    assert added["baseline"] == "unknown", added
+
+    chosen = engine(ws, "root-baseline", added["alias"], "--commit", side[:10])
+    assert chosen["ok"], chosen
+    assert "not in the history of HEAD" in chosen["note"]
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    diff = diff_text(ws, ticket)
+    assert "-print('only on side')" in diff
+    assert "+print('the run')" in diff
+    assert f"{added['alias']}:" not in warnings_of(ws, ticket)
+
+
+def test_a_commit_chosen_before_the_rule_still_follows_as_it_was_saved(ws: Path, engine: Engine) -> None:
+    """The documented limit of :func:`arl.workspace.remember_commit`: a state saved by an older
+    engine holds the chosen commit as ``start_commit``, like a base taken from a detached HEAD,
+    and is left as saved. The move is said, so nothing changes unseen."""
+    lib = make_repo(ws.parent / "lib", when=PAST, files={"lib.py": "print('lib')\n"})
+    git_at(lib, "checkout", "-q", "-b", "side")
+    (lib / "side.py").write_text("print('only on side')\n")
+    git_at(lib, "add", "side.py")
+    git_at(lib, "commit", "-qm", "side work", when=PAST)
+    side = git_at(lib, "rev-parse", "HEAD")
+    git_at(lib, "checkout", "-q", "main")
+    started(engine, ws)
+    (lib / "lib.py").write_text("print('the run')\n")
+    added = engine(ws, "root-add", str(lib))
+    assert engine(ws, "root-baseline", added["alias"], "--commit", side)["ok"]
+    saved = json.loads((ws / ".arl" / "state.json").read_text())
+    for root in saved["roots"]:
+        if root["alias"] == added["alias"]:
+            root["start_commit"] = side
+    (ws / ".arl" / "state.json").write_text(json.dumps(saved))
+
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    assert "-print('only on side')" not in diff_text(ws, ticket)
+    assert f"{added['alias']}:" in range_text(ws, ticket)
+
+
+def test_a_chosen_commit_in_heads_history_says_nothing(ws: Path, engine: Engine) -> None:
+    lib = make_repo(ws.parent / "lib", when=PAST, files={"lib.py": "print('lib')\n"})
+    base = git_at(lib, "rev-parse", "HEAD")
+    started(engine, ws)
+    (lib / "lib.py").write_text("print('the run')\n")
+    added = engine(ws, "root-add", str(lib))
+    chosen = engine(ws, "root-baseline", added["alias"], "--commit", base)
+    assert chosen["ok"] and "note" not in chosen, chosen
+
+
 def test_an_empty_base_never_moves_so_no_file_of_the_root_leaves_the_review(ws: Path, engine: Engine) -> None:
     """An empty base makes every file the run's own work. A commit elsewhere with the empty tree
     (one that removed every file) is not its commit: moving to the merge-base would drop the files."""

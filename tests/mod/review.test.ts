@@ -689,7 +689,7 @@ test('a root without a baseline is settled by the user, then the review runs', a
     choices: ['Changes since 0123456789ab (when the run started)'],
   })
   expect(await review($, {}, reviewer([APPROVED]).run)).toBe(RECORDED.message)
-  expect(w.calls.find(call => call.args[0] === 'root-baseline')?.args).toEqual(['root-baseline', 'lib', '--commit', '0123456789abcdef0123', '--run', 'r1'])
+  expect(w.calls.find(call => call.args[0] === 'root-baseline')?.args).toEqual(['root-baseline', 'lib', '--commit=0123456789abcdef0123', '--run', 'r1'])
 })
 
 test('a late root the user removes instead is not asked about again, and the review runs on what is left', async () => {

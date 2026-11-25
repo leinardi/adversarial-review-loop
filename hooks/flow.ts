@@ -235,17 +235,27 @@ const WHY: Record<string, string> = {
 /** The most options `$.ui.ask` takes. */
 const ASK_OPTIONS = 4
 
+/** How many typed answers one root's baseline question refuses before it gives up. */
+const MAX_TYPED_TRIES = 3
+
 const EVERYTHING_NEW = 'Everything here is new'
 const CURRENT_CONTENT = 'The current content is the baseline'
 
 /** What one answer to the baseline question chose; `undefined` for an answer that chose nothing. */
-export type BaselineChoice = { kind: 'commit'; commit: string } | { kind: 'empty' } | { kind: 'current' } | { kind: 'remove' } | undefined
+export type BaselineChoice =
+  | { kind: 'commit'; commit: string; typed?: true }
+  | { kind: 'empty' }
+  | { kind: 'current' }
+  | { kind: 'remove' }
+  | { kind: 'not-git'; text: string }
+  | undefined
 
 /**
  * The baseline question for one root: its text, its options, and what an answer chose. The
  * dialog takes at most four options, so the commits offered come first, then Remove, then the
  * current content and "everything new" as room allows. What does not fit can still be typed:
- * `current` and `empty`, which the question names when they are left out.
+ * `current` and `empty`, which the question names when they are left out. On a git root, any
+ * other text typed is a commit, passed on as typed for the engine to resolve or refuse.
  */
 export function baselineQuestion(root: RunView['roots'][number], remove: string): { question: string; options: string[]; choose: (answer: string) => BaselineChoice } {
   const commits = new Map<string, string>()
@@ -260,7 +270,9 @@ export function baselineQuestion(root: RunView['roots'][number], remove: string)
   const left = room - shownCommits.length
   const shownFixed = left >= 2 ? [EVERYTHING_NEW, CURRENT_CONTENT] : left === 1 ? [CURRENT_CONTENT] : []
   const options = [...shownCommits, ...shownFixed, ...tail]
+  const git = root.kind === 'git'
   const typed = [
+    ...(git ? ['a commit to compare against'] : []),
     ...(shownFixed.includes(CURRENT_CONTENT) ? [] : ["'current' for its current content"]),
     ...(shownFixed.includes(EVERYTHING_NEW) ? [] : ["'empty' for everything new"]),
   ]
@@ -276,7 +288,9 @@ export function baselineQuestion(root: RunView['roots'][number], remove: string)
     const word = answer.trim().toLowerCase()
     if (word === 'current') return { kind: 'current' }
     if (word === 'empty') return { kind: 'empty' }
-    return undefined
+    const text = answer.trim()
+    if (text === '') return undefined
+    return git ? { kind: 'commit', commit: text, typed: true } : { kind: 'not-git', text }
   }
   return { question, options, choose }
 }
@@ -294,6 +308,9 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
   const done = (settled: boolean): Baselines => ({ settled, removed, outcomes })
   // Roots whose removal met a changed set, and were asked again once.
   const retried = new Set<string>()
+  // How many typed answers each root's question refused: a person who keeps mistyping is asked
+  // again, but not forever.
+  const refusedTyped = new Map<string, number>()
   for (;;) {
     const status = await run($, ['status'])
     const summary = status.run as RunSummary | null | undefined
@@ -315,6 +332,14 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
       return ''
     })
     const choice = choose(answered)
+    if (choice?.kind === 'not-git') {
+      const tries = (refusedTyped.get(root.alias) ?? 0) + 1
+      refusedTyped.set(root.alias, tries)
+      $.ui.log(`Root ${root.alias} is a folder, not a git repository: type a commit only for a git repository.`)
+      if (tries < MAX_TYPED_TRIES) continue
+      outcomes.set(root.alias, 'unchosen')
+      return done(false)
+    }
     if (choice?.kind === 'remove') {
       const answer = await run($, ['root-remove', top.alias, '--with-nested', '--expect', going.join(','), '--run', summary.run_id])
       if (answer.ok) {
@@ -334,18 +359,31 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
     }
     const args =
       choice?.kind === 'commit'
-        ? ['root-baseline', root.alias, '--commit', choice.commit]
+        ? // One argument, so typed text is never read as an option.
+          ['root-baseline', root.alias, `--commit=${choice.commit}`]
         : choice?.kind === 'empty'
           ? ['root-baseline', root.alias, '--empty']
           : choice?.kind === 'current'
             ? ['root-baseline', root.alias, '--current']
             : undefined
     // Chosen for the run the question showed: another session may have replaced it meanwhile.
-    if (args !== undefined) args.push('--run', summary.run_id)
-    if (args === undefined || !(await run($, args)).ok) {
+    if (args === undefined) {
       outcomes.set(root.alias, 'unchosen')
       return done(false)
     }
+    args.push('--run', summary.run_id)
+    const set = await run($, args)
+    if (!set.ok && choice?.kind === 'commit' && choice.typed === true && set.code === 'bad-commit') {
+      const tries = (refusedTyped.get(root.alias) ?? 0) + 1
+      refusedTyped.set(root.alias, tries)
+      $.ui.log(`Not a commit in ${root.alias}: ${set.error ?? choice.commit}`)
+      if (tries < MAX_TYPED_TRIES) continue
+    }
+    if (!set.ok) {
+      outcomes.set(root.alias, 'unchosen')
+      return done(false)
+    }
+    if (typeof set.note === 'string' && set.note !== '') $.ui.log(set.note)
     outcomes.set(root.alias, 'chosen')
   }
 }

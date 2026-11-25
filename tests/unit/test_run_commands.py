@@ -375,9 +375,38 @@ def test_an_empty_baseline_commit_is_refused_and_never_replaced_by_a_candidate(r
     assert added["candidates"]
 
     assert engine(ws, "root-baseline", added["alias"], "--commit=")["code"] == "bad-commit"
+    # Typed text reaches the engine whole, as one ``--commit=`` argument: an option's name is no
+    # option, and a tree is no commit.
+    assert engine(ws, "root-baseline", added["alias"], "--commit=--empty")["code"] == "bad-commit"
+    assert engine(ws, "root-baseline", added["alias"], "--commit=HEAD^{tree}")["code"] == "bad-commit"
+    # A path whose name ends like a peel is still a path: ``HEAD:src`` is a tree, never the
+    # directory ``src^{commit}``.
+    for name in ("src", "src^{commit}"):
+        (clone / name).mkdir()
+        (clone / name / "f.txt").write_text(name + "\n")
+    git_at(clone, "add", "-A")
+    git_at(clone, "commit", "-qm", "two directories")
+    assert engine(ws, "root-baseline", added["alias"], "--commit=HEAD:src")["code"] == "bad-commit"
     root = load(ws).root(added["alias"])
     assert root is not None
     assert root["baseline"] == "unknown"
+    short = added["candidates"][0]["commit"][:9]
+    assert engine(ws, "root-baseline", added["alias"], f"--commit={short}")["ok"]
+
+
+def test_a_baseline_commit_found_by_its_message_is_taken(run_env: Path, ws: Path, engine: Engine) -> None:
+    upstream = make_repo(run_env / "upstream")
+    (upstream / "marked.txt").write_text("marked\n")
+    git_at(upstream, "add", "marked.txt")
+    git_at(upstream, "commit", "-qm", "the marked commit")
+    marked = git_at(upstream, "rev-parse", "HEAD")
+    started(engine, ws)
+    clone = _clone_during_run(run_env, upstream)
+    (clone / "README.md").write_text("changed in the clone\n")
+    added = engine(ws, "root-add", str(clone))
+
+    chosen = engine(ws, "root-baseline", added["alias"], "--commit=:/the marked commit")
+    assert chosen["tree"] == git_at(clone, "rev-parse", f"{marked}^{{tree}}")
 
 
 def test_a_repository_cloned_during_the_run_proposes_the_clone(run_env: Path, ws: Path, engine: Engine) -> None:

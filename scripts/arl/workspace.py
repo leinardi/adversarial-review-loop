@@ -648,11 +648,18 @@ def remember_heads(roots: Sequence[dict[str, Any]], *, start: bool = False) -> N
             root["start_commit"] = _clean_head(root, str(root.get("start_tree") or ""))
 
 
-def remember_commit(root: dict[str, Any], commit: str) -> None:
-    """Record a starting base the user chose as ``commit``: on no branch, and a clean checkout of it."""
+def remember_commit(root: dict[str, Any]) -> None:
+    """Record a starting base the user chose as a commit: on no branch, and with no commit to
+    follow. The user named it, so it stays exactly that (:func:`follow_moves` moves only a base
+    taken from HEAD as it was).
+
+    Known limit: a run whose baseline was chosen before this rule stored the chosen commit as
+    ``start_commit``, and that base still follows the checkout. It cannot be told from a base
+    taken from a detached HEAD, which rightly follows, so it is left as it was saved.
+    """
     remember_heads([root], start=True)
     root["start_branch"] = root["approved_branch"] = ""
-    root["start_commit"] = commit
+    root["start_commit"] = ""
 
 
 def _is_ancestor(repo: str, commit: str) -> bool:
@@ -903,18 +910,25 @@ def discover(run: RunState, *, late: bool) -> list[str]:
     return added
 
 
-def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") -> str:
+def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") -> tuple[str, str]:
     """Settle an unknown baseline: ``commit`` (a git root's revision), ``empty`` or ``current``.
 
     ``empty`` makes everything in the root new to the run; ``current`` takes what is there now as
     already reviewed. Both trees are set to the choice, so the next phase review diffs from it and
-    so does the final review. Answers the tree.
+    so does the final review. Answers the tree, and what to tell the user about it (``""`` for
+    nothing).
+
+    A commit is resolved as a commit, and its tree taken from that: a tree or a blob is refused.
+    It is the base exactly as named, and never follows the checkout (:func:`remember_commit`).
+    One that is not in HEAD's history is still taken, and said: what only it holds reads as
+    removed.
     """
     root = run.root(alias)
     if root is None:
         raise RunError("unknown-root", f"no root named {alias!r}")
     if root["baseline"] != "unknown":
         raise RunError("baseline-set", f"root {alias!r} already has a baseline")
+    note = ""
     if choice == "empty":
         tree = empty_tree(root, run.paths)
     elif choice == "current":
@@ -923,19 +937,28 @@ def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") ->
         if root["kind"] != "git":
             raise RunError("not-git", f"root {alias!r} is not a git repository; choose empty or current")
         # Only the commit named: never a candidate in its stead, which may be the checkout guess.
-        spec = commit
-        if not spec or spec.startswith("-"):
+        if not commit or commit.startswith("-"):
             raise RunError("bad-commit", f"no commit to take as the baseline of {alias!r}")
-        tree = gitsnap.rev_parse(root["path"], f"{spec}^{{tree}}")
+        # The expression as typed first, then its object peeled: a suffix on the raw text would be
+        # read as part of a path (``HEAD:src`` + ``^{commit}`` names ``src^{commit}``) or of a
+        # message search (``:/text``).
+        named = gitsnap.rev_parse(root["path"], commit)
+        sha = gitsnap.rev_parse(root["path"], f"{named}^{{commit}}") if named else ""
+        tree = gitsnap.rev_parse(root["path"], f"{sha}^{{tree}}") if sha else ""
         if not tree:
-            raise RunError("bad-commit", f"{spec!r} does not name a commit in {alias!r}")
+            raise RunError("bad-commit", f"{commit!r} does not name a commit in {alias!r}")
+        if not _is_ancestor(root["path"], sha):
+            note = (
+                f"{alias}: commit {sha[:12]} is not in the history of HEAD. It is the baseline as chosen, so what only it "
+                "holds reads as removed in the review."
+            )
     else:
         raise RunError("bad-choice", f"unknown baseline choice {choice!r}")
     root["start_tree"] = root["approved_tree"] = tree
     root["baseline"] = "set"
     root["candidates"] = []
     if choice == "commit":
-        remember_commit(root, gitsnap.rev_parse(root["path"], f"{spec}^{{commit}}"))
+        remember_commit(root)
     else:
         remember_heads([root], start=True)
-    return tree
+    return tree, note

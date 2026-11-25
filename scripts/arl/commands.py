@@ -314,12 +314,12 @@ def cmd_root_baseline(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any
         # The person chose for the run they were shown: aliases repeat across runs, and a stale
         # "current content" would hide a replacement run's changes from its diff.
         _require_run(run, args, "no baseline was set")
-        tree = workspace.set_baseline(run, str(args["alias"]), str(args["choice"]), commit=str(args.get("commit") or ""))
+        tree, note = workspace.set_baseline(run, str(args["alias"]), str(args["choice"]), commit=str(args.get("commit") or ""))
         # The user's choice is what the loop was waiting on: let the next turn end continue it,
         # even though the choice moves nothing the continuation token counts.
         run.data["last_continuation"] = ""
         run.save()
-        return {"ok": True, "alias": args["alias"], "tree": tree, "run": run.summary()}
+        return {"ok": True, "alias": args["alias"], "tree": tree, "run": run.summary(), **({"note": note} if note else {})}
 
 
 def cmd_attach(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:

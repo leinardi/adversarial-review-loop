@@ -1004,17 +1004,67 @@ test('the baseline question offers every commit it can fit, and the rest can be 
   const root = { alias: 'clone', path: '/c', kind: 'git', baseline: 'unknown', candidates: [{ commit: 'a'.repeat(40), why: 'checkout' }, { commit: 'b'.repeat(40), why: 'clone' }] }
   const full = baselineQuestion(root, 'Remove clone')
   expect(full.options).toEqual([`Changes since ${'a'.repeat(12)} (after the clone's checkout; a guess)`, `Changes since ${'b'.repeat(12)} (as cloned)`, 'The current content is the baseline', 'Remove clone'])
-  expect(full.question).toContain("Or type 'empty' for everything new.")
+  expect(full.question).toContain("Or type a commit to compare against, or 'empty' for everything new.")
   expect(full.choose(full.options[1] ?? '')).toEqual({ kind: 'commit', commit: 'b'.repeat(40) })
   expect(full.choose(' Empty ')).toEqual({ kind: 'empty' })
   expect(full.choose('Remove clone')).toEqual({ kind: 'remove' })
-  expect(full.choose('something else')).toBeUndefined()
+  expect(full.choose(' 1234abcd ')).toEqual({ kind: 'commit', commit: '1234abcd', typed: true })
+  expect(full.choose('')).toBeUndefined()
 
   const roomy = baselineQuestion(root, '')
   expect(roomy.options).toEqual([...full.options.slice(0, 2), 'Everything here is new', 'The current content is the baseline'])
-  expect(roomy.question).not.toContain('Or type')
-  expect(roomy.choose('remove')).toBeUndefined()
+  expect(roomy.question).not.toContain("'empty'")
+  expect(roomy.choose('remove')).toEqual({ kind: 'commit', commit: 'remove', typed: true })
+
+  const folder = baselineQuestion({ alias: 'web', path: '/w', kind: 'dir', baseline: 'unknown', candidates: [] }, '')
+  expect(folder.question).not.toContain('Or type')
+  expect(folder.choose('abc123')).toEqual({ kind: 'not-git', text: 'abc123' })
 
   const twice = baselineQuestion({ ...root, candidates: [{ commit: 'c'.repeat(40), why: 'start' }, { commit: 'c'.repeat(40), why: 'clone' }] }, '')
   expect(twice.options).toEqual([`Changes since ${'c'.repeat(12)} (when the run started)`, 'Everything here is new', 'The current content is the baseline'])
+})
+
+test('a commit typed at the baseline question goes to the engine as one argument, and a refused one is asked again', async () => {
+  at(true)
+  let tries = 0
+  const { $, w } = fakeEngine({
+    engine: {
+      ...removal([WORK, CLONE], [WORK], { ok: true }),
+      'root-baseline': () => (++tries === 1 ? { ok: false, code: 'bad-commit', error: "'nope' does not name a commit in 'clone'" } : { ok: true, run: summary(), note: 'clone: commit 55f8ddf is not in the history of HEAD.' }),
+    },
+    choices: ['nope', '--empty'],
+  })
+  const chosen = await chooseBaselines($)
+  expect([...chosen.outcomes]).toEqual([['clone', 'chosen']])
+  expect(w.calls.filter(call => call.args[0] === 'root-baseline').map(call => call.args)).toEqual([
+    ['root-baseline', 'clone', '--commit=nope', '--run', 'r1'],
+    ['root-baseline', 'clone', '--commit=--empty', '--run', 'r1'],
+  ])
+  expect(w.asked).toHaveLength(2)
+  expect(w.logged.join('\n')).toContain("Not a commit in clone: 'nope' does not name a commit in 'clone'")
+  expect(w.logged.join('\n')).toContain('not in the history of HEAD')
+})
+
+test('three refused typed commits end the question unchosen', async () => {
+  at(true)
+  const { $, w } = fakeEngine({
+    engine: { ...removal([WORK, CLONE], [WORK], { ok: true }), 'root-baseline': { ok: false, code: 'bad-commit', error: 'no' } },
+    choices: ['a', 'b', 'c', 'd'],
+  })
+  const chosen = await chooseBaselines($)
+  expect([chosen.settled, [...chosen.outcomes]]).toEqual([false, [['clone', 'unchosen']]])
+  expect(w.asked).toHaveLength(3)
+})
+
+test('text typed for a folder root never reaches the engine as a commit', async () => {
+  at(true)
+  const web = { alias: 'web', path: '/tmp/s/web', kind: 'dir', baseline: 'unknown', candidates: [] }
+  const { $, w } = fakeEngine({
+    engine: { ...removal([WORK, web], [WORK], { ok: true }), 'root-baseline': { ok: true, run: summary() } },
+    choices: ['abc123', 'empty'],
+  })
+  const chosen = await chooseBaselines($)
+  expect([...chosen.outcomes]).toEqual([['web', 'chosen']])
+  expect(w.calls.filter(call => call.args[0] === 'root-baseline').map(call => call.args)).toEqual([['root-baseline', 'web', '--empty', '--run', 'r1']])
+  expect(w.logged.join('\n')).toContain('type a commit only for a git repository')
 })
