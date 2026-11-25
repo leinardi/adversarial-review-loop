@@ -70,7 +70,7 @@ export const TOOLS = {
   },
   review: {
     description:
-      "Ask for the adversarial review of the implemented phase (or the final review); on approval, commit each changed git repository, then do what the answer says. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. After a review that asked for changes, pass dispositions too: for each finding of that review (by its id, r<round>.<n>), whether you fixed it or reject it, with a note citing the file and line that shows it. A finding you reject with no such citation stays open. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
+      "Ask for the adversarial review of the implemented phase (or the final review); on approval, commit each changed git repository, then do what the answer says. First run the project's checks yourself and pass what they printed as verification, with the directory each ran in; the reviewer does not run them. After a review that asked for changes, pass dispositions too: for each finding of that review (by its id, r<round>.<n>), whether you fixed it or reject it, with a note citing the file and line that shows it. A finding you reject with no such citation stays open. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -82,11 +82,11 @@ export const TOOLS = {
             properties: {
               root: { type: 'string', description: 'The root the command ran for (its alias or path).' },
               command: { type: 'string' },
-              cwd: { type: 'string' },
+              cwd: { type: 'string', description: 'The directory it ran in, absolute or relative to the launch directory: it tells which root it checked.' },
               status: { type: 'integer', description: 'Exit status.' },
-              output: { type: 'string', description: 'The tail of its output.' },
+              output: { type: 'string', description: 'The last lines the command itself printed, verbatim: never a summary of them.' },
             },
-            required: ['command', 'status'],
+            required: ['command', 'cwd', 'status', 'output'],
           },
         },
         dispositions: {

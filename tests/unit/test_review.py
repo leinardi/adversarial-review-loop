@@ -154,6 +154,58 @@ def test_verification_is_the_implementers_report_and_says_so(ws: Path, engine: E
     assert "The engine ran none of them" in text
 
 
+def test_verification_shows_the_reported_root_beside_the_one_it_ran_in(ws: Path, engine: Engine, tmp_path: Path) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    report = {
+        "verification": [
+            # Run from the launch directory for api: where it started is not what it checked.
+            {"root": "api", "command": "make -C api test", "cwd": str(ws), "status": 0, "output": "ok", "root_given": "forged"},
+            {"root": "api", "command": "make check", "cwd": "api/src", "status": 0, "output": "  \n"},
+            {"command": "make lint", "cwd": str(tmp_path), "status": 1, "output": "lint failed"},
+        ]
+    }
+
+    text = (Path(prepare(engine, ws, stdin=json.dumps(report))["bundle_dir"]) / "verification.txt").read_text()
+    make_c, check, lint = text.split("\n## ")[1:]
+    assert "- root, as the implementer reported it: api\n" in make_c
+    assert f"- working directory: {ws} (in root " in make_c
+    assert "(in root api)" not in make_c
+    # Only the entry's own fields reach the bundle.
+    assert "forged" not in text
+    assert "- working directory: api/src (in root api)" in check
+    assert "(no output reported)" in check
+    assert "- root, as the implementer reported it: -\n" in lint
+    assert "(in root none)" in lint
+    assert "an excerpt it chose; the engine did not capture it" in make_c
+
+
+@pytest.mark.parametrize("ignored", [False, True])
+def test_verification_whose_cwd_is_no_path_is_refused_even_when_nothing_is_reviewed(
+    ws: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch, ignored: bool
+) -> None:
+    if ignored:
+        # Every change ignored: the stage would be approved without a reviewer.
+        monkeypatch.setenv("ARL_IGNORE_GLOBS", "*.py")
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    report = {"verification": [{"root": "api", "command": "make test", "cwd": "api\x00x", "status": 0, "output": "ok"}]}
+    assert prepare(engine, ws, stdin=json.dumps(report))["code"] == "bad-verification"
+    if ignored:
+        # The same stage with a working directory that is a path is approved unreviewed.
+        report["verification"][0]["cwd"] = "api"
+        assert prepare(engine, ws, stdin=json.dumps(report))["status"] == "skipped"
+
+
+def test_verification_without_its_working_directory_is_refused(ws: Path, engine: Engine) -> None:
+    started(engine, ws)
+    edit(ws / "api" / "src" / "main.py", "print(2)\n")
+    report = {"verification": [{"root": "api", "command": "make test", "status": 0, "output": "12 passed"}]}
+    refused = prepare(engine, ws, stdin=json.dumps(report))
+    assert refused["code"] == "bad-verification"
+    assert "make test" in refused["error"]
+
+
 @pytest.mark.parametrize("stdin", ["not json", '{"verification": "make test"}', '{"verification": [1]}'])
 def test_verification_that_cannot_be_read_is_refused_not_dropped(ws: Path, engine: Engine, stdin: str) -> None:
     started(engine, ws)

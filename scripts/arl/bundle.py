@@ -808,11 +808,13 @@ def _verification_text(entries: Sequence[Mapping[str, Any]]) -> str:
         output = str(entry.get("output") or "")
         raw = encode(output)
         tail = decode(raw[-VERIFICATION_OUTPUT_BYTES:]) if len(raw) > VERIFICATION_OUTPUT_BYTES else output
-        cut = f" (last {VERIFICATION_OUTPUT_BYTES} bytes)" if len(raw) > VERIFICATION_OUTPUT_BYTES else ""
+        cut = f", its last {VERIFICATION_OUTPUT_BYTES} bytes" if len(raw) > VERIFICATION_OUTPUT_BYTES else ""
         out.append(
             f"\n## `{entry.get('command', '')}`\n\n"
-            f"- root: {entry.get('root', '-')}\n- working directory: {entry.get('cwd', '-')}\n- exit status: {entry.get('status', '-')}\n"
-            f"\nOutput{cut}:\n\n```\n{tail.rstrip()}\n```\n"
+            f"- root, as the implementer reported it: {entry.get('root') or '-'}\n"
+            f"- working directory: {entry.get('cwd', '-')} (in root {entry.get('cwd_root') or '-'})\n"
+            f"- exit status: {entry.get('status', '-')}\n"
+            f"\nOutput, as the implementer reported it (an excerpt it chose; the engine did not capture it{cut}):\n\n```\n{tail.rstrip()}\n```\n"
         )
     if len(entries) > MAX_VERIFICATION_ENTRIES:
         out.append(f"\n({len(entries) - MAX_VERIFICATION_ENTRIES} more entries were not kept)\n")
