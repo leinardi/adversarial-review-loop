@@ -23,7 +23,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { asOf, COMMANDS, openPane, registerCommands, runCommand, showNow } from './commands'
 import { engine } from './engine'
-import { addRoot, continueRun, ensureRoot, fromScript, nameTools, parentOf, type Registration, review, session, resetWrites, setPhases, SCRIPT_BUDGET_MS, sweepRoots, track, unregistered, writeIn } from './flow'
+import { addRoot, continueRun, ensureRoot, fromScript, nameTools, parentOf, refreshIfChanged, type Registration, review, session, resetWrites, setPhases, SCRIPT_BUDGET_MS, sweepRoots, track, unregistered, writeIn } from './flow'
 import { countStep, deliver, registerReviewer, resetCheckedModels, REVIEWER, reviewerDecision, runHandback, runSubagentCall } from './reviewer'
 import { TOOLS, type ToolName } from './text'
 import { pane, registerUi, showBusy } from './ui'
@@ -162,6 +162,8 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       session.turnRunning = true
+      // What changed the run outside this session is drawn before the turn: never in its way.
+      await refreshIfChanged($).catch(() => undefined)
       await showBusy($, true).catch(() => undefined)
     }
     return next(e)

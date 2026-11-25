@@ -195,6 +195,8 @@ export type WorldOptions = {
   check?: 'allow' | 'ask' | 'deny'
   /** What the write itself comes to: `'deny'` as when the person refuses it in the dialog. */
   writeOutcome?: 'run' | 'deny' | 'throw'
+  /** How many of the hand-made `$`'s next `$.state.set` calls reject, as a failing host would. */
+  stateSetFails?: number
   /** Make `$.session.compact` reject, as a headless session does. */
   compactFails?: boolean
 }
@@ -400,8 +402,14 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
       },
     },
     fs: {
-      exists: async (path: string) => exists(options, path),
-      stat: async () => ({ mtimeMs: options.stateMtime ?? 1 }),
+      exists: async (path: string) => {
+        if (options.existsFails) throw new Error('fs unavailable')
+        return exists(options, path)
+      },
+      stat: async (path: string) => {
+        if (!exists(options, path)) throw new Error(`ENOENT: ${path}`)
+        return { mtimeMs: options.stateMtime ?? 1, size: 1 }
+      },
       read: async (path: string) => read(options, state, path),
       write: async (path: string, text: string) => {
         state.written.set(path, text)
@@ -453,6 +461,10 @@ export function fakeEngine(options: WorldOptions): { $: EngineInterface; w: Worl
         return { value: state.state.get(key), version: state.state.has(key) ? 1 : 0 }
       },
       set: async (ref: { plugin: string; key: string }, value: unknown) => {
+        if ((options.stateSetFails ?? 0) > 0) {
+          options.stateSetFails = (options.stateSetFails ?? 0) - 1
+          throw new Error('state unavailable')
+        }
         state.state.set(`${ref.plugin}/${ref.key}`, value)
         return { isSet: true, version: 1 }
       },

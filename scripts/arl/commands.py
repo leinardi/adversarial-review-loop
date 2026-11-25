@@ -391,7 +391,15 @@ def cmd_stats(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def cmd_status(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
-    """The run's summary; with ``context``, also what a resumed session is told about it, as it is now."""
+    """The run's summary; with ``context``, also what a resumed session is told about it, as it is now.
+
+    With ``peek``, the summary alone, read without the lock: what the mod draws between turns
+    must never wait on a command that holds it. A save is a rename, so the read is one whole
+    save, and its stamp names it (:meth:`RunState.load`).
+    """
+    if args.get("peek"):
+        peeked = RunState.load(paths)
+        return {"ok": True, "run": peeked.summary() if peeked is not None else None}
     with locked_state(paths) as run:
         answer: dict[str, Any] = {"ok": True, "run": run.summary() if run is not None else None}
         if args.get("context") and run is not None:

@@ -500,3 +500,35 @@ test('the band says working while Claude\'s main turn runs, and idle once it end
   await turnEnds($, { reason: 'aborted', isAborted: true })
   expect(await band()).toContain('· idle')
 })
+
+test('a turn draws the run again when its state file is not the save last drawn, and only then', async ($, on) => {
+  let stamp = '5:1'
+  const options = {
+    engine: {
+      attach: { ok: true, run: summary({ state_stamp: '5:1' }), foreign_review: false, effort: '' },
+      status: () => ({ ok: true, run: summary({ state_stamp: stamp }) }),
+      'next-action': { ok: true, action: 'yield', reason: 'unchanged' },
+    },
+    stateMtime: 5,
+  }
+  const w = world(on, options)
+  on('turn.start', (_, e) => e as never)
+  await start($)
+  const statuses = (): number => w.calls.filter(call => call.args[0] === 'status').length
+  const before = statuses()
+  const turn = async (id: string): Promise<void> => {
+    await $.turn.start({ text: 'go', turnId: id } as never)
+  }
+  await turn('t1')
+  expect(statuses()).toBe(before)
+  // Saved outside the mod; the engine still answers the save it read before that one.
+  options.stateMtime = 9
+  await turn('t2')
+  expect(statuses()).toBe(before + 1)
+  // The answer named the older save, so the newer one is still unseen.
+  stamp = '9:1'
+  await turn('t3')
+  expect(statuses()).toBe(before + 2)
+  await turn('t4')
+  expect(statuses()).toBe(before + 2)
+})

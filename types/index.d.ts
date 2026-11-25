@@ -34,6 +34,8 @@ export type RunView = {
   final_required: boolean
   pending_review: boolean
   waiting: { kind: string; detail?: string; switch?: { which: string; word: string } } | null
+  /** Which save of the state file this summary was read from (`state.state_stamp`). */
+  state_stamp?: string
   roots: { alias: string; path: string; kind: string; baseline: string; candidates: Candidate[]; suggested?: string }[]
 }
 

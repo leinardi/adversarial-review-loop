@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from arl.errors import StateLoadError
-from arl.state import RunError, RunState, locked_state, new_document, next_action, run_paths
+from arl.state import RunError, RunState, locked_state, new_document, next_action, run_paths, state_stamp
 
 TREES = {"ws": "a" * 40, "api": "b" * 40}
 
@@ -237,6 +237,25 @@ def test_a_state_written_with_one_proposed_commit_loads_it_as_the_only_candidate
     assert [root["candidates"] for root in loaded.roots] == [[{"commit": "c" * 40, "why": "start"}], []]
     assert all("proposed" not in root for root in loaded.roots)
     assert loaded.summary()["roots"][0]["candidates"] == [{"commit": "c" * 40, "why": "start"}]
+
+
+def test_the_state_stamp_names_the_file_as_read_and_as_saved(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    assert run.summary()["state_stamp"] == ""
+    with locked_state(run.paths):
+        run.save()
+    saved = run.summary()["state_stamp"]
+    info = run.paths.state_file.stat()
+    assert saved == f"{info.st_mtime_ns // 1_000_000}:{info.st_size}"
+    loaded = RunState.load(run.paths)
+    assert loaded is not None
+    assert loaded.stamp == saved
+    # A save of another size, so the stamp differs even within the same millisecond.
+    run.data["rounds"] = 1234567
+    with locked_state(run.paths):
+        run.save()
+    assert run.stamp != saved
+    assert state_stamp(tmp_path / "missing.json") == ""
 
 
 def test_a_later_statement_replaces_the_earlier_one_and_a_replan_clears_them(tmp_path: Path) -> None:

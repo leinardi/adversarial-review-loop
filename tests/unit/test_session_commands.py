@@ -306,6 +306,18 @@ def test_root_baseline_refuses_consent_given_for_another_run(engine: Engine, ws:
     assert engine(ws, "root-baseline", alias, "--current", "--run", load_run_id(ws))["ok"]
 
 
+def test_status_peek_answers_while_another_command_holds_the_lock(engine: Engine, ws: Path, run_env: Path) -> None:
+    started(engine, ws)
+    paths = state.run_paths(ws)
+    with state.locked_state(paths):
+        answer = engine(ws, "status", "--peek")
+    info = paths.state_file.stat()
+    assert answer["ok"] and answer["run"]["state_stamp"] == f"{info.st_mtime_ns // 1_000_000}:{info.st_size}"
+    assert "context" not in answer
+    paths.state_file.unlink()
+    assert engine(ws, "status", "--peek") == {"ok": True, "run": None}
+
+
 def test_status_context_is_the_resume_context_of_the_run_as_it_is_now(engine: Engine, ws: Path, run_env: Path) -> None:
     started(engine, ws)
     _scratch_with_clone(ws, run_env, engine)

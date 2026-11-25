@@ -58,8 +58,15 @@ export async function track($: EngineInterface, answer: Answer): Promise<void> {
   const run = answer.run as RunSummary | null | undefined
   if (run === undefined) return
   roots = run !== null && (run.status === 'active' || run.status === 'paused') ? run.roots.map(root => root.path) : null
-  // What the person sees must never stop the loop.
-  await showRun($, run).catch(() => undefined)
+  // What the person sees must never stop the loop. The save drawn is the one the engine read,
+  // never a stat taken after, and only once it is drawn: a newer save in between, or a draw that
+  // failed, still reads as unseen (`refreshIfChanged`).
+  try {
+    await showRun($, run)
+    seenStamp = run?.state_stamp ?? ''
+  } catch {
+    seenStamp = undefined
+  }
 }
 
 /**
@@ -84,6 +91,31 @@ async function runHere($: EngineInterface): Promise<'yes' | 'no' | { unknown: st
 async function hasRun($: EngineInterface): Promise<boolean> {
   return (await runHere($)) === 'yes'
 }
+
+/** Which save of the state file the run shown was read from; `undefined` before any. */
+let seenStamp: string | undefined
+
+/**
+ * Draw the run again when its state file is not the save last drawn: an engine command the mod
+ * did not run (another session, the person's own shell) changed it. One stat when it did not.
+ */
+export async function refreshIfChanged($: EngineInterface): Promise<void> {
+  if (session.dir === '') return
+  const file = `${session.dir}/.arl/state.json`
+  const stat = await $.fs.stat(file).catch(() => undefined)
+  if (stat === undefined) {
+    // Gone (deleted, moved): no run here now. A stat that failed otherwise says nothing.
+    if (seenStamp !== '' && (await $.fs.exists(file).catch(() => true)) === false) await track($, { ok: true, run: null })
+    return
+  }
+  if (`${Math.floor(stat.mtimeMs)}:${stat.size}` === seenStamp) return
+  // Without the lock and on a short deadline: a command holding the lock (a review, another
+  // session) never holds up the turn this runs before.
+  await track($, await engine($, session.dir, ['status', '--peek'], '', PEEK_TIMEOUT_MS))
+}
+
+/** How long drawing a run changed elsewhere may hold up a turn. */
+const PEEK_TIMEOUT_MS = 10_000
 
 /** Run an engine command for this session's launch directory, and track the run it answers. */
 export async function run($: EngineInterface, args: readonly string[], stdin = ''): Promise<Answer> {

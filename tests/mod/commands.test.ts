@@ -21,7 +21,7 @@
 import { expect, test } from 'claude-code/testing'
 import { asOf, implementArgs, modelArgs, openPane, runCommand, showNow } from '../../hooks/commands'
 import { pane } from '../../hooks/ui'
-import { announce, baselineQuestion, chooseBaselines, continueRun, nameTools, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
+import { announce, baselineQuestion, chooseBaselines, refreshIfChanged, track, continueRun, nameTools, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
 import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, settle, start, summary, world } from './world'
 
 function at(isInteractive = false): void {
@@ -1155,4 +1155,43 @@ test('a removal whose target another session removed already reads the roots aga
     choices: [REMOVE],
   })
   expect((await chooseBaselines($)).settled).toBe(true)
+})
+
+test('a run drawn elsewhere is read without the lock, on a short deadline', async () => {
+  at(true)
+  const { $, w } = fakeEngine({ engine: { status: { ok: true, run: summary({ state_stamp: '1:1' }) } }, stateMtime: 1 })
+  await track($, { ok: true, run: summary({ state_stamp: '0:1' }) })
+  await refreshIfChanged($)
+  expect(w.calls.map(call => call.args)).toEqual([['status', '--peek']])
+})
+
+test('a state file that is gone clears the run drawn, and a stat that failed otherwise clears nothing', async () => {
+  at(true)
+  const options = { engine: { status: { ok: true, run: summary({ state_stamp: '1:1' }) } }, stateMtime: 1, hasState: true, existsFails: false }
+  const { $, w } = fakeEngine(options)
+  await track($, { ok: true, run: summary({ state_stamp: '1:1' }) })
+  expect(w.state.get('adversarial-review-loop/run')).toMatchObject({ value: { run_id: 'r1' } })
+  // The stat fails and nothing can say the file is gone: the run drawn stays.
+  options.hasState = false
+  options.existsFails = true
+  await refreshIfChanged($)
+  expect(w.state.get('adversarial-review-loop/run')).toMatchObject({ value: { run_id: 'r1' } })
+  options.existsFails = false
+  await refreshIfChanged($)
+  expect(w.state.get('adversarial-review-loop/run')).toMatchObject({ value: null })
+  expect(w.calls).toEqual([])
+})
+
+test('a draw that failed leaves its save unseen, so the next turn draws it again', async () => {
+  at(true)
+  const options = { engine: { status: { ok: true, run: summary({ state_stamp: '1:1', rounds: 3 }) } }, stateMtime: 1, stateSetFails: 0 }
+  const { $, w } = fakeEngine(options)
+  await track($, { ok: true, run: summary({ state_stamp: '0:1' }) })
+  options.stateSetFails = 1
+  await refreshIfChanged($)
+  expect(w.state.get('adversarial-review-loop/run')).toMatchObject({ value: { rounds: 0 } })
+  await refreshIfChanged($)
+  expect(w.state.get('adversarial-review-loop/run')).toMatchObject({ value: { rounds: 3 } })
+  await refreshIfChanged($)
+  expect(w.calls).toHaveLength(2)
 })
