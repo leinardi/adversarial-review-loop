@@ -64,9 +64,9 @@ export const ENGINE_TIMEOUT_MS = 600_000
  * `stdin` is always written and closed: `set-phases` and `review prepare` read their input to
  * end of file, and an inherited stdin would hang them.
  */
-export async function engine($: EngineInterface, dir: string, args: readonly string[], stdin = ''): Promise<Answer> {
+export async function engine($: EngineInterface, dir: string, args: readonly string[], stdin = '', timeoutMs = ENGINE_TIMEOUT_MS): Promise<Answer> {
   try {
-    const ran = await $.process.run(argv($, dir, args), { cwd: dir, stdin, timeoutMs: ENGINE_TIMEOUT_MS })
+    const ran = await $.process.run(argv($, dir, args), { cwd: dir, stdin, timeoutMs })
     return parseAnswer(ran.stdout, ran.stderr, `exit ${ran.exitCode}`)
   } catch (error) {
     return broken('could not run', String(error))

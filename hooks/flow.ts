@@ -58,8 +58,15 @@ export async function track($: EngineInterface, answer: Answer): Promise<void> {
   const run = answer.run as RunSummary | null | undefined
   if (run === undefined) return
   roots = run !== null && (run.status === 'active' || run.status === 'paused') ? run.roots.map(root => root.path) : null
-  // What the person sees must never stop the loop.
-  await showRun($, run).catch(() => undefined)
+  // What the person sees must never stop the loop. The save drawn is the one the engine read,
+  // never a stat taken after, and only once it is drawn: a newer save in between, or a draw that
+  // failed, still reads as unseen (`refreshIfChanged`).
+  try {
+    await showRun($, run)
+    seenStamp = run?.state_stamp ?? ''
+  } catch {
+    seenStamp = undefined
+  }
 }
 
 /**
@@ -84,6 +91,31 @@ async function runHere($: EngineInterface): Promise<'yes' | 'no' | { unknown: st
 async function hasRun($: EngineInterface): Promise<boolean> {
   return (await runHere($)) === 'yes'
 }
+
+/** Which save of the state file the run shown was read from; `undefined` before any. */
+let seenStamp: string | undefined
+
+/**
+ * Draw the run again when its state file is not the save last drawn: an engine command the mod
+ * did not run (another session, the person's own shell) changed it. One stat when it did not.
+ */
+export async function refreshIfChanged($: EngineInterface): Promise<void> {
+  if (session.dir === '') return
+  const file = `${session.dir}/.arl/state.json`
+  const stat = await $.fs.stat(file).catch(() => undefined)
+  if (stat === undefined) {
+    // Gone (deleted, moved): no run here now. A stat that failed otherwise says nothing.
+    if (seenStamp !== '' && (await $.fs.exists(file).catch(() => true)) === false) await track($, { ok: true, run: null })
+    return
+  }
+  if (`${Math.floor(stat.mtimeMs)}:${stat.size}` === seenStamp) return
+  // Without the lock and on a short deadline: a command holding the lock (a review, another
+  // session) never holds up the turn this runs before.
+  await track($, await engine($, session.dir, ['status', '--peek'], '', PEEK_TIMEOUT_MS))
+}
+
+/** How long drawing a run changed elsewhere may hold up a turn. */
+const PEEK_TIMEOUT_MS = 10_000
 
 /** Run an engine command for this session's launch directory, and track the run it answers. */
 export async function run($: EngineInterface, args: readonly string[], stdin = ''): Promise<Answer> {
@@ -223,6 +255,80 @@ export function removedNote(removed: readonly string[]): string {
   return `The user removed root${removed.length === 1 ? '' : 's'} ${removed.join(', ')} from the run: nothing in ${removed.length === 1 ? 'it' : 'them'} is reviewed. Don't change ${removed.length === 1 ? 'it' : 'them'} for the plan.\n\n`
 }
 
+/** Why the engine offers a commit as a baseline (`workspace._candidates`), as the dialog says it. */
+const WHY: Record<string, string> = {
+  checkout: "after the clone's checkout; a guess",
+  clone: 'as cloned',
+  worktree: 'where the worktree was made',
+  start: 'when the run started',
+  suggested: "Claude's suggestion",
+}
+
+/** The most options `$.ui.ask` takes. */
+const ASK_OPTIONS = 4
+
+/** How many typed answers one root's baseline question refuses before it gives up. */
+const MAX_TYPED_TRIES = 3
+
+const EVERYTHING_NEW = 'Everything here is new'
+const CURRENT_CONTENT = 'The current content is the baseline'
+
+/** What one answer to the baseline question chose; `undefined` for an answer that chose nothing. */
+export type BaselineChoice =
+  | { kind: 'commit'; commit: string; typed?: true }
+  | { kind: 'empty' }
+  | { kind: 'current' }
+  | { kind: 'remove' }
+  | { kind: 'not-git'; text: string }
+  | undefined
+
+/**
+ * The baseline question for one root: its text, its options, and what an answer chose. The
+ * dialog takes at most four options, so the commits offered come first, then Remove, then the
+ * current content and "everything new" as room allows. What does not fit can still be typed:
+ * `current` and `empty`, which the question names when they are left out. On a git root, any
+ * other text typed is a commit, passed on as typed for the engine to resolve or refuse.
+ */
+export function baselineQuestion(root: RunView['roots'][number], remove: string): { question: string; options: string[]; choose: (answer: string) => BaselineChoice } {
+  const commits = new Map<string, string>()
+  // Claude's suggestion first; a commit offered twice is listed once, under its first reason.
+  const offers = [...(root.suggested ? [{ commit: root.suggested, why: 'suggested' }] : []), ...(root.candidates ?? [])]
+  for (const offered of offers) {
+    if (!offered.commit || [...commits.values()].includes(offered.commit)) continue
+    commits.set(`Changes since ${offered.commit.slice(0, 12)} (${WHY[offered.why] ?? offered.why})`, offered.commit)
+  }
+  const tail = remove ? [remove] : []
+  const room = ASK_OPTIONS - tail.length
+  const shownCommits = [...commits.keys()].slice(0, room)
+  // "Everything new" gives way first: on a root with commits to offer it is the least likely.
+  const left = room - shownCommits.length
+  const shownFixed = left >= 2 ? [EVERYTHING_NEW, CURRENT_CONTENT] : left === 1 ? [CURRENT_CONTENT] : []
+  const options = [...shownCommits, ...shownFixed, ...tail]
+  const git = root.kind === 'git'
+  const typed = [
+    ...(git ? ['a commit to compare against'] : []),
+    ...(shownFixed.includes(CURRENT_CONTENT) ? [] : ["'current' for its current content"]),
+    ...(shownFixed.includes(EVERYTHING_NEW) ? [] : ["'empty' for everything new"]),
+  ]
+  const question =
+    `Root ${root.alias} (${root.path}) joined the run after it changed. What should its review compare against?` +
+    (typed.length > 0 ? ` Or type ${typed.join(', or ')}.` : '')
+  const choose = (answer: string): BaselineChoice => {
+    const commit = commits.get(answer)
+    if (commit !== undefined && shownCommits.includes(answer)) return { kind: 'commit', commit }
+    if (answer === CURRENT_CONTENT) return { kind: 'current' }
+    if (answer === EVERYTHING_NEW) return { kind: 'empty' }
+    if (remove && answer === remove) return { kind: 'remove' }
+    const word = answer.trim().toLowerCase()
+    if (word === 'current') return { kind: 'current' }
+    if (word === 'empty') return { kind: 'empty' }
+    const text = answer.trim()
+    if (text === '') return undefined
+    return git ? { kind: 'commit', commit: text, typed: true } : { kind: 'not-git', text }
+  }
+  return { question, options, choose }
+}
+
 /**
  * Ask the user for the baseline of each root that has none, or to remove it: a scratch folder
  * registered by mistake, or the clone found in it, is not the plan's work. Removal takes the
@@ -236,10 +342,22 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
   const done = (settled: boolean): Baselines => ({ settled, removed, outcomes })
   // Roots whose removal met a changed set, and were asked again once.
   const retried = new Set<string>()
+  // How many typed answers each root's question refused: a person who keeps mistyping is asked
+  // again, but not forever.
+  const refusedTyped = new Map<string, number>()
+  // Roots an answer found gone (another session removed them), and asked about again once.
+  const vanished = new Set<string>()
+  // The run the questions are about: outcomes are kept by alias, and aliases repeat across runs.
+  let runId: string | undefined
   for (;;) {
     const status = await run($, ['status'])
     const summary = status.run as RunSummary | null | undefined
     if (!status.ok || summary == null) return done(false)
+    runId ??= summary.run_id
+    if (summary.run_id !== runId) {
+      $.ui.log(`The run changed while its baselines were asked (now ${summary.run_id}): nothing more is asked.`)
+      return done(false)
+    }
     // A root whose baseline the engine took is not asked again, whatever a stale status says.
     const unknown = summary.roots.filter(root => root.baseline === 'unknown' && outcomes.get(root.alias) !== 'chosen')
     const root = unknown[0]
@@ -250,26 +368,44 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
     // inside another, so the container goes with it, and every root it holds.
     const top = roots.filter(other => within(root.path, other.path)).sort((a, b) => a.path.length - b.path.length)[0] ?? root
     const going = roots.filter(other => within(other.path, top.path)).map(other => other.alias)
-    const remove = going.length < roots.length ? `Remove ${going.join(', ')} (not the plan's work)` : ''
-    const since = root.proposed ? `Changes since ${root.proposed}` : ''
-    const options = [...(since ? [since] : []), 'Everything here is new', 'The current content is the baseline', ...(remove ? [remove] : [])]
-    const choice = await $.ui
-      .ask(`Root ${root.alias} (${root.path}) joined the run after it changed. What should its review compare against?`, options)
-      .catch((error: unknown) => {
-        $.ui.log(`Could not ask for the baseline of root ${root.alias} (${String(error)}).`)
-        return ''
-      })
-    if (choice === remove && remove) {
-      const answer = await run($, ['root-remove', top.alias, '--with-nested', '--expect', going.join(','), '--run', summary.run_id])
+    // A root inside that has a baseline is said: someone chose to review it.
+    const kept = roots.filter(other => going.includes(other.alias) && other.alias !== top.alias && other.baseline === 'set').map(other => other.alias)
+    const keptNote = kept.length === 0 ? '' : `; ${kept.join(', ')} already ${kept.length === 1 ? 'has' : 'have'} a baseline`
+    const remove = going.length < roots.length ? `Remove ${going.join(', ')} (not the plan's work${keptNote})` : ''
+    const { question, options, choose } = baselineQuestion(root, remove)
+    const answered = await $.ui.ask(question, options).catch((error: unknown) => {
+      $.ui.log(`Could not ask for the baseline of root ${root.alias} (${String(error)}).`)
+      return ''
+    })
+    const choice = choose(answered)
+    if (choice?.kind === 'not-git') {
+      const tries = (refusedTyped.get(root.alias) ?? 0) + 1
+      refusedTyped.set(root.alias, tries)
+      $.ui.log(`Root ${root.alias} is a folder, not a git repository: type a commit only for a git repository.`)
+      if (tries < MAX_TYPED_TRIES) continue
+      outcomes.set(root.alias, 'unchosen')
+      return done(false)
+    }
+    if (choice?.kind === 'remove') {
+      // The baselines as shown too: one set meanwhile, a nested clone's say, may be wanted now.
+      const shown = roots.filter(other => going.includes(other.alias)).map(other => `${other.alias}=${other.baseline}`)
+      const answer = await run($, ['root-remove', top.alias, '--with-nested', '--expect', going.join(','), '--expect-baselines', shown.join(','), '--run', summary.run_id])
       if (answer.ok) {
         const gone = Array.isArray(answer.removed) ? answer.removed.map(String) : going
         removed.push(...gone)
         for (const alias of gone) outcomes.set(alias, 'removed')
         continue
       }
-      // A root joined or left while the question was open: ask again, once, with the new set.
+      // A root joined or left, or a baseline was set, while the question was open: say what
+      // changed, then ask again, once, with the roots as they are now.
       if (answer.code === 'removal-changed' && !retried.has(root.alias)) {
         retried.add(root.alias)
+        $.ui.log(`Nothing was removed: ${answer.error ?? 'the roots changed while you were asked'}. Asking again.`)
+        continue
+      }
+      // Gone already: removed by another session. Read the roots again.
+      if (answer.code === 'unknown-root' && !vanished.has(root.alias)) {
+        vanished.add(root.alias)
         continue
       }
       $.ui.log(`Could not remove ${going.join(', ')}: ${answer.error ?? answer.code ?? 'no reason given'}`)
@@ -277,19 +413,42 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
       return done(false)
     }
     const args =
-      choice === since && since
-        ? ['root-baseline', root.alias, '--commit', root.proposed]
-        : choice === 'Everything here is new'
+      choice?.kind === 'commit'
+        ? // One argument, so typed text is never read as an option.
+          ['root-baseline', root.alias, `--commit=${choice.commit}`]
+        : choice?.kind === 'empty'
           ? ['root-baseline', root.alias, '--empty']
-          : choice === 'The current content is the baseline'
+          : choice?.kind === 'current'
             ? ['root-baseline', root.alias, '--current']
             : undefined
     // Chosen for the run the question showed: another session may have replaced it meanwhile.
-    if (args !== undefined) args.push('--run', summary.run_id)
-    if (args === undefined || !(await run($, args)).ok) {
+    if (args === undefined) {
       outcomes.set(root.alias, 'unchosen')
       return done(false)
     }
+    args.push('--run', summary.run_id)
+    const set = await run($, args)
+    if (!set.ok && choice?.kind === 'commit' && choice.typed === true && set.code === 'bad-commit') {
+      const tries = (refusedTyped.get(root.alias) ?? 0) + 1
+      refusedTyped.set(root.alias, tries)
+      $.ui.log(`Not a commit in ${root.alias}: ${set.error ?? choice.commit}`)
+      if (tries < MAX_TYPED_TRIES) continue
+    }
+    // Set meanwhile, by another session or by hand: chosen, not this question's to answer.
+    if (!set.ok && set.code === 'baseline-set') {
+      outcomes.set(root.alias, 'chosen')
+      continue
+    }
+    // Removed meanwhile by another session: nothing left to choose for it. Read the roots again.
+    if (!set.ok && set.code === 'unknown-root' && !vanished.has(root.alias)) {
+      vanished.add(root.alias)
+      continue
+    }
+    if (!set.ok) {
+      outcomes.set(root.alias, 'unchosen')
+      return done(false)
+    }
+    if (typeof set.note === 'string' && set.note !== '') $.ui.log(set.note)
     outcomes.set(root.alias, 'chosen')
   }
 }
@@ -308,39 +467,64 @@ export async function setPhases($: EngineInterface, input: Record<string, unknow
 
 export async function addRoot($: EngineInterface, input: Record<string, unknown>): Promise<string> {
   if (typeof input.path !== 'string' || input.path === '') return 'add_root needs a path.'
-  const answer = await run($, ['root-add', input.path, '--not-scratch'])
+  const base = typeof input.base === 'string' ? input.base.trim() : ''
+  // One argument, so a base is never read as an option.
+  const answer = await run($, ['root-add', input.path, '--not-scratch', ...(base ? [`--base=${base}`] : [])])
   if (!answer.ok && answer.code === 'scratch') {
     return `${input.path} is a scratch directory (temporary or Claude Code's own), so it is not registered: everything in a root is reviewed. Do throwaway checks there unregistered. If it really holds the plan's work, ask the user to add it with /add-dir.`
   }
   if (!answer.ok) return refused(answer)
   // `root-add` answers no run summary: refresh the cached roots.
-  await run($, ['status'])
+  const status = await run($, ['status'])
   // Named on purpose: a root a refused write left behind, or one a running write registered, is
   // the run's now, not taken back.
   if (typeof answer.alias === 'string') {
     named.add(answer.alias)
     retry.delete(answer.alias)
   }
+  const alias = String(answer.alias)
+  // A suggestion asks nothing now: the question covers every root without a baseline, so asking
+  // here would put the others to the user before Claude could suggest theirs. Review asks.
+  if (typeof answer.suggested === 'string') {
+    const roots = (status.run as RunSummary | null | undefined)?.roots ?? []
+    const others = roots.filter(root => root.alias !== alias && root.baseline === 'unknown' && root.kind === 'git' && !root.suggested)
+    const rest =
+      others.length > 0
+        ? ` Roots ${others.map(root => root.alias).join(', ')} have no baseline and no suggestion either: call add_root with path and base for each one whose starting commit you know, then call review.`
+        : ' Call review when the phase is done.'
+    return `${answer.status === 'added' ? 'Registered root' : 'Root'} ${alias} has no baseline yet; the user is offered ${answer.suggested.slice(0, 12)} first as its baseline when review asks.${rest}`
+  }
+  // A base given asks nothing either way: say why it was not taken.
+  if (base !== '') {
+    if (answer.baseline !== 'unknown') {
+      return `${answer.status === 'added' ? `Registered root ${alias}; its current content is the baseline` : `${input.path} is covered by root ${alias}, which already has a baseline`}, so the base you gave is not used.`
+    }
+    return `Root ${alias} has no baseline, but it is not a git repository, so the base you gave is not used: the user picks its baseline when review asks.`
+  }
   if (answer.status !== 'added') {
     if (answer.baseline !== 'unknown') {
-      return `${input.path} is already covered by root ${String(answer.alias)}. If its baseline is wrong (a review sees files that predate the run as new), only the user can fix it: ask them to run /arl-remove-root ${String(answer.alias)}, then call add_root again.`
+      return `${input.path} is already covered by root ${alias}. If its baseline is wrong (a review sees files that predate the run as new), only the user can fix it: ask them to run /arl-remove-root ${alias}, then call add_root again.`
     }
     // A root with no baseline yet reviews nothing: settle it now rather than at the next review.
     const chosen = await chooseBaselines($)
-    const outcome = chosen.outcomes.get(String(answer.alias))
+    const outcome = chosen.outcomes.get(alias)
     if (outcome === 'removed') return removedNote(chosen.removed).trim()
-    if (outcome === 'chosen') return `${removedNote(chosen.removed)}${input.path} is covered by root ${String(answer.alias)}, whose baseline the user just chose.`
-    return removedNote(chosen.removed) + `${input.path} is covered by root ${String(answer.alias)}, whose baseline is unknown: nothing in it can be reviewed until the user picks one. Tell the user.`
+    if (outcome === 'chosen') return `${removedNote(chosen.removed)}${input.path} is covered by root ${alias}, whose baseline the user just chose.`
+    return removedNote(chosen.removed) + `${input.path} is covered by root ${alias}, whose baseline is unknown: nothing in it can be reviewed until the user picks one. ${SUGGEST_BASE}`
   }
-  if (answer.baseline !== 'unknown') return `Registered root ${String(answer.alias)}; its current content is the baseline.`
+  if (answer.baseline !== 'unknown') return `Registered root ${alias}; its current content is the baseline.`
   const chosen = await chooseBaselines($)
   // This root's own outcome, never the run's: another root's question may have failed.
-  const outcome = chosen.outcomes.get(String(answer.alias))
+  const outcome = chosen.outcomes.get(alias)
   // Removed, never "registered": nothing in it is reviewed now.
   if (outcome === 'removed') return removedNote(chosen.removed).trim()
-  if (outcome === 'chosen') return `${removedNote(chosen.removed)}Registered root ${String(answer.alias)} with the baseline the user chose.`
-  return removedNote(chosen.removed) + `Registered root ${String(answer.alias)}, but it already holds changes, so its baseline is unknown and nothing in it can be reviewed until the user picks one. Tell the user.`
+  if (outcome === 'chosen') return `${removedNote(chosen.removed)}Registered root ${alias} with the baseline the user chose.`
+  return removedNote(chosen.removed) + `Registered root ${alias}, but it already holds changes, so its baseline is unknown and nothing in it can be reviewed until the user picks one. ${SUGGEST_BASE}`
 }
+
+/** What Claude is told it can do about a root whose baseline is unknown. */
+const SUGGEST_BASE =
+  'If you know the commit your work in it started from, call add_root with its path and that commit as base, for every such root, then call review: the user is offered each first. Otherwise tell the user.'
 
 /** What a review round's runs cost so far, summed over the review and its repair. */
 type Spent = { usage?: TurnUsage; durationMs?: number; requests?: number }
@@ -496,7 +680,7 @@ export async function reviewWith($: EngineInterface, input: Record<string, unkno
   if (!prepared.ok && prepared.code === 'baseline-unknown') {
     const chosen = await chooseBaselines($)
     note = removedNote(chosen.removed)
-    if (!chosen.settled) return `${note}${refused(prepared)}\n\nStop and tell the user: a root's baseline must be chosen before the review can run.`
+    if (!chosen.settled) return `${note}${refused(prepared)}\n\nStop: a root's baseline must be chosen before the review can run. ${SUGGEST_BASE}`
     prepared = await prepareReview($, input)
   }
   return note + (await reviewPrepared($, prepared, reviewer, signal, deadlineMs))
@@ -603,7 +787,7 @@ export async function ensureRoot($: EngineInterface, directory: string, { explic
     return {
       added: alias,
       path: target,
-      note: `adversarial-review-loop registered ${target} as root ${alias}, but it already holds changes: its baseline is unknown, and the next review asks the user for one.`,
+      note: `adversarial-review-loop registered ${target} as root ${alias}, but it already holds changes: its baseline is unknown, and the next review asks the user for one. If you know the commit your work in it started from, call add_root with path ${target} and that commit as base before calling review.`,
     }
   }
   return { added: alias, path: target, note: `adversarial-review-loop registered ${target} as root ${alias}; its content before this change is the baseline.` }

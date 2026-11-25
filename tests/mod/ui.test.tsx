@@ -42,7 +42,7 @@ test('the band names the phase, the round and what the loop does', () => {
 test('the band says what the run waits on, and how to go on', () => {
   expect(bandLine(run({ status: 'paused' }), '')).toContain('paused: /arl-resume continues it')
   expect(bandLine(run({ waiting: { kind: 'stall' } }), '')).toContain('waits for you (stall): /arl-resume, /arl-accept or /arl-stop')
-  expect(bandLine(run({ roots: [{ alias: 'web', path: '/w', kind: 'dir', baseline: 'unknown', proposed: '' }] }), '')).toContain('needs a baseline for web')
+  expect(bandLine(run({ roots: [{ alias: 'web', path: '/w', kind: 'dir', baseline: 'unknown', candidates: [] }] }), '')).toContain('needs a baseline for web')
   expect(bandLine(run({ pending_review: true }), '')).toContain('a review is pending')
 })
 
@@ -52,7 +52,7 @@ test('the pane without a run says how to start one', () => {
 
 test('the pane shows the phases around the current one on one line, and unknown baselines', () => {
   const lines = paneLines(
-    run({ phases: ['one', 'two', 'three'], phase_count: 3, phase: 2, approved_phases: 1, rounds: 1, final_required: true, roots: [{ alias: 'web', path: '/w', kind: 'dir', baseline: 'unknown', proposed: '' }] }),
+    run({ phases: ['one', 'two', 'three'], phase_count: 3, phase: 2, approved_phases: 1, rounds: 1, final_required: true, roots: [{ alias: 'web', path: '/w', kind: 'dir', baseline: 'unknown', candidates: [] }] }),
     null,
     '',
   ).map(line => line.text)
@@ -128,13 +128,13 @@ test('the band says working only while Claude\'s turn runs', () => {
 })
 
 test('/arl-status text holds every phase and every root path', () => {
-  const text = statusText(run({ roots: [{ alias: 'web', path: '/w', kind: 'dir', baseline: 'set', proposed: '' }] }))
+  const text = statusText(run({ roots: [{ alias: 'web', path: '/w', kind: 'dir', baseline: 'set', candidates: [] }] }))
   expect(text).toContain('▶ 1. one  (round 1)')
   expect(text).toContain('· 2. two')
   expect(text).toContain('  web  /w  (dir)')
 })
 
-const stored = (key: string, value: unknown): unknown => (key === 'run' ? { shape: 'run-1', value } : key === 'last' ? { shape: 'last-1', value } : value)
+const stored = (key: string, value: unknown): unknown => (key === 'run' ? { shape: 'run-2', value } : key === 'last' ? { shape: 'last-1', value } : value)
 
 function seed(on: On, values: Record<string, unknown>): void {
   on('state.get', (_, e) => {

@@ -673,8 +673,8 @@ test('a root without a baseline is settled by the user, then the review runs', a
   at(true)
   const late = summary({
     roots: [
-      { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' },
-      { alias: 'lib', path: '/work2/lib', kind: 'git', baseline: 'unknown', proposed: 'HEAD@{2026-11-12 10:00}' },
+      { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', candidates: [] },
+      { alias: 'lib', path: '/work2/lib', kind: 'git', baseline: 'unknown', candidates: [{ commit: '0123456789abcdef0123', why: 'start' }] },
     ],
   })
   let prepares = 0
@@ -686,10 +686,10 @@ test('a root without a baseline is settled by the user, then the review runs', a
       'review record': RECORDED,
     },
     files: PROMPTS,
-    choices: ['Changes since HEAD@{2026-11-12 10:00}'],
+    choices: ['Changes since 0123456789ab (when the run started)'],
   })
   expect(await review($, {}, reviewer([APPROVED]).run)).toBe(RECORDED.message)
-  expect(w.calls.find(call => call.args[0] === 'root-baseline')?.args).toEqual(['root-baseline', 'lib', '--commit', 'HEAD@{2026-11-12 10:00}', '--run', 'r1'])
+  expect(w.calls.find(call => call.args[0] === 'root-baseline')?.args).toEqual(['root-baseline', 'lib', '--commit=0123456789abcdef0123', '--run', 'r1'])
 })
 
 test('a late root the user removes instead is not asked about again, and the review runs on what is left', async () => {
@@ -697,8 +697,8 @@ test('a late root the user removes instead is not asked about again, and the rev
   let removed = false
   let prepares = 0
   const roots = [
-    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' },
-    { alias: 'clone', path: '/tmp/s/clone', kind: 'git', baseline: 'unknown', proposed: '' },
+    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', candidates: [] },
+    { alias: 'clone', path: '/tmp/s/clone', kind: 'git', baseline: 'unknown', candidates: [] },
   ]
   const { $, w } = fakeEngine({
     engine: {
@@ -725,7 +725,7 @@ test('headless, an unknown baseline stops the review and says why', async () => 
   const { $, w } = fakeEngine({
     engine: {
       'review prepare': { ok: false, code: 'baseline-unknown', error: 'baseline unknown for lib' },
-      status: { ok: true, run: summary({ roots: [{ alias: 'lib', path: '/l', kind: 'dir', baseline: 'unknown', proposed: '' }] }) },
+      status: { ok: true, run: summary({ roots: [{ alias: 'lib', path: '/l', kind: 'dir', baseline: 'unknown', candidates: [] }] }) },
     },
   })
   const text = await review($, {}, reviewer([]).run)

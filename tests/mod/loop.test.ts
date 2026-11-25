@@ -77,17 +77,17 @@ test('set_phases with replan says so, and a refusal is passed on', async ($, on)
 })
 
 test('add_root registers a directory and reports its baseline', async ($, on) => {
-  const w = world(on, { engine: { 'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'set', proposed: '' } } })
+  const w = world(on, { engine: { 'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'set', candidates: [] } } })
   await start($)
   expect(await callTool($, 'add_root', { path: '../lib' })).toContain('Registered root lib')
   expect(w.calls[0]?.args).toEqual(['root-add', '../lib', '--not-scratch'])
 })
 
 test('add_root on a directory that already changed asks the user for its baseline', async ($, on) => {
-  const unknown = summary({ roots: [{ alias: 'lib', path: '/lib', kind: 'dir', baseline: 'unknown', proposed: '' }] })
+  const unknown = summary({ roots: [{ alias: 'lib', path: '/lib', kind: 'dir', baseline: 'unknown', candidates: [] }] })
   const w = world(on, {
     engine: {
-      'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', proposed: '' },
+      'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', candidates: [] },
       status: { ok: true, run: unknown },
       'root-baseline': { ok: true, run: summary() },
     },
@@ -102,12 +102,12 @@ test('add_root on a directory that already changed asks the user for its baselin
 test('add_root whose new root the user removes says it was removed, never registered', async ($, on) => {
   let removed = false
   const roots = [
-    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' },
-    { alias: 'lib', path: '/lib', kind: 'dir', baseline: 'unknown', proposed: '' },
+    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', candidates: [] },
+    { alias: 'lib', path: '/lib', kind: 'dir', baseline: 'unknown', candidates: [] },
   ]
   world(on, {
     engine: {
-      'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', proposed: '' },
+      'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', candidates: [] },
       status: () => ({ ok: true, run: summary({ roots: removed ? roots.slice(0, 1) : roots }) }),
       'root-remove': () => {
         removed = true
@@ -125,13 +125,13 @@ test('add_root whose new root the user removes says it was removed, never regist
 test('add_root answers its own root\'s outcome, not the run\'s: another root left unchosen does not undo it', async ($, on) => {
   let chosen = false
   const roots = () => [
-    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' },
-    { alias: 'lib', path: '/lib', kind: 'dir', baseline: chosen ? 'set' : 'unknown', proposed: '' },
-    { alias: 'svc', path: '/svc', kind: 'dir', baseline: 'unknown', proposed: '' },
+    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', candidates: [] },
+    { alias: 'lib', path: '/lib', kind: 'dir', baseline: chosen ? 'set' : 'unknown', candidates: [] },
+    { alias: 'svc', path: '/svc', kind: 'dir', baseline: 'unknown', candidates: [] },
   ]
   world(on, {
     engine: {
-      'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', proposed: '' },
+      'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', candidates: [] },
       status: () => ({ ok: true, run: summary({ roots: roots() }) }),
       'root-baseline': () => {
         chosen = true
@@ -148,7 +148,7 @@ test('add_root answers its own root\'s outcome, not the run\'s: another root lef
 test('add_root never claims a baseline was chosen when the engine could not say', async ($, on) => {
   world(on, {
     engine: {
-      'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', proposed: '' },
+      'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', candidates: [] },
       status: { ok: false, code: 'state-corrupt', error: 'bad state' },
     },
   })
@@ -158,10 +158,61 @@ test('add_root never claims a baseline was chosen when the engine could not say'
   expect(text).not.toContain('the user chose')
 })
 
-test('headless, a root with an unknown baseline is reported, not guessed', async ($, on) => {
-  const unknown = summary({ roots: [{ alias: 'lib', path: '/lib', kind: 'dir', baseline: 'unknown', proposed: '' }] })
+test('add_root with a base asks nothing, and names the roots still without a suggestion', async ($, on) => {
+  const A = 'a'.repeat(40)
+  const B = 'b'.repeat(40)
+  let suggestedA = false
+  let suggestedB = false
+  const roots = () => [
+    { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', candidates: [] },
+    { alias: 'one', path: '/c/one', kind: 'git', baseline: 'unknown', candidates: [], suggested: suggestedA ? A : '' },
+    { alias: 'two', path: '/c/two', kind: 'git', baseline: 'unknown', candidates: [], suggested: suggestedB ? B : '' },
+  ]
   const w = world(on, {
-    engine: { 'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', proposed: '' }, status: { ok: true, run: unknown } },
+    engine: {
+      'root-add': (call: { args: string[] }) => {
+        const one = call.args[1] === '/c/one'
+        if (one) suggestedA = true
+        else suggestedB = true
+        return { ok: true, status: 'known', alias: one ? 'one' : 'two', baseline: 'unknown', suggested: one ? A : B, candidates: [] }
+      },
+      status: () => ({ ok: true, run: summary({ roots: roots() }) }),
+    },
+  })
+  await start($, true)
+  const first = await callTool($, 'add_root', { path: '/c/one', base: 'main~2' })
+  expect(first).toContain(`offered ${A.slice(0, 12)} first`)
+  expect(first).toContain('Roots two have no baseline and no suggestion either')
+  const second = await callTool($, 'add_root', { path: '/c/two', base: '--empty' })
+  expect(second).toContain('Call review when the phase is done.')
+  expect(w.asked).toEqual([])
+  expect(w.calls.filter(call => call.args[0] === 'root-add').map(call => call.args)).toEqual([
+    ['root-add', '/c/one', '--not-scratch', '--base=main~2'],
+    ['root-add', '/c/two', '--not-scratch', '--base=--empty'],
+  ])
+})
+
+test('add_root with a base it cannot take says why, and still asks nothing', async ($, on) => {
+  const answers: Record<string, unknown> = {
+    '/f': { ok: true, status: 'known', alias: 'f', baseline: 'unknown', base_ignored: true },
+    '/s': { ok: true, status: 'known', alias: 's', baseline: 'set', base_ignored: true },
+  }
+  const w = world(on, {
+    engine: {
+      'root-add': (call: { args: string[] }) => answers[call.args[1] ?? ''],
+      status: { ok: true, run: summary({ roots: [{ alias: 'f', path: '/f', kind: 'dir', baseline: 'unknown', candidates: [] }] }) },
+    },
+  })
+  await start($, true)
+  expect(await callTool($, 'add_root', { path: '/f', base: 'HEAD' })).toContain('it is not a git repository, so the base you gave is not used')
+  expect(await callTool($, 'add_root', { path: '/s', base: 'HEAD' })).toContain('which already has a baseline, so the base you gave is not used')
+  expect(w.asked).toEqual([])
+})
+
+test('headless, a root with an unknown baseline is reported, not guessed', async ($, on) => {
+  const unknown = summary({ roots: [{ alias: 'lib', path: '/lib', kind: 'dir', baseline: 'unknown', candidates: [] }] })
+  const w = world(on, {
+    engine: { 'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'unknown', candidates: [] }, status: { ok: true, run: unknown } },
   })
   await start($)
   expect(await callTool($, 'add_root', { path: '/lib' })).toContain('its baseline is unknown')
@@ -182,7 +233,7 @@ test('a file written outside every root registers its directory before the write
       },
       'root-add': () => {
         order.push('root-add')
-        return { ok: true, status: 'added', alias: 'web', baseline: 'set', proposed: '' }
+        return { ok: true, status: 'added', alias: 'web', baseline: 'set', candidates: [] }
       },
     },
   })
@@ -225,7 +276,7 @@ test('a stopped run registers nothing', async ($, on) => {
 })
 
 test('a directory added to the session joins the run as a root', async ($, on) => {
-  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'extra', baseline: 'set', proposed: '' } } })
+  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'extra', baseline: 'set', candidates: [] } } })
   await start($)
   await $.classic.DirectoryAdded({ directory: '/extra', source: 'slash_command' })
   expect(w.calls.find(call => call.args[0] === 'root-add')?.args).toEqual(['root-add', '/extra'])
@@ -277,7 +328,7 @@ test('with no run here, a turn end asks the engine nothing', async ($, on) => {
 
 test('a file in a folder being created registers the folder being created, not its deepest subfolder', async ($, on) => {
   const w = world(on, {
-    engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'svc', baseline: 'set', proposed: '' } },
+    engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'svc', baseline: 'set', candidates: [] } },
     missing: ['/x/svc/src/deep', '/x/svc/src', '/x/svc'],
   })
   fileTools(on)
@@ -306,8 +357,8 @@ test('a run the engine cannot read is said too, rather than taken as no run', as
 })
 
 test('add_root refreshes what the mod knows, so a write under the new root asks nothing more', async ($, on) => {
-  const withLib = summary({ roots: [{ alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' }, { alias: 'lib', path: '/lib', kind: 'dir', baseline: 'set', proposed: '' }] })
-  const w = world(on, { engine: { 'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'set', proposed: '' }, status: { ok: true, run: withLib } } })
+  const withLib = summary({ roots: [{ alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', candidates: [] }, { alias: 'lib', path: '/lib', kind: 'dir', baseline: 'set', candidates: [] }] })
+  const w = world(on, { engine: { 'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'set', candidates: [] }, status: { ok: true, run: withLib } } })
   fileTools(on)
   await start($)
   await callTool($, 'add_root', { path: '/lib' })
@@ -323,7 +374,7 @@ test('set_phases names the phase to implement, which after a replan need not be 
 })
 
 test('a write through a symlink in a root to a folder outside every root registers where it lands', async ($, on) => {
-  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'set', proposed: '' } }, links: { [`${LAUNCH}/link`]: '/elsewhere/lib' } })
+  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'lib', baseline: 'set', candidates: [] } }, links: { [`${LAUNCH}/link`]: '/elsewhere/lib' } })
   fileTools(on)
   await start($)
   await $.tool.call({ tool: 'Write', file_path: `${LAUNCH}/link/src/a.ts`, content: 'x' })
@@ -357,7 +408,7 @@ test('add_root refuses a scratch folder and points to /add-dir', async ($, on) =
 })
 
 test('a path that climbs out of a root with .. is not taken to be inside it', async ($, on) => {
-  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'other', baseline: 'set', proposed: '' } } })
+  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'other', baseline: 'set', candidates: [] } } })
   fileTools(on)
   await start($)
   await $.tool.call({ tool: 'Write', file_path: `${LAUNCH}/../other/a.ts`, content: 'x' })
@@ -406,7 +457,7 @@ test('the tools are served under the names the host registered them by', async (
 })
 
 test('a directory the person adds under a temp folder still joins the run', async ($, on) => {
-  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'extra', baseline: 'set', proposed: '' } } })
+  const w = world(on, { engine: { status: STATUS, 'root-add': { ok: true, status: 'added', alias: 'extra', baseline: 'set', candidates: [] } } })
   await start($)
   await $.classic.DirectoryAdded({ directory: '/tmp/extra', source: 'slash_command' })
   expect(w.calls.find(call => call.args[0] === 'root-add')?.args).toEqual(['root-add', '/tmp/extra'])
@@ -420,7 +471,7 @@ test('a directory added to the session whose registration throws is shown, and t
 })
 
 test('add_root on a root that has no baseline yet settles it with the user', async ($, on) => {
-  const unknown = summary({ roots: [{ alias: 'lib', path: '/lib', kind: 'dir', baseline: 'unknown', proposed: '' }] })
+  const unknown = summary({ roots: [{ alias: 'lib', path: '/lib', kind: 'dir', baseline: 'unknown', candidates: [] }] })
   const w = world(on, {
     engine: {
       'root-add': { ok: true, status: 'known', alias: 'lib', baseline: 'unknown' },
@@ -448,4 +499,36 @@ test('the band says working while Claude\'s main turn runs, and idle once it end
   expect(await band()).toContain('· working')
   await turnEnds($, { reason: 'aborted', isAborted: true })
   expect(await band()).toContain('· idle')
+})
+
+test('a turn draws the run again when its state file is not the save last drawn, and only then', async ($, on) => {
+  let stamp = '5:1'
+  const options = {
+    engine: {
+      attach: { ok: true, run: summary({ state_stamp: '5:1' }), foreign_review: false, effort: '' },
+      status: () => ({ ok: true, run: summary({ state_stamp: stamp }) }),
+      'next-action': { ok: true, action: 'yield', reason: 'unchanged' },
+    },
+    stateMtime: 5,
+  }
+  const w = world(on, options)
+  on('turn.start', (_, e) => e as never)
+  await start($)
+  const statuses = (): number => w.calls.filter(call => call.args[0] === 'status').length
+  const before = statuses()
+  const turn = async (id: string): Promise<void> => {
+    await $.turn.start({ text: 'go', turnId: id } as never)
+  }
+  await turn('t1')
+  expect(statuses()).toBe(before)
+  // Saved outside the mod; the engine still answers the save it read before that one.
+  options.stateMtime = 9
+  await turn('t2')
+  expect(statuses()).toBe(before + 1)
+  // The answer named the older save, so the newer one is still unseen.
+  stamp = '9:1'
+  await turn('t3')
+  expect(statuses()).toBe(before + 2)
+  await turn('t4')
+  expect(statuses()).toBe(before + 2)
 })

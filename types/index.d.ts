@@ -18,6 +18,9 @@
 // The values the mod keeps in the session's state, which its band and pane draw. They outlive a
 // reload of the mod; a change to a value's fields changes its shape tag (hooks/ui.tsx).
 
+/** A commit a late git root's baseline may be, and why the engine offers it (`workspace._candidates`). */
+export type Candidate = { commit: string; why: string }
+
 /** A run summary, as the engine prints it (`RunState.summary`). */
 export type RunView = {
   run_id: string
@@ -31,7 +34,9 @@ export type RunView = {
   final_required: boolean
   pending_review: boolean
   waiting: { kind: string; detail?: string; switch?: { which: string; word: string } } | null
-  roots: { alias: string; path: string; kind: string; baseline: string; proposed: string }[]
+  /** Which save of the state file this summary was read from (`state.state_stamp`). */
+  state_stamp?: string
+  roots: { alias: string; path: string; kind: string; baseline: string; candidates: Candidate[]; suggested?: string }[]
 }
 
 /** The latest review this session recorded, as the engine answered it. */

@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from run_common import PAST, arl, git_at, make_repo, run_env, ws
+from run_common import PAST, arl, backdate, git_at, make_repo, run_env, ws
 
 from arl import state
 
@@ -199,6 +199,122 @@ def test_a_run_stored_before_commits_were_recorded_does_not_guess_its_base(ws: P
     # Nothing recorded says which commit the base was, or when: it stays, and nothing is hidden.
     assert "-print('fixed')" in diff_text(ws, ticket)
     assert "api:" not in warnings_of(ws, ticket)
+
+
+def test_a_commit_the_user_chose_is_the_base_exactly_even_off_heads_history(ws: Path, engine: Engine) -> None:
+    """A chosen commit is never moved to a merge-base: the user named it, and the review diffs
+    from exactly that, saying it is not in HEAD's history."""
+    lib = make_repo(ws.parent / "lib", when=PAST, files={"lib.py": "print('lib')\n"})
+    git_at(lib, "checkout", "-q", "-b", "side", when=PAST)
+    (lib / "side.py").write_text("print('only on side')\n")
+    git_at(lib, "add", "side.py")
+    git_at(lib, "commit", "-qm", "side work", when=PAST)
+    side = git_at(lib, "rev-parse", "HEAD")
+    git_at(lib, "checkout", "-q", "main", when=PAST)
+    backdate(lib)
+    started(engine, ws)
+    (lib / "lib.py").write_text("print('the run')\n")
+    added = engine(ws, "root-add", str(lib))
+    assert added["baseline"] == "unknown", added
+
+    chosen = engine(ws, "root-baseline", added["alias"], "--commit", side[:10])
+    assert chosen["ok"], chosen
+    assert "not in the history of HEAD" in chosen["note"]
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    diff = diff_text(ws, ticket)
+    assert "-print('only on side')" in diff
+    assert "+print('the run')" in diff
+    # Not moved, and said: what only the chosen commit holds reads as removed.
+    assert f"{added['alias']}: its base, commit {side[:12]} as the user chose it" in range_text(ws, ticket)
+
+
+def test_a_commit_chosen_before_the_rule_still_follows_as_it_was_saved(ws: Path, engine: Engine) -> None:
+    """The documented limit of :func:`arl.workspace.remember_commit`: a state saved by an older
+    engine holds the chosen commit as ``start_commit``, like a base taken from a detached HEAD,
+    and is left as saved. The move is said, so nothing changes unseen."""
+    lib = make_repo(ws.parent / "lib", when=PAST, files={"lib.py": "print('lib')\n"})
+    git_at(lib, "checkout", "-q", "-b", "side")
+    (lib / "side.py").write_text("print('only on side')\n")
+    git_at(lib, "add", "side.py")
+    git_at(lib, "commit", "-qm", "side work", when=PAST)
+    side = git_at(lib, "rev-parse", "HEAD")
+    git_at(lib, "checkout", "-q", "main")
+    started(engine, ws)
+    (lib / "lib.py").write_text("print('the run')\n")
+    added = engine(ws, "root-add", str(lib))
+    assert engine(ws, "root-baseline", added["alias"], "--commit", side)["ok"]
+    saved = json.loads((ws / ".arl" / "state.json").read_text())
+    for root in saved["roots"]:
+        if root["alias"] == added["alias"]:
+            root["start_commit"] = side
+    (ws / ".arl" / "state.json").write_text(json.dumps(saved))
+
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    assert "-print('only on side')" not in diff_text(ws, ticket)
+    assert f"{added['alias']}:" in range_text(ws, ticket)
+
+
+def test_head_as_the_run_found_it_follows_the_checkout_when_chosen(ws: Path, engine: Engine) -> None:
+    """The "when the run started" candidate is a base taken from HEAD as it was: chosen, it
+    follows a checkout that leaves its line, as AGENTS.md rule 2 has it, and the move is said."""
+    lib = make_repo(ws.parent / "lib", when=PAST, files={"src/main.py": "print('main')\n"})
+    # On a fix branch when the run starts, every reflog entry of it older than the run.
+    git_at(lib, "checkout", "-q", "-b", "fix/prereqs", when=PAST)
+    (lib / "src" / "main.py").write_text("print('fixed')\n")
+    git_at(lib, "commit", "-qam", "a fix only this branch has", when=PAST)
+    backdate(lib)
+    started(engine, ws)
+    git_at(lib, "commit", "-q", "--allow-empty", "-m", "bash commit")
+    added = engine(ws, "root-add", str(lib))
+    start = next(entry["commit"] for entry in added["candidates"] if entry["why"] == "start")
+    chosen = engine(ws, "root-baseline", added["alias"], "--commit", start)
+    assert chosen["ok"] and "note" not in chosen, chosen
+    git_at(lib, "checkout", "-q", "main")
+    git_at(lib, "checkout", "-q", "-b", "feat/work")
+    (lib / "run.py").write_text("print('the run')\n")
+
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    diff = diff_text(ws, ticket)
+    assert "-print('fixed')" not in diff
+    assert "+print('the run')" in diff
+    assert f"{added['alias']}:" in range_text(ws, ticket)
+
+
+def test_a_typed_commit_that_head_leaves_later_stays_and_is_said(ws: Path, engine: Engine) -> None:
+    lib = make_repo(ws.parent / "lib", when=PAST, files={"src/main.py": "print('main')\n"})
+    # On a fix branch when the run starts, every reflog entry of it older than the run.
+    git_at(lib, "checkout", "-q", "-b", "fix/prereqs", when=PAST)
+    (lib / "src" / "main.py").write_text("print('fixed')\n")
+    git_at(lib, "commit", "-qam", "a fix only this branch has", when=PAST)
+    backdate(lib)
+    started(engine, ws)
+    git_at(lib, "commit", "-q", "--allow-empty", "-m", "bash commit")
+    bash = git_at(lib, "rev-parse", "HEAD")
+    added = engine(ws, "root-add", str(lib))
+    # Not the start candidate: the bash commit itself, named by the user.
+    chosen = engine(ws, "root-baseline", added["alias"], "--commit", bash)
+    assert chosen["ok"], chosen
+    git_at(lib, "checkout", "-q", "main")
+    git_at(lib, "checkout", "-q", "-b", "feat/work")
+    (lib / "run.py").write_text("print('the run')\n")
+
+    ticket = engine(ws, "review", "prepare")
+    assert ticket["ok"], ticket
+    assert "-print('fixed')" in diff_text(ws, ticket)
+    assert f"{added['alias']}: its base, commit {bash[:12]} as the user chose it" in range_text(ws, ticket)
+
+
+def test_a_chosen_commit_in_heads_history_says_nothing(ws: Path, engine: Engine) -> None:
+    lib = make_repo(ws.parent / "lib", when=PAST, files={"lib.py": "print('lib')\n"})
+    base = git_at(lib, "rev-parse", "HEAD")
+    started(engine, ws)
+    (lib / "lib.py").write_text("print('the run')\n")
+    added = engine(ws, "root-add", str(lib))
+    chosen = engine(ws, "root-baseline", added["alias"], "--commit", base)
+    assert chosen["ok"] and "note" not in chosen, chosen
 
 
 def test_an_empty_base_never_moves_so_no_file_of_the_root_leaves_the_review(ws: Path, engine: Engine) -> None:

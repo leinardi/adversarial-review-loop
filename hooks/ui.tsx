@@ -41,7 +41,7 @@ const PANE_FINDINGS = 3
 
 // The shape tags decline what an earlier version stored, which outlives a reload: change one when
 // its value's fields change.
-const runAtom = atom({ plugin: 'adversarial-review-loop', key: 'run' } as const, null, { shape: 'run-1' })
+const runAtom = atom({ plugin: 'adversarial-review-loop', key: 'run' } as const, null, { shape: 'run-2' })
 const lastAtom = atom({ plugin: 'adversarial-review-loop', key: 'last' } as const, null, { shape: 'last-1' })
 const activityAtom = atom({ plugin: 'adversarial-review-loop', key: 'activity' } as const, '')
 const busyAtom = atom({ plugin: 'adversarial-review-loop', key: 'busy' } as const, false)

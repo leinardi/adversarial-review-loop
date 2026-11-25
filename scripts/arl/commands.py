@@ -218,7 +218,28 @@ def cmd_root_add(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         run.require_status("active", "paused")
         target = Path(str(args["path"])).expanduser()
         where = target if target.is_absolute() else paths.launch_dir / target
+        base = str(args.get("base") or "")
+        commit = ""
+        top, kind = workspace.resolve(where)
+        known = next((root for root in run.roots if Path(root["path"]) == top), None)
+        # A root that already has a baseline takes no suggestion, so its base is never resolved:
+        # a stale one does not fail a registration that changes nothing. Anything else is checked
+        # before anything is registered: a suggestion that names nothing adds nothing.
+        settled = known is not None and known["baseline"] == "set" and not (kind == "git" and known["kind"] == "dir")
+        if base and not settled:
+            if kind != "git":
+                raise RunError("not-git", f"{top} is not a git repository: a base is a commit, for a repository only")
+            commit = workspace.resolve_commit(str(top), base)
+            if not commit:
+                raise RunError("bad-commit", f"{base!r} does not name a commit in {top}")
         outcome = workspace.register(run, where, late=True, not_scratch=bool(args.get("not_scratch")))
+        if base:
+            root = run.root(str(outcome["alias"]))
+            if commit and root is not None and workspace.suggest_base(root, commit):
+                outcome["suggested"] = commit
+                outcome["candidates"] = root["candidates"]
+            else:
+                outcome["base_ignored"] = True
         run.save()
         return {"ok": True, **outcome}
 
@@ -239,7 +260,9 @@ def cmd_root_remove(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
     ``with_nested`` also drops every root inside it, in one save: a scratch folder registered by
     mistake, and the clone found in it. ``expect`` is the aliases the person was shown, all of
     them: when the set to remove is no longer exactly those (a root joined or left since), nothing
-    changes and the answer is ``removal-changed``. ``run`` is the run id the person was shown: aliases repeat
+    changes and the answer is ``removal-changed``. ``expect_baselines`` (``alias=set|unknown,…``) is the
+    baseline state the person was shown for each root to remove: when any differs now, nothing
+    changes and the answer is ``removal-changed`` too. ``run`` is the run id the person was shown: aliases repeat
     across runs, so consent given for one run never removes roots of a run that replaced it
     (``run-changed``). ``dry_run`` answers what ``with_nested`` would remove, resolved as the removal
     resolves it, and the run id, and changes nothing.
@@ -278,6 +301,17 @@ def cmd_root_remove(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
                     f"removing {root['alias']!r} with what it holds now removes {', '.join(aliases)}, "
                     f"not {', '.join(expected) or 'nothing named'}: nothing was removed",
                 )
+        if args.get("expect_baselines") is not None:
+            # The baseline each root had when the person was asked: one set meanwhile (by another
+            # session, or by hand) may be wanted now, so its removal is not what was agreed to.
+            shown = dict(pair.partition("=")[::2] for pair in str(args["expect_baselines"]).split(",") if pair)
+            now = {entry["alias"]: entry["baseline"] for entry in removing}
+            if shown != now:
+                changed = sorted(alias for alias in now.keys() | shown.keys() if shown.get(alias) != now.get(alias))
+                raise RunError(
+                    "removal-changed",
+                    f"the baselines of {', '.join(changed)} are not what was shown: nothing was removed",
+                )
         if args.get("undo"):
             _require_untouched(run, root)
         run.data["roots"] = [entry for entry in run.data["roots"] if all(entry is not gone for gone in removing)]
@@ -314,12 +348,12 @@ def cmd_root_baseline(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any
         # The person chose for the run they were shown: aliases repeat across runs, and a stale
         # "current content" would hide a replacement run's changes from its diff.
         _require_run(run, args, "no baseline was set")
-        tree = workspace.set_baseline(run, str(args["alias"]), str(args["choice"]), commit=str(args.get("commit") or ""))
+        tree, note = workspace.set_baseline(run, str(args["alias"]), str(args["choice"]), commit=str(args.get("commit") or ""))
         # The user's choice is what the loop was waiting on: let the next turn end continue it,
         # even though the choice moves nothing the continuation token counts.
         run.data["last_continuation"] = ""
         run.save()
-        return {"ok": True, "alias": args["alias"], "tree": tree, "run": run.summary()}
+        return {"ok": True, "alias": args["alias"], "tree": tree, "run": run.summary(), **({"note": note} if note else {})}
 
 
 def cmd_attach(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
@@ -357,7 +391,15 @@ def cmd_stats(paths: RunPaths, _args: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def cmd_status(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
-    """The run's summary; with ``context``, also what a resumed session is told about it, as it is now."""
+    """The run's summary; with ``context``, also what a resumed session is told about it, as it is now.
+
+    With ``peek``, the summary alone, read without the lock: what the mod draws between turns
+    must never wait on a command that holds it. A save is a rename, so the read is one whole
+    save, and its stamp names it (:meth:`RunState.load`).
+    """
+    if args.get("peek"):
+        peeked = RunState.load(paths)
+        return {"ok": True, "run": peeked.summary() if peeked is not None else None}
     with locked_state(paths) as run:
         answer: dict[str, Any] = {"ok": True, "run": run.summary() if run is not None else None}
         if args.get("context") and run is not None:

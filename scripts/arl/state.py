@@ -43,6 +43,7 @@ document must get right is that no transition reports an approval nobody gave (A
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -73,6 +74,7 @@ __all__ = [
     "run_overlay",
     "run_paths",
     "start_prompt",
+    "state_stamp",
 ]
 
 RUN_DIR_NAME: Final = ".arl"
@@ -235,7 +237,25 @@ def _validated(document: object) -> dict[str, Any]:
             or (root["baseline"] == "set" and not (root["start_tree"] and root["approved_tree"]))
         ):
             raise StateLoadError("state.json holds a malformed root")
+        _migrate_candidates(root)
     return document
+
+
+def _migrate_candidates(root: dict[str, Any]) -> None:
+    """Give a root its baseline ``candidates``. A state file written before they existed may hold
+    one ``proposed`` commit instead: it becomes the only candidate. A malformed entry is dropped."""
+    proposed = root.pop("proposed", "")
+    offered = root.get("candidates")
+    if offered is None:
+        offered = [{"commit": proposed, "why": "start"}] if isinstance(proposed, str) and proposed else []
+    entries = offered if isinstance(offered, list) else []
+    if not isinstance(root.get("suggested", ""), str):
+        root.pop("suggested")
+    root["candidates"] = [
+        {"commit": entry["commit"], "why": entry["why"]}
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("commit"), str) and entry["commit"] and isinstance(entry.get("why"), str)
+    ]
 
 
 class RunState:
@@ -248,27 +268,39 @@ class RunState:
     def __init__(self, paths: RunPaths, data: dict[str, Any]) -> None:
         self.paths = paths
         self.data = data
+        #: The state file as this run was read or last saved (:func:`state_stamp`), ``""`` when
+        #: neither happened yet.
+        self.stamp = ""
 
     # -- persistence --------------------------------------------------------
 
     @classmethod
     def load(cls, paths: RunPaths) -> RunState | None:
-        """The run under ``paths``, ``None`` when there is none, or :class:`StateLoadError`."""
+        """The run under ``paths``, ``None`` when there is none, or :class:`StateLoadError`.
+
+        Read and stamped (:func:`state_stamp`) through one open file: a save replaces the file
+        by a rename, never in place, so what is read is the save the stamp names, lock or no lock.
+        """
         try:
-            raw = paths.state_file.read_text(encoding="utf-8")
+            with paths.state_file.open("rb") as handle:
+                info = os.fstat(handle.fileno())
+                raw = handle.read().decode("utf-8")
         except FileNotFoundError:
             return None
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise StateLoadError(f"cannot read {paths.state_file}: {exc}") from exc
         try:
             document = json.loads(raw)
         except ValueError as exc:
             raise StateLoadError(f"{paths.state_file} is not JSON: {exc}") from exc
-        return cls(paths, _validated(document))
+        run = cls(paths, _validated(document))
+        run.stamp = _stamp_of(info)
+        return run
 
     def save(self) -> None:
         text = json.dumps(self.data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
         write_private_atomic(self.paths.state_file, text, root=self.paths.run_dir)
+        self.stamp = state_stamp(self.paths.state_file)
 
     # -- reading ------------------------------------------------------------
 
@@ -570,8 +602,31 @@ class RunState:
             "final_required": self.final_required,
             "pending_review": self.data["pending_ticket"] is not None,
             "waiting": self.data["waiting"],
-            "roots": [{key: root.get(key, "") for key in ("alias", "path", "kind", "baseline", "proposed")} for root in self.data["roots"]],
+            "state_stamp": self.stamp,
+            "roots": [
+                {
+                    **{key: root.get(key, "") for key in ("alias", "path", "kind", "baseline", "suggested")},
+                    "candidates": list(root.get("candidates") or []),
+                }
+                for root in self.data["roots"]
+            ],
         }
+
+
+def state_stamp(path: Path) -> str:
+    """Which save of the state file ``path`` is: its modification time in milliseconds and its
+    size, ``""`` when it cannot be read. Milliseconds and bytes because that is what the mod's
+    file stat gives it to compare: it draws a run again only when the file is not the one this
+    stamp names. Two saves within a millisecond at the same size read as one."""
+    try:
+        info = path.stat()
+    except OSError:
+        return ""
+    return _stamp_of(info)
+
+
+def _stamp_of(info: os.stat_result) -> str:
+    return f"{info.st_mtime_ns // 1_000_000}:{info.st_size}"
 
 
 def run_overlay(paths: RunPaths) -> dict[str, str]:

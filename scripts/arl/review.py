@@ -38,7 +38,7 @@ import json
 import math
 import shutil
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -129,11 +129,46 @@ def _subagent_settings(cfg: config.Config) -> dict[str, Any]:
 
 
 def _validated_verification(raw: object) -> list[dict[str, Any]]:
+    """The implementer's verification entries, or a refusal: each names the directory its command
+    ran in, which the bundle shows beside the root the implementer says it checked."""
     if raw is None:
         return []
     if not isinstance(raw, list) or not all(isinstance(entry, dict) for entry in raw):
         raise RunError("bad-verification", "verification must be a list of objects (root, command, cwd, status, output)")
+    missing = [str(entry.get("command") or index + 1) for index, entry in enumerate(raw) if not isinstance(entry.get("cwd"), str) or not entry["cwd"]]
+    if missing:
+        raise RunError("bad-verification", f"each verification entry needs the cwd its command ran in; none for: {', '.join(missing)}")
     return [dict(entry) for entry in raw]
+
+
+def _placed_verification(entries: Sequence[Mapping[str, Any]], run: RunState) -> list[dict[str, Any]]:
+    """Each entry's own fields only (``command``, ``cwd``, ``status``, ``output``, and ``root`` as
+    the implementer reported it), plus ``cwd_root``: the alias of the innermost root its working
+    directory lies in, ``none`` outside every root. Where a command starts is not what it
+    checks (``make -C api``), so the two are shown side by side, never one in the other's place.
+    An empty output is said, never left blank; a working directory that is no path is refused."""
+    launch = run.paths.launch_dir
+    roots = sorted(run.roots, key=lambda root: len(root["path"]), reverse=True)
+    placed = []
+    for entry in entries:
+        try:
+            cwd = Path(str(entry["cwd"])).expanduser()
+            where = (cwd if cwd.is_absolute() else launch / cwd).resolve()
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise RunError("bad-verification", f"the cwd of {entry.get('command')!r} is no path: {exc}") from exc
+        inner = next((root for root in roots if where.is_relative_to(Path(root["path"]))), None)
+        output = str(entry.get("output") or "")
+        placed.append(
+            {
+                "command": str(entry.get("command") or ""),
+                "cwd": str(entry["cwd"]),
+                "cwd_root": inner["alias"] if inner is not None else "none",
+                "root": str(entry.get("root") or ""),
+                "status": entry.get("status", "-"),
+                "output": output if output.strip() else "(no output reported)",
+            }
+        )
+    return placed
 
 
 #: How long one disposition's note may be.
@@ -296,7 +331,8 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         stage = run.stage()
         if stage not in ("phase", "final"):
             raise RunError("nothing-to-review", "set the phases first" if stage == "plan" else "the run is complete")
-        stated, ignored = _validated_dispositions(args.get("dispositions"), run)
+        # Both before anything can approve: an auto-approval below takes no malformed input either.
+        (stated, ignored), verification = _validated_dispositions(args.get("dispositions"), run), _placed_verification(verification, run)
         if not run.roots:
             # An empty bundle would show the reviewer nothing, and its approval would cover changes
             # no one saw.
@@ -326,7 +362,15 @@ def prepare(paths: RunPaths, args: Mapping[str, Any]) -> dict[str, Any]:
         sources, warnings = guidance.collect([root for root in run.roots if root["alias"] in changed], cfg, paths.launch_dir)
         warnings = [*warnings, *moved]
         try:
-            built = bundle.build(run, target, review_dir / "bundle", config=cfg, verification=verification, sources=sources, warnings=warnings)
+            built = bundle.build(
+                run,
+                target,
+                review_dir / "bundle",
+                config=cfg,
+                verification=verification,
+                sources=sources,
+                warnings=warnings,
+            )
             bundle.compose_prompt(target, built, review_dir / "prompt.md")
         except BundleTooLarge as exc:
             # Nothing is reviewed from it, and what was written can be the oversized diff itself.

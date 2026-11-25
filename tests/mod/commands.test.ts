@@ -21,7 +21,7 @@
 import { expect, test } from 'claude-code/testing'
 import { asOf, implementArgs, modelArgs, openPane, runCommand, showNow } from '../../hooks/commands'
 import { pane } from '../../hooks/ui'
-import { announce, chooseBaselines, continueRun, nameTools, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
+import { announce, baselineQuestion, chooseBaselines, refreshIfChanged, track, continueRun, nameTools, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
 import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, settle, start, summary, world } from './world'
 
 function at(isInteractive = false): void {
@@ -329,7 +329,7 @@ test('/arl-resume that cannot continue says why, and submits nothing', async () 
 test('/arl-resume asks for a missing baseline, then continues', async () => {
   at(true)
   let asked = 0
-  const unknown = summary({ roots: [{ alias: 'web', path: '/elsewhere/web', kind: 'dir', baseline: 'unknown', proposed: '' }] })
+  const unknown = summary({ roots: [{ alias: 'web', path: '/elsewhere/web', kind: 'dir', baseline: 'unknown', candidates: [] }] })
   const { $, w } = fakeEngine({
     engine: {
       resume: { ok: true, run: unknown },
@@ -348,7 +348,7 @@ test('/arl-resume asks for a missing baseline, then continues', async () => {
 test('/arl-status answers the run as several lines of its own text, and opens the pane', async () => {
   // Measured live: a log line is one line, and its newlines drew as stray characters.
   at(true)
-  const run = summary({ approved_phases: 1, phase: 2, rounds: 1, roots: [{ alias: 'web', path: '/w', kind: 'git', baseline: 'unknown', proposed: '' }] })
+  const run = summary({ approved_phases: 1, phase: 2, rounds: 1, roots: [{ alias: 'web', path: '/w', kind: 'git', baseline: 'unknown', candidates: [] }] })
   const { $, w } = fakeEngine({ engine: { status: { ok: true, run } } })
   const shown = String(await runCommand($, 'arl-status', ''))
   expect(w.logged).toEqual([])
@@ -573,10 +573,10 @@ test('/arl-remove-root whose root gained a root inside since the dry run removes
 // Removing roots that are not the plan's work
 // --------------------------------------------------------------------------
 
-const WORK = { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' }
-const SCRATCH = { alias: 'scratchpad', path: '/tmp/s/scratchpad', kind: 'dir', baseline: 'set', proposed: '' }
-const CLONE = { alias: 'clone', path: '/tmp/s/scratchpad/clone', kind: 'git', baseline: 'unknown', proposed: 'abc' }
-const CLONE2 = { alias: 'clone2', path: '/tmp/s/scratchpad/clone2', kind: 'git', baseline: 'unknown', proposed: '' }
+const WORK = { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', candidates: [] }
+const SCRATCH = { alias: 'scratchpad', path: '/tmp/s/scratchpad', kind: 'dir', baseline: 'set', candidates: [] }
+const CLONE = { alias: 'clone', path: '/tmp/s/scratchpad/clone', kind: 'git', baseline: 'unknown', candidates: [{ commit: 'abc', why: 'clone' }] }
+const CLONE2 = { alias: 'clone2', path: '/tmp/s/scratchpad/clone2', kind: 'git', baseline: 'unknown', candidates: [] }
 const REMOVE = "Remove scratchpad, clone, clone2 (not the plan's work)"
 
 /** A status that shows `before` until `root-remove` ran, then `after`; and that removal's answer. */
@@ -603,14 +603,14 @@ test('the baseline question offers to remove the outermost root holding a late o
   expect([...chosen.outcomes]).toEqual([['scratchpad', 'removed'], ['clone', 'removed'], ['clone2', 'removed']])
   // A nested root's option names its container and itself; nothing is asked about the sibling.
   expect(w.asked).toHaveLength(1)
-  expect(w.asked[0]?.options).toEqual(['Changes since abc', 'Everything here is new', 'The current content is the baseline', REMOVE])
+  expect(w.asked[0]?.options).toEqual(['Changes since abc (as cloned)', 'Everything here is new', 'The current content is the baseline', REMOVE])
   // Guarded by the set shown and by the run it was shown for.
-  expect(w.calls.filter(call => call.args[0] === 'root-remove').map(call => call.args)).toEqual([['root-remove', 'scratchpad', '--with-nested', '--expect', 'scratchpad,clone,clone2', '--run', 'r1']])
+  expect(w.calls.filter(call => call.args[0] === 'root-remove').map(call => call.args)).toEqual([['root-remove', 'scratchpad', '--with-nested', '--expect', 'scratchpad,clone,clone2', '--expect-baselines', 'scratchpad=set,clone=unknown,clone2=unknown', '--run', 'r1']])
 })
 
 test('a removal whose set changed while the question was open is asked again with the new set', async () => {
   at(true)
-  const late = { alias: 'late', path: '/tmp/s/scratchpad/late', kind: 'git', baseline: 'unknown', proposed: '' }
+  const late = { alias: 'late', path: '/tmp/s/scratchpad/late', kind: 'git', baseline: 'unknown', candidates: [] }
   let removals = 0
   let statuses = 0
   const { $, w } = fakeEngine({
@@ -810,7 +810,7 @@ test('a recorded review lands in the pane, is logged, and a completed run is not
   expect(w.notified.join('\n')).toContain('the run is complete')
 })
 
-const ADDED = { ok: true, status: 'added', alias: 'web', baseline: 'set', proposed: '' }
+const ADDED = { ok: true, status: 'added', alias: 'web', baseline: 'set', candidates: [] }
 const STATUS = { ok: true, run: summary() }
 
 test('a write the session denies registers no root', async ($, on) => {
@@ -998,4 +998,200 @@ test('/arl-resume that cannot continue still tells Claude what the run is', asyn
   const text = String(await runCommand($, 'arl-resume', ''))
   expect(text).toContain('does not continue now (waiting)')
   expect(text).toContain(context)
+})
+
+test('the baseline question offers every commit it can fit, and the rest can be typed', () => {
+  const root = { alias: 'clone', path: '/c', kind: 'git', baseline: 'unknown', candidates: [{ commit: 'a'.repeat(40), why: 'checkout' }, { commit: 'b'.repeat(40), why: 'clone' }] }
+  const full = baselineQuestion(root, 'Remove clone')
+  expect(full.options).toEqual([`Changes since ${'a'.repeat(12)} (after the clone's checkout; a guess)`, `Changes since ${'b'.repeat(12)} (as cloned)`, 'The current content is the baseline', 'Remove clone'])
+  expect(full.question).toContain("Or type a commit to compare against, or 'empty' for everything new.")
+  expect(full.choose(full.options[1] ?? '')).toEqual({ kind: 'commit', commit: 'b'.repeat(40) })
+  expect(full.choose(' Empty ')).toEqual({ kind: 'empty' })
+  expect(full.choose('Remove clone')).toEqual({ kind: 'remove' })
+  expect(full.choose(' 1234abcd ')).toEqual({ kind: 'commit', commit: '1234abcd', typed: true })
+  expect(full.choose('')).toBeUndefined()
+
+  const roomy = baselineQuestion(root, '')
+  expect(roomy.options).toEqual([...full.options.slice(0, 2), 'Everything here is new', 'The current content is the baseline'])
+  expect(roomy.question).not.toContain("'empty'")
+  expect(roomy.choose('remove')).toEqual({ kind: 'commit', commit: 'remove', typed: true })
+
+  const folder = baselineQuestion({ alias: 'web', path: '/w', kind: 'dir', baseline: 'unknown', candidates: [] }, '')
+  expect(folder.question).not.toContain('Or type')
+  expect(folder.choose('abc123')).toEqual({ kind: 'not-git', text: 'abc123' })
+
+  const suggested = baselineQuestion({ ...root, suggested: 'd'.repeat(40) }, 'Remove clone')
+  expect(suggested.options.slice(0, 3)).toEqual([
+    `Changes since ${'d'.repeat(12)} (Claude's suggestion)`,
+    `Changes since ${'a'.repeat(12)} (after the clone's checkout; a guess)`,
+    `Changes since ${'b'.repeat(12)} (as cloned)`,
+  ])
+  expect(suggested.question).toContain("'current' for its current content")
+
+  // A suggestion of a commit the engine offers too is listed once, as Claude's.
+  const same = baselineQuestion({ ...root, suggested: 'b'.repeat(40) }, '')
+  expect(same.options.slice(0, 2)).toEqual([`Changes since ${'b'.repeat(12)} (Claude's suggestion)`, `Changes since ${'a'.repeat(12)} (after the clone's checkout; a guess)`])
+
+  const twice = baselineQuestion({ ...root, candidates: [{ commit: 'c'.repeat(40), why: 'start' }, { commit: 'c'.repeat(40), why: 'clone' }] }, '')
+  expect(twice.options).toEqual([`Changes since ${'c'.repeat(12)} (when the run started)`, 'Everything here is new', 'The current content is the baseline'])
+})
+
+test('a commit typed at the baseline question goes to the engine as one argument, and a refused one is asked again', async () => {
+  at(true)
+  let tries = 0
+  const { $, w } = fakeEngine({
+    engine: {
+      ...removal([WORK, CLONE], [WORK], { ok: true }),
+      'root-baseline': () => (++tries === 1 ? { ok: false, code: 'bad-commit', error: "'nope' does not name a commit in 'clone'" } : { ok: true, run: summary(), note: 'clone: commit 55f8ddf is not in the history of HEAD.' }),
+    },
+    choices: ['nope', '--empty'],
+  })
+  const chosen = await chooseBaselines($)
+  expect([...chosen.outcomes]).toEqual([['clone', 'chosen']])
+  expect(w.calls.filter(call => call.args[0] === 'root-baseline').map(call => call.args)).toEqual([
+    ['root-baseline', 'clone', '--commit=nope', '--run', 'r1'],
+    ['root-baseline', 'clone', '--commit=--empty', '--run', 'r1'],
+  ])
+  expect(w.asked).toHaveLength(2)
+  expect(w.logged.join('\n')).toContain("Not a commit in clone: 'nope' does not name a commit in 'clone'")
+  expect(w.logged.join('\n')).toContain('not in the history of HEAD')
+})
+
+test('three refused typed commits end the question unchosen', async () => {
+  at(true)
+  const { $, w } = fakeEngine({
+    engine: { ...removal([WORK, CLONE], [WORK], { ok: true }), 'root-baseline': { ok: false, code: 'bad-commit', error: 'no' } },
+    choices: ['a', 'b', 'c', 'd'],
+  })
+  const chosen = await chooseBaselines($)
+  expect([chosen.settled, [...chosen.outcomes]]).toEqual([false, [['clone', 'unchosen']]])
+  expect(w.asked).toHaveLength(3)
+})
+
+test('text typed for a folder root never reaches the engine as a commit', async () => {
+  at(true)
+  const web = { alias: 'web', path: '/tmp/s/web', kind: 'dir', baseline: 'unknown', candidates: [] }
+  const { $, w } = fakeEngine({
+    engine: { ...removal([WORK, web], [WORK], { ok: true }), 'root-baseline': { ok: true, run: summary() } },
+    choices: ['abc123', 'empty'],
+  })
+  const chosen = await chooseBaselines($)
+  expect([...chosen.outcomes]).toEqual([['web', 'chosen']])
+  expect(w.calls.filter(call => call.args[0] === 'root-baseline').map(call => call.args)).toEqual([['root-baseline', 'web', '--empty', '--run', 'r1']])
+  expect(w.logged.join('\n')).toContain('type a commit only for a git repository')
+})
+
+test('a baseline set elsewhere while its question was open counts as chosen, and the next root is asked', async () => {
+  at(true)
+  const { $, w } = fakeEngine({
+    engine: {
+      ...removal([WORK, SCRATCH, CLONE, CLONE2], [WORK], { ok: true }),
+      'root-baseline': (call: { args: string[] }) => (call.args[1] === 'clone' ? { ok: false, code: 'baseline-set', error: "root 'clone' already has a baseline" } : { ok: true, run: summary() }),
+    },
+    choices: ['The current content is the baseline', 'The current content is the baseline'],
+  })
+  const chosen = await chooseBaselines($)
+  expect([chosen.settled, [...chosen.outcomes]]).toEqual([true, [['clone', 'chosen'], ['clone2', 'chosen']]])
+  expect(w.asked).toHaveLength(2)
+})
+
+test('a removal refused because a baseline inside was set meanwhile asks again, saying so in the option', async () => {
+  at(true)
+  let statuses = 0
+  const clone2Set = { ...CLONE2, baseline: 'set' }
+  const { $, w } = fakeEngine({
+    engine: {
+      status: () => ({ ok: true, run: summary({ roots: ++statuses === 1 ? [WORK, SCRATCH, CLONE, CLONE2] : [WORK, SCRATCH, CLONE, clone2Set] }) }),
+      'root-remove': { ok: false, code: 'removal-changed', error: 'the baselines of clone2 are not what was shown: nothing was removed' },
+    },
+    choices: [REMOVE, 'Something else'],
+  })
+  await chooseBaselines($)
+  expect(w.asked).toHaveLength(2)
+  expect(w.asked[1]?.options).toContain("Remove scratchpad, clone, clone2 (not the plan's work; clone2 already has a baseline)")
+  expect(w.asked[1]?.options).not.toContain(REMOVE)
+  expect(w.logged.join('\n')).toContain('the baselines of clone2 are not what was shown')
+})
+
+test('the baseline questions stop when the run is replaced meanwhile, whatever its roots are called', async () => {
+  at(true)
+  let statuses = 0
+  const { $, w } = fakeEngine({
+    engine: {
+      status: () => ({ ok: true, run: summary({ run_id: ++statuses === 1 ? 'r1' : 'r2', roots: [WORK, CLONE] }) }),
+      'root-baseline': { ok: false, code: 'baseline-set', error: 'already' },
+    },
+    choices: ['The current content is the baseline', 'The current content is the baseline'],
+  })
+  const chosen = await chooseBaselines($)
+  expect(chosen.settled).toBe(false)
+  expect(w.asked).toHaveLength(1)
+  expect(w.logged.join('\n')).toContain('The run changed while its baselines were asked')
+})
+
+test('a root another session removed while it was asked about is not reported unresolved', async () => {
+  at(true)
+  let statuses = 0
+  const { $, w } = fakeEngine({
+    engine: {
+      status: () => ({ ok: true, run: summary({ roots: ++statuses === 1 ? [WORK, CLONE] : [WORK] }) }),
+      'root-baseline': { ok: false, code: 'unknown-root', error: "no root named 'clone'" },
+    },
+    choices: ['The current content is the baseline'],
+  })
+  const chosen = await chooseBaselines($)
+  expect(chosen.settled).toBe(true)
+  expect(w.asked).toHaveLength(1)
+})
+
+test('a removal whose target another session removed already reads the roots again', async () => {
+  at(true)
+  let statuses = 0
+  const { $ } = fakeEngine({
+    engine: {
+      status: () => ({ ok: true, run: summary({ roots: ++statuses === 1 ? [WORK, SCRATCH, CLONE, CLONE2] : [WORK] }) }),
+      'root-remove': { ok: false, code: 'unknown-root', error: "no root named or at 'scratchpad'" },
+    },
+    choices: [REMOVE],
+  })
+  expect((await chooseBaselines($)).settled).toBe(true)
+})
+
+test('a run drawn elsewhere is read without the lock, on a short deadline', async () => {
+  at(true)
+  const { $, w } = fakeEngine({ engine: { status: { ok: true, run: summary({ state_stamp: '1:1' }) } }, stateMtime: 1 })
+  await track($, { ok: true, run: summary({ state_stamp: '0:1' }) })
+  await refreshIfChanged($)
+  expect(w.calls.map(call => call.args)).toEqual([['status', '--peek']])
+})
+
+test('a state file that is gone clears the run drawn, and a stat that failed otherwise clears nothing', async () => {
+  at(true)
+  const options = { engine: { status: { ok: true, run: summary({ state_stamp: '1:1' }) } }, stateMtime: 1, hasState: true, existsFails: false }
+  const { $, w } = fakeEngine(options)
+  await track($, { ok: true, run: summary({ state_stamp: '1:1' }) })
+  expect(w.state.get('adversarial-review-loop/run')).toMatchObject({ value: { run_id: 'r1' } })
+  // The stat fails and nothing can say the file is gone: the run drawn stays.
+  options.hasState = false
+  options.existsFails = true
+  await refreshIfChanged($)
+  expect(w.state.get('adversarial-review-loop/run')).toMatchObject({ value: { run_id: 'r1' } })
+  options.existsFails = false
+  await refreshIfChanged($)
+  expect(w.state.get('adversarial-review-loop/run')).toMatchObject({ value: null })
+  expect(w.calls).toEqual([])
+})
+
+test('a draw that failed leaves its save unseen, so the next turn draws it again', async () => {
+  at(true)
+  const options = { engine: { status: { ok: true, run: summary({ state_stamp: '1:1', rounds: 3 }) } }, stateMtime: 1, stateSetFails: 0 }
+  const { $, w } = fakeEngine(options)
+  await track($, { ok: true, run: summary({ state_stamp: '0:1' }) })
+  options.stateSetFails = 1
+  await refreshIfChanged($)
+  expect(w.state.get('adversarial-review-loop/run')).toMatchObject({ value: { rounds: 0 } })
+  await refreshIfChanged($)
+  expect(w.state.get('adversarial-review-loop/run')).toMatchObject({ value: { rounds: 3 } })
+  await refreshIfChanged($)
+  expect(w.calls).toHaveLength(2)
 })

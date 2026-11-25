@@ -38,8 +38,11 @@ does nothing (Claude Code does not compact headless sessions).
 
 The folder joined the run after it already had changes, so nobody knows which of them are this
 run's. You are asked once: whether everything in it is new, or its current content counts as
-already reviewed, and for a git repository also the changes since a commit the engine proposes, when
-it finds one (where the repository stood when the run started). No review runs until you choose.
+already reviewed, and for a git repository also the changes since a commit the engine offers, when
+it finds one: where the repository stood when the run started or, for a clone or a worktree made
+during the run, the commit it was checked out at after it was made and the one it was made at.
+For a git repository you can also type any commit to compare against. No review runs until you
+choose.
 
 ### The loop keeps raising the same findings
 

@@ -57,13 +57,20 @@ export const TOOLS = {
       "Register a directory holding the plan's work (never a scratch, temporary or build directory) as an adversarial-review-loop root, before changing it through Bash. That includes a directory you are about to create, whose every file is then new to the review: a clone or a worktree you will work in is registered after you create it, never before. Edit and Write register their own files. A change made through Bash in a directory outside every root is never reviewed. Never register a directory you only use to check the work (a throwaway clone or worktree, a build output): everything in a root is reviewed, and a copy of a repository is a diff of its every file.",
     inputSchema: {
       type: 'object',
-      properties: { path: { type: 'string', description: 'The directory, absolute or relative to the launch directory.' } },
+      properties: {
+        path: { type: 'string', description: 'The directory, absolute or relative to the launch directory.' },
+        base: {
+          type: 'string',
+          description:
+            "For a git repository that already holds the plan's work (a clone or worktree you made and changed): the commit your work in it started from. The user is offered it first as the baseline at the next review; they still choose.",
+        },
+      },
       required: ['path'],
     },
   },
   review: {
     description:
-      "Ask for the adversarial review of the implemented phase (or the final review); on approval, commit each changed git repository, then do what the answer says. First run the project's checks yourself and pass what they reported as verification; the reviewer does not run them. After a review that asked for changes, pass dispositions too: for each finding of that review (by its id, r<round>.<n>), whether you fixed it or reject it, with a note citing the file and line that shows it. A finding you reject with no such citation stays open. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
+      "Ask for the adversarial review of the implemented phase (or the final review); on approval, commit each changed git repository, then do what the answer says. First run the project's checks yourself and pass what they printed as verification, with the directory each ran in; the reviewer does not run them. After a review that asked for changes, pass dispositions too: for each finding of that review (by its id, r<round>.<n>), whether you fixed it or reject it, with a note citing the file and line that shows it. A finding you reject with no such citation stays open. Returns the findings to fix, or the approval: on approval, commit each changed git repository by its own conventions, then do what the answer says next (go on with the next phase, unless it says to stop or end your turn). The review sees every change since the last approval, in every root.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -73,13 +80,13 @@ export const TOOLS = {
           items: {
             type: 'object',
             properties: {
-              root: { type: 'string', description: 'The root the command ran for (its alias or path).' },
+              root: { type: 'string', description: 'The root the command checked, as you see it (its alias or path).' },
               command: { type: 'string' },
-              cwd: { type: 'string' },
+              cwd: { type: 'string', description: 'The directory it ran in, absolute or relative to the launch directory.' },
               status: { type: 'integer', description: 'Exit status.' },
-              output: { type: 'string', description: 'The tail of its output.' },
+              output: { type: 'string', description: 'The last lines the command itself printed, verbatim: never a summary of them.' },
             },
-            required: ['command', 'status'],
+            required: ['command', 'cwd', 'status', 'output'],
           },
         },
         dispositions: {

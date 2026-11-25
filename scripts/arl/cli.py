@@ -45,24 +45,28 @@ USAGE = """usage: arl.sh [--dir LAUNCH_DIR] <subcommand> [args]
                                              --model: this run's reviewer model on every round)
   resume [--session ID]                      continue the run in this session
   set-phases [--replan]                      read a JSON array of phase descriptions on stdin
-  root-add PATH [--not-scratch]              register a root before changing it (--not-scratch:
-                                             refuse a temp or Claude Code folder)
+  root-add PATH [--not-scratch] [--base REV] register a root before changing it (--not-scratch:
+                                             refuse a temp or Claude Code folder; --base: offer
+                                             REV first as its baseline, when it has none)
   root-baseline ALIAS (--commit REV | --empty | --current) [--run ID]
                                              a late root's baseline (--run: only in run ID)
   root-remove ALIAS|PATH [--undo | --with-nested (--dry-run | --expect A,B)] [--run ID]
+              [--expect-baselines A=set,B=unknown]
                                              drop a root registered by mistake (--undo: only
                                              while unchanged, for a write that did not run;
                                              --with-nested: and every root inside it, which
                                              must be exactly the --expect aliases; --dry-run:
                                              answer that set and change nothing; --run: only
-                                             in run ID)
+                                             in run ID; --expect-baselines: only while each
+                                             has the baseline state given)
   attach [--session ID]                      a session starts: the run, and another session's review
   report [N]                                 the newest stored report, or the N-th
   config                                     show, set or unset a key; arguments as text on stdin
   model [set all|first|late M | reset [all|first|late]]
                                              this run's reviewer model, never written to a file
-  status [--json] [--context]                the run summary (--context: and what a resumed
-                                             session is told about it)
+  status [--json] [--context | --peek]       the run summary (--context: and what a resumed
+                                             session is told about it; --peek: without waiting
+                                             for the lock)
   stats [--json]                             what each review round cost and found
   pause | stop | finish | accept             user decisions
   next-action                                whether the loop continues after a turn
@@ -90,6 +94,7 @@ def _root_parsers(sub: Any) -> None:
     root_add = sub.add_parser("root-add", add_help=False)
     root_add.add_argument("path")
     root_add.add_argument("--not-scratch", action="store_true")
+    root_add.add_argument("--base", default=None)
     baseline = sub.add_parser("root-baseline", add_help=False)
     baseline.add_argument("alias")
     choice = baseline.add_mutually_exclusive_group(required=True)
@@ -102,6 +107,7 @@ def _root_parsers(sub: Any) -> None:
     remove.add_argument("--undo", action="store_true")
     remove.add_argument("--with-nested", action="store_true")
     remove.add_argument("--expect", default=None)
+    remove.add_argument("--expect-baselines", default=None)
     remove.add_argument("--run", default=None)
     remove.add_argument("--dry-run", action="store_true")
 
@@ -126,6 +132,7 @@ def _parser() -> argparse.ArgumentParser:
     # Accepted and ignored: every answer is JSON already, and the plan's spelling is `status --json`.
     status.add_argument("--json", action="store_true", dest="_json")
     status.add_argument("--context", action="store_true")
+    status.add_argument("--peek", action="store_true")
     # The same: the answer carries the text and the figures both.
     sub.add_parser("stats", add_help=False).add_argument("--json", action="store_true", dest="_json")
     resume = sub.add_parser("resume", add_help=False)
