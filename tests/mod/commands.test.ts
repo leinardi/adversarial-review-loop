@@ -21,7 +21,7 @@
 import { expect, test } from 'claude-code/testing'
 import { asOf, implementArgs, modelArgs, openPane, runCommand, showNow } from '../../hooks/commands'
 import { pane } from '../../hooks/ui'
-import { announce, chooseBaselines, continueRun, nameTools, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
+import { announce, baselineQuestion, chooseBaselines, continueRun, nameTools, resetWrites, reviewWith, run, session, writeIn } from '../../hooks/flow'
 import { callTool, fakeEngine, LAUNCH, PREPARED, PROMPTS, RECORDED, reviewer, settle, start, summary, world } from './world'
 
 function at(isInteractive = false): void {
@@ -329,7 +329,7 @@ test('/arl-resume that cannot continue says why, and submits nothing', async () 
 test('/arl-resume asks for a missing baseline, then continues', async () => {
   at(true)
   let asked = 0
-  const unknown = summary({ roots: [{ alias: 'web', path: '/elsewhere/web', kind: 'dir', baseline: 'unknown', proposed: '' }] })
+  const unknown = summary({ roots: [{ alias: 'web', path: '/elsewhere/web', kind: 'dir', baseline: 'unknown', candidates: [] }] })
   const { $, w } = fakeEngine({
     engine: {
       resume: { ok: true, run: unknown },
@@ -348,7 +348,7 @@ test('/arl-resume asks for a missing baseline, then continues', async () => {
 test('/arl-status answers the run as several lines of its own text, and opens the pane', async () => {
   // Measured live: a log line is one line, and its newlines drew as stray characters.
   at(true)
-  const run = summary({ approved_phases: 1, phase: 2, rounds: 1, roots: [{ alias: 'web', path: '/w', kind: 'git', baseline: 'unknown', proposed: '' }] })
+  const run = summary({ approved_phases: 1, phase: 2, rounds: 1, roots: [{ alias: 'web', path: '/w', kind: 'git', baseline: 'unknown', candidates: [] }] })
   const { $, w } = fakeEngine({ engine: { status: { ok: true, run } } })
   const shown = String(await runCommand($, 'arl-status', ''))
   expect(w.logged).toEqual([])
@@ -573,10 +573,10 @@ test('/arl-remove-root whose root gained a root inside since the dry run removes
 // Removing roots that are not the plan's work
 // --------------------------------------------------------------------------
 
-const WORK = { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' }
-const SCRATCH = { alias: 'scratchpad', path: '/tmp/s/scratchpad', kind: 'dir', baseline: 'set', proposed: '' }
-const CLONE = { alias: 'clone', path: '/tmp/s/scratchpad/clone', kind: 'git', baseline: 'unknown', proposed: 'abc' }
-const CLONE2 = { alias: 'clone2', path: '/tmp/s/scratchpad/clone2', kind: 'git', baseline: 'unknown', proposed: '' }
+const WORK = { alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', candidates: [] }
+const SCRATCH = { alias: 'scratchpad', path: '/tmp/s/scratchpad', kind: 'dir', baseline: 'set', candidates: [] }
+const CLONE = { alias: 'clone', path: '/tmp/s/scratchpad/clone', kind: 'git', baseline: 'unknown', candidates: [{ commit: 'abc', why: 'clone' }] }
+const CLONE2 = { alias: 'clone2', path: '/tmp/s/scratchpad/clone2', kind: 'git', baseline: 'unknown', candidates: [] }
 const REMOVE = "Remove scratchpad, clone, clone2 (not the plan's work)"
 
 /** A status that shows `before` until `root-remove` ran, then `after`; and that removal's answer. */
@@ -603,14 +603,14 @@ test('the baseline question offers to remove the outermost root holding a late o
   expect([...chosen.outcomes]).toEqual([['scratchpad', 'removed'], ['clone', 'removed'], ['clone2', 'removed']])
   // A nested root's option names its container and itself; nothing is asked about the sibling.
   expect(w.asked).toHaveLength(1)
-  expect(w.asked[0]?.options).toEqual(['Changes since abc', 'Everything here is new', 'The current content is the baseline', REMOVE])
+  expect(w.asked[0]?.options).toEqual(['Changes since abc (as cloned)', 'Everything here is new', 'The current content is the baseline', REMOVE])
   // Guarded by the set shown and by the run it was shown for.
   expect(w.calls.filter(call => call.args[0] === 'root-remove').map(call => call.args)).toEqual([['root-remove', 'scratchpad', '--with-nested', '--expect', 'scratchpad,clone,clone2', '--run', 'r1']])
 })
 
 test('a removal whose set changed while the question was open is asked again with the new set', async () => {
   at(true)
-  const late = { alias: 'late', path: '/tmp/s/scratchpad/late', kind: 'git', baseline: 'unknown', proposed: '' }
+  const late = { alias: 'late', path: '/tmp/s/scratchpad/late', kind: 'git', baseline: 'unknown', candidates: [] }
   let removals = 0
   let statuses = 0
   const { $, w } = fakeEngine({
@@ -810,7 +810,7 @@ test('a recorded review lands in the pane, is logged, and a completed run is not
   expect(w.notified.join('\n')).toContain('the run is complete')
 })
 
-const ADDED = { ok: true, status: 'added', alias: 'web', baseline: 'set', proposed: '' }
+const ADDED = { ok: true, status: 'added', alias: 'web', baseline: 'set', candidates: [] }
 const STATUS = { ok: true, run: summary() }
 
 test('a write the session denies registers no root', async ($, on) => {
@@ -998,4 +998,23 @@ test('/arl-resume that cannot continue still tells Claude what the run is', asyn
   const text = String(await runCommand($, 'arl-resume', ''))
   expect(text).toContain('does not continue now (waiting)')
   expect(text).toContain(context)
+})
+
+test('the baseline question offers every commit it can fit, and the rest can be typed', () => {
+  const root = { alias: 'clone', path: '/c', kind: 'git', baseline: 'unknown', candidates: [{ commit: 'a'.repeat(40), why: 'checkout' }, { commit: 'b'.repeat(40), why: 'clone' }] }
+  const full = baselineQuestion(root, 'Remove clone')
+  expect(full.options).toEqual([`Changes since ${'a'.repeat(12)} (after the clone's checkout; a guess)`, `Changes since ${'b'.repeat(12)} (as cloned)`, 'The current content is the baseline', 'Remove clone'])
+  expect(full.question).toContain("Or type 'empty' for everything new.")
+  expect(full.choose(full.options[1] ?? '')).toEqual({ kind: 'commit', commit: 'b'.repeat(40) })
+  expect(full.choose(' Empty ')).toEqual({ kind: 'empty' })
+  expect(full.choose('Remove clone')).toEqual({ kind: 'remove' })
+  expect(full.choose('something else')).toBeUndefined()
+
+  const roomy = baselineQuestion(root, '')
+  expect(roomy.options).toEqual([...full.options.slice(0, 2), 'Everything here is new', 'The current content is the baseline'])
+  expect(roomy.question).not.toContain('Or type')
+  expect(roomy.choose('remove')).toBeUndefined()
+
+  const twice = baselineQuestion({ ...root, candidates: [{ commit: 'c'.repeat(40), why: 'start' }, { commit: 'c'.repeat(40), why: 'clone' }] }, '')
+  expect(twice.options).toEqual([`Changes since ${'c'.repeat(12)} (when the run started)`, 'Everything here is new', 'The current content is the baseline'])
 })

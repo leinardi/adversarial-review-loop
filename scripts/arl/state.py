@@ -235,7 +235,23 @@ def _validated(document: object) -> dict[str, Any]:
             or (root["baseline"] == "set" and not (root["start_tree"] and root["approved_tree"]))
         ):
             raise StateLoadError("state.json holds a malformed root")
+        _migrate_candidates(root)
     return document
+
+
+def _migrate_candidates(root: dict[str, Any]) -> None:
+    """Give a root its baseline ``candidates``. A state file written before they existed may hold
+    one ``proposed`` commit instead: it becomes the only candidate. A malformed entry is dropped."""
+    proposed = root.pop("proposed", "")
+    offered = root.get("candidates")
+    if offered is None:
+        offered = [{"commit": proposed, "why": "start"}] if isinstance(proposed, str) and proposed else []
+    entries = offered if isinstance(offered, list) else []
+    root["candidates"] = [
+        {"commit": entry["commit"], "why": entry["why"]}
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("commit"), str) and entry["commit"] and isinstance(entry.get("why"), str)
+    ]
 
 
 class RunState:
@@ -570,7 +586,10 @@ class RunState:
             "final_required": self.final_required,
             "pending_review": self.data["pending_ticket"] is not None,
             "waiting": self.data["waiting"],
-            "roots": [{key: root.get(key, "") for key in ("alias", "path", "kind", "baseline", "proposed")} for root in self.data["roots"]],
+            "roots": [
+                {**{key: root.get(key, "") for key in ("alias", "path", "kind", "baseline")}, "candidates": list(root.get("candidates") or [])}
+                for root in self.data["roots"]
+            ],
         }
 
 

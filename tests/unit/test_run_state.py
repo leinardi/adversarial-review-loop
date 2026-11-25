@@ -34,7 +34,7 @@ TREES = {"ws": "a" * 40, "api": "b" * 40}
 def make_run(tmp_path: Path, *, phases: int = 2, final_review: bool = False) -> RunState:
     run = RunState(run_paths(tmp_path), new_document(plan_source="plan.md", final_review=final_review))
     run.data["roots"] = [
-        {"alias": alias, "path": str(tmp_path / alias), "kind": "dir", "baseline": "set", "start_tree": tree, "approved_tree": tree, "proposed": ""}
+        {"alias": alias, "path": str(tmp_path / alias), "kind": "dir", "baseline": "set", "start_tree": tree, "approved_tree": tree, "candidates": []}
         for alias, tree in TREES.items()
     ]
     if phases:
@@ -220,6 +220,23 @@ def test_a_state_written_with_clarify_history_and_without_dispositions_loads(tmp
     loaded = RunState.load(run.paths)
     assert loaded is not None
     assert (loaded.data["dispositions"], loaded.dispositions_of("phase1")) == ([], {})
+
+
+def test_a_state_written_with_one_proposed_commit_loads_it_as_the_only_candidate(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    with locked_state(run.paths):
+        run.save()
+    document = json.loads(run.paths.state_file.read_text())
+    for root in document["roots"]:
+        del root["candidates"]
+    document["roots"][0].update(baseline="unknown", start_tree="", approved_tree="", proposed="c" * 40)
+    document["roots"][1]["proposed"] = ""
+    run.paths.state_file.write_text(json.dumps(document))
+    loaded = RunState.load(run.paths)
+    assert loaded is not None
+    assert [root["candidates"] for root in loaded.roots] == [[{"commit": "c" * 40, "why": "start"}], []]
+    assert all("proposed" not in root for root in loaded.roots)
+    assert loaded.summary()["roots"][0]["candidates"] == [{"commit": "c" * 40, "why": "start"}]
 
 
 def test_a_later_statement_replaces_the_earlier_one_and_a_replan_clears_them(tmp_path: Path) -> None:

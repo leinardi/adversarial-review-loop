@@ -320,7 +320,7 @@ def test_a_late_folder_changed_during_the_run_needs_a_baseline(run_env: Path, ws
 
     added = engine(ws, "root-add", str(late))
     assert added["baseline"] == "unknown"
-    assert added["proposed"] == ""
+    assert added["candidates"] == []
     assert engine(ws, "root-baseline", added["alias"], "--commit", "HEAD")["code"] == "not-git"
 
     chosen = engine(ws, "root-baseline", added["alias"], "--empty")
@@ -336,7 +336,7 @@ def test_an_unborn_repository_created_during_the_run_needs_a_baseline(run_env: P
     (unborn / "new.py").write_text("x = 1\n")
 
     added = engine(ws, "root-add", str(unborn))
-    assert (added["baseline"], added["proposed"]) == ("unknown", "")
+    assert (added["baseline"], added["candidates"]) == ("unknown", [])
 
     chosen = engine(ws, "root-baseline", added["alias"], "--current")
     assert git_at(unborn, "ls-tree", "-r", "--name-only", chosen["tree"]) == "new.py"
@@ -351,10 +351,10 @@ def test_a_repository_committed_to_through_bash_proposes_head_at_the_run_start(r
     git_at(other, "commit", "-qam", "bash commit")
 
     added = engine(ws, "root-add", str(other))
-    assert (added["baseline"], added["proposed"]) == ("unknown", before)
+    assert (added["baseline"], added["candidates"]) == ("unknown", [{"commit": before, "why": "start"}])
     assert engine(ws, "next-action")["reason"] == "baseline-unknown"
 
-    chosen = engine(ws, "root-baseline", added["alias"], "--commit", added["proposed"])
+    chosen = engine(ws, "root-baseline", added["alias"], "--commit", added["candidates"][0]["commit"])
     assert chosen["tree"] == git_at(other, "rev-parse", f"{before}^{{tree}}")
 
 
@@ -364,6 +364,20 @@ def test_a_baseline_commit_shaped_like_an_option_is_refused(run_env: Path, ws: P
     (other / "README.md").write_text("changed during the run\n")
     added = engine(ws, "root-add", str(other))
     assert engine(ws, "root-baseline", added["alias"], "--commit=--output=x")["code"] == "bad-commit"
+
+
+def test_an_empty_baseline_commit_is_refused_and_never_replaced_by_a_candidate(run_env: Path, ws: Path, engine: Engine) -> None:
+    upstream = make_repo(run_env / "upstream")
+    started(engine, ws)
+    clone = _clone_during_run(run_env, upstream)
+    (clone / "README.md").write_text("changed in the clone\n")
+    added = engine(ws, "root-add", str(clone))
+    assert added["candidates"]
+
+    assert engine(ws, "root-baseline", added["alias"], "--commit=")["code"] == "bad-commit"
+    root = load(ws).root(added["alias"])
+    assert root is not None
+    assert root["baseline"] == "unknown"
 
 
 def test_a_repository_cloned_during_the_run_proposes_the_clone(run_env: Path, ws: Path, engine: Engine) -> None:
@@ -377,7 +391,106 @@ def test_a_repository_cloned_during_the_run_proposes_the_clone(run_env: Path, ws
     git_at(clone, "commit", "-qam", "change")
 
     added = engine(ws, "root-add", str(clone))
-    assert (added["baseline"], added["proposed"]) == ("unknown", git_at(upstream, "rev-parse", "HEAD"))
+    assert (added["baseline"], added["candidates"]) == ("unknown", [{"commit": git_at(upstream, "rev-parse", "HEAD"), "why": "clone"}])
+
+
+def _clone_during_run(run_env: Path, upstream: Path, name: str = "clone") -> Path:
+    git_at(run_env, "clone", "-q", str(upstream), str(run_env / name))
+    clone = run_env / name
+    git_at(clone, "config", "user.email", "c@example.invalid")
+    git_at(clone, "config", "user.name", "c")
+    return clone
+
+
+def test_a_clone_switched_to_another_commit_offers_the_checkout_then_the_clone(run_env: Path, ws: Path, engine: Engine) -> None:
+    upstream = make_repo(run_env / "upstream")
+    older = git_at(upstream, "rev-parse", "HEAD")
+    (upstream / "later.txt").write_text("upstream work the run never did\n")
+    git_at(upstream, "add", "later.txt")
+    git_at(upstream, "commit", "-qm", "upstream later")
+    cloned = git_at(upstream, "rev-parse", "HEAD")
+    started(engine, ws)
+    clone = _clone_during_run(run_env, upstream)
+    git_at(clone, "checkout", "-q", "-b", "work", older)
+    (clone / "README.md").write_text("the run's change\n")
+    git_at(clone, "commit", "-qam", "change")
+
+    added = engine(ws, "root-add", str(clone))
+    assert added["candidates"] == [{"commit": older, "why": "checkout"}, {"commit": cloned, "why": "clone"}]
+    chosen = engine(ws, "root-baseline", added["alias"], "--commit", added["candidates"][0]["commit"])
+    assert chosen["tree"] == git_at(clone, "rev-parse", f"{older}^{{tree}}")
+
+
+def test_a_checkout_that_carried_an_edit_still_offers_the_clone(run_env: Path, ws: Path, engine: Engine) -> None:
+    # The reflog cannot say when work began: an edit carried by `switch --merge` into a branch
+    # holding the same edit leaves only `clone:` and `checkout:`. The clone point stays offered,
+    # and against it the edit shows.
+    upstream = make_repo(run_env / "upstream")
+    git_at(upstream, "checkout", "-q", "-b", "other")
+    (upstream / "README.md").write_text("the same edit\n")
+    git_at(upstream, "commit", "-qam", "edit on other")
+    other = git_at(upstream, "rev-parse", "HEAD")
+    git_at(upstream, "checkout", "-q", "-")
+    cloned = git_at(upstream, "rev-parse", "HEAD")
+    started(engine, ws)
+    clone = _clone_during_run(run_env, upstream)
+    (clone / "README.md").write_text("the same edit\n")
+    git_at(clone, "switch", "-q", "--merge", "--detach", "origin/other")
+    assert git_at(clone, "status", "--porcelain") == ""
+
+    added = engine(ws, "root-add", str(clone))
+    assert added["candidates"] == [{"commit": other, "why": "checkout"}, {"commit": cloned, "why": "clone"}]
+    chosen = engine(ws, "root-baseline", added["alias"], "--commit", cloned)
+    assert git_at(clone, "diff", "--name-only", chosen["tree"], "HEAD^{tree}") == "README.md"
+
+
+def test_a_reset_after_work_began_ends_the_walk_at_the_clone(run_env: Path, ws: Path, engine: Engine) -> None:
+    # A same-commit reset is skipped only where ``worktree add`` writes one. In a clone it may
+    # be work (an edit staged, then unstaged), so a checkout after it is not offered.
+    upstream = make_repo(run_env / "upstream")
+    git_at(upstream, "checkout", "-q", "-b", "other")
+    (upstream / "README.md").write_text("the same edit\n")
+    git_at(upstream, "commit", "-qam", "edit on other")
+    git_at(upstream, "checkout", "-q", "-")
+    cloned = git_at(upstream, "rev-parse", "HEAD")
+    started(engine, ws)
+    clone = _clone_during_run(run_env, upstream)
+    (clone / "README.md").write_text("the same edit\n")
+    git_at(clone, "add", "README.md")
+    git_at(clone, "reset", "-q", "HEAD")
+    git_at(clone, "switch", "-q", "--merge", "--detach", "origin/other")
+
+    added = engine(ws, "root-add", str(clone))
+    assert added["candidates"] == [{"commit": cloned, "why": "clone"}]
+
+
+def test_a_clone_committed_to_at_once_offers_only_the_clone(run_env: Path, ws: Path, engine: Engine) -> None:
+    upstream = make_repo(run_env / "upstream")
+    started(engine, ws)
+    clone = _clone_during_run(run_env, upstream)
+    git_at(clone, "checkout", "-q", "-b", "work")
+    (clone / "README.md").write_text("changed in the clone\n")
+    git_at(clone, "commit", "-qam", "change")
+
+    added = engine(ws, "root-add", str(clone))
+    assert added["candidates"] == [{"commit": git_at(upstream, "rev-parse", "HEAD"), "why": "clone"}]
+
+
+def test_a_worktree_switched_after_it_was_added_offers_both(run_env: Path, ws: Path, engine: Engine) -> None:
+    upstream = make_repo(run_env / "upstream")
+    base = git_at(upstream, "rev-parse", "HEAD")
+    (upstream / "later.txt").write_text("later\n")
+    git_at(upstream, "add", "later.txt")
+    git_at(upstream, "commit", "-qm", "later")
+    tip = git_at(upstream, "rev-parse", "HEAD")
+    backdate(upstream)
+    started(engine, ws)
+    git_at(upstream, "worktree", "add", "-q", "-b", "work", str(run_env / "tree"))
+    git_at(run_env / "tree", "checkout", "-q", "--detach", base)
+    (run_env / "tree" / "README.md").write_text("the run's change\n")
+
+    added = engine(ws, "root-add", str(run_env / "tree"))
+    assert added["candidates"] == [{"commit": base, "why": "checkout"}, {"commit": tip, "why": "worktree"}]
 
 
 def test_a_worktree_added_during_the_run_proposes_its_checkout(run_env: Path, ws: Path, engine: Engine) -> None:
@@ -388,7 +501,7 @@ def test_a_worktree_added_during_the_run_proposes_its_checkout(run_env: Path, ws
     git_at(upstream, "worktree", "add", "-q", "-b", "work", str(run_env / "tree"))
 
     added = engine(ws, "root-add", str(run_env / "tree"))
-    assert (added["baseline"], added["proposed"]) == ("unknown", base)
+    assert (added["baseline"], added["candidates"]) == ("unknown", [{"commit": base, "why": "worktree"}])
 
 
 def test_a_folder_registered_before_its_worktree_existed_is_made_a_git_root_again(run_env: Path, ws: Path, engine: Engine) -> None:
@@ -401,13 +514,20 @@ def test_a_folder_registered_before_its_worktree_existed_is_made_a_git_root_agai
     git_at(upstream, "worktree", "add", "-q", "-b", "work", str(run_env / "tree"))
 
     again = engine(ws, "root-add", str(run_env / "tree"))
-    assert again == {"ok": True, "status": "known", "alias": early["alias"], "baseline": "unknown", "proposed": base, "rekinded": True}
+    assert again == {
+        "ok": True,
+        "status": "known",
+        "alias": early["alias"],
+        "baseline": "unknown",
+        "candidates": [{"commit": base, "why": "worktree"}],
+        "rekinded": True,
+    }
     root = load(ws).root(early["alias"])
     assert root is not None
     assert (root["kind"], root["start_tree"]) == ("git", "")
     assert engine(ws, "next-action")["reason"] == "baseline-unknown"
 
-    chosen = engine(ws, "root-baseline", early["alias"], "--commit", again["proposed"])
+    chosen = engine(ws, "root-baseline", early["alias"], "--commit", again["candidates"][0]["commit"])
     assert chosen["tree"] == git_at(upstream, "rev-parse", f"{base}^{{tree}}")
     # Settled: naming it again changes nothing.
     assert engine(ws, "root-add", str(run_env / "tree")) == {"ok": True, "status": "known", "alias": early["alias"], "baseline": "set"}
@@ -838,7 +958,7 @@ def test_a_repository_the_run_initialised_proposes_no_commit(run_env: Path, ws: 
     git_at(made, "add", "-A")
     git_at(made, "commit", "-qm", "second")
     added = engine(ws, "root-add", str(made))
-    assert (added["baseline"], added["proposed"]) == ("unknown", "")
+    assert (added["baseline"], added["candidates"]) == ("unknown", [])
 
 
 def test_accept_registers_a_repository_created_inside_a_root_and_refuses(ws: Path, engine: Engine) -> None:

@@ -532,16 +532,22 @@ def _git_touched(repo: str, since: int) -> bool:
     return any((Path(repo) / os.fsdecode(name)).lstat().st_mtime_ns >= since for name in names)
 
 
-def _proposed_commit(repo: str, start_ns: int) -> str:
-    """Where HEAD was when the run started, from the reflog; else the commit it was cloned at.
+def _candidates(repo: str, start_ns: int) -> list[dict[str, str]]:
+    """The commits a late git root's baseline may be, from its reflog, most likely first.
 
-    The newest reflog entry older than the start is HEAD as the run found it. A repository with
-    no such entry was created, cloned or checked out as a worktree during the run. A clone and a
-    linked worktree (``git worktree add``) arrived with content the run did not write, so their
-    oldest entry is proposed: a clone's says ``clone:``, and a linked worktree's reflog starts
-    where it was checked out. A repository the run ``git init``-ed has no commit that predates
-    its work, and gets ``""`` -- the user picks an empty baseline or the current content. It is a
-    proposal the user accepts or not, never taken on its own.
+    Each is ``{"commit": <full id>, "why": <why it is offered>}``. The newest reflog entry older
+    than the run's start is HEAD as the run found it (``start``). A repository with no such entry
+    was created, cloned or checked out as a worktree during the run. A clone and a linked worktree
+    (``git worktree add``) arrived with content the run did not write: their oldest entry is
+    offered (``clone`` or ``worktree``), and so, first, is where the checkouts right after it
+    left HEAD (``checkout``), when that is another commit -- a clone switched to the branch its
+    work is on.
+
+    The checkout point is a guess, never proof: the reflog does not say when work began, and a
+    ``checkout --merge`` can carry an edit into it unrecorded. So the oldest entry is offered
+    beside it. A repository the run ``git init``-ed has no commit that predates its work and gets
+    none -- the user picks an empty baseline or the current content. Each is a proposal the user
+    accepts or not, never taken on its own.
     """
     proc = git_run(repo, ["reflog", "show", "--date=unix", "--format=%H%x09%gd%x09%gs", "HEAD"])
     entries: list[tuple[str, int, str]] = []
@@ -553,10 +559,27 @@ def _proposed_commit(repo: str, start_ns: int) -> str:
             entries.append((commit, int(match.group(1)) * 1_000_000_000, subject))
     before = [commit for commit, at, _ in entries if at < start_ns - TOUCH_TOLERANCE_NS]
     if before:
-        return before[0]
-    if entries and (entries[-1][2].startswith("clone:") or _linked_worktree(repo)):
-        return entries[-1][0]
-    return ""
+        return [{"commit": before[0], "why": "start"}]
+    if not entries:
+        return []
+    cloned = entries[-1][2].startswith("clone:")
+    if not cloned and not _linked_worktree(repo):
+        return []
+    oldest_first = list(reversed(entries))
+    origin = moved = oldest_first[0][0]
+    later = oldest_first[1:]
+    if not cloned:
+        # ``git worktree add`` opens a linked worktree's reflog with an entry of no subject and a
+        # ``reset: moving to HEAD`` at its checkout. Only those, and only there: any later entry,
+        # a reset to the same commit included, may be work and ends the walk.
+        while later and later[0][0] == origin and later[0][2] in ("", "reset: moving to HEAD"):
+            later = later[1:]
+    for commit, _, subject in later:
+        if not subject.startswith("checkout:"):
+            break
+        moved = commit
+    offered = [{"commit": moved, "why": "checkout"}] if moved != origin else []
+    return [*offered, {"commit": origin, "why": "clone" if cloned else "worktree"}]
 
 
 def _linked_worktree(repo: str) -> bool:
@@ -762,7 +785,7 @@ def _add(run: RunState, path: Path, kind: str, *, late: bool) -> dict[str, Any]:
         "baseline": "set",
         "start_tree": "",
         "approved_tree": "",
-        "proposed": "",
+        "candidates": [],
     }
     roots.append(root)
     _exclude_run_dir(root, run.paths)
@@ -777,7 +800,7 @@ def _add(run: RunState, path: Path, kind: str, *, late: bool) -> dict[str, Any]:
     elif late and touched_since(root, run.data["created_at_ns"]):
         root["baseline"] = "unknown"
         if kind == "git":
-            root["proposed"] = _proposed_commit(str(path), run.data["created_at_ns"])
+            root["candidates"] = _candidates(str(path), run.data["created_at_ns"])
         return root
     else:
         tree = snapshot(root, roots, run.paths)
@@ -807,7 +830,7 @@ def register(run: RunState, path: Path, *, late: bool, not_scratch: bool = False
         here = Path(root["path"])
         if target == here:
             if kind == "git" and _rekind(run, root):
-                return {"status": "known", "alias": root["alias"], "baseline": "unknown", "proposed": root["proposed"], "rekinded": True}
+                return {"status": "known", "alias": root["alias"], "baseline": "unknown", "candidates": root["candidates"], "rekinded": True}
             return {"status": "known", "alias": root["alias"], "baseline": root["baseline"]}
     for root in run.data["roots"]:
         here = Path(root["path"])
@@ -817,7 +840,7 @@ def register(run: RunState, path: Path, *, late: bool, not_scratch: bool = False
         where = landed if is_scratch(run, landed) else target
         raise RunError("scratch", f"{where} is a scratch directory (temporary or Claude Code's own)")
     added = _add(run, target, kind, late=late)
-    return {"status": "added", "alias": added["alias"], "baseline": added["baseline"], "proposed": added["proposed"]}
+    return {"status": "added", "alias": added["alias"], "baseline": added["baseline"], "candidates": added["candidates"]}
 
 
 def _rekind(run: RunState, root: dict[str, Any]) -> bool:
@@ -836,7 +859,7 @@ def _rekind(run: RunState, root: dict[str, Any]) -> bool:
     empty = empty_tree(root, run.paths)
     if root["start_tree"] != empty or root["approved_tree"] != empty:
         return False
-    root.update(kind="git", baseline="unknown", start_tree="", approved_tree="", proposed=_proposed_commit(root["path"], run.data["created_at_ns"]))
+    root.update(kind="git", baseline="unknown", start_tree="", approved_tree="", candidates=_candidates(root["path"], run.data["created_at_ns"]))
     _exclude_run_dir(root, run.paths)
     run.invalidate_ticket("root-rekinded")
     run.clear_wait("oversized")
@@ -870,7 +893,7 @@ def discover(run: RunState, *, late: bool) -> list[str]:
                     "baseline": "unknown",
                     "start_tree": "",
                     "approved_tree": "",
-                    "proposed": _proposed_commit(str(nested), run.data["created_at_ns"]),
+                    "candidates": _candidates(str(nested), run.data["created_at_ns"]),
                 }
                 run.data["roots"].append(entry)
                 _exclude_run_dir(entry, run.paths)
@@ -899,7 +922,8 @@ def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") ->
     elif choice == "commit":
         if root["kind"] != "git":
             raise RunError("not-git", f"root {alias!r} is not a git repository; choose empty or current")
-        spec = commit or root.get("proposed", "")
+        # Only the commit named: never a candidate in its stead, which may be the checkout guess.
+        spec = commit
         if not spec or spec.startswith("-"):
             raise RunError("bad-commit", f"no commit to take as the baseline of {alias!r}")
         tree = gitsnap.rev_parse(root["path"], f"{spec}^{{tree}}")
@@ -909,7 +933,7 @@ def set_baseline(run: RunState, alias: str, choice: str, *, commit: str = "") ->
         raise RunError("bad-choice", f"unknown baseline choice {choice!r}")
     root["start_tree"] = root["approved_tree"] = tree
     root["baseline"] = "set"
-    root["proposed"] = ""
+    root["candidates"] = []
     if choice == "commit":
         remember_commit(root, gitsnap.rev_parse(root["path"], f"{spec}^{{commit}}"))
     else:

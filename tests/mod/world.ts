@@ -76,7 +76,7 @@ export function summary(fields: Record<string, unknown> = {}): Record<string, un
     final_required: false,
     pending_review: false,
     waiting: null,
-    roots: [{ alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', proposed: '' }],
+    roots: [{ alias: 'work', path: LAUNCH, kind: 'git', baseline: 'set', candidates: [] }],
     ...fields,
   }
 }

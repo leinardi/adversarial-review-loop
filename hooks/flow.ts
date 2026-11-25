@@ -223,6 +223,64 @@ export function removedNote(removed: readonly string[]): string {
   return `The user removed root${removed.length === 1 ? '' : 's'} ${removed.join(', ')} from the run: nothing in ${removed.length === 1 ? 'it' : 'them'} is reviewed. Don't change ${removed.length === 1 ? 'it' : 'them'} for the plan.\n\n`
 }
 
+/** Why the engine offers a commit as a baseline (`workspace._candidates`), as the dialog says it. */
+const WHY: Record<string, string> = {
+  checkout: "after the clone's checkout; a guess",
+  clone: 'as cloned',
+  worktree: 'where the worktree was made',
+  start: 'when the run started',
+  suggested: "Claude's suggestion",
+}
+
+/** The most options `$.ui.ask` takes. */
+const ASK_OPTIONS = 4
+
+const EVERYTHING_NEW = 'Everything here is new'
+const CURRENT_CONTENT = 'The current content is the baseline'
+
+/** What one answer to the baseline question chose; `undefined` for an answer that chose nothing. */
+export type BaselineChoice = { kind: 'commit'; commit: string } | { kind: 'empty' } | { kind: 'current' } | { kind: 'remove' } | undefined
+
+/**
+ * The baseline question for one root: its text, its options, and what an answer chose. The
+ * dialog takes at most four options, so the commits offered come first, then Remove, then the
+ * current content and "everything new" as room allows. What does not fit can still be typed:
+ * `current` and `empty`, which the question names when they are left out.
+ */
+export function baselineQuestion(root: RunView['roots'][number], remove: string): { question: string; options: string[]; choose: (answer: string) => BaselineChoice } {
+  const commits = new Map<string, string>()
+  for (const offered of root.candidates ?? []) {
+    if (!offered.commit || [...commits.values()].includes(offered.commit)) continue
+    commits.set(`Changes since ${offered.commit.slice(0, 12)} (${WHY[offered.why] ?? offered.why})`, offered.commit)
+  }
+  const tail = remove ? [remove] : []
+  const room = ASK_OPTIONS - tail.length
+  const shownCommits = [...commits.keys()].slice(0, room)
+  // "Everything new" gives way first: on a root with commits to offer it is the least likely.
+  const left = room - shownCommits.length
+  const shownFixed = left >= 2 ? [EVERYTHING_NEW, CURRENT_CONTENT] : left === 1 ? [CURRENT_CONTENT] : []
+  const options = [...shownCommits, ...shownFixed, ...tail]
+  const typed = [
+    ...(shownFixed.includes(CURRENT_CONTENT) ? [] : ["'current' for its current content"]),
+    ...(shownFixed.includes(EVERYTHING_NEW) ? [] : ["'empty' for everything new"]),
+  ]
+  const question =
+    `Root ${root.alias} (${root.path}) joined the run after it changed. What should its review compare against?` +
+    (typed.length > 0 ? ` Or type ${typed.join(', or ')}.` : '')
+  const choose = (answer: string): BaselineChoice => {
+    const commit = commits.get(answer)
+    if (commit !== undefined && shownCommits.includes(answer)) return { kind: 'commit', commit }
+    if (answer === CURRENT_CONTENT) return { kind: 'current' }
+    if (answer === EVERYTHING_NEW) return { kind: 'empty' }
+    if (remove && answer === remove) return { kind: 'remove' }
+    const word = answer.trim().toLowerCase()
+    if (word === 'current') return { kind: 'current' }
+    if (word === 'empty') return { kind: 'empty' }
+    return undefined
+  }
+  return { question, options, choose }
+}
+
 /**
  * Ask the user for the baseline of each root that has none, or to remove it: a scratch folder
  * registered by mistake, or the clone found in it, is not the plan's work. Removal takes the
@@ -251,15 +309,13 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
     const top = roots.filter(other => within(root.path, other.path)).sort((a, b) => a.path.length - b.path.length)[0] ?? root
     const going = roots.filter(other => within(other.path, top.path)).map(other => other.alias)
     const remove = going.length < roots.length ? `Remove ${going.join(', ')} (not the plan's work)` : ''
-    const since = root.proposed ? `Changes since ${root.proposed}` : ''
-    const options = [...(since ? [since] : []), 'Everything here is new', 'The current content is the baseline', ...(remove ? [remove] : [])]
-    const choice = await $.ui
-      .ask(`Root ${root.alias} (${root.path}) joined the run after it changed. What should its review compare against?`, options)
-      .catch((error: unknown) => {
-        $.ui.log(`Could not ask for the baseline of root ${root.alias} (${String(error)}).`)
-        return ''
-      })
-    if (choice === remove && remove) {
+    const { question, options, choose } = baselineQuestion(root, remove)
+    const answered = await $.ui.ask(question, options).catch((error: unknown) => {
+      $.ui.log(`Could not ask for the baseline of root ${root.alias} (${String(error)}).`)
+      return ''
+    })
+    const choice = choose(answered)
+    if (choice?.kind === 'remove') {
       const answer = await run($, ['root-remove', top.alias, '--with-nested', '--expect', going.join(','), '--run', summary.run_id])
       if (answer.ok) {
         const gone = Array.isArray(answer.removed) ? answer.removed.map(String) : going
@@ -277,11 +333,11 @@ export async function chooseBaselines($: EngineInterface): Promise<Baselines> {
       return done(false)
     }
     const args =
-      choice === since && since
-        ? ['root-baseline', root.alias, '--commit', root.proposed]
-        : choice === 'Everything here is new'
+      choice?.kind === 'commit'
+        ? ['root-baseline', root.alias, '--commit', choice.commit]
+        : choice?.kind === 'empty'
           ? ['root-baseline', root.alias, '--empty']
-          : choice === 'The current content is the baseline'
+          : choice?.kind === 'current'
             ? ['root-baseline', root.alias, '--current']
             : undefined
     // Chosen for the run the question showed: another session may have replaced it meanwhile.
